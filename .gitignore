@@ -1,6 +1,7 @@
 # ==========================================================================
 # TestPlane · .gitignore
-# 本仓库只放设计文档、原型与 Tester 源码；运行产物与本地环境一律不入库。
+# 设计先行、实现陆续补入（server / web / deploy）；运行产物、构建产物、
+# 本地环境与凭据一律不入库。
 # ==========================================================================
 
 # ---------- 操作系统 ----------
@@ -84,6 +85,32 @@ dist/
 *.tgz
 *.whl
 *.zip
+
+# ---------- Go（控制面 / Executor 若用 Go） ----------
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/bin/
+/coverage.txt
+/go.work.sum
+
+# ---------- 前端构建 ----------
+.next/
+.nuxt/
+web/dist/
+*.tsbuildinfo
+
+# ---------- 部署本地配置（清单本身入库，本地覆盖与密钥不入库） ----------
+*kubeconfig*
+*.kubeconfig
+deploy/**/*.local.yaml
+deploy/**/*.local.yml
+deploy/**/*.secret.yaml
+deploy/**/*.secret.yml
 
 # 注意：以下内容必须入库，别加进忽略清单
 #   design/prototype/screenshots/*.png   —— 文档里引用的渲染截图

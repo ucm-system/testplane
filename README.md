@@ -2,23 +2,51 @@
 
 > 云原生、轻量化、AI Agent 友好的 **LLM 服务测试编排平台**。
 
-本仓库存放 TestPlane 的**设计资料**、**可点击原型**，以及已按契约实现的 **Tester**。平台服务端代码不在本仓库。
+这是 TestPlane 的**主仓库**：契约、原型、Tester，以及后续的控制面与 Web UI 都落在这里。
 
-## 仓库内容
+当前处于**设计先行**阶段——先把契约与形态钉死，再按契约补实现。已经落地的三样东西不是"全部内容"，而是后续实现的**输入**：设计文档定裁决，原型定信息结构与状态谱，参考 Tester 定契约的落地样子。
 
-| 路径 | 内容 |
-|---|---|
-| [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) | 架构与设计约束（设计裁决集合）。系统边界、Tester 契约、Pre-Check 语义、并发与排队、存储与日志、错误码与终态语义 |
-| [`design/prototype/`](design/prototype/) | 单文件可点击原型（圣杯布局），覆盖概览 / 运行列表 / 运行详情 / 提交运行 / Tester 目录 / 执行环境 |
-| [`testers/endpoint-probe/`](testers/endpoint-probe/) | 已实现的 Pre-Check Tester：探测 LLM 端点此刻能否出 token |
+## 进度
+
+| 部分 | 状态 | 位置 |
+|---|---|---|
+| 设计约束文档（系统边界 / 契约 / 语义） | ✅ 定稿 | [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) |
+| 可点击原型（6 个页面 + 全状态谱） | ✅ 可交互 | [`design/prototype/`](design/prototype/) |
+| 参考 Tester：endpoint-probe（Pre-Check） | ✅ 可运行 | [`testers/endpoint-probe/`](testers/endpoint-probe/) |
+| 控制面：API / 状态机 / 编排 / 存储 | ⬜ P0 待实现 | 规划 `server/` |
+| Executor：K8s Job、超时与取消、日志采集 | ⬜ P0 待实现 | 规划 `server/executor/` |
+| Genet 适配：部署 / 状态查询 / Endpoint | ⬜ P0 待实现 | 规划 `server/genet/` |
+| Tester Registry：目录发现与校验 | ⬜ P0 待实现 | 规划 `server/registry/` |
+| Web UI：列表 / 详情 / 报告 / 日志 / 提交 | ⬜ P0 待实现 | 规划 `web/` |
+| 部署与镜像 | ⬜ 待实现 | 规划 `deploy/` |
+| P1：MCP Server / CLI / SSE / 失败续跑 / Run 对比 | ⬜ 之后 | 见 §14.2 |
+
+P0 的完整验收清单是 [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) §14.1 的 17 项，上表只是按模块归了类；验收以那 17 项为准，不以本表为准。
+
+## 目录
+
+```text
+design/               设计文档与可点击原型（已有）
+  ARCHITECTURE.md     设计裁决集合（1800+ 行）
+  prototype/          单文件原型 + 渲染截图 + 自托管字体
+
+testers/              Tester 实现，一个目录一个 Tester（已有）
+  endpoint-probe/     Pre-Check；契约的参考实现，也是新 Tester 的模板
+
+server/               规划：控制面（API / 状态机 / 编排 / 调度 / 存储）
+web/                  规划：Web UI，按 design/prototype 落地
+deploy/               规划：镜像构建、K8s 清单、配置
+```
+
+> `server/`、`web/`、`deploy/` **尚未创建**，是给 P0 实现预留的位置。目录一落地就同步更新本表与上面的进度表。
 
 ## 设计文档：约束，不是需求
 
 [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) 是**设计裁决**的集合：
 
 - 写的是裁决（必须 / 不得 / 应该 / 可以），不是背景论证与用户画像；
-- 与实现冲突时**以文档为准**；确需变更时按 §15 追加裁决条目并记录，不做静默修改；
-- 显式列出 Non-Goals，防止实现蔓延。
+- 与实现冲突时**以文档为准**；确需变更时按 §15 追加裁决条目、升版本号并记录，不做静默修改；
+- 显式列出 Non-Goals（§13），防止实现蔓延。
 
 它曾以 `PRD.md` 命名，现已停用——需求类文档另行维护，不用设计文档代替需求基线。
 
@@ -35,25 +63,42 @@
 - 截图在 [`design/prototype/screenshots/`](design/prototype/screenshots/)，设计说明在 [`design/prototype/README.md`](design/prototype/README.md)；
 - 字体自托管（`assets/fonts/`），离线也不回落系统字体。
 
+原型是**实现 Web UI 时的参照物**，不是可交付的产品——它没有后端、不做校验、所有操作只改内存。
+
 ## Tester：契约的参考实现
 
 [`testers/endpoint-probe/`](testers/endpoint-probe/) 既是可用的 Pre-Check Tester，也是新 Tester 的模板：
 
 - 平台只认 `tester.yaml` + `run.sh`，用 argv 调它，不关心内部怎么实现；
 - 输出统一落 `/workspace/output`，`result.json` 是唯一必产出文件；
-- 本地可直接跑：`./run-local.sh --url ... --model_name ...`。
+- 不依赖平台也能跑：`docker run <image> --p1=1 --p2=2`，或本地 `./run-local.sh --url ... --model_name ...`。
+
+新 Tester 从复制这个目录开始，改 `tester.yaml` 与 `run.sh` 即可。
 
 细节见[该目录的 README](testers/endpoint-probe/README.md)。
 
-## 本仓库刻意不含
+## 实现阶段不能"顺手优化"的几条
 
-- 平台服务端 / Web UI / 调度器实现代码；
-- AISBench、EvalScope 等测试工具本身（平台只调它们）；
-- 部署逻辑——统一由 Genet 承担，TestPlane 不做部署平台；
-- 需求文档、排期与里程碑。
+这些在文档里已经钉死，实现时最容易想当然地违反：
+
+| 约束 | 出处 |
+|---|---|
+| 公共参数（`url` / `model_name` / `model_path`）只从 `deploy` XOR `service` 一处来，且**恒由平台注入**，Tester 参数里不得重复 | §5.4.1 |
+| 平台**不渲染、不校验** Tester 参数，只做词法切分后原样传 argv | §5.3、§13.1 |
+| `SKIPPED`（没跑）与 `FAILED`（跑了但失败）严格区分，不混用 | §7 |
+| 日志按 Pod 采集、与 Pod 生命周期解耦；测试期间日志还在长 | §8.6 |
+| 只有 K8s 一种 Executor，不做 SSH / Docker 执行后端 | §6.4、§13.1 |
+| 平台只产出事实，**不做 Gate 判定**、不替 Agent 下结论 | §13.1 |
+| 契约字段（附录 A/B/C）变更属破坏性变更，必须升 `schema_version` 并给兼容期 | §15 |
+
+## 不属于 TestPlane 的部分
+
+部署归 Genet，调度与执行归 K8s / Volcano，测试算法归 AISBench / EvalScope——平台只编排、只记录事实。完整 Non-Goals 见 §13。
 
 ## 协作
 
 - 默认分支 `main`；
 - 文档改动请在 PR 描述里指出对应章节号（如 §6.7），方便评审对照；
-- 不要提交测试运行产物、日志与任何凭据（见 `.gitignore`）。
+- 实现 PR 请在描述里对应到 §14.1 的验收项；
+- 不要提交运行产物、日志与任何凭据（见 `.gitignore`）；
+- 脚本与 Dockerfile 强制 LF（见 `.gitattributes`），避免容器内 `bad interpreter`。
