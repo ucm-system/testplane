@@ -97,8 +97,11 @@ deploy/               规划：镜像构建、K8s 清单、配置
 
 ## 协作
 
-- 默认分支 `main`；
-- 文档改动请在 PR 描述里指出对应章节号（如 §6.7），方便评审对照；
+流程见 [`CONTRIBUTING.md`](CONTRIBUTING.md)：所有改动走 PR，`main` 只接受 **squash / rebase** 合入（merge commit 已关闭），合并后源分支自动删除。
+
+- 文档改动请在 PR 描述里指出对应章节号（如 §6.7）；
 - 实现 PR 请在描述里对应到 §14.1 的验收项；
 - 不要提交运行产物、日志与任何凭据（见 `.gitignore`）；
-- 脚本与 Dockerfile 强制 LF（见 `.gitattributes`），避免容器内 `bad interpreter`。
+- 脚本与 Dockerfile 强制 LF（见 `.gitattributes`）。
+
+> ⚠️ **「只能 PR 合入」目前是约定，不是平台强制。** 组织在 GitHub Free 计划、仓库为私有，服务端不支持分支保护（私有库需 Pro/Team 及以上，实测 API 返回 403）。有写权限的人技术上可以直接 push 到 `main`——请不要这样做。需要真正强制时：仓库转 public（免费，但需先给文档里的内部 registry 标识脱敏）或组织升级 Team（付费），再由管理员开启保护。
