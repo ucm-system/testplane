@@ -1,0 +1,26 @@
+# ==========================================================================
+# 行尾统一，避免 Windows 检出的 CRLF 破坏容器里的脚本
+# 关键：run.sh 在 Linux 容器里执行，CRLF 会让 shebang 失效
+#       （/usr/bin/env bash^M: bad interpreter），必须强制 LF
+# ==========================================================================
+
+* text=auto
+
+# 会被容器/Shell 执行或解析的，一律 LF
+*.sh      text eol=lf
+Dockerfile text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.json    text eol=lf
+
+# 文本类资源同样用 LF，避免 PR 里出现整文件改写
+*.md      text eol=lf
+*.html    text eol=lf
+*.css     text eol=lf
+*.svg     text eol=lf
+
+# 二进制：不做任何换行转换
+*.png     binary
+*.jpg     binary
+*.woff2   binary
+*.woff    binary
