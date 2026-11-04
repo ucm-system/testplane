@@ -1,0 +1,91 @@
+# ==========================================================================
+# TestPlane · .gitignore
+# 本仓库只放设计文档、原型与 Tester 源码；运行产物与本地环境一律不入库。
+# ==========================================================================
+
+# ---------- 操作系统 ----------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# ---------- 编辑器 / IDE ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.sublime-workspace
+
+# ---------- AI 编码工具 ----------
+.claude/
+.cursor/
+.dsh/
+.aider*
+
+# ---------- 本地临时文件 ----------
+*.tmp
+*.bak
+*.orig
+*.rej
+# 截图/校验用的临时变体文件（如 .__shot-nodeploy.html、.__shots.ps1）
+.__*
+
+# ---------- 凭据与密钥（绝不入库） ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets.yaml
+secrets.yml
+*credentials*
+
+# ---------- Node（原型是零依赖的，这里只防误装） ----------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+
+# ---------- Python（Tester 可能引用脚本） ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------- Tester 运行产物 ----------
+# 平台容器内的输出目录是 /workspace/output，本地跑由 run-local.sh 生成
+output/
+**/output/
+result.json
+report.json
+*.log
+logs/
+**/logs/
+
+# ---------- 构建产物 ----------
+dist/
+*.tar
+*.tar.gz
+*.tgz
+*.whl
+*.zip
+
+# 注意：以下内容必须入库，别加进忽略清单
+#   design/prototype/screenshots/*.png   —— 文档里引用的渲染截图
+#   design/prototype/assets/fonts/*.woff2 —— 自托管字体，缺了会回落系统字体
+#   testers/*/build/Dockerfile           —— 构建定义，属于源码

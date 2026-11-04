@@ -1,0 +1,302 @@
+/* =============================================================================
+   前端设计 · 设计令牌（Design Tokens）
+   仿照「歸藏设计」的组织方式：一套基础令牌 + 四套家族化配色。
+   用法：<html data-fde="slate"> 切换家族；家族只覆盖颜色，尺寸/间距/动效全家族共享。
+   全部用系统字体栈，不依赖网络字体：企业系统离线可用是第一要求。
+   ========================================================================== */
+
+/* ---------- 1. 基础令牌：与家族无关 ---------- */
+:root {
+  /* 字体 */
+  --fde-font-sans: "Inter", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, -apple-system, sans-serif;
+  --fde-font-mono: "Cascadia Mono", "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", ui-monospace, monospace;
+
+  /* 字号：11 起，按 1.2 左右递进；桌面系统最小可读 11px 仅用于辅助信息 */
+  --fde-fz-2xs: 11px;
+  --fde-fz-xs: 12px;
+  --fde-fz-sm: 13px;
+  --fde-fz-md: 14px;
+  --fde-fz-lg: 16px;
+  --fde-fz-xl: 20px;
+  --fde-fz-2xl: 24px;
+  --fde-fz-3xl: 30px;
+  --fde-fz-4xl: 38px;
+  --fde-fz-5xl: 48px;
+
+  /* 行高 */
+  --fde-lh-tight: 1.2;
+  --fde-lh-snug: 1.4;
+  --fde-lh-base: 1.55;
+
+  /* 字重 */
+  --fde-fw-normal: 400;
+  --fde-fw-medium: 500;
+  --fde-fw-bold: 600;
+
+  /* 间距：4 的倍数，含 2 与 6 两个半档 */
+  --fde-sp-0: 0;
+  --fde-sp-1: 2px;
+  --fde-sp-2: 4px;
+  --fde-sp-3: 6px;
+  --fde-sp-4: 8px;
+  --fde-sp-5: 12px;
+  --fde-sp-6: 16px;
+  --fde-sp-7: 20px;
+  --fde-sp-8: 24px;
+  --fde-sp-9: 32px;
+  --fde-sp-10: 40px;
+  --fde-sp-11: 48px;
+  --fde-sp-12: 64px;
+
+  /* 圆角 */
+  --fde-r-xs: 4px;
+  --fde-r-sm: 6px;
+  --fde-r-md: 8px;
+  --fde-r-lg: 12px;
+  --fde-r-xl: 16px;
+  --fde-r-full: 999px;
+
+  /* 动效 */
+  --fde-dur-1: 120ms;
+  --fde-dur-2: 180ms;
+  --fde-dur-3: 240ms;
+  --fde-dur-4: 360ms;
+  --fde-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --fde-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* 层级 */
+  --fde-z-base: 0;
+  --fde-z-sticky: 10;
+  --fde-z-overlay: 40;
+  --fde-z-modal: 50;
+  --fde-z-toast: 60;
+
+  /* 密度：控制台/中后台用 compact，SaaS 用 comfortable */
+  --fde-row-h: 40px;
+  --fde-control-h: 34px;
+  --fde-control-h-sm: 28px;
+  --fde-panel-pad: var(--fde-sp-6);
+  --fde-focus-ring: 0 0 0 3px var(--fde-primary-ring);
+}
+
+/* ---------- 2. 家族：console — 深色控制台（可观测、K8s、运维） ---------- */
+[data-fde="console"] {
+  color-scheme: dark;
+  --fde-bg: #0a0c10;
+  --fde-bg-sub: #0d1015;
+  --fde-surface: #11141a;
+  --fde-surface-2: #161a22;
+  --fde-surface-3: #1c212b;
+  --fde-line: #232934;
+  --fde-line-strong: #313a48;
+  --fde-text: #e7ebf3;
+  --fde-text-2: #9aa4b5;
+  --fde-text-3: #7f889b;
+  --fde-primary: #35d6a4;
+  --fde-primary-fg: #04150f;
+  --fde-primary-weak: rgba(53, 214, 164, 0.12);
+  --fde-primary-ring: rgba(53, 214, 164, 0.28);
+  --fde-info: #6ea8fe;
+  --fde-info-weak: rgba(110, 168, 254, 0.12);
+  --fde-success: #35d6a4;
+  --fde-success-weak: rgba(53, 214, 164, 0.12);
+  --fde-warn: #f6c177;
+  --fde-warn-weak: rgba(246, 193, 119, 0.12);
+  --fde-danger: #ff6b6b;
+  --fde-danger-weak: rgba(255, 107, 107, 0.12);
+  /* 弱底上的文字色：深色家族直接用原色 */
+  --fde-primary-text: #35d6a4;
+  --fde-info-text: #6ea8fe;
+  --fde-success-text: #35d6a4;
+  --fde-warn-text: #f6c177;
+  --fde-danger-text: #ff6b6b;
+  --fde-chart-1: #35d6a4;
+  --fde-chart-2: #6ea8fe;
+  --fde-chart-3: #f6c177;
+  --fde-chart-4: #c084fc;
+  --fde-chart-5: #ff8fa3;
+  --fde-chart-6: #4dd4e8;
+  --fde-shadow-1: 0 1px 0 rgba(255, 255, 255, 0.03);
+  --fde-shadow-2: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 0 1px var(--fde-line);
+  --fde-shadow-3: 0 24px 64px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--fde-line-strong);
+  --fde-glow: 0 0 24px rgba(53, 214, 164, 0.18);
+  --fde-skeleton: linear-gradient(90deg, #161a22 25%, #1e242e 37%, #161a22 63%);
+}
+
+/* ---------- 3. 家族：slate — 浅色中后台（企业管理、审批、CRM） ---------- */
+[data-fde="slate"] {
+  color-scheme: light;
+  --fde-bg: #f6f7f9;
+  --fde-bg-sub: #eef0f4;
+  --fde-surface: #ffffff;
+  --fde-surface-2: #f9fafb;
+  --fde-surface-3: #f2f4f7;
+  --fde-line: #e4e7ec;
+  --fde-line-strong: #d0d5dd;
+  --fde-text: #101828;
+  --fde-text-2: #475467;
+  --fde-text-3: #667085;
+  --fde-primary: #2e6be6;
+  --fde-primary-fg: #ffffff;
+  --fde-primary-weak: #eef3fe;
+  --fde-primary-ring: rgba(46, 107, 230, 0.24);
+  --fde-info: #2e6be6;
+  --fde-info-weak: #eef3fe;
+  --fde-success: #12b76a;
+  --fde-success-weak: #e7f8ef;
+  --fde-warn: #f79009;
+  --fde-warn-weak: #fff4e5;
+  --fde-danger: #d92d20;
+  --fde-danger-weak: #fdecea;
+  /* 弱底上的文字色：浅色底需要深一档才到 4.5:1 */
+  --fde-primary-text: #1d4ed8;
+  --fde-info-text: #1d4ed8;
+  --fde-success-text: #067647;
+  --fde-warn-text: #b54708;
+  --fde-danger-text: #b42318;
+  --fde-chart-1: #2e6be6;
+  --fde-chart-2: #12b76a;
+  --fde-chart-3: #f79009;
+  --fde-chart-4: #7a5af8;
+  --fde-chart-5: #ee46bc;
+  --fde-chart-6: #06aed4;
+  --fde-shadow-1: 0 1px 2px rgba(16, 24, 40, 0.04);
+  --fde-shadow-2: 0 4px 12px rgba(16, 24, 40, 0.08), 0 0 0 1px var(--fde-line);
+  --fde-shadow-3: 0 16px 40px rgba(16, 24, 40, 0.16), 0 0 0 1px var(--fde-line);
+  --fde-glow: none;
+  --fde-skeleton: linear-gradient(90deg, #eef0f4 25%, #f7f8fa 37%, #eef0f4 63%);
+}
+
+/* ---------- 4. 家族：board — 数据大屏（监控、指挥中心、展厅） ---------- */
+[data-fde="board"] {
+  color-scheme: dark;
+  --fde-bg: #050a18;
+  --fde-bg-sub: #071026;
+  --fde-surface: rgba(16, 32, 64, 0.55);
+  --fde-surface-2: rgba(28, 52, 96, 0.55);
+  --fde-surface-3: rgba(40, 72, 128, 0.4);
+  --fde-line: rgba(90, 160, 255, 0.22);
+  --fde-line-strong: rgba(120, 200, 255, 0.4);
+  --fde-text: #e8f4ff;
+  --fde-text-2: #9dc0e6;
+  --fde-text-3: #6e8fb5;
+  --fde-primary: #3fe0ff;
+  --fde-primary-fg: #00131f;
+  --fde-primary-weak: rgba(63, 224, 255, 0.14);
+  --fde-primary-ring: rgba(63, 224, 255, 0.3);
+  --fde-info: #5b9dff;
+  --fde-info-weak: rgba(91, 157, 255, 0.14);
+  --fde-success: #2ee6a8;
+  --fde-success-weak: rgba(46, 230, 168, 0.14);
+  --fde-warn: #ffc53d;
+  --fde-warn-weak: rgba(255, 197, 61, 0.14);
+  --fde-danger: #ff5c7c;
+  --fde-danger-weak: rgba(255, 92, 124, 0.14);
+  --fde-primary-text: #3fe0ff;
+  --fde-info-text: #5b9dff;
+  --fde-success-text: #2ee6a8;
+  --fde-warn-text: #ffc53d;
+  --fde-danger-text: #ff5c7c;
+  --fde-chart-1: #3fe0ff;
+  --fde-chart-2: #8b5cf6;
+  --fde-chart-3: #ffc53d;
+  --fde-chart-4: #2ee6a8;
+  --fde-chart-5: #ff7ac6;
+  --fde-chart-6: #5b9dff;
+  --fde-shadow-1: 0 0 0 1px rgba(90, 160, 255, 0.14) inset;
+  --fde-shadow-2: 0 0 32px rgba(63, 224, 255, 0.14), 0 0 0 1px var(--fde-line) inset;
+  --fde-shadow-3: 0 0 64px rgba(63, 224, 255, 0.22);
+  --fde-glow: 0 0 18px rgba(63, 224, 255, 0.45);
+  --fde-skeleton: linear-gradient(90deg, #0b1732 25%, #12244a 37%, #0b1732 63%);
+}
+
+/* ---------- 5. 家族：aurora — 现代 SaaS / 官网（产品、落地页） ---------- */
+[data-fde="aurora"] {
+  color-scheme: light;
+  --fde-bg: #ffffff;
+  --fde-bg-sub: #fbfbfd;
+  --fde-surface: #ffffff;
+  --fde-surface-2: #f7f7fa;
+  --fde-surface-3: #f1f1f6;
+  --fde-line: #e8e8ef;
+  --fde-line-strong: #d8d8e2;
+  --fde-text: #0b0b0f;
+  --fde-text-2: #5c5f66;
+  --fde-text-3: #6e7180;
+  --fde-primary: #6d5ef8;
+  --fde-primary-fg: #ffffff;
+  --fde-primary-weak: #eeecff;
+  --fde-primary-ring: rgba(109, 94, 248, 0.22);
+  --fde-info: #38bdf8;
+  --fde-info-weak: #e8f8ff;
+  --fde-success: #0eaa66;
+  --fde-success-weak: #e6f7ef;
+  --fde-warn: #e8880a;
+  --fde-warn-weak: #fff6e6;
+  --fde-danger: #e5484d;
+  --fde-danger-weak: #fdeced;
+  --fde-primary-text: #5140d8;
+  --fde-info-text: #0369a1;
+  --fde-success-text: #067647;
+  --fde-warn-text: #b54708;
+  --fde-danger-text: #b42318;
+  --fde-chart-1: #6d5ef8;
+  --fde-chart-2: #38bdf8;
+  --fde-chart-3: #0eaa66;
+  --fde-chart-4: #f59e0b;
+  --fde-chart-5: #ec4899;
+  --fde-chart-6: #14b8a6;
+  --fde-shadow-1: 0 1px 2px rgba(11, 11, 15, 0.05);
+  --fde-shadow-2: 0 8px 24px rgba(11, 11, 15, 0.08), 0 0 0 1px var(--fde-line);
+  --fde-shadow-3: 0 24px 56px rgba(11, 11, 15, 0.14), 0 0 0 1px var(--fde-line);
+  --fde-glow: 0 12px 32px rgba(109, 94, 248, 0.18);
+  --fde-skeleton: linear-gradient(90deg, #f1f1f6 25%, #f8f8fb 37%, #f1f1f6 63%);
+
+  /* SaaS / 官网更松：圆角更大、留白更多 */
+  --fde-r-sm: 8px;
+  --fde-r-md: 10px;
+  --fde-r-lg: 14px;
+  --fde-r-xl: 20px;
+  --fde-control-h: 38px;
+  --fde-row-h: 52px;
+  --fde-panel-pad: var(--fde-sp-7);
+}
+
+/* 家族代号给品牌色块用（大屏/控制台会用到） */
+[data-fde] { --fde-brand-1: var(--fde-primary); --fde-brand-2: var(--fde-chart-2); }
+
+/* ---------- 6. 全局重置：只作用于挂了 data-fde 的文档根 ---------- */
+[data-fde] body {
+  /* 浏览器默认给 body 8px margin，会在页面四周留一圈白边；这里统一抹掉 */
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}
+[data-fde] {
+  background: var(--fde-bg);
+  color: var(--fde-text);
+  font-family: var(--fde-font-sans);
+  font-size: var(--fde-fz-md);
+  line-height: var(--fde-lh-base);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+[data-fde] *,
+[data-fde] *::before,
+[data-fde] *::after { box-sizing: border-box; }
+[data-fde] h1, [data-fde] h2, [data-fde] h3, [data-fde] h4, [data-fde] p, [data-fde] figure { margin: 0; }
+[data-fde] a { color: inherit; text-decoration: none; }
+[data-fde] button, [data-fde] input, [data-fde] select, [data-fde] textarea { font: inherit; color: inherit; }
+[data-fde] :focus-visible { outline: none; box-shadow: var(--fde-focus-ring); border-radius: var(--fde-r-sm); }
+[data-fde] ::selection { background: var(--fde-primary-weak); }
+[data-fde] ::-webkit-scrollbar { width: 10px; height: 10px; }
+[data-fde] ::-webkit-scrollbar-thumb { background: var(--fde-line-strong); border-radius: var(--fde-r-full); border: 2px solid transparent; background-clip: content-box; }
+[data-fde] ::-webkit-scrollbar-track { background: transparent; }
+
+@media (prefers-reduced-motion: reduce) {
+  [data-fde] *, [data-fde] *::before, [data-fde] *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

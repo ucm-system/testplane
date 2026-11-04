@@ -1,0 +1,19 @@
+/* 自托管字体：随服务一起部署，运行时不需要外网。
+   Latin 用 Albert Sans（风格站同款），中文用 Noto Sans SC 子集（仅收录页面用到的字）。
+   子集里没有的字会回落到系统中文体，不会出现豆腐块。 */
+
+@font-face {
+  font-family: "Albert Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("fonts/albert-sans-latin.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Noto Sans SC";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("fonts/noto-sans-sc-var.woff2") format("woff2");
+}

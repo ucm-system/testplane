@@ -1,0 +1,1892 @@
+<!doctype html>
+<html lang="zh-CN" data-fde="slate">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TestPlane · 示意原型</title>
+<link rel="icon" type="image/svg+xml" href="assets/testplane-icon.svg">
+<link rel="stylesheet" href="assets/fonts.css">
+<link rel="stylesheet" href="assets/tokens.css">
+<link rel="stylesheet" href="assets/components.css">
+<link rel="stylesheet" href="assets/holy-grail.css">
+<style>
+  body { margin: 0; }
+  .app-grid { display: grid; grid-template-columns: minmax(0,1fr) 340px; gap: var(--fde-sp-6); align-items: start; }
+  .sticky-col { position: sticky; top: calc(56px + var(--fde-sp-7)); }
+  .kv { display: grid; grid-template-columns: 120px minmax(0,1fr); gap: var(--fde-sp-3) var(--fde-sp-4); margin: 0; font-size: var(--fde-fz-sm); }
+  .kv dt { color: var(--fde-text-3); font-size: var(--fde-fz-xs); }
+  .kv dd { margin: 0; color: var(--fde-text); min-width: 0; }
+  .pre { font-family: var(--fde-font-mono); font-size: var(--fde-fz-xs); line-height: 1.65; background: var(--fde-bg-sub);
+         border: 1px solid var(--fde-line); border-radius: var(--fde-r-md); padding: var(--fde-sp-4);
+         overflow: auto; max-height: 240px; margin: 0; white-space: pre; color: var(--fde-text-2); }
+  .task-cell { display: flex; align-items: center; gap: var(--fde-sp-3); min-width: 0; }
+  .seq { width: 22px; height: 22px; border-radius: var(--fde-r-sm); background: var(--fde-surface-3);
+         display: grid; place-items: center; font-family: var(--fde-font-mono); font-size: var(--fde-fz-2xs);
+         color: var(--fde-text-2); flex: none; }
+  .task-block { border: 1px solid var(--fde-line); border-radius: var(--fde-r-lg); background: var(--fde-surface); overflow: hidden; }
+  .task-block-hd { display: flex; align-items: center; gap: var(--fde-sp-3); padding: var(--fde-sp-3) var(--fde-sp-4);
+                   background: var(--fde-bg-sub); border-bottom: 1px solid var(--fde-line); }
+  .task-block-bd { padding: var(--fde-sp-4); display: flex; flex-direction: column; gap: var(--fde-sp-4); }
+  .grid-three { display: grid; grid-template-columns: minmax(0,1fr) 160px 120px; gap: var(--fde-sp-3); align-items: end; }
+  .env-row { display: grid; grid-template-columns: 200px minmax(0,1fr) 32px; gap: var(--fde-sp-3); align-items: center; }
+  .env-row--secret { grid-template-columns: 200px minmax(0,1fr) 32px; }
+  .mono-sm { font-family: var(--fde-font-mono); font-size: var(--fde-fz-xs); }
+  .timeline { display: flex; flex-direction: column; gap: 0; }
+  .tl-item { display: grid; grid-template-columns: 74px 12px minmax(0,1fr); gap: var(--fde-sp-3);
+             padding: var(--fde-sp-4) 0; align-items: start; }
+  .tl-time { font-family: var(--fde-font-mono); font-size: var(--fde-fz-2xs); color: var(--fde-text-3); padding-top: 2px; }
+  .tl-rail { position: relative; display: flex; justify-content: center; }
+  .tl-rail::before { content: ""; position: absolute; top: 0; bottom: -100%; width: 1px; background: var(--fde-line); }
+  .tl-item:last-child .tl-rail::before { display: none; }
+  .tl-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fde-line-strong); margin-top: 5px;
+            position: relative; z-index: 1; }
+  .tl-dot.is-ok { background: var(--fde-success); }
+  .tl-dot.is-err { background: var(--fde-danger); }
+  .tl-dot.is-warn { background: var(--fde-warn); }
+  .tl-text { font-size: var(--fde-fz-sm); color: var(--fde-text-2); min-width: 0; }
+  .note { display: flex; gap: var(--fde-sp-3); padding: var(--fde-sp-4); border-radius: var(--fde-r-md);
+          background: var(--fde-bg-sub); border: 1px solid var(--fde-line); font-size: var(--fde-fz-xs);
+          color: var(--fde-text-2); line-height: var(--fde-lh-base); }
+  .note strong { color: var(--fde-text); }
+  .banner { display: flex; gap: var(--fde-sp-4); align-items: flex-start; padding: var(--fde-sp-5);
+            border-radius: var(--fde-r-lg); border: 1px solid var(--fde-line); }
+  .banner--err { background: var(--fde-danger-weak); border-color: transparent; }
+  .banner--warn { background: var(--fde-warn-weak); border-color: transparent; }
+  .banner-title { font-size: var(--fde-fz-sm); font-weight: var(--fde-fw-bold); color: var(--fde-text); margin: 0 0 var(--fde-sp-2); }
+  .banner p { margin: 0; font-size: var(--fde-fz-xs); color: var(--fde-text-2); line-height: var(--fde-lh-base); }
+  .dot-status { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: currentColor; }
+  .link { color: var(--fde-primary-text); cursor: pointer; text-decoration: none; font-weight: var(--fde-fw-medium); }
+  .link:hover { text-decoration: underline; }
+  .card-stack { display: flex; flex-direction: column; gap: var(--fde-sp-5); }
+  .scroll-x { overflow-x: auto; }
+  .drawer-wide { width: min(620px, 94vw); }
+  .mock-tag { font-size: var(--fde-fz-2xs); color: var(--fde-text-3); border: 1px dashed var(--fde-line-strong);
+              border-radius: var(--fde-r-full); padding: 1px 8px; white-space: nowrap; }
+  .empty-hint { padding: var(--fde-sp-8); text-align: center; color: var(--fde-text-3); font-size: var(--fde-fz-sm); }
+  
+  /* 流程图 */
+  .flow { display: flex; align-items: center; gap: var(--fde-sp-3); flex-wrap: nowrap; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
+  .flow-node { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; min-width: 0;
+               padding: 8px 10px; border: 1px solid var(--fde-line-strong); border-radius: var(--fde-r-md);
+               background: var(--fde-surface); cursor: pointer; text-align: left; }
+  .flow-node:hover { background: var(--fde-surface-2); }
+  .flow-node.is-active { border-color: var(--fde-primary); box-shadow: var(--fde-focus-ring); }
+  .flow-node-top { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: var(--fde-fz-sm);
+                   font-weight: var(--fde-fw-medium); color: var(--fde-text); }
+  .flow-node-meta { font-size: var(--fde-fz-2xs); color: var(--fde-text-3); font-family: var(--fde-font-mono); white-space: nowrap; }
+  .flow-node .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fde-text-3); flex: none; }
+  .flow-node--ok .dot { background: var(--fde-success); }
+  .flow-node--err .dot { background: var(--fde-danger); }
+  .flow-node--warn .dot { background: var(--fde-warn); }
+  .flow-node--info .dot { background: var(--fde-info); }
+  .flow-arrow { width: 24px; height: 1px; background: #9ca3af; position: relative; flex: none; }
+  .flow-arrow::after { content: ""; position: absolute; right: 0; top: -3px; width: 6px; height: 6px;
+                       border-top: 1px solid #9ca3af; border-right: 1px solid #9ca3af;
+                       transform: rotate(45deg); }
+  .flow-group { display: flex; flex-direction: column; gap: var(--fde-sp-2); position: relative;
+                padding-left: var(--fde-sp-6); }
+  .flow-group::before { content: ""; position: absolute; left: 10px; top: 16px; bottom: 16px; width: 1px;
+                        background: #b6bcc5; }
+  .flow-group .flow-node { position: relative; }
+  .flow-group .flow-node::before { content: ""; position: absolute; left: calc(-1 * var(--fde-sp-6) + 10px);
+                                   top: 50%; width: calc(var(--fde-sp-6) - 20px); height: 1px;
+                                   background: #b6bcc5; }
+  .flow-group-label { font-size: var(--fde-fz-2xs); color: var(--fde-text-3); letter-spacing: 0.02em; }
+  .pod-chips { display: flex; gap: var(--fde-sp-2); flex-wrap: wrap; }
+  .live-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: inline-block;
+              animation: live-pulse 1.6s ease-in-out infinite; }
+  @keyframes live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .28; } }
+  .param-table td:first-child, .param-table th:first-child { white-space: nowrap; width: 1%; }
+  .param-table td:last-child { line-height: 1.5; }
+  #topbar-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* 代码类输入框：Deploy YAML 与 Task 参数是同一类东西，共用一套度量
+     （原来参数框可拖拽变长、YAML 框固定 150px，一眼就能看出不是一套控件） */
+  .code-ta, .yaml-ta {
+    font-family: var(--fde-font-mono); font-size: 12.5px; line-height: 1.7;
+    padding: 10px 12px; border: 1px solid var(--fde-line-strong); border-radius: 8px;
+    background: #f9fafb; min-height: 104px; max-height: 360px;
+    resize: none; overflow-y: auto; white-space: pre-wrap; overflow-wrap: break-word;
+    display: block; width: 100%; box-sizing: border-box;
+  }
+  /* YAML 编辑器：透明 textarea 叠在着色层上，零依赖高亮 */
+  .yaml-editor { position: relative; }
+  .yaml-hl { font-family: var(--fde-font-mono); font-size: 12.5px; line-height: 1.7;
+             padding: 10px 12px; white-space: pre-wrap; overflow-wrap: break-word;
+             border: 1px solid var(--fde-line-strong); border-radius: 8px; box-sizing: border-box; }
+  .yaml-hl { position: absolute; inset: 0; margin: 0; overflow: hidden; pointer-events: none;
+             background: #f9fafb; }
+  .yaml-ta { position: relative; z-index: 1; background: transparent; color: transparent; caret-color: var(--fde-text); }
+  .code-ta:focus, .yaml-ta:focus { outline: none; border-color: var(--fde-primary); box-shadow: 0 0 0 3px rgba(59,130,246,.2); }
+  .yaml-ta:focus { background: transparent; } /* 保持透明，否则会盖住下面的高亮层 */
+  /* tokens.css 的 [data-fde] textarea { color: inherit } 优先级高于单类名，必须带前缀压住 */
+  [data-fde] .yaml-ta { color: transparent; }
+  .yaml-ta:focus { background: transparent; } /* 覆盖输入框聚焦变白的规则，否则会盖住高亮层 */
+  .yaml-key { color: #1d4ed8; } .yaml-str { color: #047857; } .yaml-num { color: #b45309; }
+  .yaml-pun { color: #6b7280; } .yaml-com { color: #9ca3af; font-style: italic; }
+  .yaml-errline { background: rgba(239, 68, 68, 0.14); border-radius: 2px; }
+  .yaml-status { font-size: 12px; margin-top: 8px; }
+  .yaml-status .ok { color: #047857; }
+  .yaml-status .bad { color: #b91c1c; }
+
+  /* 日志查看器：深色终端，底色与品牌图标同款 #0b1220 */
+  .log { background: #0b1220; border: 1px solid #1c2536; border-radius: 8px; color: #c9d4e3;
+         font-family: var(--fde-font-mono); font-size: 12px; line-height: 1.75;
+         padding: 12px 14px; overflow: auto; margin: 0; white-space: pre-wrap; overflow-wrap: break-word; }
+  .log .lg-t { color: #5b6b82; }
+  .log .lg-ok { color: #3ddc97; }
+  .log .lg-warn { color: #fbbf24; }
+  .log .lg-err { color: #f87a7a; }
+  .log .lg-mark { color: #fbbf24; background: rgba(251, 191, 36, 0.09); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="hg-app">
+
+  <header class="hg-header">
+    <div class="hg-brand">
+      <svg class="hg-wordmark" viewBox="0 0 134 30" role="img" aria-label="TestPlane">
+        <defs>
+          <linearGradient id="tp-accent" x1="128" y1="362" x2="386" y2="142" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#22D3EE"/><stop offset="0.52" stop-color="#38BDF8"/><stop offset="1" stop-color="#6366F1"/>
+          </linearGradient>
+        </defs>
+        <g transform="translate(0,2) scale(0.0508)">
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="#0B1220"/>
+          <path d="M118 319L255 246L394 319L256 392L118 319Z" fill="#172B43"/>
+          <path d="M118 286L255 213L394 286L256 359L118 286Z" fill="#203B59"/>
+          <path d="M126 274L371 153L293 341L251 282L126 274Z" fill="url(#tp-accent)"/>
+          <path d="M251 282L371 153L293 341L251 282Z" fill="#2563EB" opacity="0.62"/>
+          <path d="M126 274L251 282L293 341" stroke="#A5F3FC" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
+        </g>
+        <text class="hg-wordmark-type" x="36" y="22">TestPlane</text>
+      </svg>
+    </div>
+    <div class="hg-divider"></div>
+    <div class="hg-title">
+      <span class="hg-title-main" id="topbar-title">概览</span>
+      <span class="hg-title-sub" id="topbar-sub"></span>
+    </div>
+    <div class="hg-header-actions" id="topbar-actions"></div>
+    <div class="hg-user">
+      <span class="hg-avatar">林</span>
+      <span class="hg-user-name">林知微 · operator</span>
+    </div>
+  </header>
+
+  <div class="hg-body">
+  <!-- 主内容在源码中先于两侧栏，靠 grid-column 摆位 -->
+  <main class="hg-main" id="view"></main>
+
+  <aside class="hg-left" aria-label="主导航">
+    <nav class="hg-nav">
+      <div class="hg-nav-group">运行</div>
+      <button class="fde-nav-item" data-nav="dashboard"><svg class="hg-nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="11" y="3" width="6" height="6" rx="1.5"/><rect x="3" y="11" width="6" height="6" rx="1.5"/><rect x="11" y="11" width="6" height="6" rx="1.5"/></svg>概览</button>
+      <button class="fde-nav-item" data-nav="runs"><svg class="hg-nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 5h10M7 10h10M7 15h10"/><circle cx="4" cy="5" r="1"/><circle cx="4" cy="10" r="1"/><circle cx="4" cy="15" r="1"/></svg>运行列表<span class="fde-nav-badge" id="nav-run-count">5</span></button>
+      <button class="fde-nav-item" data-nav="submit"><svg class="hg-nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="10" cy="10" r="7"/><path d="M10 7v6M7 10h6"/></svg>提交运行</button>
+      <div class="hg-nav-group">能力</div>
+      <button class="fde-nav-item" data-nav="testers"><svg class="hg-nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 3l6 3.2v7.6L10 17l-6-3.2V6.2L10 3z"/><path d="M10 10l6-3.2M10 10v7M10 10L4 6.8"/></svg>Tester 目录<span class="fde-nav-badge">4</span></button>
+      <button class="fde-nav-item" data-nav="profiles"><svg class="hg-nav-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="14" height="5" rx="1.5"/><rect x="3" y="11" width="14" height="5" rx="1.5"/><path d="M6 6.5h.01M6 13.5h.01"/></svg>执行环境</button>
+    </nav>
+    <div class="hg-left-ft">
+      <span class="mock-tag">示意原型 · 数据为 mock</span>
+    </div>
+  </aside>
+
+  <aside class="hg-right" id="side" aria-label="辅助信息"></aside>
+  </div>
+
+  <footer class="hg-footer">
+    <span>TestPlane · 示意原型</span>
+    <span class="hg-footer-sub">数据为 mock，点击操作不产生真实执行</span>
+  </footer>
+</div>
+
+<div id="overlay-root"></div>
+<div id="toast-root" style="position: fixed; right: 24px; bottom: 24px; display: flex; flex-direction: column; gap: 8px; z-index: 2000"></div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * 数据：全部为示意用的 mock，不是真实接口返回
+ * ------------------------------------------------------------------ */
+
+const TESTERS = [
+  {
+    name: "endpoint-probe", version: "1.0.0", role: "pre_check", on_failure: "abort_run",
+    exclusive: true, image: "registry.dev.huawei.com/testplane/endpoint-probe:1.0.0",
+    desc: "对已部署的 LLM 服务执行生成型探活：max_tokens=1、stream=true，首包 token 一到即判定可服务。只回答「服务此刻能不能出字」。",
+    placeholder: "--wait_timeout_seconds=600 --retry_interval_seconds=15",
+    params: [
+      { n: "url", t: "string", req: true, d: "OpenAI 兼容 base URL，如 http://10.0.0.10:8000/v1。平台有值时注入，不得重复传", def: "—" },
+      { n: "model_name", t: "string", req: false, d: "模型名；省略时从 /v1/models 取第一个", def: "—" },
+      { n: "wait_timeout_seconds", t: "integer", req: false, d: "就绪等待窗口（秒）", def: "600" },
+      { n: "retry_interval_seconds", t: "integer", req: false, d: "两次探测间隔（秒）", def: "15" },
+      { n: "max_tokens", t: "integer", req: false, d: "探活请求的 max_tokens，不要调大", def: "1" },
+      { n: "stream", t: "boolean", req: false, d: "流式探活；true 时首 token 到达即通过", def: "true" }
+    ],
+    env: [{ n: "ENDPOINT_API_KEY", req: false, secret: true, d: "Bearer token；不提供时按无鉴权探测" }]
+  },
+  {
+    name: "aisbench-acc", version: "1.0.0", role: "test", on_failure: "continue",
+    exclusive: false, image: "registry.dev.huawei.com/testplane/aisbench-acc:1.0.0",
+    desc: "数据集精度评测，输出逐数据集 accuracy。",
+    placeholder: "--dataset=/data/gsm8k.jsonl --limit=200",
+    params: [
+      { n: "url", t: "string", req: true, d: "OpenAI 兼容 base URL", def: "—" },
+      { n: "model_name", t: "string", req: true, d: "模型名", def: "—" },
+      { n: "dataset", t: "string", req: true, d: "数据集在容器内的绝对路径，由挂载提供", def: "—" },
+      { n: "limit", t: "integer", req: false, d: "最多评测多少条样本", def: "—" }
+    ],
+    env: [{ n: "ENDPOINT_API_KEY", req: false, secret: true, d: "Bearer token" }]
+  },
+  {
+    name: "aisbench-perf", version: "1.0.0", role: "test", on_failure: "continue",
+    exclusive: true, image: "registry.dev.huawei.com/testplane/aisbench-perf:1.0.0",
+    desc: "性能压测，输出 TTFT / TPOT / 吞吐。独占 Endpoint，避免与其它 Task 互相干扰。",
+    placeholder: "--input_lens=[512,1024,4096] --output_lens=[128,512] --concurrency=[1,4,8,16]",
+    params: [
+      { n: "url", t: "string", req: true, d: "OpenAI 兼容 base URL", def: "—" },
+      { n: "model_name", t: "string", req: true, d: "模型名", def: "—" },
+      { n: "input_lens", t: "list<int>", req: true, d: "输入长度列表", def: "—" },
+      { n: "output_lens", t: "list<int>", req: true, d: "输出长度列表", def: "—" },
+      { n: "concurrency", t: "list<int>", req: true, d: "并发档位", def: "—" }
+    ],
+    env: [{ n: "ENDPOINT_API_KEY", req: false, secret: true, d: "Bearer token" }]
+  },
+  {
+    name: "evalscope-acc", version: "2.3.0", role: "test", on_failure: "continue",
+    exclusive: false, image: "registry.dev.huawei.com/testplane/evalscope-acc:2.3.0",
+    desc: "EvalScope 精度评测，适合跑多 benchmark 组合。",
+    placeholder: "--dataset=mmlu --subset=abstract_algebra --limit=100",
+    params: [
+      { n: "url", t: "string", req: true, d: "OpenAI 兼容 base URL", def: "—" },
+      { n: "model_name", t: "string", req: true, d: "模型名", def: "—" },
+      { n: "dataset", t: "string", req: true, d: "benchmark 名称", def: "—" },
+      { n: "subset", t: "string", req: false, d: "子集", def: "—" },
+      { n: "limit", t: "integer", req: false, d: "样本上限", def: "—" }
+    ],
+    env: [{ n: "ENDPOINT_API_KEY", req: false, secret: true, d: "Bearer token" }]
+  }
+];
+
+const PROFILES = [
+  { name: "k8s-npu", cluster: "prod-npu-01", ns: "testplane", mounts: ["dataset(readonly)", "model(readonly)"] },
+  { name: "k8s-gpu", cluster: "prod-gpu-02", ns: "testplane", mounts: ["dataset(readonly)"] }
+];
+
+const SECRETS = [
+  { ref: "endpoint/prod-qwen", desc: "生产 Qwen 服务的 Bearer token" },
+  { ref: "endpoint/canary-qwen", desc: "灰度环境 token" }
+];
+
+function task(seq, name, tester, status, opts) {
+  return Object.assign({
+    seq: seq, id: "T-8f2c0" + seq + "-" + Math.random().toString(16).slice(2, 6),
+    name: name, tester: tester, status: status,
+    attempts: [], duration: "—", error: null, reason: null, metrics: [], labels: {}
+  }, opts || {});
+}
+
+const RUNS = [
+  {
+    id: "R-20261104-0031", name: "qwen3-32b-daily", status: "SUCCEEDED",
+    submitted_by: "林知微", created: "2026-11-04 09:41", duration: "23m 18s",
+    endpoint: { url: "http://10.0.0.10:8000/v1", model: "Qwen3-32B" },
+    profile: "k8s-npu",
+    env: { LOG_LEVEL: "info", HTTP_TIMEOUT: "300" },
+    secrets: ["endpoint/prod-qwen"],
+    tasks: [
+      task(1, "precheck", "endpoint-probe", "SUCCEEDED", {
+        duration: "41s",
+        attempts: [{ i: 1, status: "SUCCEEDED", exit: 0, started: "09:41:12", ended: "09:41:53", note: "第 3 次探测通过" }],
+        metrics: [
+          { name: "precheck_attempts", value: 3, unit: "count", stat: "count", labels: {} },
+          { name: "precheck_wait_seconds", value: 38, unit: "s", stat: "max", labels: {} },
+          { name: "precheck_last_http_status", value: 200, unit: "code", stat: "max", labels: {} }
+        ],
+        log: "[09:41:12] 探活 http://10.0.0.10:8000/v1/chat/completions model_name=Qwen3-32B\n[09:41:12] 第 1 次探测：未就绪 —— 连接失败（curl exit=7）\n[09:41:27] 第 2 次探测：未就绪 —— HTTP 503：{\"error\":\"model loading\"}\n[09:41:50] 第 3 次探测：HTTP 200，收到 SSE 数据帧，服务可出 token\n结论：status=succeeded"
+      }),
+      task(2, "accuracy-dataset-a", "aisbench-acc", "SUCCEEDED", {
+        duration: "8m 04s",
+        attempts: [{ i: 1, status: "SUCCEEDED", exit: 0, started: "09:41:54", ended: "09:49:58", note: "" }],
+        metrics: [
+          { name: "accuracy", value: 0.8421, unit: "ratio", stat: "mean", labels: { dataset: "gsm8k" } }
+        ],
+        log: "loading dataset /data/gsm8k.jsonl\n200 samples done\naccuracy=0.8421"
+      }),
+      task(3, "accuracy-dataset-b", "aisbench-acc", "SUCCEEDED", {
+        duration: "6m 51s",
+        attempts: [{ i: 1, status: "SUCCEEDED", exit: 0, started: "09:41:54", ended: "09:48:45", note: "" }],
+        metrics: [
+          { name: "accuracy", value: 0.7715, unit: "ratio", stat: "mean", labels: { dataset: "mmlu" } }
+        ],
+        log: "loading dataset /data/mmlu.jsonl\n200 samples done\naccuracy=0.7715"
+      }),
+      task(4, "performance-sweep", "aisbench-perf", "SUCCEEDED", {
+        duration: "7m 12s",
+        attempts: [{ i: 1, status: "SUCCEEDED", exit: 0, started: "09:49:59", ended: "09:57:11", note: "" }],
+        metrics: [
+          { name: "ttft_ms", value: 143.7, unit: "ms", stat: "p95", labels: { input_len: 512, concurrency: 8 } },
+          { name: "tpot_ms", value: 21.4, unit: "ms", stat: "mean", labels: { input_len: 512, concurrency: 8 } },
+          { name: "throughput_tokens_per_s", value: 1482.6, unit: "tokens/s", stat: "mean", labels: { input_len: 512, concurrency: 8 } },
+          { name: "ttft_ms", value: 402.9, unit: "ms", stat: "p95", labels: { input_len: 4096, concurrency: 16 } }
+        ],
+        log: "[sweep] 24 combos, 24 ok"
+      })
+    ],
+    events: [
+      { t: "09:41:08", text: "Run 提交，解析为 4 个 Task（含平台注入的 Pre-Check）", kind: "" },
+      { t: "09:41:11", text: "Task#1 获得执行槽位（Endpoint 独占）", kind: "" },
+      { t: "09:41:53", text: "Pre-Check 通过，后续 Task 放行", kind: "ok" },
+      { t: "09:48:45", text: "Task#3 SUCCEEDED", kind: "ok" },
+      { t: "09:57:11", text: "Task#4 SUCCEEDED，Run 进入 CLEANUP", kind: "ok" },
+      { t: "09:57:26", text: "清理完成，Run 终态 SUCCEEDED", kind: "ok" }
+    ]
+  },
+  {
+    id: "R-20261104-0029", name: "qwen3-32b-daily", status: "COMPLETED_WITH_ERRORS",
+    submitted_by: "陈一鸣", created: "2026-11-04 08:12", duration: "18m 02s",
+    endpoint: { url: "http://10.0.0.10:8000/v1", model: "Qwen3-32B" },
+    profile: "k8s-npu",
+    env: { LOG_LEVEL: "info" },
+    secrets: ["endpoint/prod-qwen"],
+    tasks: [
+      task(1, "precheck", "endpoint-probe", "SUCCEEDED", {
+        duration: "12s",
+        attempts: [{ i: 1, status: "SUCCEEDED", exit: 0, started: "08:12:05", ended: "08:12:17", note: "第 1 次探测通过" }],
+        metrics: [
+          { name: "precheck_attempts", value: 1, unit: "count", stat: "count", labels: {} },
+          { name: "precheck_wait_seconds", value: 0, unit: "s", stat: "max", labels: {} }
+        ],
+        log: "[08:12:06] 第 1 次探测：HTTP 200，收到 SSE 数据帧\n结论：status=succeeded"
+      }),
+      task(2, "accuracy-dataset-a", "aisbench-acc", "SUCCEEDED", {
+        duration: "7m 40s",
+        attempts: [{ i: 1, status: "SUCCEEDED", exit: 0, started: "08:12:18", ended: "08:19:58", note: "" }],
+        metrics: [{ name: "accuracy", value: 0.8409, unit: "ratio", stat: "mean", labels: { dataset: "gsm8k" } }],
+        log: "accuracy=0.8409"
+      }),
+      task(3, "accuracy-dataset-b", "aisbench-acc", "FAILED", {
+        duration: "3m 21s",
+        attempts: [{ i: 1, status: "FAILED", exit: 1, started: "08:12:18", ended: "08:15:39", note: "数据集校验失败" }],
+        error: { code: "TESTER_NONZERO_EXIT", message: "数据集文件缺失：/data/mmlu.jsonl", retryable: false },
+        metrics: [],
+        log: "error: /data/mmlu.jsonl not found\nexit code 1"
+      }),
+      task(4, "performance-sweep", "aisbench-perf", "SUCCEEDED", {
+        duration: "10m 44s",
+        attempts: [{ i: 1, status: "SUCCEEDED", exit: 0, started: "08:19:59", ended: "08:30:43", note: "与 Task#3 并行" }],
+        metrics: [
+          { name: "ttft_ms", value: 151.2, unit: "ms", stat: "p95", labels: { input_len: 512, concurrency: 8 } },
+          { name: "throughput_tokens_per_s", value: 1441.0, unit: "tokens/s", stat: "mean", labels: { input_len: 512, concurrency: 8 } }
+        ],
+        log: "[sweep] 24 combos, 24 ok"
+      })
+    ],
+    events: [
+      { t: "08:12:01", text: "Run 提交，4 个 Task", kind: "" },
+      { t: "08:12:17", text: "Pre-Check 通过", kind: "ok" },
+      { t: "08:15:39", text: "Task#3 FAILED（TESTER_NONZERO_EXIT，retryable=false），on_failure=continue", kind: "err" },
+      { t: "08:30:43", text: "其余 Task 全部结束，Run 终态 COMPLETED_WITH_ERRORS", kind: "warn" }
+    ]
+  },
+  {
+    id: "R-20261104-0027", name: "qwen3-32b-canary", status: "SERVICE_UNAVAILABLE",
+    submitted_by: "林知微", created: "2026-11-04 06:30", duration: "5h 01m",
+    endpoint: { url: "http://10.0.0.11:8000/v1", model: "Qwen3-32B" },
+    profile: "k8s-npu",
+    env: { LOG_LEVEL: "debug" },
+    secrets: ["endpoint/canary-qwen"],
+    tasks: [
+      task(1, "precheck", "endpoint-probe", "FAILED", {
+        duration: "5h 00m 04s",
+        attempts: [{ i: 1, status: "FAILED", exit: 1, started: "06:30:10", ended: "11:30:14", note: "窗口 18000s 用尽" }],
+        error: { code: "PRECHECK_FAILED", message: "18000s 内未就绪：HTTP 503 model loading", retryable: true },
+        metrics: [
+          { name: "precheck_attempts", value: 1200, unit: "count", stat: "count", labels: {} },
+          { name: "precheck_wait_seconds", value: 18000, unit: "s", stat: "max", labels: {} }
+        ],
+        log: "[06:30:10] 探活 …\n[11:30:14] 窗口用尽：HTTP 503 model loading\n结论：status=failed retryable=true"
+      }),
+      task(2, "accuracy-dataset-a", "aisbench-acc", "SKIPPED", {
+        reason: "upstream_abort",
+        attempts: [], metrics: [], log: "未执行（Pre-Check 未通过，串行链路未开始）"
+      }),
+      task(3, "accuracy-dataset-b", "aisbench-acc", "SKIPPED", {
+        reason: "upstream_abort",
+        attempts: [], metrics: [], log: "未执行"
+      }),
+      task(4, "performance-sweep", "aisbench-perf", "SKIPPED", {
+        reason: "upstream_abort",
+        attempts: [], metrics: [], log: "未执行"
+      })
+    ],
+    events: [
+      { t: "06:30:05", text: "Run 提交，注入 Pre-Check 为 Task#1", kind: "" },
+      { t: "06:33:12", text: "Task#1 仍未就绪（HTTP 503 model loading），继续在窗口内重试", kind: "warn" },
+      { t: "11:30:14", text: "Task#1 FAILED（PRECHECK_FAILED, retryable=true）", kind: "err" },
+      { t: "11:30:14", text: "on_failure=abort_run：Task#2–#4 全部 SKIPPED（upstream_abort），一个都没开始", kind: "err" },
+      { t: "11:30:16", text: "Run 终态 SERVICE_UNAVAILABLE（服务侧问题，不是平台故障）", kind: "err" }
+    ]
+  },
+  {
+    id: "R-20261104-0032", name: "qwen3-8b-nightly", status: "TESTING",
+    submitted_by: "陈一鸣", created: "2026-11-04 10:05", duration: "进行中 6m 41s",
+    endpoint: { url: "http://10.0.0.20:8000/v1", model: "Qwen3-8B" },
+    profile: "k8s-gpu",
+    env: { LOG_LEVEL: "info" },
+    secrets: ["endpoint/prod-qwen"],
+    tasks: [
+      task(1, "precheck", "endpoint-probe", "SUCCEEDED", {
+        duration: "6s",
+        attempts: [{ i: 1, status: "SUCCEEDED", exit: 0, started: "10:05:20", ended: "10:05:26", note: "第 1 次探测通过" }],
+        metrics: [
+          { name: "precheck_attempts", value: 1, unit: "count", stat: "count", labels: {} }
+        ],
+        log: "第 1 次探测：HTTP 200，收到 SSE 数据帧"
+      }),
+      task(2, "accuracy-dataset-a", "evalscope-acc", "RUNNING", {
+        duration: "6m 35s",
+        attempts: [{ i: 1, status: "RUNNING", exit: null, started: "10:05:27", ended: null, note: "" }],
+        metrics: [], log: "[progress] 132/200 samples"
+      }),
+      task(3, "accuracy-dataset-b", "aisbench-acc", "QUEUED", {
+        attempts: [], metrics: [], log: "等待执行槽位（Endpoint 互斥）"
+      }),
+      task(4, "performance-sweep", "aisbench-perf", "PENDING", {
+        attempts: [], metrics: [], log: "依赖未满足：等 Task#3 结束"
+      })
+    ],
+    events: [
+      { t: "10:05:15", text: "Run 提交，4 个 Task", kind: "" },
+      { t: "10:05:26", text: "Pre-Check 通过", kind: "ok" },
+      { t: "10:05:27", text: "Task#2 RUNNING；Task#3 因 Endpoint 互斥排队", kind: "" }
+    ]
+  }
+  ,
+  {
+    id: "R-20261104-0034", name: "qwen3-32b-acc-200", status: "CANCELED",
+    submitted_by: "陈一鸣", created: "2026-11-04 08:40", duration: "12m 33s",
+    endpoint: { url: "http://10.0.0.11:8000/v1", model: "Qwen3-32B" },
+    profile: "k8s-npu",
+    env: { LOG_LEVEL: "info" },
+    secrets: ["endpoint/canary-qwen"],
+    tasks: [
+      task(1, "precheck", "endpoint-probe", "SUCCEEDED", {
+        duration: "4s",
+        attempts: [{ i: 1, status: "SUCCEEDED", exit: 0, started: "08:40:10", ended: "08:40:14", note: "第 1 次探测通过" }],
+        metrics: [{ name: "precheck_attempts", value: 1, unit: "count", stat: "count", labels: {} }],
+        log: "第 1 次探测：HTTP 200，收到 SSE 数据帧"
+      }),
+      task(2, "accuracy-dataset-a", "aisbench-acc", "CANCELED", {
+        duration: "12m 20s",
+        attempts: [{ i: 1, status: "CANCELED", exit: null, started: "08:40:15", ended: "08:52:35", note: "用户取消 Run" }],
+        metrics: [], log: "[progress] canceled by user at 148/200 samples"
+      }),
+      task(3, "performance-sweep", "aisbench-perf", "SKIPPED", {
+        reason: "run_canceled", attempts: [], metrics: [], log: "未执行（Run 被取消）"
+      })
+    ],
+    events: [
+      { t: "08:40:05", text: "Run 提交，3 个 Task", kind: "" },
+      { t: "08:40:14", text: "Pre-Check 通过", kind: "ok" },
+      { t: "08:40:15", text: "Task#2 RUNNING", kind: "" },
+      { t: "08:52:35", text: "用户取消 Run：Task#2 CANCELED，Task#3 SKIPPED", kind: "warn" },
+      { t: "08:52:36", text: "Run 终态 CANCELED", kind: "warn" }
+    ]
+  },
+  {
+    id: "R-20261104-0033", name: "existing-service-smoke", status: "TESTING",
+    submitted_by: "林知微", created: "2026-11-04 10:14", duration: "进行中 2m 05s",
+    endpoint: { url: "http://10.0.0.30:8000/v1", model: "Qwen3-32B" },
+    profile: "k8s-npu",
+    env: { LOG_LEVEL: "info" },
+    secrets: ["endpoint/prod-qwen"],
+    tasks: [
+      task(1, "precheck", "endpoint-probe", "SUCCEEDED", {
+        duration: "5s",
+        attempts: [{ i: 1, status: "SUCCEEDED", exit: 0, started: "10:14:20", ended: "10:14:25", note: "第 1 次探测通过" }],
+        metrics: [{ name: "precheck_attempts", value: 1, unit: "count", stat: "count", labels: {} }],
+        log: "第 1 次探测：HTTP 200，收到 SSE 数据帧"
+      }),
+      task(2, "smoke-acc", "aisbench-acc", "RUNNING", {
+        duration: "2m 00s",
+        attempts: [{ i: 1, status: "RUNNING", exit: null, started: "10:14:26", ended: null, note: "" }],
+        metrics: [], log: "[progress] 96/200 samples"
+      })
+    ],
+    events: [
+      { t: "10:14:15", text: "Run 提交：没有 deploy，跑已有服务", kind: "" },
+      { t: "10:14:19", text: "没有 Deploy 节点：--url / --model_name 由调用方在参数里给出", kind: "" },
+      { t: "10:14:25", text: "Pre-Check 通过", kind: "ok" },
+      { t: "10:14:26", text: "Task#2 RUNNING", kind: "" }
+    ]
+  }
+];
+
+
+/* ------------------------------------------------------------------ *
+ * 集群 / 队列 mock（看板用）
+ * ------------------------------------------------------------------ */
+
+var QUEUES = [
+  { name: "npu-batch", state: "open", deserved: 32, allocated: 32, pending: 6, longest_wait: "18m", reason: "queue_full" },
+  { name: "npu-interactive", state: "open", deserved: 8, allocated: 3, pending: 1, longest_wait: "2m", reason: "insufficient_resources" },
+  { name: "gpu-shared", state: "open", deserved: 16, allocated: 16, pending: 4, longest_wait: "41m", reason: "gang_pending" }
+];
+
+var WAIT_REASON = {
+  queue_full: "队列已满",
+  insufficient_resources: "资源不足",
+  gang_pending: "gang 未满足",
+  slot_waiting: "平台槽位"
+};
+
+/* ------------------------------------------------------------------ *
+ * Deploy（Genet 部署）—— 多 Pod、日志在测试期间持续产生
+ * ------------------------------------------------------------------ */
+
+var DEPLOYS = {
+  "R-20261104-0031": {
+    provider: "genet", status: "SUCCEEDED", duration: "3m 12s",
+    yaml: "provider: genet\nparameters:\n  model: Qwen3-32B\n  replicas: 1\n  pd_disaggregation: true   # prefill / decode 分开部署\n  npu_count: 4",
+    pods: [
+      { name: "qwen3-32b-router-0", role: "router", status: "Running", node: "npu-01", restarts: 0,
+        log: [["09:37:58", "router listening on :8000"], ["09:38:04", "waiting for prefill/decode endpoints"],
+              ["09:40:31", "prefill-0 registered"], ["09:41:02", "decode-0 registered"], ["09:41:09", "decode-1 registered"],
+              ["09:41:12", "healthcheck ok, 3 backends"], ["09:57:20", "[req] 24 combos still flowing, qps=8"]] },
+      { name: "qwen3-32b-prefill-0", role: "prefill", status: "Running", node: "npu-01", restarts: 0,
+        log: [["09:38:20", "loading weights shard 1/4"], ["09:39:05", "loading weights shard 4/4"],
+              ["09:40:28", "prefill engine ready, max_batch=8"], ["09:57:22", "[req] prefill batch=8 avg=41ms"]] },
+      { name: "qwen3-32b-decode-0", role: "decode", status: "Running", node: "npu-02", restarts: 1,
+        log: [["09:38:31", "loading weights shard 1/4"], ["09:39:44", "OOM (npu mem 94%), container killed"],
+              ["09:39:52", "--- [container restarted #1 at 09:39:52, previous exit: OOMKilled] ---"],
+              ["09:40:58", "decode engine ready"], ["09:57:25", "[req] decode tokens/s=1480"]] },
+      { name: "qwen3-32b-decode-1", role: "decode", status: "Running", node: "npu-03", restarts: 0,
+        log: [["09:38:33", "loading weights shard 1/4"], ["09:41:04", "decode engine ready"],
+              ["09:57:25", "[req] decode tokens/s=1466"]] }
+    ]
+  },
+  "R-20261104-0029": {
+    provider: "genet", status: "SUCCEEDED", duration: "2m 44s",
+    yaml: "provider: genet\nparameters:\n  model: Qwen3-32B\n  replicas: 1",
+    pods: [
+      { name: "qwen3-32b-0", role: "all-in-one", status: "Running", node: "npu-01", restarts: 0,
+        log: [["08:09:10", "loading weights"], ["08:11:52", "engine ready"], ["08:30:40", "[req] serving"]] }
+    ]
+  },
+  "R-20261104-0027": {
+    provider: "genet", status: "SUCCEEDED", duration: "3m 31s",
+    yaml: "provider: genet\nparameters:\n  model: Qwen3-32B\n  replicas: 1\n  pd_disaggregation: true\n  canary: true",
+    pods: [
+      { name: "qwen3-32b-canary-router-0", role: "router", status: "Running", node: "npu-01", restarts: 0,
+        log: [["06:26:40", "router listening on :8000"], ["06:29:51", "decode backends: 0 → unavailable"],
+              ["06:30:10", "[warn] no healthy decode backend, 503"], ["11:29:58", "[warn] still 503: model loading"]] },
+      { name: "qwen3-32b-canary-decode-0", role: "decode", status: "Running", node: "npu-02", restarts: 6,
+        log: [["06:27:02", "loading weights shard 1/4"], ["06:29:44", "OOM (npu mem 91%), container killed"],
+              ["06:29:50", "--- [container restarted #1 at 06:29:50, previous exit: OOMKilled] ---"],
+              ["06:44:11", "OOM (npu mem 93%), container killed"],
+              ["06:44:19", "--- [container restarted #2 at 06:44:19, previous exit: OOMKilled] ---"],
+              ["11:29:40", "still loading, engine not ready (restart #6)"]] },
+      { name: "qwen3-32b-canary-prefill-0", role: "prefill", status: "Running", node: "npu-03", restarts: 0,
+        log: [["06:27:10", "loading weights"], ["06:29:30", "prefill engine ready"], ["11:29:41", "idle, no decode peer"]] }
+    ]
+  },
+  "R-20261104-0032": {
+    provider: "genet", status: "SUCCEEDED", duration: "1m 48s",
+    yaml: "provider: genet\nparameters:\n  model: Qwen3-8B\n  replicas: 1",
+    pods: [
+      { name: "qwen3-8b-0", role: "all-in-one", status: "Running", node: "gpu-02", restarts: 0,
+        log: [["10:03:12", "loading weights"], ["10:05:03", "engine ready"],
+              ["10:09:31", "[req] serving, tokens/s=612"], ["10:11:40", "[req] 132/200 samples, qps=4"]] }
+    ]
+  }
+};
+
+function deployOf(run) { return Object.prototype.hasOwnProperty.call(DEPLOYS, run.id) ? DEPLOYS[run.id] : null; }
+function isRunTerminal(s) { return ["SUCCEEDED", "COMPLETED_WITH_ERRORS", "SERVICE_UNAVAILABLE", "FAILED", "CANCELED"].indexOf(s) >= 0; }
+
+/* ------------------------------------------------------------------ *
+ * 状态元数据
+ * ------------------------------------------------------------------ */
+
+const RUN_STATUS = {
+  SUBMITTED: { t: "已提交", c: "" },
+  QUEUED: { t: "排队中", c: "" },
+  DEPLOYING: { t: "部署中", c: "info" },
+  TESTING: { t: "执行中", c: "info" },
+  CLEANUP: { t: "清理中", c: "info" },
+  CANCELLING: { t: "取消中", c: "warn" },
+  SUCCEEDED: { t: "成功", c: "ok" },
+  COMPLETED_WITH_ERRORS: { t: "部分失败", c: "warn" },
+  SERVICE_UNAVAILABLE: { t: "服务不可用", c: "err" },
+  FAILED: { t: "平台失败", c: "err" },
+  CANCELED: { t: "已取消", c: "outline" }
+};
+
+const TASK_STATUS = {
+  PENDING: { t: "待调度", c: "" },
+  QUEUED: { t: "排队中", c: "" },
+  PREPARING: { t: "准备中", c: "info" },
+  RUNNING: { t: "执行中", c: "info" },
+  SUCCEEDED: { t: "成功", c: "ok" },
+  FAILED: { t: "失败", c: "err" },
+  SKIPPED: { t: "跳过", c: "warn" },
+  CANCELED: { t: "已取消", c: "outline" }
+};
+
+/* ------------------------------------------------------------------ *
+ * 小工具
+ * ------------------------------------------------------------------ */
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (m) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m];
+  });
+}
+
+function badge(meta, extra) {
+  var cls = "fde-badge" + (meta.c ? " fde-badge--" + meta.c : "");
+  return '<span class="' + cls + '">' + esc(meta.t) + (extra ? " · " + esc(extra) : "") + "</span>";
+}
+
+function runBadge(status) { return badge(RUN_STATUS[status] || { t: status, c: "" }); }
+function taskBadge(status) { return badge(TASK_STATUS[status] || { t: status, c: "" }); }
+
+function testerMeta(name) {
+  for (var i = 0; i < TESTERS.length; i++) if (TESTERS[i].name === name) return TESTERS[i];
+  return { name: name, role: "test", on_failure: "continue", exclusive: false, params: [], env: [] };
+}
+
+function route() {
+  var h = location.hash.replace(/^#\/?/, "");
+  if (!h || h === "dashboard") return { page: "dashboard" };
+  if (h === "runs") return { page: "runs" };
+  if (h === "runs/new") return { page: "submit" };
+  if (h.indexOf("runs/") === 0) return { page: "detail", id: h.slice(5) };
+  if (h === "testers") return { page: "testers" };
+  if (h === "profiles") return { page: "profiles" };
+  return { page: "runs" };
+}
+
+function findRun(id) {
+  for (var i = 0; i < RUNS.length; i++) if (RUNS[i].id === id) return RUNS[i];
+  return null;
+}
+
+function setSide(html) {
+  var el = document.getElementById("side");
+  if (!el) return;
+  el.innerHTML = html || "";
+}
+
+function toast(msg) {
+  var root = document.getElementById("toast-root");
+  var el = document.createElement("div");
+  el.className = "fde-toast";
+  el.style.cssText = "background: var(--fde-text); color: var(--fde-surface); padding: 10px 14px; border-radius: 10px; font-size: 13px; box-shadow: var(--fde-shadow-3);";
+  el.textContent = msg;
+  root.appendChild(el);
+  setTimeout(function () { el.remove(); }, 2400);
+}
+
+function copyText(text) {
+  var ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  var ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+  ta.remove();
+  toast(ok ? "已复制到剪贴板" : "复制失败，请手动选择文本");
+}
+
+/* ------------------------------------------------------------------ *
+ * YAML 着色 + 结构校验（零依赖子集级：key: value、两格缩进、注释、查重）
+ * ------------------------------------------------------------------ */
+
+function yamlValueClass(v) {
+  if (/^(true|false|null)$/.test(v) || /^-?\d+(\.\d+)?$/.test(v)) return "num";
+  return "str";
+}
+
+function hlYaml(text, errLines) {
+  errLines = errLines || [];
+  return String(text).split("\n").map(function (line, i) {
+    var n = i + 1;
+    var open = errLines.indexOf(n) >= 0 ? '<span class="yaml-errline">' : "";
+    var close = open ? "</span>" : "";
+    if (/^\s*#/.test(line)) return open + '<span class="yaml-com">' + esc(line) + "</span>" + close;
+    var m = line.match(/^(\s*)([A-Za-z0-9_.\-\/]+)(\s*:)(\s*)(.*)$/);
+    if (!m) return open + esc(line) + close;
+    var val = m[5], comment = "";
+    var hash = val.indexOf(" #");
+    if (hash >= 0) { comment = val.slice(hash); val = val.slice(0, hash); }
+    return open + esc(m[1])
+      + '<span class="yaml-key">' + esc(m[2]) + "</span>"
+      + '<span class="yaml-pun">' + esc(m[3]) + "</span>"
+      + esc(m[4])
+      + (val ? '<span class="yaml-' + yamlValueClass(val.trim()) + '">' + esc(val) + "</span>" : "")
+      + (comment ? '<span class="yaml-com">' + esc(comment) + "</span>" : "")
+      + close;
+  }).join("\n");
+}
+
+function checkYaml(text) {
+  var errs = [];
+  var keys = {};          // 缩进层级 -> 该层已见键，用于兄弟查重
+  var prevIndent = 0;
+  var hasProvider = false;
+  String(text).split("\n").forEach(function (line, i) {
+    var n = i + 1;
+    if (/^\s*$/.test(line) || /^\s*#/.test(line)) return;
+    if (/\t/.test(line)) { errs.push({ line: n, msg: "缩进不能用 Tab，请用空格" }); return; }
+    var indent = line.match(/^\s*/)[0].length;
+    if (indent % 2 !== 0) { errs.push({ line: n, msg: "缩进必须是 2 的倍数" }); return; }
+    if (indent > prevIndent + 2) { errs.push({ line: n, msg: "缩进一次只能加深 2 格" }); return; }
+    var m = line.slice(indent).match(/^([A-Za-z0-9_.\-\/]+)\s*:(\s*)(.*)$/);
+    if (!m) { errs.push({ line: n, msg: "应为 key: value 或 key:（示意原型只支持单行值）" }); return; }
+    if (indent === 0 && m[1] === "provider") hasProvider = true;
+    Object.keys(keys).forEach(function (lv) { if (+lv > indent) delete keys[lv]; });
+    if (keys[indent] && keys[indent].indexOf(m[1]) >= 0) errs.push({ line: n, msg: "重复的键 " + m[1] });
+    (keys[indent] = keys[indent] || []).push(m[1]);
+    prevIndent = indent;
+  });
+  if (!hasProvider) errs.push({ line: 1, msg: "缺少顶层 provider 字段（平台按 provider 转交 Genet）" });
+  return errs;
+}
+
+function yamlStatusHtml(errs) {
+  if (!errs.length) return '<span class="ok">✓ YAML 结构有效</span>';
+  return '<span class="bad">✗ ' + errs.map(function (e) { return "第 " + e.line + " 行：" + e.msg; }).join("；") + "</span>";
+}
+
+/* 代码框随内容长高，超过上限转为内部滚动——YAML 与参数共用同一套行为 */
+function growTa(el) {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = Math.max(104, Math.min(360, el.scrollHeight)) + "px";
+}
+/* 高亮层与 textarea 是两个独立滚动体，长文本时必须同步，否则着色会错位 */
+function syncYamlScroll(el) {
+  var hl = document.getElementById("yaml-hl");
+  if (hl) { hl.scrollTop = el.scrollTop; hl.scrollLeft = el.scrollLeft; }
+}
+
+function onYamlEdit(v) {
+  draft.deployYaml = v;
+  var ta = document.getElementById("yaml-ta");
+  var pre = document.getElementById("yaml-hl");
+  var st = document.getElementById("yaml-status");
+  var errs = checkYaml(v);
+  var errLines = errs.map(function (e) { return e.line; });
+  if (pre) pre.innerHTML = "<code>" + hlYaml(v, errLines) + "</code>";
+  if (st) st.innerHTML = yamlStatusHtml(errs);
+  if (ta) growTa(ta);
+}
+
+/* ------------------------------------------------------------------ *
+ * 日志着色：时间戳变暗、错误红、告警/重启琥珀、成功绿，其余浅灰
+ * ------------------------------------------------------------------ */
+
+function renderLog(text) {
+  return String(text == null ? "" : text).split("\n").map(function (raw) {
+    var s = esc(raw);
+    if (/---\s*\[container restarted/.test(raw)) return '<span class="lg-mark">' + s + "</span>";
+    s = s.replace(/^(\[?)(\d{1,2}:\d{2}(?::\d{2})?)(\]?)(\s*)/, function (_, a, t, b, sp) {
+      return '<span class="lg-t">' + a + t + b + "</span>" + sp;
+    });
+    var cls = /\b(error|failed|failure|OOM|killed|not found|exit code [1-9]\d*|503)\b/i.test(raw) ? "lg-err"
+      : /\[warn\]|warn:/i.test(raw) ? "lg-warn"
+      : /HTTP 200|succeeded|accuracy=/i.test(raw) ? "lg-ok"
+      : "";
+    return cls ? '<span class="' + cls + '">' + s + "</span>" : s;
+  }).join("\n");
+}
+
+/* ------------------------------------------------------------------ *
+ * 视图：看板
+ * ------------------------------------------------------------------ */
+
+function meter(used, total) {
+  var pct = total ? Math.round(used / total * 100) : 0;
+  var color = pct >= 100 ? "var(--fde-danger)" : pct >= 80 ? "var(--fde-warn)" : "var(--fde-success)";
+  return '<div style="display:flex; align-items:center; gap:8px; min-width:120px">'
+    + '<div style="flex:1; height:6px; border-radius:999px; background:var(--fde-surface-3); overflow:hidden">'
+    + '<div style="width:' + pct + '%; height:100%; background:' + color + '"></div></div>'
+    + '<span class="mono-sm" style="color:var(--fde-text-2)">' + used + "/" + total + "</span></div>";
+}
+
+function statCard(label, value, foot, accent) {
+  return '<div class="fde-card"><div class="fde-card-bd">'
+    + '<div class="fde-label" style="display:flex; align-items:center; gap:8px">'
+    +   '<span class="accent-dot accent-dot--' + (accent || "blue") + '"></span>' + esc(label) + "</div>"
+    + '<div class="stat-value stat-value--' + (accent || "blue") + '">' + esc(value) + "</div>"
+    + '<div class="fde-hint">' + esc(foot) + "</div>"
+    + "</div></div>";
+}
+
+function viewDashboard() {
+  document.getElementById("topbar-title").textContent = "概览";
+  document.getElementById("topbar-sub").textContent = "集群忙不忙、谁在排队、有没有东西挂着";
+  document.getElementById("topbar-actions").innerHTML = "";
+
+  var active = RUNS.filter(function (r) { return !isRunTerminal(r.status); }).length;
+  var queued = 0, failed24 = 0;
+  RUNS.forEach(function (r) {
+    r.tasks.forEach(function (t) { if (t.status === "QUEUED" || t.status === "PENDING") queued++; });
+    if (r.status === "COMPLETED_WITH_ERRORS" || r.status === "SERVICE_UNAVAILABLE" || r.status === "FAILED") failed24++;
+  });
+  var longest = QUEUES.reduce(function (a, q) { return parseInt(q.longest_wait) > parseInt(a) ? q.longest_wait : a; }, "0m");
+
+  var queueRows = QUEUES.map(function (q) {
+    return "<tr>"
+      + '<td class="mono-sm fde-cell-strong">' + esc(q.name) + "</td>"
+      + "<td>" + (q.state === "open" ? '<span class="fde-badge fde-badge--ok">开放</span>' : '<span class="fde-badge">已关闭</span>') + "</td>"
+      + "<td>" + meter(q.allocated, q.deserved) + "</td>"
+      + '<td class="fde-cell-num">' + q.pending + "</td>"
+      + '<td class="fde-cell-num mono-sm">' + esc(q.longest_wait) + "</td>"
+      + '<td><span class="fde-tag">' + esc(WAIT_REASON[q.reason] || q.reason) + "</span></td>"
+      + "</tr>";
+  }).join("");
+
+  // 排队中的 Task：只讲"卡在哪一层"，不谈硬件
+  var waiting = [];
+  RUNS.forEach(function (r) {
+    r.tasks.forEach(function (t) {
+      if (t.status === "QUEUED" || t.status === "PENDING") {
+        waiting.push({ run: r, task: t });
+      }
+    });
+  });
+  var waitRows = waiting.length
+    ? waiting.map(function (w) {
+        var reason = w.task.status === "PENDING" ? "依赖未满足" : "平台槽位";
+        return "<tr>"
+          + '<td class="fde-cell-strong">' + esc(w.task.name) + "</td>"
+          + '<td class="mono-sm">' + esc(w.run.id) + "</td>"
+          + "<td>" + taskBadge(w.task.status) + "</td>"
+          + '<td><span class="fde-tag">' + esc(reason) + "</span></td>"
+          + "</tr>";
+      }).join("")
+    : '<tr><td colspan="4"><div class="empty-hint">当前没有排队的 Task</div></td></tr>';
+
+  var sortedAll = RUNS.slice().sort(function (a, b) { return a.created < b.created ? 1 : -1; });
+  var recent = sortedAll.slice(0, 4).map(function (r) {
+    return '<tr onclick="location.hash=\'#/runs/' + r.id + '\'" style="cursor:pointer">'
+      + '<td class="mono-sm fde-cell-strong">' + esc(r.id) + "</td>"
+      + '<td class="fde-cell-strong">' + esc(r.name) + "</td>"
+      + "<td>" + runBadge(r.status) + "</td>"
+      + "<td>" + esc(r.submitted_by) + "</td>"
+      + '<td class="fde-cell-num">' + esc(r.duration) + "</td>"
+      + '<td class="mono-sm">' + esc(r.created.slice(5)) + "</td>"
+      + "</tr>";
+  }).join("");
+
+  document.getElementById("view").innerHTML =
+    '<div class="fde-grid fde-grid--4">'
+    + statCard("进行中 Run", active, "含部署与 Pre-Check", "blue")
+    + statCard("排队中 Task", queued, "平台槽位 + 队列两个来源", "ink")
+    + statCard("近 24h 失败", failed24, "含服务不可用", "red")
+    + statCard("队列最长等待", longest, "当前排队 Job 里最久的一个", "amber")
+    + "</div>"
+
+    + '<div class="fde-card"><div class="fde-card-hd hg-amber"><span class="fde-card-title">Volcano 队列</span>'
+    +   '<span class="fde-card-sub">已分配 / 配额</span>'
+    +   '<div class="fde-toolbar-spacer"></div><span class="fde-tag">只读</span></div>'
+    +   '<div class="fde-card-bd fde-card-bd--flush"><div class="fde-table-wrap"><table class="fde-table fde-table--compact">'
+    +   '<thead><tr><th>队列</th><th>状态</th><th>已分配 / 配额</th><th style="text-align:right">排队 Job</th>'
+    +   '<th style="text-align:right">最长等待</th><th>主要原因</th></tr></thead><tbody>' + queueRows + "</tbody></table></div></div>"
+    +   '<div class="fde-card-ft"><span class="fde-hint">平台不参与调度：这里只回答「卡在队列还是卡在平台槽位」（§6.9）</span></div>'
+    + "</div>"
+
+    + '<div class="fde-card"><div class="fde-card-hd hg-green"><span class="fde-card-title">最近 Run</span>'
+    +   '<div class="fde-toolbar-spacer"></div>'
+    +   '<span class="link" onclick="location.hash=\'#/runs\'">查看全部</span></div>'
+    +   '<div class="fde-card-bd fde-card-bd--flush"><div class="fde-table-wrap"><table class="fde-table fde-table--compact">'
+    +   '<thead><tr><th>Run</th><th>名称</th><th>状态</th><th>提交人</th><th style="text-align:right">耗时</th><th>创建时间</th></tr></thead>'
+    +   "<tbody>" + recent + "</tbody></table></div></div>"
+    + "</div>";
+
+  var waitList = waiting.length
+    ? waiting.map(function (w) {
+        var reason = w.task.status === "PENDING" ? "依赖未满足" : "平台槽位";
+        return '<div class="wait-item">'
+          + '<div class="wait-name">' + esc(w.task.name) + "</div>"
+          + '<div class="wait-meta">'
+          +   '<span class="wait-run mono-sm">#' + esc(w.run.id.slice(-4)) + "</span>"
+          +   '<span class="wait-reason">' + esc(reason) + "</span>"
+          + "</div>"
+          + "</div>";
+      }).join("")
+    : '<div class="empty-hint" style="padding: 20px 0">当前没有排队的 Task</div>';
+
+  setSide('<div class="fde-card"><div class="fde-card-hd hg-ink"><span class="fde-card-title">快捷操作</span></div>'
+    + '<div class="fde-card-bd card-stack">'
+    +   '<button class="fde-btn fde-btn--primary" style="width:100%" onclick="location.hash=\'#/runs/new\'">新建 Run</button>'
+    +   '<button class="fde-btn" style="width:100%" onclick="location.hash=\'#/runs\'">查看运行列表</button>'
+    + "</div></div>"
+    + '<div class="fde-card"><div class="fde-card-hd hg-amber"><span class="fde-card-title">排队中的 Task</span>'
+    +   '<span class="fde-card-sub">' + waiting.length + ' 个</span></div>'
+    + '<div class="fde-card-bd fde-card-bd--flush"><div class="wait-list">' + waitList + "</div></div></div>"
+    + '<div class="fde-card"><div class="fde-card-hd hg-muted"><span class="fde-card-title">这页怎么看</span></div>'
+    + '<div class="fde-card-bd"><p class="fde-hint" style="margin:0; line-height:1.7">'
+    + "队列满 = 等资源；队列空却还在排队 = 卡在平台槽位。</p></div></div>");
+}
+
+/* ------------------------------------------------------------------ *
+ * 视图：运行列表
+ * ------------------------------------------------------------------ */
+
+var listState = { q: "", filter: "all" };
+
+function viewRuns() {
+  document.getElementById("topbar-title").textContent = "运行列表";
+  document.getElementById("topbar-sub").textContent = "一次 Run = 一组 Task；Pre-Check 是平台注入的第一个 Task";
+  document.getElementById("topbar-actions").innerHTML = "";
+
+  var sorted = RUNS.slice().sort(function (a, b) { return a.created < b.created ? 1 : -1; });
+  var rows = sorted.filter(function (r) {
+    var hitQ = !listState.q || (r.name + " " + r.id).toLowerCase().indexOf(listState.q.toLowerCase()) >= 0;
+    var hitF = listState.filter === "all"
+      || (listState.filter === "active" && ["SUBMITTED", "QUEUED", "DEPLOYING", "TESTING", "CLEANUP"].indexOf(r.status) >= 0)
+      || (listState.filter === "bad" && ["FAILED", "SERVICE_UNAVAILABLE", "COMPLETED_WITH_ERRORS"].indexOf(r.status) >= 0);
+    return hitQ && hitF;
+  });
+
+  var body = rows.map(function (r) {
+    var done = r.tasks.filter(function (t) { return t.status === "SUCCEEDED"; }).length;
+    return '<tr onclick="location.hash=\'#/runs/' + r.id + '\'" style="cursor:pointer">'
+      + '<td><span class="mono-sm fde-cell-strong">' + esc(r.id) + "</span></td>"
+      + '<td class="fde-cell-strong">' + esc(r.name) + "</td>"
+      + "<td>" + runBadge(r.status) + "</td>"
+      + '<td class="fde-cell-num">' + done + " / " + r.tasks.length + "</td>"
+      + '<td class="fde-cell-num">' + esc(r.duration) + "</td>"
+      + "<td>" + esc(r.submitted_by) + "</td>"
+      + '<td class="mono-sm">' + esc(r.created.slice(5)) + "</td>"
+      + "</tr>";
+  }).join("");
+
+  if (!rows.length) {
+    body = '<tr><td colspan="8"><div class="empty-hint">没有匹配的 Run</div></td></tr>';
+  }
+
+  document.getElementById("view").innerHTML =
+    '<div class="fde-card">'
+    + '<div class="fde-card-hd hg-green">'
+    +   '<span class="fde-card-title">全部 Run</span>'
+    +   '<div class="fde-toolbar" style="flex:1">'
+    +     '<div class="fde-search"><input class="fde-input" id="q" placeholder="搜索 Run 名称或 ID" value="' + esc(listState.q) + '" style="width:260px" oninput="onSearch(this.value)"></div>'
+    +     '<div class="fde-seg" id="filter-seg">'
+    +       '<button data-f="all" class="' + (listState.filter === "all" ? "is-active" : "") + '" onclick="onFilter(\'all\')">全部</button>'
+    +       '<button data-f="active" class="' + (listState.filter === "active" ? "is-active" : "") + '" onclick="onFilter(\'active\')">进行中</button>'
+    +       '<button data-f="bad" class="' + (listState.filter === "bad" ? "is-active" : "") + '" onclick="onFilter(\'bad\')">有失败</button>'
+    +     "</div>"
+    +   "</div>"
+    + "</div>"
+    + '<div class="fde-card-bd fde-card-bd--flush"><div class="fde-table-wrap"><table class="fde-table fde-table--compact">'
+    + "<thead><tr><th>Run</th><th>名称</th><th>状态</th><th style=\"text-align:right\">Task</th>"
+    + "<th style=\"text-align:right\">耗时</th><th>提交人</th><th>创建时间</th></tr></thead>"
+    + "<tbody>" + body + "</tbody></table></div></div>"
+    + '<div class="fde-card-ft"><span class="fde-hint">共 ' + rows.length + " 条 · 示意数据，非真实查询结果</span></div>"
+    + "</div>";
+
+  setSide('<div class="fde-card"><div class="fde-card-hd hg-muted"><span class="fde-card-title">终态语义</span></div>'
+    + '<div class="fde-card-bd" style="display:flex; flex-direction:column; gap:10px; font-size:12px">'
+    +   '<div>' + runBadge("SUCCEEDED") + ' <span class="fde-hint">全部 Task 成功</span></div>'
+    +   '<div>' + runBadge("COMPLETED_WITH_ERRORS") + ' <span class="fde-hint">流程走完但有失败</span></div>'
+    +   '<div>' + runBadge("SERVICE_UNAVAILABLE") + ' <span class="fde-hint">服务没起来，找部署方</span></div>'
+    +   '<div>' + runBadge("FAILED") + ' <span class="fde-hint">平台侧问题，找平台</span></div>'
+    +   '<div>' + runBadge("CANCELED") + ' <span class="fde-hint">人主动停的，不算失败</span></div>'
+    + "</div></div>"
+    + '<div class="fde-hint">SKIPPED 表示没跑，FAILED 表示跑了但失败，两者不混用。</div>');
+}
+
+function onSearch(v) { listState.q = v; viewRuns(); var i = document.getElementById("q"); if (i) { i.focus(); i.setSelectionRange(v.length, v.length); } }
+function onFilter(f) { listState.filter = f; viewRuns(); }
+
+/* ------------------------------------------------------------------ *
+ * 视图：Run 详情
+ * ------------------------------------------------------------------ */
+
+var selectedNode = "deploy";
+var selectedPod = null;
+var selectedTaskSeq = null;
+
+function selectNode(key) { selectedNode = key; selectedPod = null; viewDetail(route().id); }
+
+function nowHM() {
+  var d = new Date();
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+function retryTask(runId, seq) {
+  var run = findRun(runId);
+  if (!run) return;
+  var t = null;
+  run.tasks.forEach(function (x) { if (x.seq === seq) t = x; });
+  if (!t) return;
+
+  var idx = (t.attempts.length || 0) + 1;
+  t.status = "RUNNING";
+  t.error = null;
+  t.reason = null;
+  t.duration = "进行中";
+  t.attempts.push({ i: idx, status: "RUNNING", exit: null, started: nowHM(), ended: null, note: "手动重试" });
+  run.status = "TESTING";
+  run.events.push({ t: nowHM(), text: "Task#" + seq + " 手动重试，新建 Attempt #" + idx, kind: "" });
+  toast("已重试 Task#" + seq + "：新建 Attempt #" + idx + "（旧 Attempt 保留）");
+
+  if (route().page === "detail") viewDetail(run.id);
+  document.getElementById("nav-run-count").textContent = String(RUNS.length);
+
+  setTimeout(function () {
+    t.status = "SUCCEEDED";
+    t.duration = "1m 12s";
+    t.attempts[t.attempts.length - 1].status = "SUCCEEDED";
+    t.attempts[t.attempts.length - 1].exit = 0;
+    t.attempts[t.attempts.length - 1].ended = nowHM();
+    t.attempts[t.attempts.length - 1].note = "重试后通过";
+    t.metrics = [{ name: "accuracy", value: 0.8402, unit: "ratio", stat: "mean", labels: {} }];
+    var stillBad = run.tasks.some(function (x) {
+      return ["FAILED", "CANCELED", "RUNNING", "QUEUED", "PENDING", "PREPARING"].indexOf(x.status) >= 0;
+    });
+    run.status = stillBad ? "TESTING" : "SUCCEEDED";
+    run.events.push({ t: nowHM(), text: "Task#" + seq + " 第 " + idx + " 次 Attempt 成功", kind: "ok" });
+    if (route().page === "detail") viewDetail(run.id);
+  }, 1600);
+}
+
+function retryFailed(runId) {
+  var run = findRun(runId);
+  if (!run) return;
+  var targets = run.tasks.filter(function (t) { return t.status === "FAILED" || t.status === "CANCELED"; });
+  if (!targets.length) { toast("没有需要重试的 Task"); return; }
+  run.events.push({ t: nowHM(), text: "批量重试 " + targets.length + " 个失败 Task；已成功的 Task 复用结果，不重跑", kind: "" });
+  targets.forEach(function (t) { retryTask(runId, t.seq); });
+}
+function selectPod(name) { selectedPod = name; viewDetail(route().id); }
+function selectTask(seq) { selectedNode = "task:" + seq; selectedTaskSeq = seq; viewDetail(route().id); }
+
+function podBadge(status) {
+  var map = { "Running": ["运行中", "ok"], "Pending": ["等待调度", ""], "CrashLoopBackOff": ["反复重启", "err"], "Succeeded": ["已结束", ""] };
+  var m = map[status] || [status, ""];
+  return '<span class="fde-badge' + (m[1] ? " fde-badge--" + m[1] : "") + '">' + esc(m[0]) + "</span>";
+}
+
+function nodeTone(status) {
+  if (status === "SUCCEEDED") return "ok";
+  if (status === "FAILED") return "err";
+  if (status === "SKIPPED") return "warn";
+  if (status === "CANCELED") return "idle";
+  if (status === "RUNNING" || status === "PREPARING") return "info";
+  return "idle";
+}
+
+function flowNode(key, title, tone, meta, extraTag, live) {
+  var active = selectedNode === key ? " is-active" : "";
+  return '<button class="flow-node flow-node--' + tone + active + '" title="' + esc(title) + '" onclick="selectNode(\'' + key + '\')">'
+    + '<span class="flow-node-top"><span class="dot"></span>' + esc(title)
+    + (live ? '<span class="live-dot" style="color:var(--fde-info)"></span>' : "")
+    + "</span>"
+    + '<span class="flow-node-meta">' + esc(meta) + "</span></button>";
+}
+
+function renderFlow(run, dep) {
+  var nodes = [];
+  if (dep) {
+    var tone = dep.status === "SUCCEEDED" ? "ok" : dep.status === "DEPLOYING" ? "info" : "err";
+    nodes.push(flowNode("deploy", "Deploy", tone,
+      dep.pods.length + " pod · " + dep.duration, "",
+      !isRunTerminal(run.status)));
+  }
+  var pre = null, rest = [];
+  run.tasks.forEach(function (t) {
+    if (testerMeta(t.tester).role === "pre_check") pre = t; else rest.push(t);
+  });
+  if (pre) {
+    nodes.push(flowNode("task:" + pre.seq, pre.name, nodeTone(pre.status),
+      (TASK_STATUS[pre.status] || {}).t + " · " + (pre.duration || "—"), ""));
+  }
+  // Task 按 tests[] 顺序串行：上一个结束才轮到下一个
+  rest.forEach(function (t) {
+    nodes.push(flowNode("task:" + t.seq, t.name, nodeTone(t.status),
+      (TASK_STATUS[t.status] || {}).t + " · " + (t.duration || "—")));
+  });
+  return '<div class="flow">' + nodes.join('<div class="flow-arrow"></div>') + "</div>";
+}
+
+function logRange(dep) {
+  var first = null, last = null;
+  dep.pods.forEach(function (p) {
+    p.log.forEach(function (l) {
+      if (!/^\d\d:/.test(l[0])) return;
+      if (!first || l[0] < first) first = l[0];
+      if (!last || l[0] > last) last = l[0];
+    });
+  });
+  return first ? first + " – " + last : "—";
+}
+
+function renderDeployDetail(run, dep) {
+  if (!dep) {
+    return '<div class="fde-card"><div class="fde-card-hd hg-ink"><span class="fde-card-title">Deploy</span></div>'
+      + '<div class="fde-card-bd card-stack"><div class="note"><div><strong>这个 Run 没有 Deploy。</strong><br>'
+      + "跑已有服务：三个公共参数由提交时填的 <span class=\"mono-sm\">service</span> 块提供，平台照样注入，和部署成功后的路径完全一致。</div></div>"
+      + '<dl class="kv">'
+      +   "<dt>url</dt><dd class=\"mono-sm\">" + esc(run.endpoint.url) + "</dd>"
+      +   "<dt>model_name</dt><dd class=\"mono-sm\">" + esc(run.endpoint.model) + "</dd>"
+      +   "<dt>model_path</dt><dd class=\"mono-sm\">" + esc(run.endpoint.path || "—（未填，Tester 按 usage 兜底）") + "</dd>"
+      + "</dl></div></div>";
+  }
+
+  var live = !isRunTerminal(run.status);
+  var pod = null;
+  dep.pods.forEach(function (p) { if (p.name === selectedPod) pod = p; });
+  if (!pod) pod = dep.pods[0] || null;
+
+  var podRows = dep.pods.map(function (p) {
+    return "<tr>"
+      + '<td class="mono-sm fde-cell-strong">' + esc(p.name) + "</td>"
+      + '<td><span class="fde-tag fde-tag--id">' + esc(p.role) + "</span></td>"
+      + "<td>" + podBadge(p.status) + "</td>"
+      + '<td class="mono-sm">' + esc(p.node) + "</td>"
+      + '<td class="fde-cell-num">' + p.restarts + "</td>"
+      + "</tr>";
+  }).join("");
+
+  var chips = dep.pods.map(function (p) {
+    return '<button class="fde-chip' + (pod && p.name === pod.name ? " is-active" : "") + '" onclick="selectPod(\'' + esc(p.name) + '\')">'
+      + esc(p.name) + "</button>";
+  }).join("");
+
+  var logText = pod && pod.log.length
+    ? pod.log.map(function (l) { return l[0] + "  " + l[1]; }).join("\n")
+    : "（没有日志）";
+
+  return '<div class="fde-card">'
+    + '<div class="fde-card-hd hg-ink"><span class="fde-card-title">Deploy</span>'
+    + '<span class="fde-tag fde-tag--id">' + esc(dep.provider) + "</span>"
+    + '<div class="fde-toolbar-spacer"></div>'
+    + (live
+        ? '<span class="fde-badge fde-badge--info"><span class="live-dot"></span> 日志追加中</span>'
+        : dep.status === "SUCCEEDED"
+          ? '<span class="fde-badge fde-badge--ok">已拉起</span>'
+          : dep.status === "DEPLOYING"
+            ? '<span class="fde-badge fde-badge--info">部署中</span>'
+            : '<span class="fde-badge fde-badge--err">部署失败</span>')
+    + "</div>"
+    + '<div class="fde-card-bd card-stack">'
+    +   '<dl class="kv">'
+    +     "<dt>状态</dt><dd>" + (dep.status === "SUCCEEDED" ? "服务已拉起（不是就绪判定，就绪由 Pre-Check 判）" : esc(dep.status)) + "</dd>"
+    +     "<dt>耗时</dt><dd class=\"mono-sm\">" + esc(dep.duration) + "</dd>"
+    +     "<dt>Pod</dt><dd class=\"mono-sm\">" + dep.pods.length + " 个（" + esc(dep.pods.map(function (p) { return p.role; }).filter(function (v, i, a) { return a.indexOf(v) === i; }).join(" / ")) + "）</dd>"
+    +     "<dt>Endpoint</dt><dd class=\"mono-sm\">" + esc(run.endpoint.url) + "</dd>"
+    +     "<dt>日志区间</dt><dd class=\"mono-sm\">" + esc(logRange(dep)) + (live ? "（测试期间仍在追加）" : "") + "</dd>"
+    +   "</dl>"
+    +   '<div><div class="fde-eyebrow" style="margin-bottom: var(--fde-sp-2)">Manifest 里的 deploy 段</div>'
+    +     '<pre class="pre yaml-ro">' + hlYaml(dep.yaml) + "</pre></div>"
+    + "</div></div>"
+
+    + '<div class="fde-card">'
+    +   '<div class="fde-card-hd hg-ink"><span class="fde-card-title">Pods</span>'
+    +   '<span class="fde-card-sub">多节点 / PD 分离时一个 Deploy 对应多个 Pod</span></div>'
+    +   '<div class="fde-card-bd fde-card-bd--flush"><div class="fde-table-wrap"><table class="fde-table fde-table--compact">'
+    +   "<thead><tr><th>Pod</th><th>角色</th><th>状态</th><th>节点</th><th style=\"text-align:right\">重启</th></tr></thead>"
+    +   "<tbody>" + podRows + "</tbody></table></div></div>"
+    + "</div>"
+
+    + '<div class="fde-card">'
+    +   '<div class="fde-card-hd hg-ink"><span class="fde-card-title">Pod 日志</span>'
+    +   '<span class="fde-card-sub">按 Pod 分别落盘：logs/deploy/&lt;pod&gt;.log</span>'
+    +   '<div class="fde-toolbar-spacer"></div>'
+    +   (live ? '<span class="fde-badge fde-badge--info"><span class="live-dot"></span> 持续追加</span>' : "")
+    +   "</div>"
+    +   '<div class="fde-card-bd card-stack">'
+    +     '<div class="pod-chips">' + chips + "</div>"
+    +     '<pre class="log" style="max-height:280px">' + renderLog(logText) + "</pre>"
+    +   "</div>"
+    +   '<div class="fde-card-ft"><span class="fde-hint">'
+    +   "Deploy 与测试是并行的：Tester 跑的时候 Pod 还在打日志。所以这里不是「部署完就冻结」的一次性产物——"
+    +   "采集要按 Pod 持续追加，并标注每份日志的起止时间。"
+    +   "</span></div>"
+    + "</div>";
+}
+
+function renderTaskDetail(run, sel) {
+  var tm = testerMeta(sel.tester);
+  var metricRows = sel.metrics.length
+    ? sel.metrics.map(function (m) {
+        var labels = Object.keys(m.labels || {}).map(function (k) { return k + "=" + m.labels[k]; }).join(", ");
+        return "<tr>"
+          + '<td class="fde-cell-strong mono-sm">' + esc(m.name) + "</td>"
+          + '<td class="fde-cell-num">' + esc(m.value) + "</td>"
+          + '<td class="mono-sm">' + esc(m.unit) + "</td>"
+          + '<td class="mono-sm">' + esc(m.stat) + "</td>"
+          + '<td class="mono-sm">' + (labels ? esc(labels) : "—") + "</td>"
+          + "</tr>";
+      }).join("")
+    : '<tr><td colspan="5"><div class="empty-hint">这个 Task 没有产出指标（'
+      + (sel.status === "SKIPPED" ? "未执行" : sel.status === "CANCELED" ? "被终止" : "执行失败") + "）</div></td></tr>";
+
+  var attemptRows = sel.attempts.length
+    ? sel.attempts.map(function (a) {
+        return "<tr>"
+          + '<td class="fde-cell-num">#' + a.i + "</td>"
+          + "<td>" + taskBadge(a.status) + "</td>"
+          + '<td class="fde-cell-num">' + (a.exit == null ? "—" : a.exit) + "</td>"
+          + '<td class="mono-sm">' + esc(a.started || "—") + "</td>"
+          + '<td class="mono-sm">' + esc(a.ended || "—") + "</td>"
+          + '<td class="mono-sm">' + esc(a.note || "") + "</td>"
+          + "</tr>";
+      }).join("")
+    : '<tr><td colspan="6"><div class="empty-hint">还没有 Attempt —— 这个 Task 从未开始执行</div></td></tr>';
+
+  var errBlock = sel.error
+    ? '<div class="note"><div><strong>' + esc(sel.error.code) + "</strong> · "
+      + (sel.error.retryable ? "可重试" : "不可重试") + "<br>" + esc(sel.error.message) + "</div></div>"
+    : (sel.reason ? '<div class="note"><div><strong>' + esc(sel.reason) + "</strong><br>Task 未执行（被上游终止或跳过）</div></div>" : "");
+
+  var toneCls = { SUCCEEDED: "hg-green", FAILED: "hg-red", RUNNING: "hg-blue", PREPARING: "hg-blue",
+                  QUEUED: "hg-amber", PENDING: "hg-amber", SKIPPED: "hg-muted", CANCELED: "hg-muted" }[sel.status] || "hg-muted";
+
+  return '<div class="fde-card">'
+    + '<div class="fde-card-hd ' + toneCls + '"><span class="fde-card-title">' + esc(sel.name) + "</span>"
+    + '<span class="fde-tag fde-tag--id">' + esc(sel.tester) + "</span>"
+    + (tm.role === "pre_check" ? '<span class="fde-badge fde-badge--primary">pre_check</span>' : "")
+    + '<div class="fde-toolbar-spacer"></div>' + taskBadge(sel.status)
+    + '<span class="fde-hint mono-sm">' + esc(sel.duration || "—") + "</span>"
+    + ((sel.status === "FAILED" || sel.status === "CANCELED")
+        ? '<button class="fde-btn fde-btn--sm" onclick="retryTask(\'' + run.id + "'," + sel.seq + ')">重试此 Task</button>'
+        : "")
+    + "</div>"
+    + '<div class="fde-card-bd card-stack">'
+    +   errBlock
+    +   '<dl class="kv">'
+    +     "<dt>执行环境</dt><dd class=\"mono-sm\">" + esc(sel.profile || run.profile) + "</dd>"
+    +     "<dt>Attempts</dt><dd>" + (sel.attempts.length || 0) + "</dd>"
+    +     "<dt>失败策略</dt><dd class=\"mono-sm\">" + esc(tm.on_failure) + "</dd>"
+    +   "</dl>"
+    + "</div></div>"
+    + '<div class="fde-card"><div class="fde-card-hd hg-blue"><span class="fde-card-title">结果指标</span>'
+    +   '<span class="fde-card-sub mono-sm">tasks/' + esc(sel.id) + "/attempts/1/result.json</span>"
+    +   '<div class="fde-toolbar-spacer"></div><span class="fde-tag">只呈现事实，不判定达标</span></div>'
+    +   '<div class="fde-card-bd fde-card-bd--flush"><div class="fde-table-wrap"><table class="fde-table fde-table--compact">'
+    +   '<thead><tr><th>指标</th><th style="text-align:right">值</th><th>单位</th><th>统计口径</th><th>labels</th></tr></thead>'
+    +   "<tbody>" + metricRows + "</tbody></table></div></div></div>"
+    + '<div class="fde-card"><div class="fde-card-hd hg-muted"><span class="fde-card-title">Attempts</span>'
+    +   '<span class="fde-card-sub">重试产生新 Attempt，不覆盖历史</span></div>'
+    +   '<div class="fde-card-bd fde-card-bd--flush"><div class="fde-table-wrap"><table class="fde-table fde-table--compact">'
+    +   '<thead><tr><th style="text-align:right">#</th><th>状态</th><th style="text-align:right">exit</th>'
+    +   "<th>开始</th><th>结束</th><th>备注</th></tr></thead><tbody>" + attemptRows + "</tbody></table></div></div></div>"
+    + '<div class="fde-card"><div class="fde-card-hd hg-ink"><span class="fde-card-title">日志</span>'
+    +   '<span class="fde-card-sub">平台只做搬运与脱敏，不改写内容</span></div>'
+    +   '<div class="fde-card-bd"><pre class="log">' + renderLog(sel.log || "（无日志）") + "</pre></div></div>"
+    + '<div class="fde-card"><div class="fde-card-hd hg-muted"><span class="fde-card-title">产物</span>'
+    +   '<span class="fde-card-sub mono-sm">runs/' + esc(run.id) + "/tasks/" + esc(sel.id) + "/attempts/1/</span>"
+    +   '<div class="fde-toolbar-spacer"></div><span class="fde-tag">直接写入最终存储，无打包上传</span></div>'
+    +   '<div class="fde-card-bd fde-card-bd--flush"><div class="fde-table-wrap"><table class="fde-table fde-table--compact">'
+    +   '<thead><tr><th>文件</th><th style="text-align:right">大小</th><th></th></tr></thead><tbody>'
+    +   (artifactRows(sel).length
+          ? artifactRows(sel).map(function (f) {
+              return "<tr><td class=\"mono-sm fde-cell-strong\">" + esc(f[0]) + "</td>"
+                + '<td class="fde-cell-num">' + esc(f[1]) + "</td>"
+                + '<td class="fde-cell-actions"><span class="link" onclick="toast(\'示意原型：不做真实下载\')">下载</span></td></tr>';
+            }).join("")
+          : '<tr><td colspan="3"><div class="empty-hint">' + (sel.status === "SKIPPED" ? "Task 未执行，没有产物" : "还没有产物") + "</div></td></tr>")
+    +   "</tbody></table></div></div>"
+    +   '<div class="fde-card-ft"><span class="fde-hint">result.json 是唯一必产出的文件；raw/ 与 logs/ 是自由区，平台只做校验与索引。</span></div>'
+    + "</div>";
+}
+
+function viewDetail(id) {
+  var run = findRun(id);
+  if (!run) {
+    document.getElementById("topbar-title").textContent = "找不到 Run";
+    document.getElementById("view").innerHTML =
+      '<div class="fde-card"><div class="empty-hint">找不到 Run ' + esc(id) + "</div></div>";
+    return;
+  }
+  var dep = deployOf(run);
+
+  document.getElementById("topbar-title").textContent = run.name;
+  document.getElementById("topbar-sub").textContent = run.id;
+  document.getElementById("topbar-actions").innerHTML =
+    (run.tasks.some(function (t) { return t.status === "FAILED" || t.status === "CANCELED"; }) && isRunTerminal(run.status)
+      ? '<button class="fde-btn fde-btn--sm fde-btn--primary" onclick="retryFailed(\'' + run.id + '\')">重试失败的 Task</button>'
+      : "")
+    + '<button class="fde-btn fde-btn--sm" onclick="toast(\'示意原型：取消会终止所有未完成 Task\')">取消 Run</button>'
+    + '<button class="fde-btn fde-btn--sm" onclick="location.hash=\'#/runs\'">返回列表</button>';
+
+  if (selectedNode !== "deploy" && !run.tasks.some(function (t) { return "task:" + t.seq === selectedNode; })) {
+    selectedNode = "deploy";
+  }
+
+  var banner = "";
+  if (run.status === "SERVICE_UNAVAILABLE") {
+    banner = '<div class="banner banner--err"><div>'
+      + '<p class="banner-title">被测服务不可用，不是平台故障</p>'
+      + "<p>Pre-Check 在等待窗口内始终未就绪（<span class=\"mono-sm\">PRECHECK_FAILED · retryable=true</span>）。"
+      + "按 <span class=\"mono-sm\">on_failure=abort_run</span> 终止了整个 Run：Task 是串行的，Pre-Check 失败时后面的 Task 一个都还没开始，全部标 <span class=\"mono-sm\">SKIPPED</span>（<span class=\"mono-sm\">reason: upstream_abort</span>）。"
+      + "排查方向：先看 Deploy 的 Pod 日志，再找服务部署方。</p></div></div>";
+  } else if (run.status === "COMPLETED_WITH_ERRORS") {
+    banner = '<div class="banner banner--warn"><div>'
+      + '<p class="banner-title">流程走完，但有 Task 失败</p>'
+      + "<p>失败 Task 的 <span class=\"mono-sm\">on_failure=continue</span>，其余 Task 正常执行完。终态语义：部分失败，不是服务不可用。</p></div></div>";
+  }
+
+  var timeline = run.events.map(function (e) {
+    var cls = e.kind === "ok" ? " is-ok" : e.kind === "err" ? " is-err" : e.kind === "warn" ? " is-warn" : "";
+    return '<div class="tl-item">'
+      + '<div class="tl-time">' + esc(e.t) + "</div>"
+      + '<div class="tl-rail"><span class="tl-dot' + cls + '"></span></div>'
+      + '<div class="tl-text">' + esc(e.text) + "</div>"
+      + "</div>";
+  }).join("");
+
+  var profs = [];
+  run.tasks.forEach(function (t) { var v = t.profile || run.profile; if (profs.indexOf(v) < 0) profs.push(v); });
+
+  var detailHtml;
+  if (selectedNode === "deploy") {
+    detailHtml = renderDeployDetail(run, dep);
+  } else {
+    var seq = Number(selectedNode.split(":")[1]);
+    var sel = null;
+    run.tasks.forEach(function (t) { if (t.seq === seq) sel = t; });
+    detailHtml = sel ? renderTaskDetail(run, sel) : "";
+  }
+
+  document.getElementById("view").innerHTML =
+    banner
+
+    + '<div class="fde-card"><div class="fde-card-bd">'
+    +   '<div class="fde-row" style="align-items:flex-start; flex-wrap:wrap; gap: var(--fde-sp-6)">'
+    +     '<dl class="kv" style="flex:1; min-width:320px">'
+    +       "<dt>状态</dt><dd>" + runBadge(run.status) + (isRunTerminal(run.status) ? "" : ' <span class="fde-hint">（进行中）</span>') + "</dd>"
+    +       "<dt>Endpoint</dt><dd class=\"mono-sm\">" + esc(run.endpoint.url) + "</dd>"
+    +       "<dt>模型</dt><dd class=\"mono-sm\">" + esc(run.endpoint.model) + "</dd>"
+    +       "<dt>执行环境</dt><dd class=\"mono-sm\">" + esc(profs.join(" / ")) + (profs.length > 1 ? "（按 Task 指定）" : "") + "</dd>"
+    +     "</dl>"
+    +     '<dl class="kv" style="flex:1; min-width:280px">'
+    +       "<dt>提交人</dt><dd>" + esc(run.submitted_by) + "</dd>"
+    +       "<dt>创建时间</dt><dd class=\"mono-sm\">" + esc(run.created) + "</dd>"
+    +       "<dt>耗时</dt><dd class=\"mono-sm\">" + esc(run.duration) + "</dd>"
+    +       "<dt>Task 数</dt><dd>" + run.tasks.length + "（含平台注入的 Pre-Check）</dd>"
+    +     "</dl>"
+    +   "</div>"
+    +   '<hr class="fde-hr" style="margin: var(--fde-sp-5) 0">'
+    +   '<div class="fde-row" style="gap: var(--fde-sp-6); flex-wrap:wrap; font-size: var(--fde-fz-xs); color: var(--fde-text-2)">'
+    +     "<span>env: <span class=\"mono-sm\">" + esc(JSON.stringify(run.env)) + "</span></span>"
+    +     "<span>secrets: " + run.secrets.map(function (s) { return '<span class="fde-tag fde-tag--id">' + esc(s) + "</span>"; }).join(" ") + "</span>"
+    +   "</div>"
+    + "</div></div>"
+
+    + '<div class="fde-card">'
+    +   '<div class="fde-card-hd hg-blue"><span class="fde-card-title">执行链路</span>'
+    +   '<span class="fde-card-sub">点任一节点看它的详情 · 按 tests[] 顺序排列，独占型 Tester 天然串行</span>'
+    +   '<div class="fde-toolbar-spacer"></div>'
+    +   '<span class="fde-hint">' + (dep ? "执行顺序" : "执行顺序") + '</span></div>'
+    +   '<div class="fde-card-bd">' + renderFlow(run, dep) + "</div>"
+    + "</div>"
+
+    + '<div class="card-stack">' + detailHtml + "</div>";
+
+  setSide('<div class="fde-card"><div class="fde-card-hd hg-blue">'
+    + '<span class="fde-card-title">事件</span>'
+    + '<span class="fde-card-sub">' + run.tasks.length + ' 个 Task</span></div>'
+    + '<div class="fde-card-bd"><div class="timeline">' + timeline + "</div></div></div>"
+    + '<div class="fde-hint">状态流转与错误都记在 events.jsonl，UI 只是读它。</div>');
+}
+
+function artifactRows(sel) {
+  if (sel.status === "SKIPPED") return [];
+  var out = [["result.json", "1.4 KB"], ["report.json", "3.1 KB"]];
+  out.push(["logs/" + (sel.tester === "endpoint-probe" ? "probe.log" : "run.log"), "8.2 KB"]);
+  if (sel.tester === "endpoint-probe") out.push(["raw/last-response.txt", "0.6 KB"]);
+  if (sel.tester === "aisbench-perf") out.push(["raw/perf-sweep.jsonl", "12.8 MB"]);
+  if (sel.status === "CANCELED" || sel.status === "RUNNING") return out.slice(0, 2);
+  return out;
+}
+
+/* ------------------------------------------------------------------ *
+ * 视图：提交运行
+ * ------------------------------------------------------------------ */
+
+var draft = {
+  name: "qwen3-32b-daily",
+  precheck: "auto",
+  deploy: true,
+  service: {
+    url: "http://10.0.0.30:8000/v1",
+    model_name: "Qwen3-32B",
+    model_path: "/models/Qwen3-32B"
+  },
+  deployYaml: "provider: genet\nparameters:\n  model: Qwen3-32B\n  replicas: 1\n  pd_disaggregation: true\n  npu_count: 4",
+  env: [{ k: "LOG_LEVEL", v: "info" }],
+  secrets: [{ k: "ENDPOINT_API_KEY", ref: "endpoint/prod-qwen" }],
+  tasks: [
+    { name: "accuracy-dataset-a", tester: "aisbench-acc", profile: "k8s-npu", args: "--dataset=/data/gsm8k.jsonl --limit=200", on_failure: "continue", retry: 0 }
+  ]
+};
+
+function viewSubmit() {
+  document.getElementById("topbar-title").textContent = "提交运行";
+  document.getElementById("topbar-sub").textContent = "参数是一段字符串，平台只做词法切分";
+  document.getElementById("topbar-actions").innerHTML =
+    '<button class="fde-btn fde-btn--primary" onclick="submitRun()">提交</button>';
+
+  document.getElementById("view").innerHTML =
+    '<div class="app-grid">'
+    + '<div class="card-stack">'
+
+    +   '<div class="fde-card"><div class="fde-card-hd hg-green"><span class="fde-card-title">运行</span></div>'
+    +     '<div class="fde-card-bd">'
+    +       '<div class="fde-field"><label class="fde-label">Run 名称</label>'
+    +         '<input class="fde-input" value="' + esc(draft.name) + '" oninput="draft.name=this.value"></div>'
+    +     "</div></div>"
+
+    +   '<div class="fde-card"><div class="fde-card-hd hg-ink"><span class="fde-card-title">Deploy</span>'
+    +     '<span class="fde-card-sub">' + (draft.deploy ? "Genet 部署参数；交互先保留为「直接填 YAML」" : "已有服务：直接给三个公共参数") + '</span>'
+    +     '<div class="fde-toolbar-spacer"></div>'
+    +     '<div class="fde-seg">'
+    +       '<button class="' + (draft.deploy ? "is-active" : "") + '" onclick="draft.deploy=true;viewSubmit()">部署</button>'
+    +       '<button class="' + (!draft.deploy ? "is-active" : "") + '" onclick="draft.deploy=false;viewSubmit()">不部署</button>'
+    +     "</div></div>"
+    +     '<div class="fde-card-bd card-stack">'
+    +       (draft.deploy
+              ? '<div class="yaml-editor">'
+                + '<pre class="yaml-hl" id="yaml-hl" aria-hidden="true"><code>'
+                + hlYaml(draft.deployYaml, checkYaml(draft.deployYaml).map(function (e) { return e.line; }))
+                + "</code></pre>"
+                + '<textarea class="yaml-ta code-ta" id="yaml-ta" rows="7" spellcheck="false" oninput="onYamlEdit(this.value)" onscroll="syncYamlScroll(this)">'
+                + esc(draft.deployYaml) + "</textarea></div>"
+                + '<div class="yaml-status" id="yaml-status">' + yamlStatusHtml(checkYaml(draft.deployYaml)) + "</div>"
+                + '<p class="fde-hint" style="margin:0">平台只校验 YAML 结构并转交 Genet；部署失败会终止整个 Run，不会创建任何 Task。'
+                + "一个 Deploy 可能拉起多个 Pod（多节点 / PD 分离）：router、prefill、decode 各自有日志，且在测试期间仍持续输出。</p>"
+              : '<div class="grid-three" style="grid-template-columns: minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr)">'
+                +   '<div class="fde-field"><label class="fde-label">url <span style="color:var(--fde-danger)">*</span></label>'
+                +     '<input class="fde-input mono-sm" value="' + esc(draft.service.url) + '" oninput="draft.service.url=this.value" placeholder="http://host:8000/v1"></div>'
+                +   '<div class="fde-field"><label class="fde-label">model_name <span style="color:var(--fde-danger)">*</span></label>'
+                +     '<input class="fde-input mono-sm" value="' + esc(draft.service.model_name) + '" oninput="draft.service.model_name=this.value" placeholder="Qwen3-32B"></div>'
+                +   '<div class="fde-field"><label class="fde-label">model_path</label>'
+                +     '<input class="fde-input mono-sm" value="' + esc(draft.service.model_path) + '" oninput="draft.service.model_path=this.value" placeholder="/models/Qwen3-32B"></div>'
+                + "</div>"
+                + '<div class="note"><div><strong>不部署，直接给已有服务。</strong>'
+                + "这三个值就是平台要注入的公共参数——和部署成功后的 Endpoint 走同一条注入路径，所以 Task 参数里依旧不用写它们。"
+                + '<span class="mono-sm">model_path</span> 用于算 token，服务端能报 usage 时可以不填。</div></div>')
+    +     "</div></div>"
+
+    +   '<div class="fde-card"><div class="fde-card-hd hg-amber"><span class="fde-card-title">环境变量与凭据</span>'
+    +     '<span class="fde-card-sub">Run 粒度，注入该 Run 下全部 Task</span></div>'
+    +     '<div class="fde-card-bd card-stack">'
+    +       draft.env.map(function (e, i) {
+            return '<div class="env-row">'
+              + '<input class="fde-input mono-sm" value="' + esc(e.k) + '" oninput="draft.env[' + i + '].k=this.value">'
+              + '<input class="fde-input" value="' + esc(e.v) + '" oninput="draft.env[' + i + '].v=this.value">'
+              + '<button class="fde-btn fde-btn--ghost fde-btn--icon" title="删除" onclick="draft.env.splice(' + i + ',1);viewSubmit()">×</button>'
+              + "</div>";
+          }).join("")
+    +       draft.secrets.map(function (s, i) {
+            return '<div class="env-row">'
+              + '<input class="fde-input mono-sm" value="' + esc(s.k) + '" oninput="draft.secrets[' + i + '].k=this.value">'
+              + '<select class="fde-select mono-sm" onchange="draft.secrets[' + i + '].ref=this.value">'
+              + SECRETS.map(function (x) {
+                  return '<option value="' + esc(x.ref) + '"' + (x.ref === s.ref ? " selected" : "") + ">" + esc(x.ref) + " — " + esc(x.desc) + "</option>";
+                }).join("")
+              + "</select>"
+              + '<button class="fde-btn fde-btn--ghost fde-btn--icon" title="删除" onclick="draft.secrets.splice(' + i + ',1);viewSubmit()">×</button>'
+              + "</div>";
+          }).join("")
+    +       '<div class="fde-row" style="gap: var(--fde-sp-3)">'
+    +         '<button class="fde-btn fde-btn--sm" onclick="draft.env.push({k:\'\',v:\'\'});viewSubmit()">+ 环境变量</button>'
+    +         '<button class="fde-btn fde-btn--sm" onclick="draft.secrets.push({k:\'\',ref:SECRETS[0].ref});viewSubmit()">+ 凭据引用</button>'
+    +         '<span class="fde-hint">凭据只填引用，明文不出现在 Manifest 里</span>'
+    +       "</div>"
+    +     "</div></div>"
+
+    +   '<div class="fde-card"><div class="fde-card-hd hg-blue"><span class="fde-card-title">Task 列表</span>'
+    +     '<span class="fde-card-sub">每个 Task 一段参数字符串；执行环境按 Task 指定</span>'
+    +     '<div class="fde-toolbar-spacer"></div>'
+    +     '<span class="fde-label">Pre-Check</span>'
+    +     '<div class="fde-seg">'
+    +       '<button class="' + (draft.precheck === "auto" ? "is-active" : "") + '" onclick="draft.precheck=\'auto\';viewSubmit()">auto 注入</button>'
+    +       '<button class="' + (draft.precheck === "off" ? "is-active" : "") + '" onclick="draft.precheck=\'off\';viewSubmit()">off</button>'
+    +     '</div>'
+    +     '<button class="fde-btn fde-btn--sm" onclick="addTask()">+ 添加 Task</button></div>'
+    +     '<div class="fde-card-bd card-stack">'
+    +       '<p class="fde-hint" style="margin:0">auto：平台取注册表中唯一一个 role=pre_check 的 Tester，注入为 Task#1；0 个或多个都拒绝提交。</p>'
+    +       (draft.precheck === "auto"
+              ? '<div class="task-block" style="opacity:.85"><div class="task-block-hd">'
+                + '<span class="seq">1</span>'
+                + '<span class="fde-card-title">precheck</span>'
+                + '<span class="fde-tag fde-tag--id">endpoint-probe</span>'
+                + '<span class="fde-badge fde-badge--primary">pre_check</span>'
+                + '<div class="fde-toolbar-spacer"></div>'
+                + '<span class="fde-hint">平台注入 · 参数由平台生成，不可编辑</span>'
+                + "</div>"
+                + '<div class="task-block-bd">'
+                +   '<div class="note"><div><strong>这个 Task 是平台按 precheck: auto 自动插入的</strong>，'
+                +   "排在 tests[] 最前面。它的 <span class=\"mono-sm\">--url</span> / <span class=\"mono-sm\">--model_name</span> / <span class=\"mono-sm\">--model_path</span> 来自 Endpoint（Deploy 得到的，或你不部署时填的那三个字段）；"
+                +   "<span class=\"mono-sm\">on_failure=abort_run</span> 由 Tester 自己声明，所以它一失败，后面所有 Task 都会被终止。</div></div>"
+                +   '<div class="fde-row" style="gap: var(--fde-sp-4); font-size: var(--fde-fz-xs); color: var(--fde-text-2)">'
+                +     '<span>执行环境 <span class="mono-sm">k8s-npu</span>（复用 tests[0]）</span>'
+                +     '<span>独占该 Endpoint</span>'
+                +   "</div>"
+                + "</div></div>"
+              : "")
+    +       draft.tasks.map(function (t, i) {
+            var tm = testerMeta(t.tester);
+            var idx = i + 1 + (draft.precheck === "auto" ? 1 : 0);
+            return '<div class="task-block">'
+              + '<div class="task-block-hd"><span class="seq">' + idx + "</span>"
+              +   '<input class="fde-input" style="width:200px" placeholder="Task 名称" value="' + esc(t.name || "") + '" oninput="draft.tasks[' + i + '].name=this.value">'
+              +   '<select class="fde-select" style="width:190px" onchange="setTaskTester(' + i + ',this.value)">'
+              +     TESTERS.filter(function (x) { return x.role === "test"; }).map(function (x) {
+                      return '<option value="' + esc(x.name) + '"' + (x.name === t.tester ? " selected" : "") + ">" + esc(x.name) + "</option>";
+                    }).join("")
+              +   "</select>"
+              +   '<span class="fde-tag fde-tag--id">' + esc(tm.name) + " v1.0.0</span>"
+              +   '<div class="fde-toolbar-spacer"></div>'
+              +   '<button class="fde-btn fde-btn--ghost fde-btn--sm" onclick="draft.tasks.splice(' + i + ',1);viewSubmit()">移除</button>'
+              + "</div>"
+              + '<div class="task-block-bd">'
+              +   '<div class="fde-field"><label class="fde-label">参数（原样填，平台只做词法切分）</label>'
+              +     '<textarea class="code-ta" placeholder="' + esc(tm.placeholder) + '" oninput="draft.tasks[' + i + '].args=this.value;growTa(this)">' + esc(t.args) + "</textarea>"
+              +   "</div>"
+              +   '<div class="grid-three">'
+              +     '<div class="fde-field"><label class="fde-label">失败策略</label>'
+              +       '<div class="fde-seg">'
+              +         '<button class="' + (t.on_failure === "continue" ? "is-active" : "") + '" onclick="draft.tasks[' + i + '].on_failure=\'continue\';viewSubmit()">continue</button>'
+              +         '<button class="' + (t.on_failure === "abort_run" ? "is-active" : "") + '" onclick="draft.tasks[' + i + '].on_failure=\'abort_run\';viewSubmit()">abort_run</button>'
+              +       "</div></div>"
+              +     '<div class="fde-field"><label class="fde-label">重试次数</label>'
+              +       '<input class="fde-input mono-sm" type="number" min="0" value="' + t.retry + '" oninput="draft.tasks[' + i + '].retry=Number(this.value)"></div>'
+              +     '<div class="fde-field"><label class="fde-label">执行环境</label>'
+              +       '<select class="fde-select mono-sm" onchange="draft.tasks[' + i + '].profile=this.value">' + PROFILES.map(function (p) { return "<option" + (p.name === t.profile ? " selected" : "") + ">" + esc(p.name) + "</option>"; }).join("") + "</select></div>"
+              +   "</div>"
+              +   (tm.on_failure === "abort_run"
+                    ? '<p class="fde-hint">该 Tester 声明了 on_failure=abort_run：提交时不能弱化为 continue。</p>'
+                    : "")
+              + "</div></div>";
+          }).join("")
+    +     "</div></div>"
+
+    + "</div>"
+
+    + '<aside class="sticky-col card-stack">'
+    +   '<div class="fde-card"><div class="fde-card-hd hg-muted"><span class="fde-card-title">参数说明</span>'
+    +     '<span class="fde-card-sub">只读文档语义</span></div>'
+    +     '<div class="fde-card-bd card-stack">'
+    +       '<div class="note"><div><strong>平台不渲染表单、不校验参数。</strong><br>'
+    +         '上面只有一个输入框；这里的清单是给人和 Agent 看的说明书，不是表单定义。</div></div>'
+    +       draft.tasks.map(function (t, i) {
+            var tm = testerMeta(t.tester);
+            var idx = i + 1 + (draft.precheck === "auto" ? 1 : 0);
+            return "<div>"
+              + '<div class="fde-eyebrow" style="margin-bottom: var(--fde-sp-2)">Task#' + idx + " · " + esc(t.name || tm.name) + " · " + esc(tm.name) + "</div>"
+              + '<div style="display:flex; flex-direction:column; gap:12px">'
+              + tm.params.map(function (p) {
+                  return '<div>'
+                    + '<div class="mono-sm" style="color:var(--fde-text); font-weight:500">--' + esc(p.n)
+                    + (p.req ? ' <span style="color:var(--fde-danger)">*</span>' : "") + "</div>"
+                    + '<div class="fde-hint" style="line-height:1.6">' + esc(p.d)
+                    + (p.def && p.def !== "—" ? "（默认 " + esc(p.def) + "）" : "") + "</div>"
+                    + "</div>";
+                }).join("")
+              + "</div>"
+              + '<div class="fde-row" style="margin-top: var(--fde-sp-3); gap: var(--fde-sp-2)">'
+              +   '<button class="fde-btn fde-btn--sm" onclick="copyText(\'' + esc(tm.placeholder).replace(/'/g, "\\'") + '\')">复制示例</button>'
+              +   '<span class="fde-hint">公共参数由平台注入</span>'
+              + "</div>"
+              + "</div>";
+          }).join("")
+    +       '<hr class="fde-hr">'
+    +       '<p class="fde-hint" style="margin:0">公共参数 <span class="mono-sm">--url</span> / <span class="mono-sm">--model_name</span> / <span class="mono-sm">--model_path</span> 恒由平台在 argv 末尾追加——'
+    +       "来源要么是 Deploy 得到的 Endpoint，要么是你不部署时在上面填的三个字段。若在输入框里又写了一遍，提交会被拒绝（VALIDATION_ERROR）。</p>"
+    +     "</div>"
+    +   "</div>"
+    + "</aside>"
+    + "</div>";
+
+  relocateAside();
+
+  // 代码框按内容定高：渲染完 DOM 才有 scrollHeight
+  document.querySelectorAll("#view .code-ta").forEach(growTa);
+}
+
+function addTask() {
+  draft.tasks.push({ tester: "aisbench-acc", args: "", on_failure: "continue", retry: 0 });
+  viewSubmit();
+}
+function setTaskTester(i, v) { draft.tasks[i].tester = v; viewSubmit(); }
+
+var submitSeq = 0;
+
+function submitRun() {
+  submitSeq++;
+  var now = new Date();
+  var hh = String(now.getHours()).padStart(2, "0");
+  var mm = String(now.getMinutes()).padStart(2, "0");
+  var id = "R-20261104-" + String(40 + submitSeq).padStart(4, "0");
+
+  var tasks = [];
+  if (draft.precheck === "auto") {
+    tasks.push(task(1, "precheck", "endpoint-probe", "PENDING", {
+      duration: "—", attempts: [], log: "等待调度"
+    }));
+  }
+  draft.tasks.forEach(function (t) {
+    tasks.push(task(tasks.length + 1, t.name || t.tester + "-task", t.tester, "PENDING", {
+      duration: "—", attempts: [], profile: t.profile, log: "等待调度"
+    }));
+  });
+
+  var ep = draft.deploy
+    ? { url: "http://10.0.0.10:8000/v1", model: "Qwen3-32B" }
+    : { url: draft.service.url, model: draft.service.model_name, path: draft.service.model_path };
+  var run = {
+    id: id, name: draft.name || "未命名 Run", status: draft.deploy ? "DEPLOYING" : "SUBMITTED",
+    submitted_by: "林知微", created: "2026-11-04 " + hh + ":" + mm, duration: "进行中",
+    endpoint: ep,
+    profile: (draft.tasks[0] && draft.tasks[0].profile) || "k8s-npu",
+    env: draft.env.reduce(function (a, e) { if (e.k) a[e.k] = e.v; return a; }, {}),
+    secrets: draft.secrets.map(function (s) { return s.ref; }),
+    tasks: tasks,
+    events: [{ t: hh + ":" + mm, text: "Run 提交，解析为 " + tasks.length + " 个 Task" + (draft.precheck === "auto" ? "（含平台注入的 Pre-Check）" : ""), kind: "" }]
+  };
+  RUNS.unshift(run);
+  DEPLOYS[id] = draft.deploy ? {
+    provider: "genet", status: "DEPLOYING", duration: "—", yaml: draft.deployYaml || "",
+    pods: [{ name: "qwen3-32b-0", role: "all-in-one", status: "Pending", node: "npu-01", restarts: 0,
+             log: [["--:--:--", "等待镜像拉取"]] }]
+  } : null;
+  selectedNode = draft.deploy ? "deploy" : "task:1";
+  selectedTaskSeq = null;
+  location.hash = "#/runs/" + id;
+
+  var steps = [
+    { after: 700, apply: function () { run.status = "QUEUED"; } },
+    { after: 1200, apply: function () {
+        if (draft.deploy) {
+          run.status = "DEPLOYING";
+          var d = DEPLOYS[run.id];
+          if (d) {
+            d.status = "SUCCEEDED"; d.duration = "1m 06s";
+            d.pods[0].status = "Running";
+            d.pods[0].log = [["--:--:--", "loading weights"], ["--:--:--", "engine ready"], ["--:--:--", "[req] serving"]];
+            run.events.push({ t: hh + ":" + mm, text: "Deploy 完成，Endpoint 就绪（1 个 Pod），Pre-Check 开始", kind: "ok" });
+          }
+        } else {
+          run.status = "TESTING";
+        }
+      } },
+    { after: 1500, apply: function () { run.status = "TESTING"; if (run.tasks[0]) { run.tasks[0].status = "PREPARING"; } } },
+    { after: 2600, apply: function () {
+        if (run.tasks[0]) { run.tasks[0].status = "RUNNING"; run.tasks[0].duration = "12s"; }
+      } },
+    { after: 4200, apply: function () {
+        if (run.tasks[0]) {
+          run.tasks[0].status = "SUCCEEDED";
+          run.tasks[0].attempts = [{ i: 1, status: "SUCCEEDED", exit: 0, started: hh + ":" + mm, ended: hh + ":" + mm, note: "第 1 次探测通过" }];
+          run.tasks[0].metrics = [
+            { name: "precheck_attempts", value: 1, unit: "count", stat: "count", labels: {} },
+            { name: "precheck_wait_seconds", value: 4, unit: "s", stat: "max", labels: {} }
+          ];
+          run.tasks[0].log = "第 1 次探测：HTTP 200，收到 SSE 数据帧\n结论：status=succeeded";
+          run.events.push({ t: hh + ":" + mm, text: "Pre-Check 通过，后续 Task 放行", kind: "ok" });
+        }
+        run.tasks.forEach(function (t) {
+          if (t.status === "PENDING" && t.tester !== "endpoint-probe") { t.status = "QUEUED"; }
+        });
+      } },
+    { after: 6000, apply: function () {
+        var running = run.tasks.filter(function (t) { return t.status === "QUEUED" && t.tester !== "endpoint-probe"; })[0];
+        if (running) { running.status = "RUNNING"; running.duration = "4s"; running.attempts = [{ i: 1, status: "RUNNING", exit: null, started: hh + ":" + mm, ended: null, note: "" }]; }
+        run.duration = "进行中 30s";
+      } }
+  ];
+
+  steps.forEach(function (s) {
+    setTimeout(function () {
+      s.apply();
+      var r = route();
+      if (r.page === "detail" && r.id === run.id) viewDetail(run.id);
+      if (r.page === "dashboard") viewDashboard();
+      else if (r.page === "runs") viewRuns();
+      document.getElementById("nav-run-count").textContent = String(RUNS.length);
+    }, s.after);
+  });
+
+  toast("已提交（示意：不产生真实执行）");
+}
+
+/* ------------------------------------------------------------------ *
+ * 视图：Tester 目录
+ * ------------------------------------------------------------------ */
+
+function viewTesters() {
+  document.getElementById("topbar-title").textContent = "Tester 目录";
+  document.getElementById("topbar-sub").textContent = "平台只认 tester.yaml + run.sh，白名单注册";
+  document.getElementById("topbar-actions").innerHTML = "";
+
+  var rows = TESTERS.map(function (t) {
+    return "<tr>"
+      + '<td class="fde-cell-strong">' + esc(t.name) + "</td>"
+      + '<td class="mono-sm">' + esc(t.version) + "</td>"
+      + "<td>" + (t.role === "pre_check" ? '<span class="fde-badge fde-badge--primary">pre_check</span>' : '<span class="fde-badge">test</span>') + "</td>"
+      + "<td>" + (t.on_failure === "abort_run" ? '<span class="fde-badge fde-badge--warn">abort_run</span>' : '<span class="fde-badge">continue</span>') + "</td>"
+      + "<td>" + (t.exclusive ? "是" : "否") + "</td>"
+      + '<td class="fde-cell-num">' + t.params.length + "</td>"
+      + '<td class="fde-cell-actions"><span class="link" onclick="openTester(\'' + esc(t.name) + '\')">详情</span></td>'
+      + "</tr>";
+  }).join("");
+
+  document.getElementById("view").innerHTML =
+    '<div class="fde-card"><div class="fde-card-hd hg-blue">'
+    + '<span class="fde-card-title">已注册 Tester</span>'
+    + '<span class="fde-card-sub">参数清单仅供 Agent 与维护者阅读；平台不渲染、不校验（§5.4）</span></div>'
+    + '<div class="fde-card-bd fde-card-bd--flush"><div class="fde-table-wrap"><table class="fde-table">'
+    + '<thead><tr><th>名称</th><th>版本</th><th>角色</th><th>失败策略</th><th>独占 Endpoint</th>'
+    + '<th style="text-align:right">参数</th><th></th></tr></thead>'
+    + "<tbody>" + rows + "</tbody></table></div></div></div>";
+
+  setSide('<div class="fde-card"><div class="fde-card-hd hg-muted"><span class="fde-card-title">注册规则</span></div>'
+    + '<div class="fde-card-bd"><p class="fde-hint" style="margin:0; line-height:1.7">'
+    + "只认根目录的 tester.yaml + run.sh；pre_check 必须声明 abort_run。"
+    + "</p></div></div>");
+}
+
+function openTester(name) {
+  var t = testerMeta(name);
+  document.getElementById("overlay-root").innerHTML =
+    '<div class="fde-scrim" style="position:fixed; inset:0; background:rgba(15,18,23,.34); z-index:1200" onclick="closeDrawer()"></div>'
+    + '<aside class="fde-drawer drawer-wide" role="dialog" aria-label="Tester 详情">'
+    + '<div class="fde-drawer-hd"><span class="fde-card-title">' + esc(t.name) + "</span>"
+    +   '<span class="fde-tag fde-tag--id">v' + esc(t.version) + "</span>"
+    +   '<div class="fde-toolbar-spacer"></div>'
+    +   '<button class="fde-btn fde-btn--ghost fde-btn--sm" onclick="closeDrawer()">关闭</button></div>'
+    + '<div class="fde-drawer-bd">'
+    +   "<p style=\"margin:0; font-size: var(--fde-fz-sm); color: var(--fde-text-2); line-height: var(--fde-lh-base)\">" + esc(t.desc) + "</p>"
+    +   '<dl class="kv">'
+    +     "<dt>role</dt><dd>" + esc(t.role) + "</dd>"
+    +     "<dt>on_failure</dt><dd>" + esc(t.on_failure) + "</dd>"
+    +     "<dt>独占 Endpoint</dt><dd>" + (t.exclusive ? "true（同 Endpoint 上其它 Task 排队）" : "false") + "</dd>"
+    +     "<dt>镜像</dt><dd class=\"mono-sm\" style=\"word-break:break-all\">" + esc(t.image) + "</dd>"
+    +     "<dt>入口</dt><dd class=\"mono-sm\">/tester/run.sh</dd>"
+    +   "</dl>"
+    +   "<div><div class=\"fde-eyebrow\" style=\"margin-bottom: var(--fde-sp-2)\">参数清单</div>"
+    +     '<table class="fde-table fde-table--compact param-table"><thead><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></thead><tbody>'
+    +     t.params.map(function (p) {
+            return "<tr><td class=\"mono-sm fde-cell-strong\">--" + esc(p.n) + "</td>"
+              + '<td class="mono-sm">' + esc(p.t) + "</td>"
+              + "<td>" + (p.req ? "是" : "否") + "</td>"
+              + '<td style="font-size:var(--fde-fz-xs);color:var(--fde-text-3)">' + esc(p.d) + "</td></tr>";
+          }).join("")
+    +     "</tbody></table></div>"
+    +   (t.env.length
+          ? "<div><div class=\"fde-eyebrow\" style=\"margin-bottom: var(--fde-sp-2)\">环境变量（声明读取）</div>"
+            + '<table class="fde-table fde-table--compact"><thead><tr><th>变量</th><th>必需</th><th>敏感</th><th>说明</th></tr></thead><tbody>'
+            + t.env.map(function (e) {
+                return '<tr><td class="mono-sm fde-cell-strong">' + esc(e.n) + "</td>"
+                  + "<td>" + (e.req ? "是" : "否") + "</td>"
+                  + "<td>" + (e.secret ? "是" : "否") + "</td>"
+                  + '<td style="font-size:var(--fde-fz-xs);color:var(--fde-text-3)">' + esc(e.d) + "</td></tr>";
+              }).join("")
+            + "</tbody></table></div>"
+          : "")
+    +   "<div><div class=\"fde-eyebrow\" style=\"margin-bottom: var(--fde-sp-2)\">placeholder（可直接抄）</div>"
+    +     '<pre class="pre">' + esc(t.placeholder) + "</pre></div>"
+    + "</div>"
+    + '<div class="fde-drawer-ft"><button class="fde-btn" onclick="copyText(\'' + esc(t.placeholder).replace(/'/g, "\\'") + '\')">复制示例参数</button>'
+    + '<button class="fde-btn fde-btn--primary" onclick="closeDrawer(); location.hash=\'#/runs/new\'">用它提交 Run</button></div>'
+    + "</aside>";
+}
+
+function closeDrawer() { document.getElementById("overlay-root").innerHTML = ""; }
+
+/* ------------------------------------------------------------------ *
+ * 视图：执行环境
+ * ------------------------------------------------------------------ */
+
+function viewProfiles() {
+  document.getElementById("topbar-title").textContent = "执行环境";
+  document.getElementById("topbar-sub").textContent = "Execution Profile：K8s 集群 / 命名空间 / 可挂载资源";
+  document.getElementById("topbar-actions").innerHTML = "";
+
+  var rows = PROFILES.map(function (p) {
+    return "<tr>"
+      + '<td class="fde-cell-strong mono-sm">' + esc(p.name) + "</td>"
+      + '<td class="mono-sm">' + esc(p.cluster) + "</td>"
+      + '<td class="mono-sm">' + esc(p.ns) + "</td>"
+      + "<td>" + p.mounts.map(function (m) { return '<span class="fde-tag fde-tag--id">' + esc(m) + "</span>"; }).join(" ") + "</td>"
+      + "</tr>";
+  }).join("");
+
+  document.getElementById("view").innerHTML =
+    '<div class="fde-card"><div class="fde-card-hd hg-ink"><span class="fde-card-title">已登记 Profile</span><span class="fde-card-sub">'
+    + "平台只有 K8s 一种 Executor；SSH / Docker 主机上的运行属于平台外行为，不在此登记</span></div>"
+    + '<div class="fde-card-bd fde-card-bd--flush"><div class="fde-table-wrap"><table class="fde-table">'
+    + "<thead><tr><th>Profile</th><th>集群</th><th>命名空间</th><th>可挂载资源</th></tr></thead>"
+    + "<tbody>" + rows + "</tbody></table></div></div></div>";
+
+  setSide('<div class="fde-card"><div class="fde-card-hd hg-muted"><span class="fde-card-title">边界</span></div>'
+    + '<div class="fde-card-bd"><p class="fde-hint" style="margin:0; line-height:1.7">'
+    + "平台只有 K8s 一种 Executor。SSH / Docker 主机上的运行是使用者的运行方式，不登记、不代管凭据、不进平台生命周期（§6.4）。"
+    + "</p></div></div>");
+}
+
+/* ------------------------------------------------------------------ *
+ * 路由
+ * ------------------------------------------------------------------ */
+
+function render() {
+  var r = route();
+  document.querySelectorAll(".fde-nav-item").forEach(function (b) {
+    var k = b.getAttribute("data-nav");
+    var active = (r.page === "dashboard" && k === "dashboard")
+      || (r.page === "runs" && k === "runs") || (r.page === "submit" && k === "submit")
+      || (r.page === "detail" && k === "runs") || (r.page === "testers" && k === "testers")
+      || (r.page === "profiles" && k === "profiles");
+    b.classList.toggle("is-active", active);
+  });
+  document.getElementById("nav-run-count").textContent = String(RUNS.length);
+  closeDrawer();
+  setSide("");
+  if (r.page === "dashboard") viewDashboard();
+  else if (r.page === "runs") viewRuns();
+  else if (r.page === "submit") viewSubmit();
+  else if (r.page === "detail") viewDetail(r.id);
+  else if (r.page === "testers") viewTesters();
+  else if (r.page === "profiles") viewProfiles();
+
+  relocateAside();
+}
+
+// 视图里若把辅助信息写成 main 内的 <aside>，搬到右侧栏（保持主内容在前）。
+// 提交页的交互（+Task、部署切换等）会直接重渲染 view，不走 render()，
+// 所以这段搬迁逻辑抽出来，两条路径都要调用，否则 aside 会残留在主区、右栏留旧内容。
+function relocateAside() {
+  var inner = document.querySelector("#view .app-grid > aside");
+  if (inner) {
+    setSide(inner.innerHTML);
+    inner.remove();
+  }
+  var grid = document.querySelector("#view .app-grid");
+  if (grid && grid.children.length === 1) grid.classList.add("is-single");
+}
+
+document.querySelectorAll(".fde-nav-item").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var k = b.getAttribute("data-nav");
+    location.hash = k === "submit" ? "#/runs/new" : "#/" + k;
+  });
+});
+
+window.addEventListener("hashchange", render);
+render();
+</script>
+</body>
+</html>

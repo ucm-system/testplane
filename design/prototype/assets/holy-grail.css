@@ -1,0 +1,699 @@
+/* ==========================================================================
+   Holy Grail Layout 风格覆盖层
+   在 tokens.css / components.css 之后加载，覆盖为圣杯布局的视觉与交互规范。
+   ========================================================================== */
+
+:root {
+  /* 颜色 */
+  --fde-bg: #f1f5f9;
+  --fde-bg-sub: #ffffff;
+  --fde-surface: #ffffff;
+  --fde-surface-2: #f8fafc;
+  --fde-surface-3: #f1f5f9;
+  --fde-line: #e5e7eb;
+  --fde-line-strong: #d1d5db;
+  --fde-text: #1e293b;
+  --fde-text-2: #4b5563;
+  --fde-text-3: #9ca3af;
+  --fde-primary: #3b82f6;
+  --fde-primary-fg: #ffffff;
+  --fde-primary-text: #1d4ed8;
+  --fde-primary-weak: rgba(59, 130, 246, 0.1);
+  --fde-primary-ring: rgba(59, 130, 246, 0.2);
+  --fde-success: #10b981;
+  --fde-success-weak: #ecfdf5;
+  --fde-success-text: #047857;
+  --fde-warn: #f59e0b;
+  --fde-warn-weak: #fffbeb;
+  --fde-warn-text: #b45309;
+  --fde-danger: #ef4444;
+  --fde-danger-weak: #fef2f2;
+  --fde-danger-text: #b91c1c;
+  --fde-info: #3b82f6;
+  --fde-info-weak: #eff6ff;
+  --fde-info-text: #1d4ed8;
+  /* 圆角：卡片 rounded-xl(12) / 按钮与输入框 rounded-lg(8) */
+  --fde-r-xs: 6px;
+  --fde-r-sm: 6px;
+  --fde-r-md: 8px;
+  --fde-r-lg: 12px;
+  --fde-r-xl: 16px;
+  --fde-r-full: 999px;
+  /* 阴影：只用 sm / md 两档 */
+  --fde-shadow-1: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --fde-shadow-2: 0 4px 12px rgba(15, 23, 42, 0.08);
+  --fde-shadow-3: 0 10px 30px rgba(15, 23, 42, 0.12);
+  /* 动效：一律 150ms ease-out，禁止超过 200ms */
+  --fde-dur-1: 150ms;
+  --fde-dur-2: 150ms;
+  --fde-dur-3: 150ms;
+  --fde-dur-4: 150ms;
+  --fde-ease: ease-out;
+  --fde-ease-out: ease-out;
+  --fde-control-h: 36px;
+  --fde-control-h-sm: 30px;
+  --fde-row-h: 42px;
+  --fde-focus-ring: 0 0 0 3px rgba(59, 130, 246, 0.2);
+  --fde-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --fde-font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+body {
+  margin: 0;
+  background: var(--fde-bg);
+  color: var(--fde-text);
+  font-family: var(--fde-font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------- 圣杯外壳 */
+
+.hg-app { min-height: 100vh; display: flex; flex-direction: column; background: var(--fde-bg); }
+
+.hg-header {
+  position: sticky; top: 0; z-index: 50;
+  display: flex; align-items: center; gap: 20px;
+  height: 56px; padding: 0 24px;
+  background: #ffffff; border-bottom: 1px solid var(--fde-line);
+}
+.hg-brand { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+/* 页头 logo：assets/testplane-icon.svg（深藏青底渐变纸飞机）。
+   图标自带 rx=112/512≈22% 圆角，28px 下约 6px，不用 8px 以免过度裁切 */
+.hg-logo {
+  width: 28px; height: 28px; border-radius: 6px;
+  display: block; flex: none;
+}
+.hg-brand-name { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+.hg-brand-sub { font-size: 11px; color: var(--fde-text-3); font-family: var(--fde-font-mono); }
+.hg-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.hg-title-main { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; }
+.hg-title-sub {
+  font-size: 12px; color: var(--fde-text-3); min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.hg-header-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.hg-user { display: flex; align-items: center; gap: 8px; padding-left: 16px; margin-left: 4px; border-left: 1px solid var(--fde-line); }
+.hg-avatar {
+  width: 26px; height: 26px; border-radius: 999px;
+  background: #eff6ff; color: var(--fde-primary-text);
+  font-size: 12px; display: grid; place-items: center;
+}
+.hg-user-name { font-size: 12px; color: var(--fde-text-2); }
+
+/* 三列：main 在源码里先出现，用 grid-column 摆到中间 */
+.hg-body {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr) 288px;
+  align-items: stretch;
+}
+.hg-main {
+  grid-column: 2; grid-row: 1;
+  min-width: 0; padding: 24px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+/* 两侧栏钉在视口内，不随主内容滚走：
+   高度锁一屏（56 页头 + 40 页脚），右栏内容超出时栏内自滚；
+   align-self:start 让 sticky 有活动余地（stretch 会把整列拉到内容高，sticky 失效） */
+.hg-left {
+  grid-column: 1; grid-row: 1;
+  position: sticky; top: 56px; align-self: start;
+  height: calc(100vh - 96px);
+  overflow-y: auto;
+  background: #ffffff; border-right: 1px solid var(--fde-line);
+  display: flex; flex-direction: column; padding: 16px 0;
+}
+.hg-right {
+  grid-column: 3; grid-row: 1;
+  position: sticky; top: 56px; align-self: start;
+  height: calc(100vh - 96px);
+  background: #ffffff; border-left: 1px solid var(--fde-line);
+  padding: 20px; overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.hg-right:empty { display: none; }
+
+.hg-footer {
+  position: sticky; bottom: 0; z-index: 40;
+  display: flex; align-items: center; gap: 12px;
+  height: 40px; padding: 0 24px;
+  background: #ffffff; border-top: 1px solid var(--fde-line);
+  font-size: 12px; color: var(--fde-text-2);
+}
+.hg-footer-sub { color: var(--fde-text-3); }
+
+/* 导航：左边框高亮，不做垂直位移 */
+.hg-nav { display: flex; flex-direction: column; gap: 2px; padding: 0 8px; }
+.hg-nav-group {
+  padding: 14px 12px 6px;
+  font-size: 11px; font-weight: 500; color: var(--fde-text-3);
+}
+.fde-nav-item {
+  height: 34px; padding: 0 12px;
+  border-left: 2px solid transparent; border-radius: 0 8px 8px 0;
+  color: var(--fde-text-2); font-size: 13px; font-weight: 500;
+  transition: background-color 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out;
+}
+.fde-nav-item:hover { background: #f9fafb; color: var(--fde-text); border-left-color: var(--fde-primary); }
+.fde-nav-item.is-active { background: rgba(59, 130, 246, 0.1); color: var(--fde-primary-text); border-left-color: var(--fde-primary); }
+.fde-nav-item .fde-nav-badge { font-size: 11px; color: var(--fde-text-3); }
+
+.hg-left-ft {
+  margin-top: auto; padding: 16px 20px 12px;
+  border-top: 1px solid var(--fde-line);
+  font-size: 11px; color: var(--fde-text-3);
+}
+/* 左栏底部的 mock 提示与页脚信息重复，弱化成纯文字，不再抢视觉 */
+.hg-left-ft .mock-tag { border: 0; padding: 0; border-radius: 0; }
+
+/* ---------------------------------------------------------------- 卡片 */
+
+.fde-card {
+  border-radius: 12px;
+  border: 1px solid #f3f4f6;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  transition: transform 150ms ease-out, box-shadow 150ms ease-out;
+}
+.fde-card:hover { transform: translateY(-2px); box-shadow: var(--fde-shadow-2); }
+.hg-right .fde-card:hover, .hg-left .fde-card:hover { transform: none; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }
+.fde-card-hd { border-bottom: 1px solid #f3f4f6; padding: 14px 20px; }
+.fde-card-title { font-size: 13px; font-weight: 600; letter-spacing: -0.005em; }
+.fde-card-sub { font-size: 11px; color: var(--fde-text-3); }
+.fde-card-bd { padding: 20px; }
+.fde-card-ft { border-top: 1px solid #f3f4f6; padding: 12px 20px; }
+
+/* ---------------------------------------------------------------- 表格 */
+
+.fde-table th {
+  background: #f8fafc; color: #6b7280;
+  font-size: 11px; font-weight: 500; letter-spacing: 0; text-transform: none;
+  border-bottom: 1px solid var(--fde-line);
+}
+.fde-table td { border-bottom: 1px solid #f3f4f6; font-size: 13px; }
+.fde-table tbody tr:hover td { background: #f9fafb; }
+.fde-table tbody tr.is-selected td { background: rgba(59, 130, 246, 0.08); }
+.fde-table .fde-cell-strong { color: var(--fde-text); font-weight: 500; }
+
+/* ---------------------------------------------------------------- 按钮 */
+
+.fde-btn {
+  border-radius: 8px; font-weight: 500;
+  transition: transform 150ms ease-out, box-shadow 150ms ease-out,
+              background-color 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
+}
+.fde-btn:hover { transform: translateY(-2px); }
+.fde-btn:active { transform: scale(0.98) translateY(0); box-shadow: none; }
+.fde-btn:focus-visible { outline: none; box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--fde-primary); }
+.fde-btn--primary { background: var(--fde-primary); border-color: var(--fde-primary); color: #fff; }
+.fde-btn--primary:hover { background: #2f74e0; box-shadow: 0 4px 10px rgba(59, 130, 246, 0.4); }
+.fde-btn--ghost { border-color: transparent; }
+.fde-btn--ghost:hover, .fde-btn--icon:hover { transform: none; background: #f3f4f6; }
+.fde-btn--ghost:active, .fde-btn--icon:active { transform: scale(0.98); }
+
+/* ---------------------------------------------------------------- 输入 */
+
+.fde-input, .fde-select, .fde-textarea {
+  background: #f9fafb;
+  border: 1px solid var(--fde-line);
+  border-radius: 8px;
+  font-size: 13px;
+  transition: box-shadow 150ms ease-out, border-color 150ms ease-out, background-color 150ms ease-out;
+}
+.fde-input:focus, .fde-select:focus, .fde-textarea:focus {
+  outline: none; border-color: var(--fde-primary);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+  background: #ffffff;
+}
+.fde-select { background-image: none; padding-right: 12px; }
+
+/* 分段控件 */
+.fde-seg { background: var(--fde-surface-3); border-radius: 8px; padding: 2px; }
+.fde-seg button {
+  height: 28px; border-radius: 6px; font-size: 12px; color: var(--fde-text-2);
+  transition: background-color 150ms ease-out, color 150ms ease-out, box-shadow 150ms ease-out;
+}
+.fde-seg button:hover { color: var(--fde-text); }
+.fde-seg button.is-active { background: #fff; color: var(--fde-primary-text); box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08); }
+
+/* ---------------------------------------------------------------- 标签 */
+
+.fde-badge { height: 22px; font-size: 11px; font-weight: 500; border-radius: 999px; }
+.fde-badge--ok { background: var(--fde-success-weak); color: var(--fde-success-text); }
+.fde-badge--warn { background: var(--fde-warn-weak); color: var(--fde-warn-text); }
+.fde-badge--err { background: var(--fde-danger-weak); color: var(--fde-danger-text); }
+.fde-badge--info { background: var(--fde-info-weak); color: var(--fde-info-text); }
+.fde-badge--primary { background: rgba(59, 130, 246, 0.1); color: var(--fde-primary-text); }
+/* 标签统一进胶囊家族（与 badge / chip 同语言）：
+   默认 = 中文标签：灰底、sans、500，不再被等宽字体混排；
+   --id = 机器标识符（genet / router / tester 名 / secret 引用）：描边 + 等宽，
+         透明底与「已取消」徽标的 outline 呼应，一眼区分「人话」和「标识符」 */
+.fde-tag {
+  height: 20px; padding: 0 9px; border-radius: 999px;
+  background: #f3f4f6; color: var(--fde-text-2);
+  font-size: 11px; font-weight: 500; font-family: inherit;
+}
+.fde-tag--id {
+  background: transparent; border: 1px solid var(--fde-line-strong);
+  font-family: var(--fde-font-mono); font-weight: 400;
+}
+
+/* 小标签不再是 "tiny uppercase tracked eyebrow" */
+.fde-eyebrow {
+  font-size: 11px; font-weight: 500; letter-spacing: 0; text-transform: none;
+  color: var(--fde-text-3); font-family: var(--fde-font-sans);
+}
+
+/* ---------------------------------------------------------------- 流程节点 */
+
+.flow-node {
+  border-radius: 10px; border: 1px solid var(--fde-line-strong); background: #fff;
+  transition: border-color 150ms ease-out, box-shadow 150ms ease-out, background-color 150ms ease-out;
+}
+.flow-node:hover { background: #f9fafb; border-color: #bfdbfe; }
+.flow-node.is-active { border-color: var(--fde-primary); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15); }
+.flow-node-top { font-size: 13px; font-weight: 500; }
+.flow-node-meta { font-size: 11px; }
+
+/* ---------------------------------------------------------------- 其它 */
+
+.fde-hint { font-size: 11px; color: var(--fde-text-3); }
+.fde-label { font-size: 12px; font-weight: 500; color: var(--fde-text-2); }
+.note { background: #f8fafc; border: 1px solid #f3f4f6; border-radius: 8px; }
+.banner { border-radius: 12px; }
+.banner--err { background: var(--fde-danger-weak); }
+.banner--warn { background: var(--fde-warn-weak); }
+.pre { background: #f8fafc; border: 1px solid #f3f4f6; border-radius: 8px; }
+.mock-tag { border: 1px dashed var(--fde-line-strong); color: var(--fde-text-3); }
+.link { color: var(--fde-primary-text); }
+.link:hover { text-decoration: underline; }
+
+/* main 内部的 app-grid：aside 被移走后只剩一列 */
+.hg-main .app-grid.is-single { grid-template-columns: minmax(0, 1fr); }
+
+/* ---------------------------------------------------------------- 响应式 */
+
+@media (max-width: 1024px) {
+  .hg-body { grid-template-columns: 240px minmax(0, 1fr); }
+  .hg-right { display: none; }
+  /* 卡头元素多（标题+说明+开关+按钮）时允许换行，避免溢出 */
+  .fde-card-hd { flex-wrap: wrap; row-gap: 8px; }
+}
+
+@media (max-width: 768px) {
+  .hg-body { grid-template-columns: minmax(0, 1fr); }
+  .hg-main .fde-table td:first-child, .hg-main .fde-table th:first-child { white-space: normal; }
+  .fde-card, .fde-table-wrap, .card-stack { max-width: 100%; min-width: 0; }
+  .fde-table-wrap { overflow-x: auto; }
+  .hg-main { grid-column: 1; grid-row: 2; padding: 16px; }
+  .hg-left {
+    grid-column: 1; grid-row: 1;
+    position: static; top: auto; height: auto;   /* 堆叠布局下不再是钉住的侧栏 */
+    border-right: 0; border-bottom: 1px solid var(--fde-line);
+    max-height: 240px; overflow: auto; padding: 8px 0;
+  }
+  .hg-right { display: none; }
+  .hg-header { gap: 12px; padding: 0 16px; }
+  .hg-title-sub, .hg-user-name, .hg-brand-sub { display: none; }
+  .hg-footer { padding: 0 16px; }
+}
+
+/* ---------------------------------------------------------------- 动效降级 */
+
+@media (prefers-reduced-motion: reduce) {
+  .fde-card, .fde-btn, .fde-nav-item, .flow-node { transition: none; }
+  .fde-card:hover, .fde-btn:hover, .fde-btn:active, .flow-node:hover { transform: none; }
+  .live-dot { animation: none; }
+}
+
+/* 主内容里的 KPI 栅格与卡片栅格：跟随可用宽度自适应 */
+.hg-main .fde-grid--4 { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.hg-main .fde-grid--3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.hg-main .fde-grid--2 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.hg-main .fde-table td:first-child, .hg-main .fde-table th:first-child { white-space: nowrap; }
+
+
+/* ---------------------------------------------------------------- 辅助色点缀 */
+
+:root {
+  --hg-blue: #3b82f6;
+  --hg-green: #10b981;
+  --hg-amber: #f59e0b;
+  --hg-red: #ef4444;
+  --hg-ink: #111827;
+}
+
+.accent-dot { width: 6px; height: 6px; border-radius: 999px; flex: none; display: inline-block; }
+.accent-dot--blue { background: var(--hg-blue); }
+.accent-dot--green { background: var(--hg-green); }
+.accent-dot--amber { background: var(--hg-amber); }
+.accent-dot--red { background: var(--hg-red); }
+.accent-dot--ink { background: var(--hg-ink); }
+
+.stat-value { font-size: 26px; font-weight: var(--fde-fw-bold); letter-spacing: -0.02em; margin: 8px 0 2px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.stat-value--blue { color: var(--hg-blue); }
+.stat-value--green { color: var(--hg-green); }
+.stat-value--amber { color: var(--hg-amber); }
+.stat-value--red { color: var(--hg-red); }
+.stat-value--ink { color: var(--hg-ink); }
+
+/* 主按钮改成墨黑：比蓝色更沉稳，蓝色留给链接、选中与焦点
+   注意：tokens.css 里有 [data-fde] button { color: inherit }，属性+标签的优先级高于单类名，
+   所以这里必须带上 [data-fde] 前缀才能压住它。 */
+[data-fde] .fde-btn--primary,
+.fde-btn--primary { background: var(--hg-ink); border-color: var(--hg-ink); color: #ffffff; }
+[data-fde] .fde-btn--primary:hover, .fde-btn--primary:hover { background: #0b1220; box-shadow: 0 4px 10px rgba(17, 24, 39, 0.35); color: #fff; }
+.fde-btn--primary:focus-visible { box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--fde-primary); }
+
+/* 卡片标题前的色点：只给带语义类（hg-*）的卡片头，没语义就不加点 */
+.fde-card-hd.hg-blue .fde-card-title::before,
+.fde-card-hd.hg-green .fde-card-title::before,
+.fde-card-hd.hg-amber .fde-card-title::before,
+.fde-card-hd.hg-red .fde-card-title::before,
+.fde-card-hd.hg-ink .fde-card-title::before,
+.fde-card-hd.hg-muted .fde-card-title::before {
+  content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 999px;
+  margin-right: 8px; vertical-align: 1px;
+}
+.fde-card-hd.hg-blue .fde-card-title::before { background: var(--hg-blue); }
+.fde-card-hd.hg-green .fde-card-title::before { background: var(--hg-green); }
+.fde-card-hd.hg-amber .fde-card-title::before { background: var(--hg-amber); }
+.fde-card-hd.hg-red .fde-card-title::before { background: var(--hg-red); }
+.fde-card-hd.hg-ink .fde-card-title::before { background: var(--hg-ink); }
+.fde-card-hd.hg-muted .fde-card-title::before { background: var(--fde-text-3); }
+
+/* 状态点配色更分明：底色加深一档，info 不再接近白底 */
+.fde-badge--ok { background: #d1fae5; color: #047857; }
+.fde-badge--warn { background: #fef3c7; color: #b45309; }
+.fde-badge--err { background: #fee2e2; color: #b91c1c; }
+.fde-badge--info { background: #dbeafe; color: #1d4ed8; }
+.fde-badge--primary { background: #dbeafe; color: #1d4ed8; }
+
+/* 右栏整段的说明文字：11px 太小，升到 12px 保持可读 */
+.hg-right .fde-hint { font-size: 12px; }
+
+
+/* ==========================================================================
+   精修层：排版层级 / 对比度 / 节奏
+   诊断：文字全在 11–13px，没有标题层；弱化色 #9ca3af 在白底上只有 2.3:1；
+   卡片边框 #f3f4f6 与背景几乎同色，边界靠猜。这一层只动这三件事。
+   ========================================================================== */
+
+:root {
+  /* 字体栈：Latin 用 Segoe UI，中文优先 YaHei UI（比雅黑窄一档，小字号更清晰） */
+  /* 自托管：Albert Sans（拉丁）+ Noto Sans SC 子集（中文），后面是系统兜底 */
+  --fde-font-sans: "Albert Sans", "Noto Sans SC", "Segoe UI Variable Text", "Segoe UI",
+                   system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB",
+                   "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  /* 弱化色提亮到 4.5:1 以上；真正"装饰用浅灰"另开一个变量 */
+  --fde-text-2: #475467;
+  --fde-text-3: #667085;
+  --hg-muted-soft: #98a2b3;
+  --hg-line: #e5e7eb;
+  --hg-line-soft: #eff2f5;
+  --hg-shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --hg-shadow-hover: 0 8px 20px rgba(16, 24, 40, 0.08);
+}
+
+body {
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 页头：品牌 15，页面标题 16，副标题 12 ---- */
+.hg-brand-sub { font-size: 12px; color: var(--fde-text-3); }
+.hg-title-sub { font-size: 12px; color: var(--fde-text-3); }
+.hg-user-name { font-size: 12.5px; }
+/* 图标自带圆角，这里不要再加 border-radius，否则会二次裁切边缘 */
+.hg-logo { width: 32px; height: 32px; display: block; flex: none; }
+
+/* ---- 左导航：组标签 12，条目 13.5 ---- */
+.hg-nav-group { font-size: 12px; font-weight: 500; color: var(--hg-muted-soft); letter-spacing: 0.02em; }
+
+/* ---- 卡片：标题 14，副标 12，内距 24 ---- */
+.fde-card {
+  border: 1px solid var(--hg-line);
+  box-shadow: var(--hg-shadow-card);
+}
+.fde-card:hover { box-shadow: var(--hg-shadow-hover); }
+.fde-card-hd { padding: 16px 24px; border-bottom: 1px solid var(--hg-line-soft); }
+.fde-card-sub { font-size: 12px; color: var(--fde-text-3); }
+.fde-card-bd { padding: 24px; }
+.fde-card-ft { padding: 14px 24px; border-top: 1px solid var(--hg-line-soft); }
+
+/* ---- 表格：表头 12/500，单元格 13，行高 44 ---- */
+.fde-table th {
+  height: 40px; padding: 0 16px;
+  font-size: 12px; font-weight: 500; color: var(--fde-text-3); letter-spacing: 0.01em;
+  background: #f9fafb; border-bottom: 1px solid var(--hg-line);
+}
+.fde-table td { height: 44px; padding: 0 16px; font-size: 13px; color: #344054; border-bottom: 1px solid var(--hg-line-soft); }
+.fde-table tbody tr:hover td { background: #f8fafc; }
+
+/* ---- KPI：数字 30，标签 13 ---- */
+.stat-value { font-size: 30px; font-weight: 650; letter-spacing: -0.03em; }
+.fde-label { font-size: 13px; font-weight: 500; color: var(--fde-text-2); }
+.fde-hint { font-size: 12px; color: var(--fde-text-3); }
+.hg-right .fde-hint { font-size: 12.5px; line-height: 1.65; }
+
+/* ---- 徽标 / 标签：12px，颜色对上加深一档 ---- */
+.fde-badge { height: 22px; font-size: 12px; font-weight: 500; }
+.fde-tag { font-size: 12px; height: 22px; background: #f2f4f7; color: var(--fde-text-2); }
+.fde-eyebrow { font-size: 12px; font-weight: 500; color: var(--fde-text-3); }
+
+/* ---- 按钮：13/500，高 34 ---- */
+.fde-btn { height: 34px; font-size: 13px; padding: 0 14px; border-color: var(--hg-line); }
+.fde-btn--sm { height: 30px; font-size: 12.5px; padding: 0 12px; }
+
+/* ---- 输入：13px，底色更浅一档 ---- */
+.fde-input, .fde-select, .fde-textarea {
+  font-size: 13px; height: 34px; background: #f9fafb; border-color: var(--hg-line);
+}
+.fde-textarea { height: auto; min-height: 84px; padding: 10px 12px; }
+
+/* ---- 主内容节奏：24 外边距、20 卡间距 ---- */
+.hg-main { padding: 24px; gap: 20px; }
+.hg-right { padding: 20px 18px; gap: 16px; }
+.hg-left { padding: 14px 0; }
+
+/* ---- 页脚文案 ---- */
+.hg-footer { font-size: 12px; color: var(--fde-text-3); }
+
+
+/* ---- 导航图标：与文字同色，激活态满对比 ---- */
+.hg-nav-icon { width: 16px; height: 16px; flex: none; opacity: 0.65; margin-right: 2px; }
+.fde-nav-item:hover .hg-nav-icon { opacity: 0.85; }
+.fde-nav-item.is-active .hg-nav-icon { opacity: 1; }
+.fde-nav-item { gap: 10px; }
+
+/* ---- 页头：60 高，标题 18，副标题用分隔点连接 ---- */
+.hg-header { height: 60px; padding: 0 28px; gap: 22px; }
+.hg-title { align-items: center; gap: 10px; }
+.hg-title-sub::before { content: "·"; margin-right: 10px; color: var(--hg-muted-soft); }
+.hg-main { padding-top: 28px; }
+
+
+/* ---- 最终字号收敛：中文 13px 偏小，正文提到 14 ---- */
+body { font-size: 14px; }
+.fde-table td { font-size: 14px; }
+.fde-table th { font-size: 12px; }
+.fde-btn { font-size: 13.5px; }
+.fde-btn--sm { font-size: 13px; }
+.fde-input, .fde-select, .fde-textarea { font-size: 13.5px; }
+.fde-card-title { font-size: 15px; }
+.fde-label { font-size: 13px; }
+.fde-hint { font-size: 12.5px; }
+.hg-right .fde-hint { font-size: 13px; }
+.fde-card-sub { font-size: 12.5px; }
+.hg-title-sub { font-size: 12.5px; }
+.hg-user-name { font-size: 13px; }
+.hg-footer { font-size: 12.5px; }
+.fde-badge { font-size: 12.5px; }
+.fde-tag { font-size: 12.5px; }
+.mono-sm { font-size: 12.5px; }
+
+
+/* ---- 右栏的排队 Task 列表 ---- */
+.wait-list { display: flex; flex-direction: column; }
+.wait-item {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 12px 18px; border-bottom: 1px solid var(--hg-line-soft);
+}
+.wait-meta { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.wait-item:last-child { border-bottom: 0; }
+.wait-main { min-width: 0; flex: 1; }
+.wait-name { font-size: 13.5px; font-weight: 500; color: var(--fde-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wait-run { font-size: 12px; color: var(--fde-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wait-reason { font-size: 12px; color: var(--fde-text-3); flex: none; }
+
+/* ---- 事件时间线：一条连续的轴，而不是碎线 ---- */
+.timeline { position: relative; }
+.timeline::before {
+  content: ""; position: absolute; left: 61px; top: 10px; bottom: 10px;
+  width: 1px; background: var(--hg-line);
+}
+.tl-item { position: relative; grid-template-columns: 52px 8px minmax(0,1fr); padding: 10px 0; gap: 12px; }
+.tl-rail::before { display: none; }
+.tl-dot { width: 7px; height: 7px; margin-top: 6px; box-shadow: 0 0 0 3px var(--fde-surface); background: var(--hg-muted-soft); }
+.tl-time { font-size: 11px; padding-top: 3px; }
+.tl-text { font-size: 12.5px; line-height: 1.6; color: var(--fde-text-2); }
+/* ---- 品牌层级：品牌是身份，导航是操作，别让导航比品牌更抢眼 ---- */
+.hg-brand { gap: 11px; }
+.hg-brand-name {
+  font-size: 17px; font-weight: 650; letter-spacing: -0.02em; color: var(--fde-text);
+}
+.hg-brand-sub { font-size: 11.5px; letter-spacing: 0.01em; }
+.fde-nav-item { font-size: 13.5px; font-weight: 500; }
+.hg-nav-icon { width: 15px; height: 15px; }
+/* 页面标题比品牌再大一号，保证"页面身份"压过"产品名" */
+.hg-title-main { font-size: 19px; font-weight: 650; letter-spacing: -0.022em; }
+/* 表格不让内容换行：列宽不够就整表横向滚动，而不是每行折成两行 */
+.hg-main .fde-table th, .hg-main .fde-table td { padding: 0 12px; white-space: nowrap; }
+.hg-main .fde-table th:first-child, .hg-main .fde-table td:first-child { padding-left: 24px; }
+.hg-main .fde-table th:last-child, .hg-main .fde-table td:last-child { padding-right: 24px; }
+
+/* ---- 品牌字标：图形即身份，页头不再放副标题 ---- */
+.hg-wordmark { height: 26px; width: auto; display: block; overflow: visible; }
+.hg-wordmark-type {
+  font-family: "Albert Sans", "Noto Sans SC", sans-serif;
+  font-size: 17px; font-weight: 650; letter-spacing: -0.02em;
+  fill: var(--fde-text);
+}
+.hg-divider { width: 1px; height: 18px; background: var(--hg-line); flex: none; }
+
+/* 页面标题退居次要：它是"当前在哪"，不是产品名 */
+.hg-title-main { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--fde-text); }
+.hg-title-sub { font-size: 12.5px; }
+
+
+
+
+
+
+/* ---- 品牌字标 ---- */
+.hg-wordmark { height: 30px; width: auto; display: block; overflow: visible; }
+.hg-wordmark-type {
+  font-family: "Albert Sans", "Noto Sans SC", sans-serif;
+  font-size: 20px; font-weight: 650; letter-spacing: -0.025em;
+  fill: var(--fde-text);
+}
+.hg-divider { width: 1px; height: 20px; background: var(--hg-line); flex: none; }
+.hg-title-main { font-size: 16px; font-weight: 600; letter-spacing: -0.012em; }
+
+/* ---- 执行链路：横向一条线，节点按内容收窄，整条放不下就横向滚动 ---- */
+.flow { align-items: center; }
+.flow-node { min-width: 0; padding: 8px 12px; }
+.flow-node-top { font-size: 13px; line-height: 1.35; }
+.flow-node-meta { font-size: 11px; line-height: 1.35; }
+.flow-arrow { width: 18px; }
+
+/* 链路节点：按内容自适应宽度，超长名字省略而不是把整条撑爆 */
+.flow { gap: 8px; }
+.flow-node { padding: 8px 10px; max-width: 160px; }
+.flow-node-top, .flow-node-meta { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.flow-node-top { display: flex; align-items: center; }
+.flow-arrow { width: 16px; }
+/* 链路卡片内边距收一档，给横向链多留 16px；节点再窄一点保证 5 个节点能排下 */
+.fde-card-bd:has(> .flow) { padding: 16px 16px 20px; }
+.flow { gap: 6px; }
+.flow-node { max-width: 180px; flex: none; }
+.flow-arrow { width: 14px; }
+
+/* ---- 页头：字标紧贴分隔线，不留空档 ---- */
+.hg-header { gap: 12px; padding: 0 24px; }
+.hg-brand { margin-right: 0; }
+.hg-title { margin-left: 4px; }
+.hg-header-actions { margin-left: auto; }
+
+/* ---- 节点不许内容出框 ---- */
+.flow-node { overflow: hidden; }
+.flow-node-top { min-width: 0; }
+.flow-node-top .dot { flex: none; }
+
+/* ---- 辅助色用足：卡片头按语义浅染色，让版面有冷暖，而不是一片白 ---- */
+.fde-card-hd.hg-blue   { background: linear-gradient(0deg, rgba(59,130,246,.06), rgba(59,130,246,.06)); }
+.fde-card-hd.hg-green  { background: linear-gradient(0deg, rgba(16,185,129,.06), rgba(16,185,129,.06)); }
+.fde-card-hd.hg-amber  { background: linear-gradient(0deg, rgba(245,158,11,.08), rgba(245,158,11,.08)); }
+.fde-card-hd.hg-red    { background: linear-gradient(0deg, rgba(239,68,68,.06), rgba(239,68,68,.06)); }
+.fde-card-hd.hg-ink    { background: linear-gradient(0deg, rgba(17,24,39,.04), rgba(17,24,39,.04)); }
+.fde-card-hd { border-bottom: 1px solid var(--hg-line-soft); }
+.fde-card-hd .fde-card-title { color: var(--fde-text); }
+
+/* KPI 色点给到 8px，编号也带点分量 */
+.accent-dot { width: 8px; height: 8px; border-radius: 2px; }
+
+/* 链接与可点文字统一用主色，别让整页只剩黑白灰 */
+.link, .hg-main a { color: var(--fde-primary-text); }
+.fde-table tbody tr .link:hover { color: var(--fde-primary); }
+
+/* 徽标底色再明确一档，和灰白卡片拉开 */
+.fde-badge { border: 1px solid transparent; }
+.fde-badge--ok { border-color: rgba(16,185,129,.25); }
+.fde-badge--warn { border-color: rgba(245,158,11,.3); }
+.fde-badge--err { border-color: rgba(239,68,68,.25); }
+.fde-badge--info, .fde-badge--primary { border-color: rgba(59,130,246,.25); }
+
+/* 节点内的点与文字收紧，别让状态点把名字挤掉 */
+.flow-node-top { gap: 5px; }
+
+
+/* ==========================================================================
+   对齐与一致性层
+   1) 品牌列与侧栏对齐  2) 卡片圆角裁切  3) 全站语义染色一致  4) sticky 偏移修正
+   ========================================================================== */
+
+/* ---- 品牌列固定 204px：24(页头左距) + 204 + 12(gap) = 240 = 侧栏宽度，
+   分隔线正好落在侧栏右边界的延长线上 ---- */
+.hg-brand { width: 204px; flex: none; }
+.hg-title { margin-left: 8px; }
+
+/* ---- sticky 侧栏按页头 60 + 页脚 40 计算（之前是 56/96，侧栏顶部 4px 会钻到页头下） ---- */
+.hg-left, .hg-right { top: 60px; height: calc(100vh - 100px); }
+
+/* ---- 卡片圆角裁切：染色卡头、表头底色、行 hover 底色都是直角矩形，
+   统一 overflow:hidden，任何内容都伸不出卡片的 12px 圆角 ---- */
+.fde-card { overflow: hidden; }
+.fde-card > .fde-card-hd:first-child { border-radius: 11px 11px 0 0; }
+.fde-card > .fde-card-ft:last-child { border-radius: 0 0 11px 11px; }
+
+/* ---- muted 卡头补底色：之前只有色点没有染底，和其它语义卡不齐 ---- */
+.fde-card-hd.hg-muted { background: #f8fafc; }
+
+/* ---- 链路节点按状态轻微染底：链路是详情页的地图，颜色不该只属于徽标 ---- */
+.flow-node--ok   { background: rgba(16,185,129,.06); border-color: rgba(16,185,129,.35); }
+.flow-node--info { background: rgba(59,130,246,.06); border-color: rgba(59,130,246,.35); }
+.flow-node--warn { background: rgba(245,158,11,.07); border-color: rgba(245,158,11,.42); }
+.flow-node--err  { background: rgba(239,68,68,.06);  border-color: rgba(239,68,68,.35); }
+.flow-node--ok:hover   { background: rgba(16,185,129,.1); }
+.flow-node--info:hover { background: rgba(59,130,246,.1); }
+.flow-node--warn:hover { background: rgba(245,158,11,.12); }
+.flow-node--err:hover  { background: rgba(239,68,68,.1); }
+
+/* ---- 导航与品牌左缘对齐：8(栏内距) + 2(左边框) + 14 = 24 = 页头左距 ---- */
+.fde-nav-item { padding-left: 14px; }
+.fde-nav-item.is-active { font-weight: 600; }
+
+@media (max-width: 768px) {
+  /* 堆叠布局下没有侧栏列，品牌不再占位 */
+  .hg-brand { width: auto; }
+}
+
+/* ---- 抽屉必须压在遮罩之上：遮罩内联 z-index:1200，抽屉只有 50，
+   于是整块画布（含抽屉自己）都被遮罩的 backdrop-filter 糊住 ---- */
+.fde-drawer, .fde-modal { z-index: 1210; }
+/* 抽屉只是"压暗下面的页面"，不需要全屏模糊——模糊会让抽屉里的表格看着发虚 */
+.fde-scrim { backdrop-filter: none; background: rgba(15, 18, 23, 0.32); }
+
+/* ---- 页头右侧：用户块按右栏宽度定宽（288 右栏 − 24 页头右距 = 264），
+   左边框正好落在 vw−288，与右栏左边界同一条竖线，和左侧品牌列对称 ---- */
+.hg-user { width: 264px; flex: none; justify-content: flex-end; }
+/* 用户块定宽后，超长标题在框内省略，而不是把操作区挤出屏幕 */
+.hg-title { overflow: hidden; }
+.hg-title-main { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 1024px) {
+  /* 右栏已隐藏，不再需要与列对齐 */
+  .hg-user { width: auto; }
+}
