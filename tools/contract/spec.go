@@ -265,13 +265,6 @@ func (s *Spec) requireFields(schemaName string, raw []byte) []string {
 // excludedPrefixes/paths 是明确不在 MVP 的端点（票 #3 裁决 + openapi 自述）。
 var excludedOperations = []string{
 	"POST /api/v1/tasks",
-	"POST /api/v1/runs/{run_id}/retry",
-	"GET /api/v1/runs/{run_id}/retry-plan",
-	"POST /api/v1/tasks/{task_id}/retry",
-	"PUT /api/v1/admin/profiles",
-	"POST /api/v1/admin/clusters",
-	"GET /api/v1/secrets",
-	"GET /api/v1/admin/audit",
 }
 
 // isPublicEndpoint 是不要求 bearerAuth 的端点：运维探针、Prometheus 指标、OIDC 登录/回调。

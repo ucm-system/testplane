@@ -1,9 +1,10 @@
 import { Suspense, useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import { Layers, List, Menu, PlusCircle, Server } from 'lucide-react'
+import { Layers, List, Menu, PlusCircle, Server, ShieldCheck } from 'lucide-react'
 import { USE_MOCK } from '@/api'
 import { UserMenu } from '@/components/app/UserMenu'
 import { Drawer } from '@/components/ui/drawer'
+import { useIdentity } from '@/hooks/useIdentity'
 import { cn } from '@/lib/utils'
 
 interface NavItem {
@@ -11,6 +12,8 @@ interface NavItem {
   label: string
   icon: typeof List
   end?: boolean
+  /** 只有 admin 才看得见（管理台） */
+  adminOnly?: boolean
 }
 
 const NAV_GROUPS: Array<{ title: string; items: NavItem[] }> = [
@@ -29,6 +32,10 @@ const NAV_GROUPS: Array<{ title: string; items: NavItem[] }> = [
       { to: '/clusters', label: '集群与队列', icon: Server },
     ],
   },
+  {
+    title: '管理',
+    items: [{ to: '/admin', label: '管理台', icon: ShieldCheck, adminOnly: true }],
+  },
 ]
 
 /** 路由 → 页头标题（页面级信息在页头，操作也在页头）。 */
@@ -39,6 +46,8 @@ const TITLES: Array<{ test: (path: string) => boolean; title: string; sub: strin
   { test: (p) => p === '/submit', title: '提交运行', sub: '参数是一段字符串，平台只做词法切分' },
   { test: (p) => p === '/testers', title: 'Tester 目录', sub: '随镜像内置，平台启动时扫描目录自动发现' },
   { test: (p) => p === '/clusters', title: '集群与队列', sub: '只回答「卡在队列还是卡在平台槽位」' },
+  { test: (p) => p === '/admin', title: '管理台', sub: 'Profile / 集群 / Secret 引用 / 审计（仅 admin）' },
+  { test: (p) => /^\/runs\/[^/]+\/report$/.test(p), title: 'Run 报告', sub: 'report.json：只做组织与索引' },
 ]
 
 function titleFor(pathname: string): { title: string; sub: string } {
@@ -47,9 +56,16 @@ function titleFor(pathname: string): { title: string; sub: string } {
 }
 
 function NavList({ onNavigate }: { onNavigate?: () => void }) {
+  const { auth } = useIdentity()
+  const isAdmin = auth.role === 'admin'
+  const groups = NAV_GROUPS.map((group) => ({
+    ...group,
+    items: group.items.filter((item) => !item.adminOnly || isAdmin),
+  })).filter((group) => group.items.length > 0)
+
   return (
     <nav aria-label="主导航" className="flex flex-col gap-0.5 px-2">
-      {NAV_GROUPS.map((group) => (
+      {groups.map((group) => (
         <div key={group.title} className="flex flex-col">
           <p className="px-3 pb-1.5 pt-3.5 text-2xs font-medium text-fg-3">{group.title}</p>
           {group.items.map((item) => (

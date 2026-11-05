@@ -12,6 +12,8 @@ const RunDetailPage = lazy(() => import('@/pages/RunDetailPage').then((m) => ({ 
 const SubmitPage = lazy(() => import('@/pages/SubmitPage').then((m) => ({ default: m.SubmitPage })))
 const TestersPage = lazy(() => import('@/pages/TestersPage').then((m) => ({ default: m.TestersPage })))
 const ClustersPage = lazy(() => import('@/pages/ClustersPage').then((m) => ({ default: m.ClustersPage })))
+const ReportPage = lazy(() => import('@/pages/ReportPage').then((m) => ({ default: m.ReportPage })))
+const AdminPage = lazy(() => import('@/pages/AdminPage').then((m) => ({ default: m.AdminPage })))
 
 /** 换 Run 时整体重挂：详情页内部的选中节点/Attempt 状态一律重置。 */
 function RunDetailRoute() {
@@ -46,7 +48,9 @@ export function App() {
             <Route path="runs/:runId" element={<RunDetailRoute />} />
             <Route path="submit" element={<SubmitPage />} />
             <Route path="testers" element={<TestersPage />} />
+            <Route path="runs/:runId/report" element={<ReportPage />} />
             <Route path="clusters" element={<ClustersPage />} />
+            <Route path="admin" element={<AdminPage />} />
             {/* 旧链接兼容：Endpoints 页已改名为「集群与队列」 */}
             <Route path="endpoints" element={<Navigate to="/clusters" replace />} />
             <Route path="*" element={<NotFoundPage />} />

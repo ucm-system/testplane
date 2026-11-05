@@ -61,6 +61,9 @@ function Get-HelmReleases {
     $out = & kubectl -n $HelmNamespace get secrets -l owner=helm -o json 2>&1
     if ($LASTEXITCODE -ne 0) { throw "kubectl get helm release secrets 失败：$($out -join ' ')" }
     $items = @(($out | ConvertFrom-Json).items)
+    # 只数平台 Deploy 自己的 release：mock-llm/mock-llm-fail 是基础设施，
+    # tp-demo-manual 是人工演示 release（Lead 2026-11-05），都不算平台残留。
+    $items = @($items | Where-Object { $_.name -notlike 'mock-llm*' -and $_.name -notlike 'tp-demo-*' })
     return [pscustomobject]@{ source = 'k8s-secrets（helm CLI 不在 PATH）'; items = $items }
 }
 

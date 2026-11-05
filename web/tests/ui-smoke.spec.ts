@@ -55,6 +55,18 @@ test('viewer：Task 取消按钮不可点', async ({ page }) => {
 
   // 顶栏能看到 viewer 身份（排障用）
   await expect(page.getByRole('button', { name: '账号与角色' })).toContainText('viewer')
+
+  // 终态 Run 的「重试」同样只对 operator 开放
+  await page.goto('/runs/r-20261105-0003')
+  const retry = page.locator('[data-testid="retry-run"]').first()
+  await expect(retry).toBeVisible()
+  await expect(retry).toBeDisabled()
+  await expect(retry).toHaveAttribute('title', '需要 operator 角色')
+
+  // 非 admin 打开 /admin：留在原地显示无权限，不跳走
+  await page.goto('/admin')
+  await expect(page.getByText('无权限：本页仅 admin 可见')).toBeVisible()
+  await expect(page).toHaveURL(/\/admin$/)
 })
 
 test('operator：Task 取消按钮可点并走二次确认', async ({ page }) => {

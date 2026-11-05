@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { stringify as toYaml } from 'yaml'
 import { API_BASE, api, writeBlockedReason } from '@/api'
 import { toApiError } from '@/api/client'
-import type { ApiErrorBody, Attempt, Deploy, DeploySnapshot, Run, TaskDetail, TaskSummary } from '@/api/types'
+import type { ApiErrorBody, Attempt, Deploy, DeploySnapshot, RetryPlan, Run, TaskDetail, TaskSummary } from '@/api/types'
 import { EventTimeline } from '@/components/app/EventTimeline'
 import { LogViewer } from '@/components/app/LogViewer'
 import { RightRail, RailCard } from '@/components/app/RightRail'
@@ -254,9 +254,23 @@ function DeploySection({ run, version }: { run: Run; version: number }) {
 
 /* ---------------------------------------------------------------- Task 面板 */
 
-function TaskAttemptsPanel({ summary, version }: { summary: TaskSummary; version: number }) {
-  const detail = useAsync(() => api.getTask(summary.id), [summary.id, version])
+function TaskAttemptsPanel({
+  summary,
+  version,
+  runStatus,
+}: {
+  summary: TaskSummary
+  version: number
+  runStatus: string
+}) {
+  const [attemptRefresh, setAttemptRefresh] = useState(0)
+  const detail = useAsync(() => api.getTask(summary.id), [summary.id, version, attemptRefresh])
   const [attemptIdx, setAttemptIdx] = useState<number | null>(null)
+  const [retryOpen, setRetryOpen] = useState(false)
+  const [retrying, setRetrying] = useState(false)
+  const toast = useToast()
+  const { auth } = useIdentity()
+  const blocked = writeBlockedReason(auth)
 
   const task: TaskDetail | null = detail.data
   const attempts: Attempt[] = task?.attempts ?? []
@@ -266,6 +280,30 @@ function TaskAttemptsPanel({ summary, version }: { summary: TaskSummary; version
     if (!active) return null
     return api.getAttemptLogs(summary.id, active.idx)
   }, [summary.id, active?.idx])
+
+  const TASK_TERMINAL = ['succeeded', 'failed', 'canceled', 'skipped']
+  const canRetryTask = task ? TASK_TERMINAL.includes(task.status) && runStatus !== 'canceled' : false
+
+  const confirmRetryTask = async () => {
+    if (!task) return
+    setRetrying(true)
+    try {
+      const accepted = await api.retryTask(task.id)
+      toast({
+        title: `已提交重跑：${task.name}`,
+        description: accepted.new_attempt_idx ? `新 Attempt #${accepted.new_attempt_idx} 已入队` : 'Task 已重新排队',
+        tone: 'ok',
+      })
+      setRetryOpen(false)
+      setAttemptIdx(null)
+      setAttemptRefresh((token) => token + 1)
+    } catch (e) {
+      const error = toApiError(e)
+      toast({ title: '重跑失败', description: `${error.code}：${error.message}`, tone: 'err' })
+    } finally {
+      setRetrying(false)
+    }
+  }
 
   if (detail.loading && !task) return <LoadingBlock label="加载 Task 详情…" />
   if (detail.error) return <ErrorState error={detail.error} onRetry={detail.reload} compact />
@@ -281,8 +319,44 @@ function TaskAttemptsPanel({ summary, version }: { summary: TaskSummary; version
         <Tag mono>{task.tester_name}</Tag>
         <Tag mono>v{task.tester_version}</Tag>
         {task.endpoint_exclusive ? <Tag>独占</Tag> : null}
+        {canRetryTask ? (
+          <Button
+            size="sm"
+            data-testid="retry-task"
+            disabled={Boolean(blocked)}
+            title={blocked ?? '追加一个新 Attempt（历史 Attempt 不覆盖）'}
+            onClick={() => setRetryOpen(true)}
+          >
+            重跑这个 Task
+          </Button>
+        ) : null}
         <span className="ml-auto font-mono text-2xs text-fg-3">{task.id}</span>
       </div>
+
+      <Dialog
+        open={retryOpen}
+        onClose={() => setRetryOpen(false)}
+        title={`重跑 Task：${task.name}`}
+        description="会追加一个新 Attempt（历史 Attempt 不覆盖）；已成功的 Run 上的 Task 也可单独重跑。"
+        footer={
+          <>
+            <Button onClick={() => setRetryOpen(false)}>取消</Button>
+            <Button
+              variant="primary"
+              data-testid="retry-task-confirm"
+              loading={retrying}
+              onClick={() => void confirmRetryTask()}
+            >
+              确认重跑
+            </Button>
+          </>
+        }
+      >
+        <p className="text-xs text-fg-2">
+          当前 Attempt 数：<span className="font-mono">{task.current_attempt}</span>，重跑后会变成{' '}
+          <span className="font-mono">{task.current_attempt + 1}</span>。
+        </p>
+      </Dialog>
 
       <dl className="grid gap-x-8 gap-y-2 sm:grid-cols-2">
         <KV label="参数原文">
@@ -501,7 +575,7 @@ function TaskPanels({ run, onReload }: { run: Run; onReload: () => void }) {
         </TableWrap>
       )}
 
-      {selected ? <TaskAttemptsPanel key={selected.id} summary={selected} version={refreshToken} /> : null}
+      {selected ? <TaskAttemptsPanel key={selected.id} summary={selected} version={refreshToken} runStatus={run.status} /> : null}
 
       <Dialog
         open={pendingCancel !== null}
@@ -534,6 +608,7 @@ function TaskPanels({ run, onReload }: { run: Run; onReload: () => void }) {
 
 export function RunDetailPage() {
   const { runId = '' } = useParams<{ runId: string }>()
+  const navigate = useNavigate()
   // 终态 Run 不再订阅事件（只补历史）：live 在拿到详情后翻转
   const [live, setLive] = useState(true)
   const { events, status, version, resyncToken } = useRunEvents(runId, { live })
@@ -541,12 +616,22 @@ export function RunDetailPage() {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [actionError, setActionError] = useState<ApiErrorBody | null>(null)
+  // 重试（P1）：先拉 retry-plan 预览，再确认创建新 Run
+  const [retryOpen, setRetryOpen] = useState(false)
+  const [retryPlan, setRetryPlan] = useState<RetryPlan | null>(null)
+  const [retrying, setRetrying] = useState(false)
 
   const { auth } = useIdentity()
   /** viewer 只读：写按钮置灰 + title 提示（不靠后端 403 兜底） */
   const blocked = writeBlockedReason(auth)
 
   const run = useAsync(() => api.getRun(runId), [runId, version, resyncToken])
+
+  const plan = useAsync(async () => (retryOpen ? api.getRetryPlan(runId) : null), [runId, retryOpen])
+
+  useEffect(() => {
+    if (plan.data) setRetryPlan(plan.data)
+  }, [plan.data])
 
   useEffect(() => {
     if (!run.data) return
@@ -566,6 +651,38 @@ export function RunDetailPage() {
       setConfirmOpen(false)
     } finally {
       setCancelling(false)
+    }
+  }
+
+  /** 可重试的终态：失败 / 部分失败 / 服务不可用（canceled 与成功的都不给重试） */
+  const RETRYABLE_RUN_STATUS = new Set(['failed', 'completed_with_errors', 'service_unavailable'])
+  const canRetry = (detailStatus: string) => RETRYABLE_RUN_STATUS.has(detailStatus)
+
+  const openRetry = () => {
+    setRetryPlan(null)
+    setRetryOpen(true)
+  }
+
+  const confirmRetry = async () => {
+    setRetrying(true)
+    try {
+      const accepted = await api.retryRun(runId)
+      setRetryOpen(false)
+      toast({
+        title: '已创建重试 Run',
+        description: `新 Run ${accepted.new_run_id}（retry_of ${accepted.retry_of}）`,
+        tone: 'ok',
+      })
+      navigate(`/runs/${accepted.new_run_id}`)
+    } catch (e) {
+      const error = toApiError(e)
+      toast({
+        title: error.code === 'CONFLICT' ? '已有重试在进行中' : '重试失败',
+        description: `${error.code}：${error.message}`,
+        tone: 'err',
+      })
+    } finally {
+      setRetrying(false)
     }
   }
 
@@ -619,16 +736,32 @@ export function RunDetailPage() {
             取消 Run
           </Button>
         ) : null}
-        {terminal ? (
-          <a
-            className={buttonClassName({ size: 'sm' })}
-            href={`${API_BASE}/runs/${encodeURIComponent(runId)}/report.md`}
-            target="_blank"
-            rel="noreferrer"
-            title="新窗口打开 report.md（Run 结束后才写出）"
+        {detail && terminal && canRetry(detail.status) ? (
+          <Button
+            size="sm"
+            data-testid="retry-run"
+            disabled={Boolean(blocked)}
+            title={blocked ?? '复用已成功的 Task，只重跑失败/跳过的'}
+            onClick={openRetry}
           >
-            打开报告
-          </a>
+            重试
+          </Button>
+        ) : null}
+        {terminal ? (
+          <>
+            <Link to={`/runs/${encodeURIComponent(runId)}/report`} data-testid="open-report">
+              <Button size="sm">查看报告</Button>
+            </Link>
+            <a
+              className={buttonClassName({ size: 'sm', variant: 'ghost' })}
+              href={`${API_BASE}/runs/${encodeURIComponent(runId)}/report.md`}
+              target="_blank"
+              rel="noreferrer"
+              title="新窗口打开 report.md（Run 结束后才写出）"
+            >
+              report.md
+            </a>
+          </>
         ) : null}
         <span className="ml-auto font-mono text-2xs text-fg-3">{runId}</span>
       </div>
@@ -811,6 +944,95 @@ export function RunDetailPage() {
             </Banner>
           ) : null}
         </div>
+      </Dialog>
+
+      {/* 重试预览：复用 vs 重跑，确认后创建新 Run（retry_of 指向当前） */}
+      <Dialog
+        open={retryOpen}
+        onClose={() => setRetryOpen(false)}
+        title="重试这个 Run？"
+        description="会创建一个新 Run（retry_of 指向当前），已成功的 Task 不会重复执行。"
+        size="lg"
+        footer={
+          <>
+            <Button onClick={() => setRetryOpen(false)}>取消</Button>
+            <Button
+              variant="primary"
+              data-testid="retry-confirm"
+              loading={retrying}
+              disabled={!retryPlan?.retryable}
+              title={retryPlan && !retryPlan.retryable ? (retryPlan.reason ?? '当前 Run 不可重试') : undefined}
+              onClick={() => void confirmRetry()}
+            >
+              确认重试
+            </Button>
+          </>
+        }
+      >
+        {plan.loading && !retryPlan ? (
+          <LoadingBlock label="正在计算 retry-plan…" />
+        ) : plan.error ? (
+          <ErrorState error={plan.error} onRetry={plan.reload} compact />
+        ) : retryPlan ? (
+          <div className="flex flex-col gap-3 text-xs">
+            {!retryPlan.retryable ? (
+              <Banner role="alert" tone="warn" title="当前 Run 不可重试">
+                {retryPlan.reason ?? '没有可重跑的 Task'}
+              </Banner>
+            ) : null}
+
+            <section>
+              <h3 className="mb-1.5 text-xs font-medium text-fg">
+                将复用（已成功）<span className="ml-1 font-mono text-2xs text-fg-3">{retryPlan.reuse.length}</span>
+              </h3>
+              {retryPlan.reuse.length === 0 ? (
+                <p className="text-2xs text-fg-3">没有可复用的 Task。</p>
+              ) : (
+                <ul className="flex flex-col divide-y divide-line-soft rounded-md border border-line-soft">
+                  {retryPlan.reuse.map((task) => (
+                    <li key={task.task_id} className="flex items-center gap-2 px-3 py-2">
+                      <span className="min-w-0 flex-1 truncate text-fg" title={task.name}>
+                        {task.name}
+                      </span>
+                      <TaskStatusBadge status={task.status} />
+                      <span className="font-mono text-2xs text-fg-3">{task.task_id}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <section>
+              <h3 className="mb-1.5 text-xs font-medium text-fg">
+                将重跑（失败 / 跳过）<span className="ml-1 font-mono text-2xs text-fg-3">{retryPlan.rerun.length}</span>
+              </h3>
+              {retryPlan.rerun.length === 0 ? (
+                <p className="text-2xs text-fg-3">没有需要重跑的 Task。</p>
+              ) : (
+                <ul className="flex flex-col divide-y divide-line-soft rounded-md border border-line-soft">
+                  {retryPlan.rerun.map((task) => (
+                    <li key={task.task_id} className="flex items-center gap-2 px-3 py-2">
+                      <span className="min-w-0 flex-1 truncate text-fg" title={task.name}>
+                        {task.name}
+                      </span>
+                      <TaskStatusBadge status={task.status} />
+                      {task.error_code ? (
+                        <Badge tone="err" className="font-mono">
+                          {task.error_code}
+                        </Badge>
+                      ) : null}
+                      <span className="font-mono text-2xs text-fg-3">{task.task_id}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <p className="border-t border-line-soft pt-2 text-2xs leading-relaxed text-fg-3">
+              底部的确认会创建新 Run：`retry_of` 指向当前 Run，已成功的 Task 复用结果不重复执行。
+            </p>
+          </div>
+        ) : null}
       </Dialog>
     </>
   )
