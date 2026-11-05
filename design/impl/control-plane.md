@@ -498,13 +498,13 @@ var (
 
 | 目标字段 | CRD 路径 | 说明 |
 |---|---|---|
-| `queues[].name` | `metadata.name` | 单集群时原名；多集群写成 `"<cluster>/<queue>"`（零契约变更） |
+| `queues[].name` | `metadata.name` | 统一写成 `"<cluster>/<queue>"`（零契约变更）：cluster 取 `TESTPLANE_CLUSTER_NAME`（默认 `cluster-01`），**P0 单集群也带前缀**，切多集群时 UI/契约不用改；cluster 为空则保持原名 |
 | `queues[].state` | `.status.state` | `Open` / `Closed`；未知值原样透传，不硬映射成 `Closed` |
 | `queues[].capability` | `.spec.capability` | `map[string]string`，**原文透传不做单位换算**；⚠ 队列未设 CPU/内存配额时 Volcano 会兜底成极大值，不可直接当进度条分母 |
 | `queues[].allocated` | `.status.allocated` | 控制器回写、**有滞后**；无 `/metrics` 接入时只能用它，`detail` 注明来源 |
-| `queues[].pending_jobs` | 该 queue 下 `podgroups[].status.phase == "Pending"` 的计数 | **不要用** `queue.status.pending`（Volcano 自己的计数，语义可能含 Inqueue） |
+| `queues[].pending_jobs` | 该 queue 下 `podgroups[].status.phase == "Pending"` 的计数（PodGroup 的 namespace 范围由 `TESTPLANE_VOLCANO_NAMESPACES` 决定，默认 profile 的 namespace；`spec.queue` 为空的 PodGroup 归 `default` 队列） | **不要用** `queue.status.pending`（Volcano 自己的计数，语义可能含 Inqueue） |
 | `queues[].longest_wait_seconds` | `now - min(podgroup.metadata.creationTimestamp)`，限定同 queue 且 `phase ∈ {Pending, Inqueue}` | 无排队 → `0`，不是负数、也不回退成队列创建时间 |
-| `queues[].reason` | 同 queue 下 `phase ∈ {Pending,Inqueue}` 的最新 `status.conditions[-1].message`（空则 `.reason`），再归一成 `waiting_reason` 六值 | 自由文本；映射不上就 `null` + 原文进 `detail`，不新增枚举 |
+| `queues[].reason` | 同 queue 下 `phase ∈ {Pending,Inqueue}` 里**等得最久**那条的 `status.conditions[-1].message`（空则 `.reason`），**原文透传** | 归一成 `waiting_reason` 六值是 `waiting.by_reason` 的职责（需 `Task→PodGroup` 关联，见 C-4.8.4 #4），MVP 不做。⚠ `server/api/openapi.yaml` 的 `volcano.queue.reason` 仍 `$ref WaitingReason`，与原文透传不一致，待拍板后同步 |
 
 **C-4.8.2 采样方式**
 
@@ -513,21 +513,26 @@ var (
 | 轮询 + 15s TTL 缓存，**不用 informer** | 与 `execution.md:412` 的既有约束一致 | 规模小（队列 3 个、PodGroup 数十~数百）；informer 要 watch 语义与常驻 reflector，与"15s 新鲜度"不匹配，多集群还更重 |
 | **单飞**（`sync.Mutex` + `inflight`） | 并发请求最多一个在打 API | `/queue-status` 是 30s 轮询的公共端点，看板一开就是多客户端同时打 |
 | 单查超时 5s；`/queue-status` 整体 3s 内必须返回 | 火山块失败即降级，不等 | E-11 |
+| 失败退避 60s（连续失败后） | 退避窗口内不再打 API，仍回降级快照 | 集群不可达时不要每 15s 打一次（06 §2.1（3）） |
+| PodGroup 的 namespace 范围 | `TESTPLANE_VOLCANO_NAMESPACES`（逗号分隔；默认 profile 的 namespace；`*` = 全部，一次集群级 List） | 只统计测试命名空间，避免把别的租户的 PodGroup 算进 `pending_jobs` |
 | 先 `queues` 后 `podgroups` | 小的先取；后者失败即整体 `available:false` + `queues:[]`（与 openapi 一致） | 大 List 更容易超时 |
-| RBAC | **只 `get,list`**；Queue 是 cluster-scoped → 必须 `ClusterRole`（`testplane-view`） | 轮询不需要 `watch`；不能给 `queues/status` 写权限（平台只读，不改配额、不插队） |
+| RBAC | **只 `get,list`**；Queue 是 cluster-scoped → 必须 `ClusterRole`（`testplane-volcano-view`，见 06 §2.1） | 轮询不需要 `watch`；不能给 `queues/status` 写权限（平台只读，不改配额、不插队） |
+| 实现落点 | `server/internal/k8s/volcano.go`（`k8s.Volcano` 实现 `api.VolcanoProvider`），`cmd/testplaned/main.go` 注入 `api.Deps.Volcano`；单测 `server/internal/k8s/volcano_test.go` 用 `client-go/dynamic/fake` 覆盖字段映射、四态、TTL、单飞、退避 | 生产代码不引 `volcano.sh/apis`，测试也不引 |
 
 **C-4.8.3 降级四态（红线：不可达 ≠ 0 排队）**
 
 | 情形 | `volcano` 块 | 其他块 |
 |---|---|---|
-| CRD 未安装（discovery 返回 404，结果缓存 5 分钟） | `available:false, detail:"crd_missing", queues:[]` | 照常 |
-| List 返回 `apierrors.IsForbidden` | `available:false, detail:"rbac_forbidden"`（不吐原始 RBAC 报错，避免泄露 SA/角色名） | 照常 |
-| 超时 / 连不上 | `available:false, detail:"scheduler_unavailable"`，可带上次快照 + `stale:true` | 照常 |
-| Genet 语义里的 `volcano.enabled=false` | `available:false, detail:"disabled", queues:[]` | 照常 |
+| CRD 未安装（List 返回 `IsNotFound` / `NoMatch`；结果缓存 5 分钟*） | `available:false, detail:"crd_missing", queues:[]` | 照常 |
+| List 返回 `apierrors.IsForbidden` | `available:false, detail:"rbac_forbidden", queues:[]`（不吐原始 RBAC 报错，避免泄露 SA/角色名） | 照常 |
+| 超时 / 连不上 | `available:false, detail:"scheduler_unavailable", queues:[]`；上次成功过则 `stale:true`（**不回放旧队列数字**） | 照常 |
+| `TESTPLANE_VOLCANO_ENABLED=false`（平台未启用队列调度） | `available:false, detail:"disabled", queues:[]` | 照常 |
+
+\* 404/discovery 结果的 5 分钟缓存**尚未实现**：当前由 15s TTL + 60s 退避间接覆盖，且不额外引 discovery（少一次与 RBAC 无关的调用）。
 
 - 队列存在但无 PodGroup：`available:true`，`pending_jobs:0`、`longest_wait_seconds:0`、`reason:null`——UI 显示 `—`，**不要**写"0 个排队"这种绝对断言。
 - CRD 里没有的队列不列（列事实，不列配置期望）。
-- 任何降级都**不得**影响 `slots` / `waiting`，也不得让 HTTP 非 200（500 只留给真正的平台故障）。
+- **任何降级都返 `available:false` + `queues:[]`**（唯一的降级出口 `volcanoUnavailable`），且不得影响 `slots` / `waiting`，也不得让 HTTP 非 200（500 只留给真正的平台故障）。
 
 **C-4.8.4 MVP 边界（未确认项先不实现）**
 
@@ -535,6 +540,14 @@ var (
 2. `queue_full` 的完整判定要 `deserved`（只在调度器内存 metrics 里，CRD 没有）→ **MVP 只按 `state=Closed`（且 queue 内有 Pending）判**，`detail` 写 `deserved_unavailable`；
 3. `gang_pending` 要 `PodGroup.status.running`，该字段未被 Genet 侧代码读取过 → 双路判（有 `status.running` 用它比 `minMember`，否则退回 `phase=Pending` + conditions 关键词），**字段缺失不得判成"gang 已满足"**；
 4. `waiting_reason` 的 K8s 三项需要 `Task → Job → Pod → PodGroup` 关联链路，当前编排层没有 → 先只做 `volcano` 展示层，`waiting.by_reason` 的 K8s 项保持 0 并在 `detail` 说明，**不造数**。
+
+**C-4.8.5 配置（env，以代码为准）**
+
+| env | 默认 | 说明 |
+|---|---|---|
+| `TESTPLANE_VOLCANO_ENABLED` | `true` | 关闭 → `detail:"disabled"`（**不是** `crd_missing`，也不是"0 排队"） |
+| `TESTPLANE_VOLCANO_NAMESPACES` | profile 的 namespace | 逗号分隔；`*` / `all` = 全部 namespace（集群级 List） |
+| `TESTPLANE_VOLCANO_TTL` | `15s` | 快照 TTL；非法值启动即失败（fail fast） |
 
 ---
 

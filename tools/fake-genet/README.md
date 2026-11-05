@@ -25,6 +25,38 @@ Key 取值优先级：`-api-key` > 环境变量 `FAKE_GENET_API_KEY` > 默认 `t
 `callInfo.endpoint.status=ready`，`url = http://<release>-mock-llm.<ns>.svc:18080/v1`；
 否则 `pending`；`helm status == failed` → `blocked`（message 取 helm 的 description）。
 
+## 模拟开关（QA 验收用）
+
+三个 `-sim-*` 开关互相独立，可叠加；它们只在**内存模拟**模式生效（不碰集群、不改宿主环境）：
+
+| 开关 | 效果 | 客户端预期 |
+|---|---|---|
+| `-sim-ready-after 2m` | 安装后要等 2m 才 ready（默认 3s） | Run 停在 `deploying`；用于观察排队/就绪过程 |
+| `-sim-blocked` | `GET /releases/{name}` 返回 200、`status=deployed`，但 `callInfo.endpoint.status="blocked"`、`message="insufficient quota (simulated)"` | Run → `service_unavailable`，`error.code=DEPLOY_BLOCKED`、`retryable=true`、`deploy.failure.detail.reason=blocked`；**release 不会被创建**（不真装） |
+| `-sim-error 500` | 所有 `/api/open/helm/*` 返回 500（鉴权仍生效；`/healthz` 不受影响） | Run → `failed`，`error.code=DEPLOY_FAILED`、`retryable=false` |
+
+重启/切换模式的命令（先停旧的，再按模式起）：
+
+```powershell
+# 停止：Ctrl-C，或按端口杀进程
+Get-NetTCPConnection -LocalPort 18095 -State Listen -ErrorAction SilentlyContinue |
+  ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+
+# ① 正常（3s 就绪）
+go run . -addr :18095
+
+# ② 慢就绪（看排队/部署中）
+go run . -addr :18095 -sim-ready-after 2m
+
+# ③ blocked 分支（配额不足）
+go run . -addr :18095 -sim-blocked
+
+# ④ 500 分支（Genet 侧故障）
+go run . -addr :18095 -sim-error 500
+```
+
+> 注意：`go run .` 必须在 `tools/fake-genet` 目录（独立 module）；真 helm 模式再加 `-helm`（见下）。
+
 ## 两种驱动
 
 | 模式 | 参数 | 说明 |

@@ -35,7 +35,11 @@ type Server struct {
 	Model     string // callInfo.model
 	// ServiceNameSuffix 是 chart 里 Service 的固定后缀（`<release>-mock-llm`）。
 	ServiceNameSuffix string
-	Now               func() time.Time
+	// SimBlocked 让 endpoint 永远"入口不可用"（模拟配额不足）：status=deployed 但 endpoint=blocked。
+	SimBlocked bool
+	// SimError 让所有 /api/open/helm/* 返回该 HTTP 状态（模拟 Genet 侧故障）。
+	SimError int
+	Now      func() time.Time
 }
 
 // NewServer 构造假 Genet。
@@ -62,9 +66,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/open/queue/podgroups", s.auth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "podGroups": []any{}})
 	}))
-	mux.HandleFunc("/api/open/helm/uc-packages/", s.auth(s.handleInstall))
-	mux.HandleFunc("/api/open/helm/releases", s.auth(s.handleList))
-	mux.HandleFunc("/api/open/helm/releases/", s.auth(s.handleRelease))
+	helm := func(next http.HandlerFunc) http.HandlerFunc {
+		return s.auth(func(w http.ResponseWriter, r *http.Request) {
+			if s.SimError != 0 {
+				writeError(w, s.SimError, "simulated Genet failure")
+				return
+			}
+			next(w, r)
+		})
+	}
+	mux.HandleFunc("/api/open/helm/uc-packages/", helm(s.handleInstall))
+	mux.HandleFunc("/api/open/helm/releases", helm(s.handleList))
+	mux.HandleFunc("/api/open/helm/releases/", helm(s.handleRelease))
 	return mux
 }
 
@@ -252,6 +265,18 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 
 // callInfo 按调研里的形状合成 callInfo（endpoint 只在"deployed + Pod 全 Ready"时 ready）。
 func (s *Server) callInfo(info ReleaseInfo) map[string]any {
+	if s.SimBlocked {
+		return map[string]any{
+			"namespace":   s.Namespace,
+			"model":       s.Model,
+			"serviceName": fmt.Sprintf("%s-%s", info.Name, s.ServiceNameSuffix),
+			"endpoint": map[string]any{
+				"status":  EndpointBlocked,
+				"source":  "service",
+				"message": "insufficient quota (simulated)",
+			},
+		}
+	}
 	endpoint := map[string]any{
 		"status":  EndpointPending,
 		"source":  "service",

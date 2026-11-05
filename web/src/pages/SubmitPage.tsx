@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Plus, Trash2 } from 'lucide-react'
 import { parse as parseYaml } from 'yaml'
-import { api } from '@/api'
+import { api, writeBlockedReason } from '@/api'
 import { toApiError } from '@/api/client'
 import type { ApiErrorBody, DeployManifest, RunManifest, ValidationIssue } from '@/api/types'
 import { RightRail, RailCard } from '@/components/app/RightRail'
@@ -14,6 +14,7 @@ import { Segmented } from '@/components/ui/segmented'
 import { Banner, ErrorState } from '@/components/ui/states'
 import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
+import { useIdentity } from '@/hooks/useIdentity'
 import { cn } from '@/lib/utils'
 
 type SourceMode = 'deploy' | 'service'
@@ -67,6 +68,10 @@ function parseDeploy(text: string): { deploy: DeployManifest | null; error: stri
 export function SubmitPage() {
   const navigate = useNavigate()
   const toast = useToast()
+  const { auth } = useIdentity()
+  /** viewer 只读：写按钮置灰 + title 提示（不靠后端 403 兜底） */
+  const blocked = writeBlockedReason(auth)
+  const blockedTitle = blocked ?? undefined
 
   const testers = useAsync(() => api.listTesters(), [])
   const testerList = testers.data ?? []
@@ -509,12 +514,31 @@ export function SubmitPage() {
           ))}
         </CardBody>
         <CardFooter>
-          <span>提交前会先 dry-run；校验通过才真正 POST /runs（每次提交都创建新 Run）。</span>
+          <span>
+            {blocked
+              ? `当前角色 ${auth.role ?? 'viewer'} 只读：${blocked}（服务端也会再判一次）`
+              : '提交前会先 dry-run；校验通过才真正 POST /runs（每次提交都创建新 Run）。'}
+          </span>
           <div className="ml-auto flex items-center gap-2">
-            <Button size="sm" loading={dryRunning} onClick={() => void onDryRun()}>
+            <Button
+              size="sm"
+              data-testid="validate-run"
+              loading={dryRunning}
+              disabled={Boolean(blocked)}
+              title={blockedTitle}
+              onClick={() => void onDryRun()}
+            >
               校验
             </Button>
-            <Button size="sm" variant="primary" loading={submitting} onClick={() => void onSubmit()}>
+            <Button
+              size="sm"
+              variant="primary"
+              data-testid="submit-run"
+              loading={submitting}
+              disabled={Boolean(blocked)}
+              title={blockedTitle}
+              onClick={() => void onSubmit()}
+            >
               提交
             </Button>
           </div>

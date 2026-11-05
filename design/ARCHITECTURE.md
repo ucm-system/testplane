@@ -55,6 +55,7 @@ TestPlane 是**对内工具**，以下事项已由团队裁决，本文按结论
 | 0.6 | 2026-11-05 | **MVP 实现回写**（见 `design/IMPLEMENTATION.md §15`）：① Tester 注册只做"镜像内 `tester.yaml` + 启动/周期扫描"，不提供运行时注册 API（D-38）；② 对外错误体为**扁平** `{code,message,detail,retryable,trace_id}`（D-39）；③ 提交体以**嵌套** `run:` 为唯一形态，`03-data-view.md §4.1` 的平级示例按文档缺陷处理（D-40）；④ 产物 PVC 名统一为 `testplane-storage`（D-41）；⑤ 开发环境种子 `cluster-01` + `k8s-npu`，由进程启动时补齐（D-42）；⑥ MVP 的执行环境是宿主 Kind + `kind load docker-image`，Deploy 阶段由 mock 顶替 Genet（D-43） |
 | 0.7 | 2026-11-05 | **Genet 与队列的调研回写**：按 Genet 真实实现（Helm release 为部署单元、无部署单）重写 Deploy 适配（D-44～D-48），并明确 `endpoint.status=ready` **只代表地址可解析**、必须再过 Pre-Check 服务门（D-45）；排队位次不可得（D-46）；Genet 失败终态折叠为 `blocked`（D-47）；控制面用 Open API Key、Web 用 TestPlane 自己的 OIDC client，**不把 Genet 当 IdP**（D-48）；Volcano 队列直接读 CRD、不经 Genet（D-49）；取消/卸载采用"先落意图、后置删除、对账补偿"（D-50） |
 | 0.8 | 2026-11-05 | **部署形态与鉴权落定**：纯内网部署，TestPlane 与 Genet 共用**同一个企业统一身份源**，TestPlane 作为独立 OIDC client（不是 Genet 的 client），服务间用统一身份源签发的 JWT（D-51）；Genet 侧的**独占池**（exclusive pool）语义确认：进入独占池的 namespace/服务不受每日回收影响，TestPlane 通过独占自己的 namespace 获得该保证（D-52）；Genet 将开放 `openAPI`，控制面走 `/api/open/*`（D-53） |
+| 0.9 | 2026-11-05 | **Deploy 收口与可观测收口**：Run 终态后必须卸载 deploy 的 release，**只走 Genet OpenAPI**（直接 `helm uninstall` 会被其 admission webhook 拒绝），并以「`GET 404` + pods 空」作为删干净的判据（D-54）；`runs.deploy` 落 §4.4 全字段（增量合并，不覆盖已冻结键）；新增 `cleanup.failed` 事件类型；OIDC 会话/CSRF/RBAC 已实现（D-51 落地），`dev` 模式仍保留给本地 |
 
 ---
 

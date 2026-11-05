@@ -334,7 +334,9 @@ data: {"seq":43,"type":"task.state_changed","run_id":"r-...","task_id":"t-0002",
 | 并发 | 同一用户同一 Run 的连接上限（P1 限流位），超限返回 429 |
 | 内容 | 只发状态事实，不发日志正文、不发凭据 |
 
-事件类型：`run.submitted`、`run.state_changed`、`task.state_changed`、`attempt.started`、`attempt.finished`、`deploy.state_changed`、`cleanup.started`、`run.finished`、`report.written`、`resync_required`。
+事件类型：`run.submitted`、`run.state_changed`、`task.state_changed`、`attempt.started`、`attempt.finished`、`deploy.state_changed`、`cleanup.started`、`cleanup.failed`、`run.finished`、`report.written`、`resync_required`。
+
+> `cleanup.failed`（D-54）：Run 已终态但 **deploy 卸载未通过校验**（`GET /releases/{name}` 仍 200，或 DELETE 失败）时发出，`payload = {release_name, uninstall_state, cleanup_errors[], verified_at}`。它**不改变 Run 终态**，只是把"资源没删干净"这件事暴露出来；对账循环会继续重试，成功后 `runs.deploy.uninstall.state` 转 `verified`。
 
 ---
 

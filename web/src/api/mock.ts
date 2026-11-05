@@ -50,6 +50,7 @@ import type {
   WaitingTask,
 } from './types'
 import { normalizeTester } from './normalize'
+import { applyIdentity, clearAuth } from './auth'
 
 /* ================================================================ 基础工具 */
 
@@ -1016,7 +1017,15 @@ function validateManifest(manifest: RunManifest): ValidationIssue[] {
 export const mockApi: Api = {
   async getIdentity(): Promise<Identity> {
     await delay(80)
-    return { user: getCurrentUser(), role: 'operator' }
+    // mock 的 /me 没有 csrf_token → api/auth.ts 判成 dev 模式，绝不会触发登录跳转
+    const identity: Identity = { user: getCurrentUser(), role: 'operator' }
+    applyIdentity(identity)
+    return identity
+  },
+
+  async logout(): Promise<void> {
+    await delay(60)
+    clearAuth()
   },
 
   async getMeta(): Promise<Meta> {

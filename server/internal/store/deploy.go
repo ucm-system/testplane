@@ -134,3 +134,27 @@ func (s *Store) ListDeployCleanupPending(ctx context.Context, limit int) ([]Run,
 	}
 	return out, rows.Err()
 }
+// AppendRunEvent 追加一条 state_events 记录。**只**给 cleanup.failed 用（不开放通用事件面）：
+// 载荷 {release_name, cleanup_errors[], attempt, verified_at}（03-data-view §4.6）。
+func (s *Store) AppendRunEvent(ctx context.Context, runID, typ string, payload map[string]any) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("store: append run event: marshal: %w", err)
+	}
+	return s.InTx(ctx, func(tx pgx.Tx) error {
+		if _, err := s.Runs.Lock(ctx, tx, runID); err != nil {
+			return err
+		}
+		seq, err := s.nextSeq(ctx, tx, runID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO state_events (run_id, seq, type, reason, payload, actor, created_at)
+			VALUES ($1, $2, $3, NULL, $4, 'system:orchestrator', $5)`,
+			runID, seq, typ, raw, time.Now().UTC()); err != nil {
+			return fmt.Errorf("store: append run event %s: %w", runID, err)
+		}
+		return nil
+	})
+}

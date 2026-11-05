@@ -99,6 +99,46 @@ src/
 | `tests[].execution.profile` | 必填 | — | **MVP 没有 `/profiles` 端点**：提交页给可编辑默认值 `k8s-npu`（待裁决） |
 | `Run.deploy.queue_position` | 字段保留、**恒为 null**（D-46：部署方只给水位计数，排队在 Volcano 层，没有位次） | 恒 null | **UI 不展示位次**：排队态只显示「排队中 · 已等待 <时长>」+ `queue_reason` 原文；`types.ts` 注释写明"不要读取它做展示" |
 
+## 登录态与权限（OIDC）
+
+判定**不猜**，只有两个信号（`src/api/auth.ts`）：
+
+| 信号 | 用途 |
+|---|---|
+| `GET /meta` 的 `version` | 保守预判：`dev` / `*-dev` → 先按 dev 部署处理，避免 401 把人送去并不存在的 `/auth/login`；其它 → 先按 oidc |
+| `GET /me` 的 `csrf_token` | **权威**：有 token 即 OIDC 会话（覆盖 meta 的判断）；没有即 dev 部署 |
+
+```ts
+// api/auth.ts
+export function looksLikeDevDeployment(version: string | undefined): boolean {
+  if (!version) return true
+  return /^dev\b/i.test(version) || /-dev\b/i.test(version)
+}
+
+export function applyIdentity(identity: Identity): void {
+  const csrfToken = identity.csrf_token?.trim() ? identity.csrf_token : null
+  state = {
+    mode: csrfToken ? 'oidc' : 'dev',
+    identity,
+    csrfToken,                                   // 只存内存，不落 localStorage
+    role: identity.role ?? null,
+    canOperate: identity.role !== 'viewer',      // viewer 只读
+    ready: true,
+  }
+}
+```
+
+| 行为 | 规则 |
+|---|---|
+| CSRF | token 只在内存；`api/client.ts` 对 `POST/PUT/PATCH/DELETE` 自动带 `X-CSRF-Token`（`POST /auth/logout` 同一条路） |
+| 认证头 | OIDC 会话走 Cookie，**不发** Bearer（免得后端优先读 Bearer 里的假 subject 盖掉会话身份）；dev 部署才发 `Authorization: Bearer <subject>` |
+| 401 | `handleUnauthorized()`：OIDC 部署 → `location.assign('/auth/login?return=<当前路径+查询串>')`；dev 部署**什么都不做**；一次会话只跳一次（`sessionStorage` guard），`/me` 成功后清除 guard |
+| 403 | 不当网络错误：`ErrorState` 渲染成「无权限：&lt;message&gt;」，**不给重试按钮** |
+| 角色 UI | 顶栏显示 `user` + 角色徽章（viewer 灰 / operator 蓝 / admin 琥珀）；下拉里 OIDC 有「登出」（`POST /auth/logout` → 回 `/`），dev 有「切换 dev 身份」 |
+| viewer 只读 | 提交 / 校验 / 取消 Run 按钮置灰 + `title="需要 operator 角色"`，页脚写明只读；不靠后端 403 兜底 |
+
+dev 部署与 mock 模式都没有 `/auth/*`：`/me` 无 `csrf_token` → mode=dev，不会触发登录跳转。
+
 ## SSE
 
 `hooks/useRunEvents.ts` + `api/sse.ts`：

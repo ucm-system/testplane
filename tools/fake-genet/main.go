@@ -39,6 +39,8 @@ func main() {
 		model      = flag.String("model", "mock-llm", "callInfo.model 的取值")
 		helmMode   = flag.Bool("helm", false, "用真实 helm/kubectl 驱动（默认 false = 内存模拟）")
 		readyAfter = flag.Duration("sim-ready-after", 3*time.Second, "-simulate 模式下安装到 ready 的耗时")
+		simBlocked = flag.Bool("sim-blocked", false, "模拟 endpoint 永远 blocked（配额不足）")
+		simError   = flag.Int("sim-error", 0, "让所有 /api/open/helm/* 返回该 HTTP 状态（模拟 Genet 故障）")
 	)
 	flag.Parse()
 
@@ -66,6 +68,14 @@ func main() {
 	}
 
 	srv := NewServer(store, *namespace, apiKey, *model, time.Now)
+	srv.SimBlocked = *simBlocked
+	srv.SimError = *simError
+	if *simBlocked {
+		log.Printf("fake-genet: 模拟 endpoint=blocked（配额不足）")
+	}
+	if *simError != 0 {
+		log.Printf("fake-genet: 模拟 /api/open/helm/* 返回 %d", *simError)
+	}
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),

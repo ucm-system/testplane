@@ -258,3 +258,99 @@ func TestLiveWithHelm(t *testing.T) {
 		t.Fatalf("uninstall = %d", code)
 	}
 }
+
+// ---- 失败分支：blocked / 500（验收矩阵用）--------------------------------
+
+// -sim-blocked：endpoint 永远 blocked，status 仍是 deployed → 客户端应合成 blocked。
+func TestSimBlockedEndpoint(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	store := NewSimStore(clock.Now, time.Millisecond)
+	srv := NewServer(store, "testplane-mock", "k", "mock-llm", clock.Now)
+	srv.SimBlocked = true
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	req := func(method, path string, body any) *http.Response {
+		var reader *bytes.Reader
+		if body != nil {
+			raw, _ := json.Marshal(body)
+			reader = bytes.NewReader(raw)
+		} else {
+			reader = bytes.NewReader(nil)
+		}
+		r, _ := http.NewRequest(method, hs.URL+path, reader)
+		r.Header.Set("Authorization", "Bearer k")
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	resp := req(http.MethodPost, "/api/open/helm/uc-packages/stack/releases", map[string]any{"releaseName": "tp-blocked1"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("install = %d, want 202", resp.StatusCode)
+	}
+	clock.Advance(2 * time.Second)
+
+	resp = req(http.MethodGet, "/api/open/helm/releases/tp-blocked1", nil)
+	defer resp.Body.Close()
+	var rel map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&rel)
+	if rel["status"] != StatusDeployed {
+		t.Errorf("status = %v, want deployed", rel["status"])
+	}
+	ci, _ := rel["callInfo"].(map[string]any)
+	ep, _ := ci["endpoint"].(map[string]any)
+	if ep["status"] != EndpointBlocked {
+		t.Fatalf("endpoint = %+v, want blocked", ep)
+	}
+	if msg, _ := ep["message"].(string); !strings.Contains(msg, "insufficient quota") {
+		t.Errorf("message = %q", msg)
+	}
+}
+
+// -sim-error 500：所有 /api/open/helm/* 都 500（模拟 Genet 故障）。
+func TestSimError500(t *testing.T) {
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	store := NewSimStore(clock.Now, time.Millisecond)
+	srv := NewServer(store, "testplane-mock", "k", "mock-llm", clock.Now)
+	srv.SimError = http.StatusInternalServerError
+	hs := httptest.NewServer(srv.Handler())
+	defer hs.Close()
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/api/open/helm/uc-packages/stack/releases"},
+		{http.MethodGet, "/api/open/helm/releases/tp-x"},
+		{http.MethodDelete, "/api/open/helm/releases/tp-x?force=true"},
+		{http.MethodGet, "/api/open/helm/releases"},
+	} {
+		var reader *bytes.Reader
+		if tc.method == http.MethodPost {
+			raw, _ := json.Marshal(map[string]any{"releaseName": "tp-x"})
+			reader = bytes.NewReader(raw)
+		} else {
+			reader = bytes.NewReader(nil)
+		}
+		r, _ := http.NewRequest(tc.method, hs.URL+tc.path, reader)
+		r.Header.Set("Authorization", "Bearer k")
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Errorf("%s %s = %d, want 500", tc.method, tc.path, resp.StatusCode)
+		}
+	}
+	// healthz 不受影响（QA 用它探活）。
+	resp, err := http.Get(hs.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("healthz = %d, want 200", resp.StatusCode)
+	}
+}

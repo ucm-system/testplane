@@ -238,6 +238,15 @@ CREATE TABLE state_events (
 );
 CREATE INDEX state_events_run_idx ON state_events (run_id, seq);
 
+-- `type` 的取值（D-54 起多一个 cleanup.failed）：
+--   run.submitted | run.state_changed | task.state_changed | attempt.started | attempt.finished
+--   | deploy.state_changed | cleanup.started | cleanup.failed | run.finished | report.written | resync_required
+--
+-- `cleanup.failed` 只在「Run 已终态但 deploy 卸载没通过校验」时写一条，
+-- payload = {release_name, uninstall_state, cleanup_errors[], verified_at}；
+-- 它不改 Run 终态，是给"资源没删干净"留证据（07 §7 的事件表与之一致）。
+
+
 -- 端点互斥槽位（同一 endpoint_key 上：至多 1 个独占，或 N 个共享）
 CREATE TABLE endpoint_leases (
   task_id      text PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,

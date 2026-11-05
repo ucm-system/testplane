@@ -5,6 +5,7 @@
 import type { Api, LogOptions } from './contract'
 import { qs, request, requestText } from './client'
 import { asArray, asPage, normalizeTester } from './normalize'
+import { applyIdentity, clearAuth } from './auth'
 import type {
   Attempt,
   CancelResult,

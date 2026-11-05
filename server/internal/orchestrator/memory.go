@@ -31,8 +31,15 @@ type MemoryRepos struct {
 	MaxGlobalConcurrencyOverride int
 }
 
+// RunEvent 是 state_events 的最小投影（目前只有 cleanup.failed 用）。
+type RunEvent struct {
+	Type    string
+	Payload map[string]any
+}
+
 type memRun struct {
 	RunView
+	Events []RunEvent
 }
 
 type memTask struct {
@@ -695,6 +702,18 @@ func (m *MemoryRepos) RecordDeployState(ctx context.Context, runID string, snap 
 	if snap.QueueReason != "" {
 		r.QueueReason = snap.QueueReason
 	}
+	return nil
+}
+
+// AppendRunEvent 只记录清理失败事件（内存实现挂在 memRun 上，便于测试断言）。
+func (m *MemoryRepos) AppendRunEvent(ctx context.Context, runID, typ string, payload map[string]any) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.runs[runID]
+	if !ok {
+		return fmt.Errorf("memory: run %s: %w", runID, domain.ErrNotFound)
+	}
+	r.Events = append(r.Events, RunEvent{Type: typ, Payload: payload})
 	return nil
 }
 

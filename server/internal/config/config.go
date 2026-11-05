@@ -81,6 +81,20 @@ type Config struct {
 	// GenetInsecure 跳过 Genet 的 TLS 校验（TESTPLANE_GENET_INSECURE，默认 false，仅开发环境）。
 	GenetInsecure bool
 
+	// ---- Volcano 队列快照（E-11、design/impl/control-plane.md §C-4.8） ----
+
+	// VolcanoEnabled 是平台侧是否采样 Volcano 队列（TESTPLANE_VOLCANO_ENABLED，默认 true）。
+	// 关闭时 `/queue-status` 的 volcano 块降级为 detail=disabled（**不是** crd_missing，
+	// 也不是"0 排队"）。
+	VolcanoEnabled bool
+	// VolcanoNamespaces 是 List PodGroup 的 namespace 列表（TESTPLANE_VOLCANO_NAMESPACES，
+	// 逗号分隔）。空 / `*` = 全部 namespace（一次集群级 List）。
+	// 未配置时默认取 profile 的 namespace —— 即 seed 进 execution_profiles 的那个，
+	// 与控制面 namespace 同值（TESTPLANE_NAMESPACE）。
+	VolcanoNamespaces []string
+	// VolcanoTTL 是快照缓存 TTL（TESTPLANE_VOLCANO_TTL，默认 15s，06 §2.1（3））。
+	VolcanoTTL time.Duration
+
 	// ---- 以下为实现细节配置，默认值即设计值 ----
 
 	// DBMaxConns 是连接池上限（TESTPLANE_DB_MAX_OPEN_CONNS，默认 20）。
@@ -141,6 +155,8 @@ func Load() (*Config, error) {
 		GenetAPIKey:          env("TESTPLANE_GENET_API_KEY", ""),
 		GenetCAFile:          env("TESTPLANE_GENET_CA_FILE", ""),
 		GenetInsecure:        envBool("TESTPLANE_GENET_INSECURE", false),
+		VolcanoEnabled:       envBool("TESTPLANE_VOLCANO_ENABLED", true),
+		VolcanoTTL:           15 * time.Second,
 		DBMaxConns:           20,
 		RunMaxTasks:          200,
 		TaskTimeoutDefault:   4 * time.Hour,
@@ -172,6 +188,15 @@ func Load() (*Config, error) {
 		}
 		c.SessionTTL = d
 	}
+
+	if raw := env("TESTPLANE_VOLCANO_TTL", ""); raw != "" {
+		d, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("config: TESTPLANE_VOLCANO_TTL=%q 非法（如 15s）", raw)
+		}
+		c.VolcanoTTL = d
+	}
+	c.VolcanoNamespaces = volcanoNamespacesFromEnv()
 
 	if c.Role == "" {
 		c.Role = RoleAll
@@ -318,6 +343,25 @@ func joinStorage(root string, parts ...string) string {
 	return out
 }
 
+
+// volcanoNamespacesFromEnv 解析 TESTPLANE_VOLCANO_NAMESPACES：
+//   - 未配置 → 默认 profile 的 namespace（与控制面 namespace 同值；这里不能调
+//     k8s.NamespaceFromEnv——config ← api ← k8s 会成导入环，所以按同一套 env 名重读一遍）；
+//   - `*` / `all` → nil（全部 namespace，一次集群级 List）；
+//   - 否则逗号/空白分隔的列表。
+func volcanoNamespacesFromEnv() []string {
+	raw := strings.TrimSpace(env("TESTPLANE_VOLCANO_NAMESPACES", ""))
+	if raw == "" {
+		return []string{envFirst("TESTPLANE_NAMESPACE", "TESTPLANE_EXECUTOR_NAMESPACE", "testplane")}
+	}
+	if raw == "*" || strings.EqualFold(raw, "all") {
+		return nil
+	}
+	if list := splitList(raw); len(list) > 0 {
+		return list
+	}
+	return nil
+}
 
 // splitList 把逗号/空白分隔的字符串切成切片（OIDC scopes 用）。
 func splitList(raw string) []string {

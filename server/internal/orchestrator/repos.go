@@ -235,6 +235,8 @@ type Repos interface {
 	FinishDeployAsFailed(ctx context.Context, runID string, f *domain.Failure) error
 	// ListDeployCleanupPending 返回"已终态但 deploy 还没卸载干净"的 Run（收口补偿用）。
 	ListDeployCleanupPending(ctx context.Context, limit int) ([]RunView, error)
+	// AppendRunEvent 追加一条 state_events 记录（**只**给 cleanup.failed 用，不开通用事件面）。
+	AppendRunEvent(ctx context.Context, runID, typ string, payload map[string]any) error
 
 	// ---- 收口 ----
 	BeginCleanup(ctx context.Context, runID, reason string) error

@@ -14,3 +14,14 @@ export { subscribeRunEvents } from './sse'
 export type { SseStatus } from './sse'
 export type { Api, LogOptions } from './contract'
 export type * from './types'
+
+/* 登录态 / 权限（OIDC）：判定逻辑与 CSRF 存储都在 api/auth.ts */
+export {
+  getAuthState,
+  subscribeAuth,
+  applyMetaVersion,
+  markIdentityFailed,
+  roleTone,
+  writeBlockedReason,
+} from './auth'
+export type { AuthMode, AuthState, RoleTone } from './auth'

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { stringify as toYaml } from 'yaml'
-import { API_BASE, api } from '@/api'
+import { API_BASE, api, writeBlockedReason } from '@/api'
 import { toApiError } from '@/api/client'
 import type { ApiErrorBody, Attempt, Deploy, DeploySnapshot, Run, TaskDetail, TaskSummary } from '@/api/types'
 import { EventTimeline } from '@/components/app/EventTimeline'
@@ -19,6 +19,7 @@ import { Banner, EmptyState, ErrorState, LoadingBlock } from '@/components/ui/st
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
 import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
+import { useIdentity } from '@/hooks/useIdentity'
 import { useRunEvents } from '@/hooks/useRunEvents'
 import {
   attemptStatusMeta,
@@ -465,6 +466,10 @@ export function RunDetailPage() {
   const [cancelling, setCancelling] = useState(false)
   const [actionError, setActionError] = useState<ApiErrorBody | null>(null)
 
+  const { auth } = useIdentity()
+  /** viewer 只读：写按钮置灰 + title 提示（不靠后端 403 兜底） */
+  const blocked = writeBlockedReason(auth)
+
   const run = useAsync(() => api.getRun(runId), [runId, version, resyncToken])
 
   useEffect(() => {
@@ -527,7 +532,14 @@ export function RunDetailPage() {
           </Button>
         </Link>
         {detail && !terminal ? (
-          <Button size="sm" variant="dangerGhost" onClick={() => setConfirmOpen(true)}>
+          <Button
+            size="sm"
+            variant="dangerGhost"
+            data-testid="cancel-run"
+            disabled={Boolean(blocked)}
+            title={blocked ?? undefined}
+            onClick={() => setConfirmOpen(true)}
+          >
             取消 Run
           </Button>
         ) : null}

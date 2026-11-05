@@ -659,3 +659,7 @@ func mergeDeployJSON(manifest, deploy []byte) json.RawMessage {
 	}
 	return raw
 }
+// AppendRunEvent 追加清理失败事件（目前只有 cleanup.failed 用）。
+func (r *storeRepos) AppendRunEvent(ctx context.Context, runID, typ string, payload map[string]any) error {
+	return r.st.AppendRunEvent(ctx, runID, typ, payload)
+}

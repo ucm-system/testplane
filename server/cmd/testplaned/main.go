@@ -152,11 +152,39 @@ func run() error {
 		}()
 	}
 
+	// ---- Volcano 队列快照（E-11、design/impl/control-plane.md §C-4.8）----
+	// 只读：轮询 `scheduling.volcano.sh/v1beta1` 的 queues + podgroups，
+	// 15s TTL 缓存 + 单飞 + 失败退避 60s（不用 informer）。构造失败就留 nil，
+	// `/queue-status` 的 volcano 块自动降级 scheduler_unavailable，绝不影响其它两块。
+	var volcanoProvider api.VolcanoProvider
+	if cfg.VolcanoEnabled {
+		v, err := k8s.NewVolcano(k8s.Options{Kubeconfig: cfg.Kubeconfig}, k8s.VolcanoOptions{
+			Enabled:    true,
+			Cluster:    cfg.ClusterName,
+			Namespaces: cfg.VolcanoNamespaces,
+			TTL:        cfg.VolcanoTTL,
+			Logger:     logger,
+		})
+		if err != nil {
+			logger.Warn("Volcano 队列快照未接入（降级 scheduler_unavailable）", "err", err)
+		} else {
+			volcanoProvider = v
+			logger.Info("Volcano 队列快照就绪",
+				"cluster", cfg.ClusterName, "namespaces", cfg.VolcanoNamespaces,
+				"ttl", cfg.VolcanoTTL)
+		}
+	} else {
+		// 配置关闭 ≠ 集群没装：四态里的 disabled（不是 crd_missing，也不是"0 排队"）。
+		volcanoProvider = k8s.NewVolcanoWithDynamic(nil, k8s.VolcanoOptions{Enabled: false})
+		logger.Info("Volcano 队列快照已关闭（detail=disabled）")
+	}
+
 	// ---- HTTP ----
 	srv := api.New(api.Deps{
 		Config: cfg, Store: st, Machines: machines,
 		Resolver: reg, Logger: logger,
 		WebUI: webui.FS(), Version: version,
+		Volcano: volcanoProvider,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,

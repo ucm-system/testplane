@@ -240,20 +240,20 @@ while ($gcSw.Elapsed.TotalSeconds -lt $GcWaitSeconds) {
 Add-Check 'k8s.job_query' $true ("查询成功，等待 " + [math]::Round($gcSw.Elapsed.TotalSeconds, 1) + "s")
 Add-Check 'k8s.jobs_empty' ($jobLeft.Count -eq 0) $(if ($jobLeft.Count -eq 0) { '无 Job 残留' } else { $jobLeft -join ', ' })
 
-# 事件：至少一条 attempt.finished；有对账标记则断言，没有就记录实际（口径允许）
+# 事件：至少一条 attempt.finished；设计没有 reconciled 字段，按实际 payload 的
+# phase + exit_code 断言（不再用“没有标记就放行”的检查）。
 $events = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/events/history?limit=500").items
 $finished = @($events | Where-Object { $_.type -eq 'attempt.finished' })
-$reconciled = @($finished | Where-Object {
-    ($_.payload.reason -and ([string]$_.payload.reason -match 'reconcil')) -or
-    ($_.payload.detail -and ([string]$_.payload.detail -match 'reconcil')) -or
-    ($_.payload.phase -and ([string]$_.payload.phase -match 'reconcil'))
-})
-Add-Check 'events.attempt_finished' ($finished.Count -gt 0) ("attempt.finished=" + $finished.Count)
-if ($reconciled.Count -gt 0) {
-    Add-Check 'events.reconciled_path' $true ("带对账标记的 attempt.finished=" + $reconciled.Count)
-} else {
-    Add-Check 'events.reconciled_path' $true ("没有可区分的对账标记；记录实际 attempt.finished payload=" + (($finished | ForEach-Object { $_.payload | ConvertTo-Json -Compress }) -join ' | '))
-}
+$payloads = @($finished | ForEach-Object { $_.payload })
+$payloadComplete = $finished.Count -gt 0 -and @($payloads | Where-Object {
+    [string]::IsNullOrWhiteSpace([string]$_.phase) -or $null -eq $_.exit_code
+}).Count -eq 0
+$succeededPayload = @($payloads | Where-Object {
+    [string]$_.phase -eq 'succeeded' -and [int]$_.exit_code -eq 0
+}).Count
+Add-Check 'events.attempt_finished_payload' ($payloadComplete -and $succeededPayload -gt 0) `
+    ("attempt.finished=" + $finished.Count + "，phase+exit_code 完整=" + $payloadComplete + "，succeeded/exit0=" + $succeededPayload +
+     "，payloads=" + (($payloads | ForEach-Object { $_ | ConvertTo-Json -Compress }) -join ' | '))
 
 $ok = -not ($checks | Where-Object { -not $_.ok })
 foreach ($p in $forwardProcs) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }

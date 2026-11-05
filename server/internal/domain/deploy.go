@@ -52,9 +52,20 @@ type DeployQueue struct {
 	Running int    `json:"running"`
 }
 
+// uninstall.state 的四个取值（execution §9.7）：不要散字符串。
+const (
+	UninstallPending  = "pending"  // 已决定卸载，尚未发出 DELETE
+	UninstallRunning  = "running"  // DELETE 已发出，等确认
+	UninstallVerified = "verified" // GET 404（且 pods 为空）已确认删干净
+	UninstallFailed   = "failed"   // DELETE 失败或校验未过，等对账重试
+)
+
+// EventCleanupFailed 是清理失败的事件类型（state_events.type，03-data-view §4.6）。
+const EventCleanupFailed = "cleanup.failed"
+
 // DeployUninstall 是清理收口的记录（§9.7）。
 type DeployUninstall struct {
-	State         string   `json:"state"` // pending | verified | failed
+	State         string   `json:"state"` // pending | running | verified | failed
 	VerifiedAt    *time.Time `json:"verified_at,omitempty"`
 	Force         bool     `json:"force"`
 	CleanupErrors []string `json:"cleanup_errors"`

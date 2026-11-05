@@ -39,29 +39,41 @@ export interface ErrorStateProps {
 }
 
 /**
- * 错误展示：**code + message 必须都在**（票 #5 的验收项），
- * detail 折叠成可读文本，retryable=true 才给「重试」。
+ * 错误展示：**code + message 必须都在**，detail 折叠成可读文本，retryable=true 才给「重试」。
+ *
+ * 403 / `FORBIDDEN` 是权限问题，不是网络问题：显示成「无权限：<message>」，**不给重试**（重试也没用）。
+ * 401 由 `api/client.ts` 直接跳登录，不会走到这里。
  */
 export function ErrorState({ error, onRetry, className, compact = false }: ErrorStateProps) {
   const detail = detailToText(error.detail)
+  const forbidden = error.code === 'FORBIDDEN'
+  const message = forbidden ? `无权限：${error.message}` : error.message
+  const retry = forbidden ? undefined : onRetry
   return (
     <div
       role="alert"
       className={cn(
-        'flex flex-col gap-2 rounded-lg border border-danger/25 bg-danger-weak px-4 py-3',
+        'flex flex-col gap-2 rounded-lg border px-4 py-3',
+        forbidden ? 'border-warn/30 bg-warn-weak' : 'border-danger/25 bg-danger-weak',
         compact ? 'text-xs' : 'text-sm',
         className,
       )}
     >
       <div className="flex flex-wrap items-center gap-2">
-        <AlertTriangle className="size-4 shrink-0 text-danger" aria-hidden />
-        <Badge tone="err" className="font-mono">
+        <AlertTriangle className={cn('size-4 shrink-0', forbidden ? 'text-warn' : 'text-danger')} aria-hidden />
+        <Badge tone={forbidden ? 'warn' : 'err'} className="font-mono">
           {error.code}
         </Badge>
-        <span className="min-w-0 flex-1 text-fg">{error.message}</span>
-        {error.retryable ? <Badge tone="warn">可重试</Badge> : <Badge tone="muted">不可重试</Badge>}
-        {onRetry ? (
-          <Button size="sm" variant="secondary" icon={<RefreshCw className="size-3" aria-hidden />} onClick={onRetry}>
+        <span className="min-w-0 flex-1 text-fg">{message}</span>
+        {forbidden ? (
+          <Badge tone="muted">无权限</Badge>
+        ) : error.retryable ? (
+          <Badge tone="warn">可重试</Badge>
+        ) : (
+          <Badge tone="muted">不可重试</Badge>
+        )}
+        {retry ? (
+          <Button size="sm" variant="secondary" icon={<RefreshCw className="size-3" aria-hidden />} onClick={retry}>
             重试
           </Button>
         ) : null}

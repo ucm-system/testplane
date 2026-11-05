@@ -185,7 +185,12 @@ func (s *Store) applyRun(ctx context.Context, tx pgx.Tx, tr domain.Transition, a
 		       finished_at = CASE WHEN $5 THEN $4 ELSE finished_at END,
 		       error       = COALESCE($6, error),
 		       endpoint    = COALESCE($7, endpoint),
-		       deploy      = COALESCE($8, deploy)
+		       -- deploy 必须**合并**：冻结字段（release_name/values_digest/…）写一次，
+		       -- 之后每次状态推进只带变化的键；整段覆盖会让重启后无法找回 Genet release（§9.2）。
+		       deploy      = CASE
+		                       WHEN $8::jsonb IS NULL THEN deploy
+		                       ELSE COALESCE(deploy, '{}'::jsonb) || $8::jsonb
+		                     END
 		 WHERE id = $1 AND status = ANY($9)`,
 		tr.ID, string(to), setStarted, at, setFinished,
 		nullableBytes(errJSON), nullableBytes(endpointJSON), nullableBytes(deployJSON), from)

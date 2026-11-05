@@ -708,6 +708,9 @@ func (c *Controller) JobFinished(ctx context.Context, o ports.JobOutcome) error 
 	}
 	if out.RunAllTerminal {
 		c.logf("orchestrator: run %s reached terminal state", attempt.RunID)
+		// Run 终态**已落库**（FinishAttempt 的事务已提交），这里做事务外的卸载：
+		// 秒级收口；失败只记 uninstall.state=failed，由 ReconcileOnce 兜底（§9.7）。
+		c.cleanupDeployIfTerminal(ctx, attempt.RunID)
 	}
 	// Attempt 收口后把 Pod 日志落盘（best effort，失败只 WARN）。
 	c.finalizeAttemptAsync(attempt)

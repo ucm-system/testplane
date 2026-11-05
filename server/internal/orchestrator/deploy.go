@@ -61,7 +61,7 @@ func (c *Controller) cleanupDeploy(ctx context.Context, runID string) {
 		_ = c.repos.RecordDeployState(ctx, runID, domain.DeploySnapshot{Uninstall: u})
 	}
 	// 已 verified 的不再打 Genet（对账每轮都会路过这里）。
-	if run, err := c.repos.GetRun(ctx, runID); err == nil && uninstallState(run.DeployJSON) == "verified" {
+	if run, err := c.repos.GetRun(ctx, runID); err == nil && uninstallState(run.DeployJSON) == domain.UninstallVerified {
 		return
 	}
 	cleaner, canVerify := c.deployer.(ports.DeployCleaner)
@@ -76,13 +76,14 @@ func (c *Controller) cleanupDeploy(ctx context.Context, runID string) {
 		// DELETE 404 = release 已经不存在（可能上一轮已删掉、或 Genet 侧 GC 掉了）：
 		// 用"删干净"判据复核，真的没了就记 verified，别让对账无限重试（§9.7）。
 		if verify() {
-			record(&domain.DeployUninstall{State: "verified", VerifiedAt: &now, Force: true, CleanupErrors: []string{}})
+			record(&domain.DeployUninstall{State: domain.UninstallVerified, VerifiedAt: &now, Force: true, CleanupErrors: []string{}})
 			c.logf("orchestrator: deploy_cleanup already gone: run %s", runID)
 			return
 		}
 		record(&domain.DeployUninstall{
-			State: "failed", Force: true, CleanupErrors: []string{err.Error()},
+			State: domain.UninstallFailed, Force: true, CleanupErrors: []string{err.Error()},
 		})
+		c.appendCleanupFailed(ctx, runID, []string{err.Error()})
 		c.logf("orchestrator: WARN deploy_cleanup_failed: run %s: %v", runID, err)
 		return
 	}
@@ -92,20 +93,22 @@ func (c *Controller) cleanupDeploy(ctx context.Context, runID string) {
 		switch {
 		case err != nil:
 			record(&domain.DeployUninstall{
-				State: "failed", Force: true, CleanupErrors: []string{err.Error()},
+				State: domain.UninstallFailed, Force: true, CleanupErrors: []string{err.Error()},
 			})
+			c.appendCleanupFailed(ctx, runID, []string{err.Error()})
 			c.logf("orchestrator: WARN deploy_cleanup_verify: run %s: %v", runID, err)
 			return
 		case !gone:
 			record(&domain.DeployUninstall{
-				State: "failed", Force: true, CleanupErrors: []string{"release still present after uninstall"},
+				State: domain.UninstallFailed, Force: true, CleanupErrors: []string{"release still present after uninstall"},
 			})
+			c.appendCleanupFailed(ctx, runID, []string{"release still present after uninstall"})
 			c.logf("orchestrator: WARN deploy_cleanup_verify: run %s: release still present", runID)
 			return
 		}
 	}
 	record(&domain.DeployUninstall{
-		State: "verified", VerifiedAt: &now, Force: true, CleanupErrors: []string{},
+		State: domain.UninstallVerified, VerifiedAt: &now, Force: true, CleanupErrors: []string{},
 	})
 }
 
@@ -131,4 +134,31 @@ func uninstallState(raw json.RawMessage) string {
 		return ""
 	}
 	return doc.Uninstall.State
+}
+// appendCleanupFailed 写一条 cleanup.failed 事件（只用于卸载失败；载荷见 03-data-view §4.6）。
+func (c *Controller) appendCleanupFailed(ctx context.Context, runID string, cleanupErrors []string) {
+	payload := map[string]any{
+		"cleanup_errors": cleanupErrors,
+		"verified_at":    nil,
+	}
+	if run, err := c.repos.GetRun(ctx, runID); err == nil {
+		payload["release_name"] = releaseNameOf(run.DeployJSON)
+	}
+	if err := c.repos.AppendRunEvent(ctx, runID, domain.EventCleanupFailed, payload); err != nil {
+		c.logf("orchestrator: WARN append cleanup.failed event: run %s: %v", runID, err)
+	}
+}
+
+// releaseNameOf 读 runs.deploy.release_name（缺失返回空串）。
+func releaseNameOf(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var doc struct {
+		ReleaseName string `json:"release_name"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return ""
+	}
+	return doc.ReleaseName
 }

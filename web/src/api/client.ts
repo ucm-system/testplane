@@ -43,8 +43,14 @@ export function onUserChanged(listener: (user: string) => void): () => void {
   return () => window.removeEventListener('testplane:user-changed', handler)
 }
 
-/** dev 鉴权头：`Authorization: Bearer <subject>`（不带则为 `dev`）。 */
+/**
+ * 鉴权头：
+ *  - **OIDC 会话**（`/me` 带 csrf_token）用 Cookie 认证，这里**不发** Bearer ——
+ *    否则后端可能优先看 Bearer 里的假 subject，把真实会话身份盖掉；
+ *  - dev 部署才发 `Authorization: Bearer <subject>`（不带则为 `dev`）。
+ */
 export function authHeaders(): Record<string, string> {
+  if (getAuthState().mode === 'oidc') return {}
   return { Authorization: `Bearer ${getCurrentUser()}` }
 }
 

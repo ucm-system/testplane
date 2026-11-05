@@ -147,6 +147,96 @@ func TestLoad_MissingDSN(t *testing.T) {
 	}
 }
 
+// Volcano 队列快照（E-11、C-4.8）：默认接入 + 15s TTL + podgroups namespace 口径。
+func TestLoad_VolcanoDefaults(t *testing.T) {
+	clearTestplaneEnv(t)
+	t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/tp")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.VolcanoEnabled {
+		t.Fatal("VolcanoEnabled 默认应为 true")
+	}
+	if c.VolcanoTTL != 15*time.Second {
+		t.Fatalf("VolcanoTTL = %s，期望 15s", c.VolcanoTTL)
+	}
+	// 未配置 TESTPLANE_VOLCANO_NAMESPACES 时默认取 profile 的 namespace
+	//（= seed 的 execution_profiles.namespace，与控制面 namespace 同值）。
+	if len(c.VolcanoNamespaces) != 1 || c.VolcanoNamespaces[0] != "testplane" {
+		t.Fatalf("VolcanoNamespaces = %v，期望 [testplane]", c.VolcanoNamespaces)
+	}
+}
+
+func TestLoad_VolcanoOverrides(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   map[string]string
+		check func(t *testing.T, c *Config)
+	}{
+		{
+			name: "关闭 + 多 ns + TTL",
+			env: map[string]string{
+				"TESTPLANE_VOLCANO_ENABLED":    "false",
+				"TESTPLANE_VOLCANO_NAMESPACES": "tp-a, tp-b",
+				"TESTPLANE_VOLCANO_TTL":        "30s",
+			},
+			check: func(t *testing.T, c *Config) {
+				if c.VolcanoEnabled {
+					t.Fatal("VolcanoEnabled 应为 false")
+				}
+				if c.VolcanoTTL != 30*time.Second {
+					t.Fatalf("VolcanoTTL = %s", c.VolcanoTTL)
+				}
+				if len(c.VolcanoNamespaces) != 2 || c.VolcanoNamespaces[0] != "tp-a" || c.VolcanoNamespaces[1] != "tp-b" {
+					t.Fatalf("VolcanoNamespaces = %v", c.VolcanoNamespaces)
+				}
+			},
+		},
+		{
+			name: "全部 namespace",
+			env:  map[string]string{"TESTPLANE_VOLCANO_NAMESPACES": "*"},
+			check: func(t *testing.T, c *Config) {
+				if c.VolcanoNamespaces != nil {
+					t.Fatalf("`*` 应解析为 nil（全部 ns），得到 %v", c.VolcanoNamespaces)
+				}
+			},
+		},
+		{
+			name: "默认 ns 跟随 profile 的 namespace",
+			env:  map[string]string{"TESTPLANE_NAMESPACE": "tp-custom"},
+			check: func(t *testing.T, c *Config) {
+				if len(c.VolcanoNamespaces) != 1 || c.VolcanoNamespaces[0] != "tp-custom" {
+					t.Fatalf("VolcanoNamespaces = %v，期望 [tp-custom]", c.VolcanoNamespaces)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearTestplaneEnv(t)
+			t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/tp")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			c, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			tc.check(t, c)
+		})
+	}
+
+	// TTL 非法直接 fail fast。
+	clearTestplaneEnv(t)
+	t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/tp")
+	t.Setenv("TESTPLANE_VOLCANO_TTL", "abc")
+	if _, err := Load(); err == nil {
+		t.Fatal("TESTPLANE_VOLCANO_TTL=abc 应报错")
+	}
+}
+
 func TestRedactedDSN(t *testing.T) {
 	c := &Config{DatabaseURL: "postgres://user:secret@db:5432/testplane?sslmode=disable"}
 	got := c.RedactedDSN()
