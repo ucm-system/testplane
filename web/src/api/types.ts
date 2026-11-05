@@ -149,6 +149,24 @@ export interface LogSegment {
   truncated?: boolean
 }
 
+/** `Artifact` schema：`/runs/{id}/artifacts` 的一条产物（`path` 可直接拼 `/files?path=`）。 */
+export interface Artifact {
+  /** storage-root 相对路径，含 `<run_id>/` 前缀（服务端下载时会剥掉） */
+  path: string
+  kind: 'result' | 'raw' | 'log' | 'report' | 'other'
+  size_bytes: number
+  sha256?: string | null
+  task_id?: string | null
+  attempt_id?: string | null
+}
+
+/** `ArtifactList` schema：Run / Attempt 两级产物清单的统一信封。 */
+export interface ArtifactList {
+  items: Artifact[]
+  by_kind?: Partial<Record<Artifact['kind'], Artifact[]>>
+  total_size_bytes: number
+}
+
 /** `DeploySnapshot` schema：`GET /runs/{run_id}/deploy` 的应答。 */
 export interface DeploySnapshot {
   run_id: string

@@ -154,6 +154,19 @@ type DeployState struct {
 	Queue *domain.DeployQueue
 	// ObservedAt 是该观测的时间（写 last_polled_at）。
 	ObservedAt time.Time
+	// Namespace 是该 release 所在 namespace（Genet 原值，`Release.Namespace`）。
+	//
+	// 必须带回落库（`runs.deploy.namespace`）：Deploy 的 Pod 在 **Genet 的 namespace** 里，
+	// 与平台自己的 namespace 不同（本地 `testplane-mock` / 生产 `testplane-svc`）。
+	// 不写它，Deploy 日志端点只能回退到 TESTPLANE_NAMESPACE，结果"Pod 明明在跑却读不到日志"。
+	Namespace string
+	// ReleaseName 是 Genet 返回的 release 名（与平台冻结的幂等键一般一致，只用于对账）。
+	ReleaseName string
+	// PackageType / Chart / ChartVersion 是 Genet 侧的**实际**产物描述。
+	// 用户 manifest 里可能没写、或写的是别名，Genet 会归一化；空值不覆盖库里的值（omitempty）。
+	PackageType  string
+	Chart        string
+	ChartVersion string
 }
 
 // JobHolder 是 Executor 的**可选**能力：读取 Job 的 `testplane.io/hold-until` 守卫

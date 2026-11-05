@@ -52,7 +52,8 @@ func (s *Server) middlewareAuth(next http.Handler) http.Handler {
 		// CSRF：写操作且凭据是 Cookie 时必须带 X-CSRF-Token（Bearer 天然免疫）。
 		if isUnsafeMethod(r.Method) && !s.authn.CheckCSRF(r, id) {
 			// 拒绝也要留痕（PR #33 #6）：身份有效，缺的是防伪令牌。
-			s.auditRejected(r.Context(), "user:"+id.User, id.Role, actionCSRFRejected, objectHTTPRequest, r.URL.Path,
+			// #40-6：异步有界投递，响应路径不等 DB。
+			s.auditRejectedAsync("user:"+id.User, id.Role, actionCSRFRejected, objectHTTPRequest, r.URL.Path,
 				map[string]any{
 					"result": "rejected", "code": domain.CodeForbidden,
 					"method": r.Method, "path": r.URL.Path,
@@ -81,13 +82,14 @@ const (
 )
 
 // requireRole 是 RBAC 门：角色不足返回 403 FORBIDDEN（07 §2.3）。
-// 拒绝会写一条 result=rejected 审计（review #6：中间件拦截进不到 handler，也必须留痕）。
+// 拒绝会写一条 result=rejected 审计（review #6：中间件拦截进不到 handler，也必须留痕；
+// #40-6：异步有界投递，响应不等 DB）。
 func (s *Server) requireRole(min string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			role := Role(r.Context())
 			if !auth.AtLeast(role, min) {
-				s.auditRejected(r.Context(), Actor(r.Context()), role,
+				s.auditRejectedAsync(Actor(r.Context()), role,
 					actionRBACRejected, objectHTTPRequest, r.URL.Path,
 					map[string]any{
 						"result": "rejected", "code": domain.CodeForbidden,
@@ -106,11 +108,10 @@ func (s *Server) requireRole(min string) func(http.Handler) http.Handler {
 func (s *Server) failAuth(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, auth.ErrUnauthenticated) {
 		// 401 也留痕（actor=anonymous）：合规要能查"谁被拒了"。
-		s.auditRejected(r.Context(), "anonymous", "anonymous", actionAuthRejected, objectHTTPRequest, r.URL.Path,
-			map[string]any{
-				"result": "rejected", "code": domain.CodeUnauthenticated,
-				"method": r.Method, "path": r.URL.Path, "reason": "unauthenticated",
-			})
+		// #40-6：按 (remote IP, 1min) 聚合 + 异步投递，任何人刷坏 token 都不会线性放大审计表。
+		s.auditAuthRejectedAsync(r, map[string]any{
+			"method": r.Method, "path": r.URL.Path,
+		})
 		fail(w, r, http.StatusUnauthorized, domain.CodeUnauthenticated, err.Error(), nil, false)
 		return
 	}

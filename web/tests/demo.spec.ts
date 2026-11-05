@@ -21,6 +21,7 @@ const STEPS = [
   '02-submit',
   '03-runs',
   '04-run-detail',
+  '04b-run-detail-exec',
   '05-report',
   '06-clusters',
   '07-admin-audit',
@@ -70,14 +71,18 @@ test('演示：提交服务形态 Run → 详情 → 报告 → 集群 → 管�
   await expect(page.getByText(runName).first()).toBeVisible({ timeout: 20_000 })
   await shot('03-runs')
 
-  /* 4) Run 详情：等终态（终态才出现「查看报告」）→ 展示 Task / Attempt / Endpoint / Deploy 区块 */
+  /* 4) Run 详情：等终态 → 默认就是「结果」视图（结论/counts/失败项/产物/报告） */
   await page.locator('tbody tr', { hasText: runName }).first().getByRole('link').first().click()
   await expect(page).toHaveURL(new RegExp(runUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-  await expect(page.getByText('Task 列表')).toBeVisible()
-  await expect(page.locator('[data-testid="open-report"]')).toBeVisible({ timeout: 90_000 })
-  // 点开第一个 Task，让 Attempt / 日志区块一起进画面
-  await page.locator('tbody tr', { hasText: 'accuracy-dataset-a' }).first().click()
+  await expect(page.getByTestId('run-result-verdict')).toBeVisible({ timeout: 90_000 })
+  await expect(page.locator('[data-testid="open-report"]')).toBeVisible()
   await shot('04-run-detail')
+
+  /* 4b) 执行细节：链路 / Deploy / Task / Attempt / 日志（折叠不是隐藏） */
+  await page.getByRole('tab', { name: '执行细节' }).click()
+  await expect(page.getByText('Task 列表')).toBeVisible()
+  await page.locator('tbody tr', { hasText: 'accuracy-dataset-a' }).first().click()
+  await shot('04b-run-detail-exec')
 
   /* 5) 报告页（站内点「查看报告」） */
   await page.locator('[data-testid="open-report"]').click()

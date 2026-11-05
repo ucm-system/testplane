@@ -268,7 +268,7 @@ func (r *TaskRepo) CountNonTerminal(ctx context.Context, tx pgx.Tx, runID string
 	var n int
 	err := r.s.db(tx).QueryRow(ctx, `
 		SELECT count(*) FROM tasks WHERE run_id = $1
-		   AND status NOT IN ('succeeded','failed','canceled','skipped')`, runID).Scan(&n)
+		   AND NOT (status = ANY($2))`, runID, domain.TerminalTaskStatusStrings()).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("store: count non-terminal %s: %w", runID, err)
 	}

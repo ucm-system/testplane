@@ -10,6 +10,7 @@ import { Badge, Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
 import { Field, Input, Select, Textarea } from '@/components/ui/input'
+import { YamlEditor } from '@/components/ui/yaml-editor'
 import { Segmented } from '@/components/ui/segmented'
 import { Banner, ErrorState } from '@/components/ui/states'
 import { useToast } from '@/components/ui/toast'
@@ -286,14 +287,8 @@ export function SubmitPage() {
         <CardBody className="flex flex-col gap-2">
           {mode === 'deploy' ? (
             <>
-              <Textarea
-                value={deployYaml}
-                onChange={(e) => setDeployYaml(e.target.value)}
-                rows={7}
-                spellCheck={false}
-                aria-label="deploy 段 YAML"
-                className="font-mono text-xs leading-relaxed"
-              />
+              {/* 轻量语法高亮：透明 textarea 叠在高亮 pre 上（不引入 CodeMirror/Monaco） */}
+              <YamlEditor value={deployYaml} onChange={setDeployYaml} rows={7} aria-label="deploy 段 YAML" />
               <p className={cn('text-2xs', deployParse.error ? 'text-danger-text' : 'text-success-text')}>
                 {deployParse.error ? `✗ ${deployParse.error}` : '✓ YAML 结构有效（provider + parameters）'}
               </p>

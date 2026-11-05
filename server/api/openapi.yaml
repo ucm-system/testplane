@@ -556,8 +556,10 @@ paths:
       operationId: retryTask
       summary: 重试单个 Task（新建一次 Attempt）
       description: |
-        07 §8：前置为 **Task 终态且非 `canceled`**（实现上只支持 `failed`，走 T11 `failed → queued`）；
-        Task 正在执行（`preparing` / `running`）返回 409 `CONFLICT`；Run 为 `canceled` 返回 409。
+        07 §8：前置为 **Task 终态且非 `canceled`**，状态机走 `failed | skipped → queued`
+        （T11 / T12；跳过的 Task 多是上游失败连带跳过，重跑有意义——UC-12、§C-5.8）。
+        Task 正在执行（`preparing` / `running`）返回 409 `CONFLICT`；Run 为 `canceled` 返回 409；
+        `succeeded` 的 Task 不支持重试（409）。
 
         手动重试**不受** `retry_policy.backoff_seconds` 影响：`available_at` 立即清空，
         由调度器马上拾取；`attempt_no` 返回该 Task 的下一次 Attempt 序号。写审计 `action=retry`。
@@ -897,20 +899,26 @@ paths:
         - $ref: '#/components/parameters/RunId'
         - name: pod
           in: query
-          required: true
+          required: false
           description: |
-            **必选**：要读哪个 Pod 的日志（前端 Pod 页签）。
-            多 Pod 共用一个游标会让短 Pod 永远轮不到（评审 #4），所以游标只在单个 Pod 内生效；
-            `pods[]` 仍一次返回全部 Pod，供页签渲染。
-            指定的 Pod 不在当前列表里 → `404 NOT_FOUND`（`detail.reason=pod_not_found`，附 `available_pods`）。
+            **可选**（票 #40-5）：要读哪个 Pod 的日志；不传时按 Pod 数量决定：
+
+            | Pod 数 | 行为 |
+            |---|---|
+            | 0 | `200` + `pods:[]` + `message`（排队中 / Pod 已回收），`window: "full"` |
+            | 1 | 直接服务这个 Pod（`200`，不必知道 Pod 名） |
+            | ≥2 | `409 CONFLICT`，`detail.reason=pod_ambiguous` + `available_pods[]`（**不默默取第一个**） |
+
+            给了 `pod` 但不在当前列表里 → `404 NOT_FOUND`（`detail.reason=pod_not_found` + `available_pods[]`）。
+            `pods[]` 始终返回全部 Pod，供页签渲染。
           schema:
             type: string
         - name: offset
           in: query
           required: false
           description: |
-            **该 Pod** 日志流的行偏移（默认 0）。与 `tail_lines` 互斥：
-            同时给出 → `400 VALIDATION_ERROR`（tail_lines 是"窗口末尾"语义，无法稳定翻页）。
+            **该 Pod 全文窗口**里的行偏移（默认 0）。只在 `window: "full"` 时有效；
+            与 `tail_lines` 同时给出 → `400 VALIDATION_ERROR`（两个窗口的行号基准不同，混用必然重复/漏行）。
           schema:
             type: integer
             minimum: 0
@@ -928,8 +936,12 @@ paths:
           in: query
           required: false
           description: |
-            只取该 Pod 末尾 N 行（默认 0 = 不限，上限 5000）。
-            与 `offset` 互斥（同时给出 → 400）。
+            只取该 Pod **末尾 N 行**（默认 0 = 不限，上限 5000）。
+
+            > **tail 不可续页**（票 #40-4）：`tail_lines>0` 时响应 `window: "tail"`，
+            > 一次返回整个末尾窗口，`truncated=false`、`next_offset=0`。想翻完整个日志就改用
+            > 全文窗口（不带 `tail_lines`，从 `offset=0` 读）。
+            > 与 `offset` 同时给出 → `400`。
           schema:
             type: integer
             minimum: 0
@@ -951,6 +963,17 @@ paths:
           $ref: '#/components/responses/NotFound'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '409':
+          description: |
+            省略 `pod` 但该 Deploy 有多个 Pod（`detail.reason=pod_ambiguous`，
+            并给出 `available_pods[]`）。**端点不会替你挑一个**。
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '502':
           description: |
             执行集群不可用，或缺少 `pods/log` 权限（`EXECUTOR_UNAVAILABLE`）。
@@ -1507,6 +1530,59 @@ paths:
                 $ref: '#/components/schemas/ArtifactList'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/runs/{run_id}/bundle:
+    get:
+      operationId: getRunBundle
+      summary: 下载 Run 打包（report/events/artifacts/logs 一次拿全）
+      description: |
+        一次拿全排错所需的全部材料（裁决 D-56、issue #41）：返回 `application/zip`，**流式**打包
+        （不在内存里攒整包）。固定布局：
+
+        | 包内路径 | 内容 |
+        |---|---|
+        | `MANIFEST.json` | 包内清单：`files[]`（path/size_bytes/truncated/sha256）、`missing[]`（path/reason）、`counts`、`state`、`terminal` |
+        | `report.json` / `report.md` / `metadata.json` | Run 报告产物（未生成 → 进 `missing`，**不静默省略**） |
+        | `events.jsonl` | 全量 `state_events`，按 `seq` 升序（库是权威；**敏感键已打码**） |
+        | `artifacts/index.json` | 产物索引（与 `GET /runs/{id}/artifacts` 同源） |
+        | `artifacts/<path>` | 逐条产物；单条超过 `TESTPLANE_RESULT_MAX_BYTES` 时截断并在 MANIFEST 标 `truncated` |
+        | `logs/tasks/<task_id>/attempts/<n>.log` | Task/Attempt 日志（该 Attempt 的 `*.log` 拼接） |
+        | `logs/deploy/<pod>.log` | Deploy 侧 Pod 日志（只取当前实时窗口可得部分） |
+
+        `MANIFEST.json` 永远是第一个条目，也是唯一可信的"缺了什么"来源：文件缺失、K8s 取不到
+        日志、产物索引有行但文件不在，都会出现在 `missing[]` 里并带 `reason`。
+
+        Run **非终态**仍返回 200（便于看"现在到哪了"），`MANIFEST.state` 是当前状态、
+        `terminal=false`，此时 `report.*` 通常缺失。Run 不存在 → 404。
+
+        **Secret 值不会出现在包内**：事件 payload 里键名命中
+        `secret|token|password|credential|api_key|authorization` 的值被替换成 `***`。
+      tags: [runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: zip 包（`MANIFEST.json` 在前）
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Content-Disposition:
+              description: '`attachment; filename="<run_id>-bundle.zip"`'
+              schema:
+                type: string
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
         '401':
           $ref: '#/components/responses/Unauthenticated'
         '403':
@@ -2907,6 +2983,15 @@ components:
         current_attempt:
           type: integer
           description: 最新 Attempt 序号；历史 Attempt 不覆盖
+        reused_from_task_id:
+          description: |
+            本 Task 复用自哪个旧 Task（retry 的跨 Run 续跑：`POST /runs/{id}/retry` 会把原 Run 里
+            已成功且产物可校验的 Task 复制成新 Run 的 `succeeded` Task，并指向旧 Task）。
+            非复用 Task 为 `null`（03 §4.2、07 §4.2）。
+          anyOf:
+            - type: string
+            - type: 'null'
+          example: t-0001
         available_at:
           $ref: '#/components/schemas/NullDateTime'
         cancel_requested:
@@ -3309,7 +3394,7 @@ components:
       description: |
         `GET /runs/{run_id}/deploy/logs` 的响应（`web-and-delivery.md §53`）。
         排队期没有 Pod 时 `pods`/`entries` 为空数组、`message` 说明原因；不是 404。
-      required: [run_id, pods, entries, gaps, truncated, next_offset]
+      required: [run_id, pods, entries, gaps, window, truncated, next_offset]
       properties:
         run_id:
           type: string
@@ -3330,9 +3415,17 @@ components:
             前端据此在时间轴上画"这里断过"。
           items:
             $ref: '#/components/schemas/DeployLogGap'
+        window:
+          type: string
+          enum: [full, tail]
+          description: |
+            本次 `entries` 用的窗口，决定 `offset`/`next_offset` 的行号基准：
+            `full` = 全文窗口（可续页）；`tail` = `tail_lines` 末尾窗口（**一次性，不可续页**，
+            此时 `truncated=false`、`next_offset=0`）。两种窗口的 offset 不能互相喂。
         truncated:
           type: boolean
-          description: 是否还有更多日志（配合 `next_offset` 续读）
+          description: |
+            是否还有更多日志（配合 `next_offset` 续读）。`window: "tail"` 时恒为 `false`。
         next_offset:
           type: integer
           description: 下一次请求的 `offset`；`0` 表示没有更多

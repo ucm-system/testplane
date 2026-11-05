@@ -180,6 +180,8 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/runs/{id}/deploy/logs", s.handleRunDeployLogs)
 		r.Get("/runs/{id}/retry-plan", s.handleRetryPlan)
 		r.Get("/runs/{id}/artifacts", s.handleRunArtifacts)
+		// 打包下载（issue #41 / D-56）：一次拿全 report/events/artifacts/logs。
+		r.Get("/runs/{id}/bundle", s.handleRunBundle)
 		r.Get("/runs/{id}/files", s.handleRunFile)
 
 		// Task / Attempt

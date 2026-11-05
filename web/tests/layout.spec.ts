@@ -88,8 +88,9 @@ test('Deploy 日志面板：Pod 分页签 + gap 显式标记', async ({ page }) 
   await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
 
   await page.setViewportSize({ width: 1440, height: 1000 })
-  // 这条 seeded Run 有 Deploy 阶段与多个 Pod
+  // 这条 seeded Run 有 Deploy 阶段与多个 Pod；终态默认是「结果」视图，先切到「执行细节」
   await page.goto('/runs/r-20261105-0003')
+  await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByText('Deploy 日志')).toBeVisible({ timeout: 20_000 })
 
   const panel = page.locator('section', { hasText: 'Deploy 日志' }).first()
@@ -123,6 +124,7 @@ test('Deploy 日志：pod 页签带参 + tail/offset 二选一 + next_offset 续
 
   // mock 模式不发 HTTP 请求，所以给 `mockApi.getDeployLogs` 装个探针，记录每次调用的入参
   await page.goto('/runs/r-20261105-0006')
+  await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByText('Deploy 日志')).toBeVisible({ timeout: 20_000 })
   await page.evaluate(async () => {
     const mod = (await import('/src/api/mock.ts')) as unknown as {
@@ -202,4 +204,115 @@ test('Deploy 日志：pod 页签带参 + tail/offset 二选一 + next_offset 续
   expect(errors.unknownPod).toBe('NOT_FOUND')
 
   await page.screenshot({ path: join(OUT_DIR, '05-deploy-logs-multi-pod.png'), fullPage: true })
+})
+
+/**
+ * 页头分隔线**只能**有两条，且必须落在网格列线上（用户："左侧分隔符与侧边栏没对齐，特别扎眼"）。
+ * 约束：
+ *  - 页头里所有竖直分隔线（border-left/right 或 1px 宽的 div）x ∈ {240, vw−288}，不允许第三条；
+ *  - 品牌块左内边距与左栏导航项文字左边缘对齐（都是 24px 的节奏）。
+ */
+test('页头分隔线只有 240 与 vw−288 两条，且品牌与导航左边缘对齐', async ({ page }) => {
+  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+
+  for (const width of [1280, 1440]) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/runs')
+    await expect(page.getByText('全部 Run')).toBeVisible()
+    await page.waitForTimeout(300)
+
+    const m = await page.evaluate(() => {
+      const header = document.querySelector('header')!
+      const lines: number[] = []
+      // 只看"整条竖线"：高度接近页头（>=40px）的边框，或 1px 宽且够高的 div。
+      // 徽标/头像那种小圆角边框不算分隔线。
+      for (const el of Array.from(header.querySelectorAll('*'))) {
+        const cs = getComputedStyle(el)
+        const r = el.getBoundingClientRect()
+        const tall = r.height >= 40
+        if (!tall) continue
+        if (parseFloat(cs.borderLeftWidth) > 0) lines.push(Math.round(r.left))
+        if (parseFloat(cs.borderRightWidth) > 0) lines.push(Math.round(r.right))
+        if (Math.round(r.width) === 1) lines.push(Math.round(r.left))
+      }
+      const wordmark = header.querySelector('svg[role="img"]')!.getBoundingClientRect()
+      const navItemText = (() => {
+        const item = document.querySelector('aside[aria-label="主导航"] a')
+        if (!item) return null
+        const cs = getComputedStyle(item)
+        const r = item.getBoundingClientRect()
+        return Math.round(r.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft))
+      })()
+      return { vw: window.innerWidth, lines: [...new Set(lines)].sort((a, b) => a - b), wordmarkLeft: Math.round(wordmark.left), navItemText }
+    })
+
+    const want = [240, m.vw - 288].sort((a, b) => a - b)
+    expect(m.lines, `页头竖直分隔线应只有 ${JSON.stringify(want)}`).toEqual(want)
+    // 品牌左边缘与导航项文字左边缘对齐（同一 24px 节奏，允许 2px 渲染误差）
+    expect(Math.abs(m.wordmarkLeft - (m.navItemText ?? 0))).toBeLessThanOrEqual(2)
+    expect(m.wordmarkLeft).toBe(24)
+  }
+
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.goto('/runs')
+  await expect(page.getByText('全部 Run')).toBeVisible()
+  await page.waitForTimeout(400)
+  await page.screenshot({ path: join(OUT_DIR, '06-header-divider-1280.png'), fullPage: false })
+})
+
+/**
+ * 提交页两件事（用户截图级反馈）：
+ *  - 「服务来源」是一张卡两种形态：部署 / 不部署，同一张卡里换字段（URL / 模型名 / 模型路径）；
+ *  - Deploy YAML 有**语法高亮**（透明 textarea + 高亮 pre 叠层），可编辑、Tab 缩进 2 空格。
+ */
+test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 Tab 缩进', async ({ page }) => {
+  mkdirSync(OUT_DIR, { recursive: true })
+  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
+  await page.setViewportSize({ width: 1440, height: 1100 })
+  await page.goto('/submit')
+
+  // 服务来源卡片：标题 + 一句"一张卡两形态"的说明
+  await expect(page.getByText('服务来源')).toBeVisible()
+  await expect(page.getByText('一张卡两形态', { exact: false })).toBeVisible()
+
+  // 部署形态：YAML 编辑器在，且底层是 textarea + 高亮 pre 两层
+  const editor = page.getByLabel('deploy 段 YAML')
+  await expect(editor).toBeVisible()
+  const layering = await page.evaluate(() => {
+    const textarea = document.querySelector('textarea[aria-label="deploy 段 YAML"]') as HTMLTextAreaElement | null
+    if (!textarea) return null
+    const pre = textarea.parentElement?.querySelector('pre') ?? null
+    const spans = pre ? Array.from(pre.querySelectorAll('span')) : []
+    const colors = new Set(spans.map((span) => getComputedStyle(span).color))
+    return {
+      textareaTransparent: getComputedStyle(textarea).color.includes('rgba(0, 0, 0, 0)'),
+      hasPre: Boolean(pre),
+      tokenColors: colors.size,
+      hasLineNumbers: Boolean(textarea.parentElement?.parentElement?.querySelector('[aria-hidden]')),
+    }
+  })
+  expect(layering?.hasPre, 'YAML 应该有高亮层 <pre>').toBe(true)
+  expect(layering?.textareaTransparent, 'textarea 文字应透明（否则两层文字重影）').toBe(true)
+  expect(layering?.tokenColors ?? 0, '高亮至少要有两种颜色（key / 字符串）').toBeGreaterThanOrEqual(2)
+
+  // 可编辑 + Tab 缩进 2 空格
+  await editor.click()
+  await page.keyboard.press('Control+End')
+  await page.keyboard.press('Enter')
+  await page.keyboard.press('Tab')
+  await page.keyboard.type('note: demo')
+  await page.keyboard.press('Enter')
+  await page.keyboard.type('# 注释演示')
+  const value = await editor.inputValue()
+  expect(value, 'Tab 应插入 2 个空格').toContain('\n  note: demo')
+  expect(value).toContain('# 注释演示')
+
+  await page.waitForTimeout(400)
+  await page.screenshot({ path: join(OUT_DIR, '09-submit-yaml-highlight.png'), fullPage: true })
+
+  // 切到「不部署」：同一张卡里换成服务字段
+  await page.getByRole('group', { name: '服务来源' }).getByRole('button', { name: '不部署' }).click()
+  await expect(page.getByLabel('服务 base URL')).toBeVisible()
+  await expect(page.getByText('模型路径（可选）')).toBeVisible()
+  await expect(page.getByLabel('deploy 段 YAML')).toHaveCount(0)
 })

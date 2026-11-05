@@ -155,8 +155,8 @@ func (s *Store) applyRun(ctx context.Context, tx pgx.Tx, tr domain.Transition, a
 		to == domain.RunCompletedWithErrors || to == domain.RunServiceUnavailable) {
 		var pending int
 		if err := tx.QueryRow(ctx,
-			`SELECT count(*) FROM tasks WHERE run_id = $1 AND status NOT IN
-			   ('succeeded','failed','canceled','skipped')`, tr.ID).Scan(&pending); err != nil {
+			`SELECT count(*) FROM tasks WHERE run_id = $1 AND NOT (status = ANY($2))`,
+			tr.ID, domain.TerminalTaskStatusStrings()).Scan(&pending); err != nil {
 			return domain.Applied{}, fmt.Errorf("store: kernel run %s: guard tasks: %w", tr.ID, err)
 		}
 		if pending > 0 {
@@ -270,11 +270,12 @@ func (s *Store) applyTask(ctx context.Context, tx pgx.Tx, tr domain.Transition, 
 		   SET status          = $2,
 		       status_reason   = NULLIF($3, ''),
 		       updated_at      = $4,
-		       waiting_reason  = CASE WHEN $2 IN ('queued','succeeded','failed','canceled','skipped')
+		       waiting_reason  = CASE WHEN $2 = 'queued' OR $2 = ANY($7)
 		                              THEN NULL ELSE waiting_reason END,
 		       error           = COALESCE($5, error)
 		 WHERE id = $1 AND status = ANY($6)`,
-		tr.ID, string(to), tr.Reason, at, nullableBytes(errJSON), from)
+		tr.ID, string(to), tr.Reason, at, nullableBytes(errJSON), from,
+		domain.TerminalTaskStatusStrings())
 	if err != nil {
 		return domain.Applied{}, fmt.Errorf("store: kernel task %s: cas: %w", tr.ID, err)
 	}

@@ -1,6 +1,7 @@
 import type {
   AdminCluster,
   AdminSecret,
+  ArtifactList,
   Attempt,
   AuditEntry,
   AuditQuery,
@@ -102,6 +103,9 @@ export interface Api {
   /* 提交 */
   submitRun(manifest: RunManifest): Promise<SubmitResult>
   dryRun(manifest: RunManifest): Promise<DryRunResult>
+
+  /** `GET /runs/{id}/artifacts`：Run 级产物清单（`path` 可直接拼 `/files?path=` 下载） */
+  listRunArtifacts(runId: string): Promise<ArtifactList>
 
   /* 报告（契约内：`/runs/{id}/report` 与 `/report.md`） */
   getReport(runId: string): Promise<Report>

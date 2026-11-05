@@ -48,9 +48,9 @@ func (s *Store) ListStaleLeases(ctx context.Context, limit int) ([]string, error
 		  FROM endpoint_leases l
 		  LEFT JOIN tasks t ON t.id = l.task_id
 		 WHERE t.id IS NULL
-		    OR t.status IN ('succeeded','failed','canceled','skipped')
+		    OR t.status = ANY($2)
 		 ORDER BY l.acquired_at
-		 LIMIT $1`, limit)
+		 LIMIT $1`, limit, domain.TerminalTaskStatusStrings())
 	if err != nil {
 		return nil, fmt.Errorf("store: list stale leases: %w", err)
 	}

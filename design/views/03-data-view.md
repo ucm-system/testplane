@@ -365,7 +365,9 @@ CREATE INDEX audit_object_idx ON audit_log (object_type, object_id);
 | `csrf_rejected` | 403：Cookie 写操作缺/错 `X-CSRF-Token` | `http_request` |
 | `auth_rejected` | 401：无/坏凭据（`actor=anonymous`） | `http_request` |
 
-> **审计口径（PR #33 评审第 6 条）**：所有写操作（`submit`/`cancel`/`retry` + admin 写 + `rotate` + 清理产物）与 `audit_log` 在**同一事务**提交——审计写失败 → 整体回滚 + 5xx，不允许"数据改了、审计没写"。拒绝类（403/401/CSRF）进不到 handler，在事务外用 `context.WithoutCancel` + 2s 超时补记，`detail.result=rejected` 且带 `code`/`reason`；`http_request` 的 `object_id` 记请求路径。畸形 JSON / 超大 body 不记（无法归属对象）。
+> **`cleanup_artifacts` 的两条记录**：正常写 1 条 `result=ok`（`detail.directory` 为计划删除的目录）；若磁盘目录删除失败，**再补 1 条 `result=rejected`**（带 `detail.directory` 与 `detail.error`）——同一 Run 的清理可能产生 2 条审计。
+>
+> **接入层拒绝的审计是异步有界的**：容量 1024 的队列 + 单消费者（满了丢弃并计数，**不阻塞响应**）；`401`（`auth_rejected`）按 `(来源 IP, 1min)` 聚合成一条，`object_id = 来源 IP`、`detail.suppressed_count` 记被压掉的条数、`detail.window_seconds=60`、`code = UNAUTHENTICATED`；`403`（`rbac_rejected`）与 `csrf_rejected` 仍逐条、`object_id = 请求路径`。进程级计数：`testplane_audit_rejected_{written,dropped,failed,suppressed}_total`（`/metrics`）。> **审计口径（PR #33 评审第 6 条）**：所有写操作（`submit`/`cancel`/`retry` + admin 写 + `rotate` + 清理产物）与 `audit_log` 在**同一事务**提交——审计写失败 → 整体回滚 + 5xx，不允许"数据改了、审计没写"。拒绝类（403/401/CSRF）进不到 handler，在事务外用 `context.WithoutCancel` + 2s 超时补记，`detail.result=rejected` 且带 `code`/`reason`；`http_request` 的 `object_id` 记请求路径。畸形 JSON / 超大 body 不记（无法归属对象）。
 >
 > `actor` / `role` 由服务端按当前身份记录，**不接受客户端传**；`detail` 里禁止出现任何 Secret 值（`06 §4.4` + D-55）。
 >

@@ -248,14 +248,15 @@ func (s *Store) RetryTask(ctx context.Context, taskID, actor, role string) (int,
 		if status == domain.TaskCanceled || cancelReq {
 			return retryConflict("task_canceled", "Task 已取消，不能重试")
 		}
-		if status != domain.TaskFailed {
-			return retryConflict("task_not_failed",
-				fmt.Sprintf("Task 当前状态是 %s，只有 failed 的 Task 支持重试", status))
+		// 规格：`failed | skipped → queued`（UC-12 / §C-5.8 / 07 §8；issue #40-1）。
+		if status != domain.TaskFailed && status != domain.TaskSkipped {
+			return retryConflict("task_not_retryable",
+				fmt.Sprintf("Task 当前状态是 %s，只有 failed/skipped 的 Task 支持重试", status))
 		}
 		attemptNo = current + 1
 		if _, err := s.Apply(ctx, tx, domain.Transition{
 			Entity: domain.EntityTask, ID: taskID,
-			From:    []domain.Status{domain.TaskFailed.Status()},
+			From:    []domain.Status{domain.TaskFailed.Status(), domain.TaskSkipped.Status()},
 			To:      domain.TaskQueued.Status(),
 			Command: "retry", Actor: actorOf(actor), At: at,
 		}); err != nil {

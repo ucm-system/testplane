@@ -26,9 +26,13 @@ type fakeDeployLogs struct {
 	listErr  error
 	logsErr  error
 	lastTail int64
+	// seenNamespaces 记录客户端真正读 Pod/日志用的 namespace
+	// （断言"用的是 runs.deploy.namespace 而不是配置回退"）。
+	seenNamespaces []string
 }
 
 func (f *fakeDeployLogs) ListPods(ctx context.Context, namespace string) ([]corev1.Pod, error) {
+	f.seenNamespaces = append(f.seenNamespaces, namespace)
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -36,6 +40,7 @@ func (f *fakeDeployLogs) ListPods(ctx context.Context, namespace string) ([]core
 }
 
 func (f *fakeDeployLogs) Logs(ctx context.Context, namespace, pod, container string, tailLines int64) (string, error) {
+	f.seenNamespaces = append(f.seenNamespaces, namespace)
 	if f.logsErr != nil {
 		return "", f.logsErr
 	}
@@ -384,20 +389,116 @@ func TestDeployLogs_TailLinesConflictsWithOffset(t *testing.T) {
 	}
 }
 
-// `?pod=` 必选：缺失 → 400（游标只在单 Pod 内有意义）。
-func TestDeployLogs_PodRequired(t *testing.T) {
+// `?pod=` 缺省 + **只有 1 个 Pod** → 直接服务它（票 #40-5：CLI/agent 不必先查 Pod 名）。
+func TestDeployLogs_PodOptionalSinglePod(t *testing.T) {
 	srv, st, cleanup := integrationServer(t)
 	defer cleanup()
 	runID := seedDeployRun(t, st, map[string]any{
-		"namespace": "testplane-mock", "release_name": "tp-req", "state": "ready",
+		"namespace": "testplane-mock", "release_name": "tp-one", "state": "ready",
 	})
 	srv.deployLogsKube = &fakeDeployLogs{
-		pods: []corev1.Pod{deployPod("tp-req-stack-1", true, 0, time.Now())},
-		logs: map[string]string{"tp-req-stack-1": "x\n"},
+		pods: []corev1.Pod{deployPod("tp-one-stack-1", true, 0, time.Now())},
+		logs: map[string]string{"tp-one-stack-1": "only1\nonly2\n"},
+	}
+	rec, body := getDeployLogs(t, srv, runID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200（单 Pod 不必指定 pod）: %s", rec.Code, rec.Body.String())
+	}
+	if len(body.Entries) != 1 || body.Entries[0].Pod != "tp-one-stack-1" {
+		t.Fatalf("entries = %+v, want 服务唯一那个 Pod", body.Entries)
+	}
+	if !strings.Contains(body.Entries[0].Text, "only2") {
+		t.Fatalf("text = %q", body.Entries[0].Text)
+	}
+}
+
+// `?pod=` 缺省 + **多个 Pod** → 409 CONFLICT（pod_ambiguous + available_pods），绝不默默取第一个。
+func TestDeployLogs_PodOptionalAmbiguousConflict(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	started := time.Now().Add(-5 * time.Minute).UTC().Truncate(time.Second)
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-many", "state": "ready",
+	})
+	srv.deployLogsKube = &fakeDeployLogs{
+		pods: []corev1.Pod{
+			deployPod("tp-many-stack-1", true, 0, started),
+			deployPod("tp-many-stack-2", true, 0, started),
+		},
+		logs: map[string]string{"tp-many-stack-1": "a\n", "tp-many-stack-2": "b\n"},
 	}
 	rec, _ := getDeployLogs(t, srv, runID, "")
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400（pod 必选）", rec.Code)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409（多 Pod 缺省必须要求指定）: %s", rec.Code, rec.Body.String())
+	}
+	var errBody struct {
+		Code   string         `json:"code"`
+		Detail map[string]any `json:"detail"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &errBody)
+	if errBody.Detail["reason"] != "pod_ambiguous" {
+		t.Fatalf("detail = %v, want reason=pod_ambiguous", errBody.Detail)
+	}
+	pods, _ := errBody.Detail["available_pods"].([]any)
+	if len(pods) != 2 {
+		t.Fatalf("available_pods = %v, want 两个可选 Pod", errBody.Detail["available_pods"])
+	}
+}
+
+// `?pod=` 缺省 + **0 个 Pod** → 200 + 排队/回收的 message（不是 409/404）。
+func TestDeployLogs_PodOptionalNoPods(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-zero", "state": "queued",
+	})
+	srv.deployLogsKube = &fakeDeployLogs{pods: nil}
+	rec, body := getDeployLogs(t, srv, runID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(body.Message, "排队") {
+		t.Fatalf("message = %q, want 排队说明", body.Message)
+	}
+	if body.Window != "full" {
+		t.Fatalf("window = %q, want full（排队期也是全文窗口）", body.Window)
+	}
+}
+
+// tail 窗口一次性：`truncated=false`、`next_offset=0`、`window=tail`（票 #40-4）。
+func TestDeployLogs_TailWindowIsOneShot(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	started := time.Now().Add(-5 * time.Minute).UTC().Truncate(time.Second)
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-tail2", "state": "ready",
+	})
+	// tail_lines=50 > limit=10：旧实现会返回 10 行 + next_offset>0（自相矛盾）。
+	lines := make([]string, 0, 50)
+	for i := 0; i < 50; i++ {
+		lines = append(lines, fmt.Sprintf("L%02d", i))
+	}
+	srv.deployLogsKube = &fakeDeployLogs{
+		pods: []corev1.Pod{deployPod("tp-tail2-stack-1", true, 0, started)},
+		logs: map[string]string{"tp-tail2-stack-1": strings.Join(lines, "\n") + "\n"},
+	}
+	rec, body := getDeployLogs(t, srv, runID, "?tail_lines=50&limit=10")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if body.Window != "tail" {
+		t.Fatalf("window = %q, want tail", body.Window)
+	}
+	if body.Truncated || body.NextOffset != 0 {
+		t.Fatalf("truncated=%v next_offset=%d，tail 窗口必须一次性（false/0）", body.Truncated, body.NextOffset)
+	}
+	if len(body.Entries) != 1 || body.Entries[0].LineCount != 50 {
+		t.Fatalf("entries = %+v, want 整个 tail 窗口 50 行", body.Entries)
+	}
+	// 全文窗口仍可续页，且 window=full。
+	rec, body = getDeployLogs(t, srv, runID, "?offset=0&limit=10")
+	if rec.Code != http.StatusOK || body.Window != "full" || !body.Truncated || body.NextOffset != 10 {
+		t.Fatalf("full 页 = window:%q truncated:%v next:%d", body.Window, body.Truncated, body.NextOffset)
 	}
 }
 
@@ -446,5 +547,91 @@ func TestDeployLogs_RecycledPodIsExplicit(t *testing.T) {
 	}
 	if len(body.Gaps) != 1 || !strings.Contains(body.Gaps[0].Reason, "pod recycled") {
 		t.Fatalf("gaps = %+v, want reason 说明已回收", body.Gaps)
+	}
+}
+
+// ---- runs.deploy.namespace 写入/读取（QA deploy-logs-check 的缺口）----------------
+//
+// Deploy 的 Pod 在 **Genet 的 namespace** 里；`runs.deploy.namespace` 一度"结构体有、没人写"，
+// 端点就回退到 TESTPLANE_NAMESPACE（testplane），结果 Pod 明明在 testplane-mock 里跑却读不到日志。
+
+// ② `deploy/logs` 必须用 runs.deploy.namespace（Genet 的 ns），而不是配置回退。
+func TestDeployLogs_UsesDeployNamespace(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	started := time.Now().Add(-5 * time.Minute).UTC().Truncate(time.Second)
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-ns", "state": "ready",
+	})
+	fake := &fakeDeployLogs{
+		pods: []corev1.Pod{deployPod("tp-ns-stack-1", true, 0, started)},
+		logs: map[string]string{"tp-ns-stack-1": "ns-line\n"},
+	}
+	srv.deployLogsKube = fake
+
+	rec, body := getDeployLogs(t, srv, runID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if len(fake.seenNamespaces) == 0 {
+		t.Fatal("fake client 没被调用")
+	}
+	for _, ns := range fake.seenNamespaces {
+		if ns != "testplane-mock" {
+			t.Fatalf("读取用的 namespace = %q，want testplane-mock（不能用配置回退）; 全部=%v", ns, fake.seenNamespaces)
+		}
+	}
+	if body.Message != "" {
+		t.Fatalf("message = %q，正常路径不该有回退提示", body.Message)
+	}
+}
+
+// ③ deploy 快照缺 namespace → 回退并**显式说明**（不静默）。
+func TestDeployLogs_NamespaceFallbackIsExplained(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	// 只有 release_name、没有 namespace：模拟旧数据 / 写入端漏写。
+	runID := seedDeployRun(t, st, map[string]any{
+		"release_name": "tp-nonso", "state": "ready",
+	})
+	fake := &fakeDeployLogs{pods: nil}
+	srv.deployLogsKube = fake
+
+	rec, body := getDeployLogs(t, srv, runID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.Contains(body.Message, "回退") {
+		t.Fatalf("message = %q，缺 namespace 时必须在响应里说明是回退", body.Message)
+	}
+	// 回退目标是平台 namespace（integrationServer 的 Config 默认 testplane）
+	for _, ns := range fake.seenNamespaces {
+		if ns != "testplane" {
+			t.Fatalf("回退 namespace = %q，want testplane", ns)
+		}
+	}
+}
+
+// ① `GET /runs/{id}/deploy` 里 namespace 非空，且等于 Genet 返回的 ns（写入端已验证；
+// 这里验证投影端点把它原样暴露给调用方，QA 的 deploy-logs-check 靠这条链路定位 Pod）。
+func TestRunDeployExposesNamespace(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-proj", "state": "ready",
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID+"/deploy", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Deploy map[string]any `json:"deploy"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Deploy["namespace"] != "testplane-mock" {
+		t.Fatalf("deploy.namespace = %v, want testplane-mock", body.Deploy["namespace"])
 	}
 }

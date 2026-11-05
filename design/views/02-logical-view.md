@@ -223,7 +223,7 @@ stateDiagram-v2
 | 什么时候拒绝？ | 源 Run 非终态、源 Run `canceled`、同 `retry_of` 下已有非终态子 Run（`409 CONFLICT` + `detail.reason`）、没有可复用/可重跑项（`retryable=false` + `nothing_to_retry`）。 | `07 §8` |
 | "终态"以哪份列表为准？ | **一份**：`domain` 导出的终态集合（含 `completed_with_errors`），SQL 与 Go 判定共用，不得各写一遍。 | 票 #33-3 |
 
-`POST /tasks/{id}/retry` 是**另一条路径**：只给单个 Task 追加一次 Attempt（T11 `failed → queued`），不建新 Run、不涉及复用。
+`POST /tasks/{id}/retry` 是**另一条路径**：只给单个 Task 追加一次 Attempt（T11 `failed → queued` / T12 `skipped → queued`），不建新 Run、不涉及复用。允许的状态是 **`failed` 与 `skipped`**（`skipped` 多是上游失败连带跳过，重跑它有意义）；`succeeded` / 运行中 → 409。
 
 ## 3. 状态机接口设计（Go）
 

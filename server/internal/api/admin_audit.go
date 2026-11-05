@@ -100,11 +100,19 @@ func parseAuditTime(v string) (time.Time, error) {
 	return time.Parse(time.RFC3339, v)
 }
 
+// removeAllForCleanup 是产物目录删除函数；包级变量只为测试注入 fs 失败（issue #40-7），
+// 生产行为与 os.RemoveAll 完全一致。
+var removeAllForCleanup = os.RemoveAll
+
 // handleAdminCleanupArtifacts 是 DELETE /api/v1/admin/runs/{run_id}/artifacts（200）。
 //
 // 这是保留期清理的例外通道（web-and-delivery §11）：只允许对**终态 Run** 执行，
-// 非终态 409 CONFLICT（避免删掉正在写入的目录）。删除顺序：先删磁盘目录、
-// 再删索引行——索引是可重建的派生数据（03 §3.2），目录不是。
+// 非终态 409 CONFLICT（避免删掉正在写入的目录）。
+//
+// 顺序（issue #40-7）：先在同一个事务里删 artifacts 索引行 + 写 result=ok 审计，
+// 提交后再删磁盘目录；目录删除失败时**补写一条 result=rejected 审计**
+// （带 detail.directory 与 detail.error），再返回 5xx——不会再出现"目录没删掉、
+// 审计却只有成功"的情况。索引是可重建的派生数据（03 §3.2），先删它不会丢事实。
 func (s *Server) handleAdminCleanupArtifacts(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	const action, objectType = "cleanup_artifacts", "run"
@@ -142,14 +150,23 @@ func (s *Server) handleAdminCleanupArtifacts(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// 先做 DB 事务（删索引行 + 审计），提交后再删目录：
-	// 审计失败时索引行回滚，目录也还没动——不会出现"清了磁盘却查不到记录"；
+	// 目录路径先算好（同一份写进 ok 审计与失败审计的 detail.directory）。
+	dir := ""
+	if root := strings.TrimSpace(s.cfg.StorageRoot); root != "" {
+		dir = filepath.Join(root, component)
+	}
+
+	// 先做 DB 事务（删索引行 + result=ok 审计），提交后再删目录：
+	// 审计失败时索引行回滚、目录也还没动——不会出现"清了磁盘却查不到记录"；
 	// artifacts 索引是可重建的派生数据（03 §3.2），先删它不会丢事实。
+	// 目录删除失败时补一条 rejected 审计（issue #40-7），不让 ok 成为唯一记录。
 	var (
 		entries    int64
 		freedBytes int64
 	)
-	detail := map[string]any{"deleted_entries": int64(0), "freed_bytes": int64(0)}
+	detail := map[string]any{
+		"deleted_entries": int64(0), "freed_bytes": int64(0), "directory": dir,
+	}
 	entry := s.auditEntry(r, action, objectType, runID, detail)
 	err = s.st.InAuditedTx(ctx, entry, func(tx pgx.Tx) error {
 		n, b, err := s.st.Artifacts.DeleteByRun(ctx, tx, runID)
@@ -173,16 +190,22 @@ func (s *Server) handleAdminCleanupArtifacts(w http.ResponseWriter, r *http.Requ
 	}
 
 	directoryRemoved := false
-	if root := strings.TrimSpace(s.cfg.StorageRoot); root != "" {
-		dir := filepath.Join(root, component)
+	if dir != "" {
 		if info, statErr := os.Stat(dir); statErr == nil && info.IsDir() {
-			if err := os.RemoveAll(dir); err != nil {
-				// 索引已删（可重建），目录没删掉：按 5xx 暴露，交给运维处理。
+			if err := removeAllForCleanup(dir); err != nil {
+				// 索引已删（可重建），目录没删掉：补一条 rejected 结果审计（#40-7），
+				// 再按 5xx 暴露，交给运维处理。
 				s.logger.Error("删除 Run 产物目录失败", "err", err, "run_id", run.ID,
 					"request_id", RequestID(ctx))
+				s.auditRejected(ctx, Actor(ctx), Role(ctx), action, objectType, runID, map[string]any{
+					"result": "rejected", "reason": "directory_remove_failed",
+					"code": domain.CodeCleanupFailed, "directory": dir,
+					"error": err.Error(), "deleted_entries": entries, "freed_bytes": freedBytes,
+				})
+
 				fail(w, r, http.StatusInternalServerError, domain.CodeCleanupFailed,
 					"产物索引已清理，但删除产物目录失败",
-					map[string]any{"run_id": runID, "deleted_entries": entries}, true)
+					map[string]any{"run_id": runID, "deleted_entries": entries, "directory": dir}, true)
 				return
 			}
 			directoryRemoved = true

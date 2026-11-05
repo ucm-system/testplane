@@ -80,6 +80,36 @@ var runTransitions = map[edge]TransitionSpec{
 	{RunCancelling.Status(), RunFailed.Status()}: {Command: "Fail", Event: EventRunFinished},
 }
 
+// TerminalTaskStatuses 是 Task 的**终态**集合——唯一真源（04 §2.2 / 03 §3.2）。
+//
+// 与 Run 一样：Go 侧用 `TerminalTaskStatus(st)`，SQL 侧用
+// `status = ANY($n)` / `NOT (status = ANY($n))` 并传 `TerminalTaskStatusStrings()`。
+var TerminalTaskStatuses = []TaskStatus{
+	TaskSucceeded,
+	TaskFailed,
+	TaskCanceled,
+	TaskSkipped,
+}
+
+// TerminalTaskStatus 报告 Task 状态是否终态。
+func TerminalTaskStatus(st TaskStatus) bool {
+	for _, t := range TerminalTaskStatuses {
+		if st == t {
+			return true
+		}
+	}
+	return false
+}
+
+// TerminalTaskStatusStrings 返回 Task 终态集合的字符串形态（供 SQL 的 ANY($n) 使用）。
+func TerminalTaskStatusStrings() []string {
+	out := make([]string, 0, len(TerminalTaskStatuses))
+	for _, t := range TerminalTaskStatuses {
+		out = append(out, string(t))
+	}
+	return out
+}
+
 // TerminalRunStatuses 是 Run 的**终态**集合——唯一真源。
 //
 // 用途（禁止再各写一遍）：
@@ -137,8 +167,11 @@ var taskTransitions = map[edge]TransitionSpec{
 	{TaskRunning.Status(), TaskFailed.Status()}: {Command: "Fail", Event: EventTaskStateChanged},
 	// T10 运行期取消
 	{TaskRunning.Status(), TaskCanceled.Status()}: {Command: "Cancel", Event: EventTaskStateChanged},
-	// T11 重试
+	// T11 重试（failed → queued）
 	{TaskFailed.Status(), TaskQueued.Status()}: {Command: "Retry", Event: EventTaskStateChanged},
+	// T12 重试（skipped → queued）：skipped 多是上游失败连带跳过，重跑有意义
+	// （01-use-case-view UC-12、impl/control-plane §C-5.8、issue #40-1）
+	{TaskSkipped.Status(), TaskQueued.Status()}: {Command: "Retry", Event: EventTaskStateChanged},
 }
 
 // ---- Attempt 转移表（02 §2.3）--------------------------------------------

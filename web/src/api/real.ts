@@ -9,6 +9,7 @@ import { applyIdentity, clearAuth } from './auth'
 import type {
   AdminCluster,
   AdminSecret,
+  ArtifactList,
   Attempt,
   AuditEntry,
   AuditQuery,
@@ -211,6 +212,11 @@ export const realApi: Api = {
         tail_lines: useTail ? query.tail_lines : undefined,
       })}`,
     )
+  },
+
+  /** 产物清单：与 `/files?path=` 配对使用（下载链接直接拼 API_BASE） */
+  listRunArtifacts(runId: string): Promise<ArtifactList> {
+    return request<ArtifactList>(`/runs/${encodeURIComponent(runId)}/artifacts`)
   },
 
   /* 报告（契约内） */

@@ -752,3 +752,117 @@ func TestRetryRun_ThirdGenerationKeepsArtifacts(t *testing.T) {
 		t.Fatalf("第三代复用 Task 缺 result_ref（下次 plan 会退化成 blocked/rerun）")
 	}
 }
+
+// TestRetryTask_SkippedTaskCanBeRetried 是 issue #40-1 的验收：
+// `skipped` 的 Task 也能重试（规格：failed | skipped → queued，T11/T12），
+// 改前只认 failed → 这里会 409。
+func TestRetryTask_SkippedTaskCanBeRetried(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	runID := store.NewRunID(srv.now())
+	taskID := store.NewTaskID()
+	epKey := "http://retry-skip:8000"
+	if _, _, err := st.CreateRun(ctx, store.SubmitParams{
+		Run: &store.Run{
+			ID: runID, Name: "skip-retry", Kind: "run",
+			Manifest:      []byte(`{"run":{"name":"skip-retry"}}`),
+			Resolved:      []byte(`{"kind":"run","precheck":{"injected":false}}`),
+			CleanupPolicy: "always", SubmittedBy: "dev", SubmittedAt: srv.now(),
+		},
+		Tasks: []*store.Task{{
+			ID: taskID, Seq: 0, Name: "skipped-task", TesterName: "probe", TesterVersion: "1.0.0",
+			ImageRef: "probe:1", Profile: "k8s-npu", ArgsArgv: []byte("[]"),
+			Status: string(domain.TaskSkipped), EndpointKey: &epKey,
+			TimeoutSeconds: 60, OnFailure: domain.OnFailureContinue,
+			StatusReason: strPtr(domain.SkipUpstreamAbort),
+		}},
+		Actor: "user:dev",
+	}); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if _, err := st.Pool().Exec(ctx,
+		`UPDATE runs SET status='completed_with_errors', finished_at=now() WHERE id=$1`, runID); err != nil {
+		t.Fatalf("置终态: %v", err)
+	}
+
+	rec := doPost(t, srv, "/api/v1/tasks/"+taskID+"/retry", "")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("skipped Task 重试 status = %d, 期望 202（body=%s）", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		TaskID    string `json:"task_id"`
+		AttemptNo int    `json:"attempt_no"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.TaskID != taskID || resp.AttemptNo != 1 {
+		t.Fatalf("resp = %+v, 期望 attempt_no=1", resp)
+	}
+	task, err := st.Tasks.Get(ctx, nil, taskID)
+	if err != nil {
+		t.Fatalf("读 task: %v", err)
+	}
+	if task.Status != string(domain.TaskQueued) {
+		t.Fatalf("重试后状态 = %s, 期望 queued", task.Status)
+	}
+	// succeeded 仍然不能重试（负向对照）。
+	if rec := doPost(t, srv, "/api/v1/tasks/"+taskID+"/retry", ""); rec.Code != http.StatusConflict {
+		t.Fatalf("已 queued 再重试 status = %d, 期望 409", rec.Code)
+	}
+}
+
+// TestTaskReusedFromTaskIDVisibleInAPI 是 issue #40-2 的验收：
+// `tasks[].reused_from_task_id` 必须在 API 里可见（07 §4.2）：
+// retry 出来的新 Run 里，复用 Task 非空、重跑 Task 为 null；`GET /tasks/{id}` 同样有。
+func TestTaskReusedFromTaskIDVisibleInAPI(t *testing.T) {
+	srv, st, runID, _, _, cleanup := retryTestEnv(t)
+	defer cleanup()
+
+	run2, a2, b2 := secondGeneration(t, srv, st, runID)
+	_ = run2
+
+	// Run 详情里的 tasks[]
+	rec := doGet(t, srv, "/api/v1/runs/"+run2)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET run status = %d", rec.Code)
+	}
+	var detail struct {
+		Tasks []struct {
+			ID               string  `json:"id"`
+			ReusedFromTaskID *string `json:"reused_from_task_id"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("解析 run 详情: %v", err)
+	}
+	seen := map[string]*string{}
+	for _, it := range detail.Tasks {
+		seen[it.ID] = it.ReusedFromTaskID
+	}
+	got, ok := seen[a2.ID]
+	if !ok {
+		t.Fatalf("run 详情缺跑 Task %s: %+v", a2.ID, detail.Tasks)
+	}
+	if got == nil || *got == "" {
+		t.Fatalf("复用 Task 的 reused_from_task_id 为 null（DTO 没透传）")
+	}
+	if b, ok := seen[b2.ID]; !ok || b != nil {
+		t.Fatalf("重跑 Task 的 reused_from_task_id 应为 null，实际 %v", b)
+	}
+
+	// 单 Task 详情同样带出来。
+	rec = doGet(t, srv, "/api/v1/tasks/"+a2.ID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET task status = %d", rec.Code)
+	}
+	var one struct {
+		ReusedFromTaskID *string `json:"reused_from_task_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &one); err != nil {
+		t.Fatalf("解析 task: %v", err)
+	}
+	if one.ReusedFromTaskID == nil || *one.ReusedFromTaskID == "" {
+		t.Fatalf("GET /tasks/{id} 没带 reused_from_task_id")
+	}
+}

@@ -183,6 +183,8 @@ func TestAudit_MiddlewareRejectionRecorded(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("operator 调 admin 端点应 403，得到 %d", rec.Code)
 	}
+	// issue #40-6：接入层拒绝审计是异步的，断言前先排空队列。
+	drainAuditHub(t, st)
 
 	rows, _, err := st.Audits.List(context.Background(), nil, store.AuditFilter{
 		Actor: "user:ops-bob", Limit: 20,
@@ -218,6 +220,7 @@ func TestAudit_MiddlewareRejectionRecorded(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("缺 CSRF 应 403，得到 %d", rec.Code)
 	}
+	drainAuditHub(t, st)
 	csrfRows, _, err := st.Audits.List(context.Background(), nil, store.AuditFilter{
 		Actor: "user:alice", Action: "csrf_rejected", Limit: 10,
 	})

@@ -13,6 +13,8 @@ import type { Api, LogOptions } from './contract'
 import type {
   AdminCluster,
   AdminSecret,
+  Artifact,
+  ArtifactList,
   Attempt,
   AttemptStatus,
   AuditEntry,
@@ -1627,6 +1629,55 @@ export const mockApi: Api = {
         task_count: manifest.run?.tests?.length ?? 0,
         skipped_precheck_names: [...PRE_CHECK_NAMES],
       },
+    }
+  },
+
+  /* ---------------------------------------------------------------- 产物（契约内） */
+
+  /**
+   * Run 级产物清单：把"结果页要能下载的东西"列全 ——
+   * `report.json` / `report.md` / `metadata.json` / `events.jsonl` / 每个 Attempt 的日志与 result.json /
+   * Deploy 日志。真实后端由 `artifacts` 表给出，形状一致。
+   */
+  async listRunArtifacts(runId: string): Promise<ArtifactList> {
+    await delay(110)
+    const run = findRun(runId)
+    const prefix = `${runId}/`
+    const items: Artifact[] = [
+      { path: `${prefix}report.json`, kind: 'report', size_bytes: 18_432, sha256: null, task_id: null, attempt_id: null },
+      { path: `${prefix}report.md`, kind: 'report', size_bytes: 6_208, sha256: null, task_id: null, attempt_id: null },
+      { path: `${prefix}metadata.json`, kind: 'other', size_bytes: 3_914, sha256: null, task_id: null, attempt_id: null },
+      { path: `${prefix}events.jsonl`, kind: 'raw', size_bytes: 42_106, sha256: null, task_id: null, attempt_id: null },
+      { path: `${prefix}deploy/logs/${run.deploy ? 'genet-main-0' : 'n/a'}.log`, kind: 'log', size_bytes: 12_880, sha256: null, task_id: null, attempt_id: null },
+    ]
+    for (const task of run.tasks ?? []) {
+      const detail = state.tasks[task.id]
+      if (!detail) continue
+      for (const attempt of detail.attempts ?? []) {
+        items.push({
+          path: `${prefix}tasks/${task.id}/attempts/${attempt.idx}/stdout.log`,
+          kind: 'log',
+          size_bytes: 9_216,
+          sha256: null,
+          task_id: task.id,
+          attempt_id: attempt.id,
+        })
+        items.push({
+          path: `${prefix}tasks/${task.id}/attempts/${attempt.idx}/result.json`,
+          kind: 'result',
+          size_bytes: 2_048,
+          sha256: null,
+          task_id: task.id,
+          attempt_id: attempt.id,
+        })
+      }
+    }
+    const byKind: Partial<Record<Artifact['kind'], Artifact[]>> = {}
+    for (const item of items) byKind[item.kind] = [...(byKind[item.kind] ?? []), item]
+    return {
+      items,
+      by_kind: byKind,
+      total_size_bytes: items.reduce((sum, item) => sum + item.size_bytes, 0),
     }
   },
 
