@@ -49,6 +49,12 @@ type Config struct {
 	DatabaseURL string
 	// StorageRoot 是产物根目录（TESTPLANE_STORAGE_ROOT），对应设计里的 <storage-root>。
 	StorageRoot string
+	// StoragePVC 是产物 RWX PVC 名（TESTPLANE_STORAGE_PVC，默认 testplane-storage），
+	// Job 渲染时挂到 /workspace/output（execution §3.1）。
+	StoragePVC string
+	// ClusterName 是本实例对接的集群名（TESTPLANE_CLUSTER_NAME，默认 cluster-01），
+	// 写进 attempts.executor_ref.cluster，与 clusters 表的种子对齐。
+	ClusterName string
 	// Role 是进程角色（TESTPLANE_ROLE）。
 	Role Role
 	// LogLevel 是 slog 级别（TESTPLANE_LOG_LEVEL）：debug|info|warn|error。
@@ -92,6 +98,8 @@ func Load() (*Config, error) {
 		HTTPAddr:             envFirst("TESTPLANE_HTTP_ADDR", "TESTPLANE_LISTEN", ":8080"),
 		DatabaseURL:          envFirst("TESTPLANE_DATABASE_URL", "TESTPLANE_DB_DSN", ""),
 		StorageRoot:          env("TESTPLANE_STORAGE_ROOT", "/storage-root"),
+		StoragePVC:           env("TESTPLANE_STORAGE_PVC", "testplane-storage"),
+		ClusterName:          env("TESTPLANE_CLUSTER_NAME", "cluster-01"),
 		Role:                 Role(strings.ToLower(env("TESTPLANE_ROLE", string(RoleAll)))),
 		LogLevel:             strings.ToLower(env("TESTPLANE_LOG_LEVEL", "info")),
 		TestersDir:           env("TESTPLANE_TESTERS_DIR", "./testers"),

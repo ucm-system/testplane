@@ -20,9 +20,13 @@ import (
 )
 
 func newFakeExecutor(objs ...runtime.Object) (*Executor, *fake.Clientset) {
+	return newFakeExecutorWith(20*time.Millisecond, objs...)
+}
+
+func newFakeExecutorWith(poll time.Duration, objs ...runtime.Object) (*Executor, *fake.Clientset) {
 	cs := fake.NewSimpleClientset(objs...)
 	return NewWithNamespace(cs, "testplane", Options{
-		PollInterval: 20 * time.Millisecond,
+		PollInterval: poll,
 		WatchTimeout: 2 * time.Second,
 		CancelWait:   200 * time.Millisecond,
 		ForceWait:    200 * time.Millisecond,
@@ -134,7 +138,8 @@ func TestWatchFallsBackToPollingAndNotifiesOnce(t *testing.T) {
 }
 
 func TestWatchUsesWatchEvents(t *testing.T) {
-	ex, cs := newFakeExecutor()
+	// 轮询间隔调大：本用例验证的是"watch 事件驱动"，不能被周期性核对抢先收口。
+	ex, cs := newFakeExecutorWith(30 * time.Second)
 	ctx := context.Background()
 	h, err := ex.Submit(ctx, sampleSpec())
 	if err != nil {
@@ -142,7 +147,14 @@ func TestWatchUsesWatchEvents(t *testing.T) {
 	}
 	fw := watch.NewFake()
 	defer fw.Stop()
-	cs.PrependWatchReactor("jobs", k8stesting.DefaultWatchReactor(fw, nil))
+	established := make(chan struct{}, 1)
+	cs.PrependWatchReactor("jobs", func(action k8stesting.Action) (bool, watch.Interface, error) {
+		select {
+		case established <- struct{}{}:
+		default:
+		}
+		return true, fw, nil
+	})
 
 	var calls int32
 	done := make(chan error, 1)
@@ -153,7 +165,13 @@ func TestWatchUsesWatchEvents(t *testing.T) {
 		}))
 	}()
 
-	time.Sleep(60 * time.Millisecond)
+	// 等 watch 真正建立，再推事件；不要用 sleep 猜时序。
+	select {
+	case <-established:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watch was never established")
+	}
+
 	job, err := cs.BatchV1().Jobs("testplane").Get(ctx, h.JobName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -164,6 +182,11 @@ func TestWatchUsesWatchEvents(t *testing.T) {
 	}}
 	if _, err := cs.BatchV1().Jobs("testplane").Update(ctx, job, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update job: %v", err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Watch returned before the event was delivered: %v", err)
+	case <-time.After(20 * time.Millisecond):
 	}
 	fw.Modify(job)
 

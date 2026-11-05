@@ -1,16 +1,53 @@
 /**
- * TestPlane Web 的领域类型 —— 与 design/views/07-api.md 的 REST 契约一一对应。
+ * TestPlane Web 的领域类型 —— **以 `server/api/openapi.yaml` 为准**（契约唯一来源）。
+ * 每个类型都标注了对应的 schema 名；与 `design/views/07-api.md` 冲突时以 openapi 形状为准。
  *
- * 约定（07 §1）：
- *  - 字段命名 snake_case；时间 RFC3339（UTC，`Z`）；ID 是不透明字符串。
- *  - 状态 token 一律小写（文档与 UI 展示大写，见 lib/status.ts 的中文标签表）。
- *  - 响应允许新增字段，客户端不得因未知字段失败 —— 因此所有"可选"字段一律标 `?`。
- *
- * 这里手写而非 `openapi-typescript` 生成：`api/openapi.yaml` 尚未落地（票 #5 的前提），
- * 落定后应改成生成物；生成命令见 web/README.md。
+ * 约定：
+ *  - 字段命名 snake_case；时间 RFC3339 UTC；响应允许新增字段（`additionalProperties: true`），
+ *    页面只读自己认识的字段，缺字段一律当 `undefined` 处理。
+ *  - 状态 token 全部小写（中文标签见 lib/status.ts）。
  */
 
-/* ---------------------------------------------------------------- 状态枚举 */
+/* ================================================================ 基础 */
+
+/** RFC3339 时间串（UTC）。 */
+export type Timestamp = string
+
+/** `Error` schema：错误信封（07 §3）。`trace_id` 与响应头 `X-Request-Id` 同源。 */
+export interface ErrorBody {
+  code: string
+  message: string
+  detail?: Record<string, unknown>
+  retryable: boolean
+  trace_id?: string
+}
+
+/** 历史别名：页面与 hook 里统一用它表示"错误信封"。 */
+export type ApiErrorBody = ErrorBody
+
+/** `Failure` schema：Run / Task / Attempt 同构的失败结构（没有 trace_id，retryable 是实例级的）。 */
+export interface Failure {
+  code: string
+  message: string
+  detail?: Record<string, unknown>
+  retryable: boolean
+}
+
+/** `ValidationIssue` schema：`detail.issues[]` 的一项。 */
+export interface ValidationIssue {
+  path: string
+  code: string
+  message: string
+}
+
+/** 统一分页信封（`RunList` / `TaskList` / `AttemptList` / `TesterList` / `EventList`）。 */
+export interface Page<T> {
+  items: T[]
+  next_cursor: string | null
+  has_more: boolean
+}
+
+/* ================================================================ 枚举 */
 
 export type RunKind = 'run' | 'task'
 
@@ -34,22 +71,13 @@ export type TaskStatus =
   | 'running'
   | 'succeeded'
   | 'failed'
+  | 'canceled'
   | 'skipped'
-  | 'canceled'
 
-export type AttemptStatus = 'preparing' | 'running' | 'succeeded' | 'failed' | 'canceled'
+export type AttemptStatus = 'pending' | 'preparing' | 'running' | 'succeeded' | 'failed' | 'canceled'
 
-/** Deploy 子状态（design/views/02 §2.5）。 */
-export type DeployState =
-  | 'queued'
-  | 'accepted'
-  | 'deploying'
-  | 'ready'
-  | 'blocked'
-  | 'failed'
-  | 'canceled'
+export type DeployState = 'queued' | 'accepted' | 'deploying' | 'ready' | 'blocked' | 'failed' | 'canceled'
 
-/** 排队原因（design/impl/web-and-delivery.md §4.2）。 */
 export type WaitingReason =
   | 'precheck_gate'
   | 'slot_waiting'
@@ -58,215 +86,358 @@ export type WaitingReason =
   | 'insufficient_resources'
   | 'gang_pending'
 
+export type SkippedReason = 'upstream_abort' | 'deploy_failed' | 'canceled' | string
+
 export type CleanupPolicy = 'always' | 'on_failure' | 'never'
 
-export type FailurePolicy = 'continue' | 'abort_run'
+export type TesterRole = 'pre_check' | 'test'
 
-/* ---------------------------------------------------------------- 错误模型 */
+export type OnFailure = 'continue' | 'abort_run'
 
-/**
- * `design/views/07-api.md` §3 的错误体。注意两种线上形态都要吃得下：
- *  - 扁平：`{code, message, detail, retryable, trace_id}`
- *  - 包裹：`{error: {code, message, detail, retryable}}`
- * 归一化在 api/client.ts 的 `normalizeErrorBody` 里做，页面只认这一个类型。
- */
-export interface ApiErrorBody {
-  code: string
-  message: string
-  detail?: unknown
-  retryable: boolean
-  trace_id?: string
-}
+/** `Endpoint.source`：端点从哪来。 */
+export type EndpointSource = 'genet' | 'service' | string
 
-/** 校验失败时 `detail.issues[]` 的一条（07 §3）。 */
-export interface ValidationIssue {
-  path: string
-  code: string
-  message: string
-}
+/* ================================================================ 端点 / 部署 */
 
-/* ---------------------------------------------------------------- 通用 */
-
-/** 游标分页响应（07 §6）。 */
-export interface Page<T> {
-  items: T[]
-  next_cursor: string | null
-  has_more: boolean
-}
-
-/**
- * 当前身份（`GET /api/v1/auth/me`）。
- * MVP 是 dev 模式：`Authorization: Bearer <subject>`，不带时服务端按 `dev` 处理。
- */
-export interface Identity {
-  user: string
-  /** viewer / operator / admin；服务端判定，前端不推断（07 §2.2） */
-  role?: string
-  groups?: string[]
-  csrf_token?: string
-}
-
-/** 部署得到的服务端点。 */
-export interface EndpointRef {
-  id?: string
+/** `Endpoint` schema：`runs.endpoint`，也是三个公共参数（url / model_name / model_path）的来源。 */
+export interface Endpoint {
   url: string
+  /** 互斥键 `scheme://host:port`（不含路径） */
+  key: string
+  source: EndpointSource
   model_name?: string | null
   model_path?: string | null
-  run_id?: string | null
-  status?: string | null
-  created_at?: string | null
-  /** 该 Endpoint 背后的 Pod 数（有 Deploy 时才有意义） */
-  pod_count?: number | null
+  protocol?: string | null
+  deploy_id?: string | null
 }
 
-/* ---------------------------------------------------------------- Run */
+/** `Deploy` schema：`runs.deploy`，Deploy 阶段快照（不含 Pod 拓扑）。 */
+export interface Deploy {
+  provider: string
+  state: DeployState
+  deployment_id?: string | null
+  queue_position?: number | null
+  /** 排队 / 阻塞原因（给人看） */
+  queue_reason?: string | null
+  queued_at?: Timestamp | null
+  parameters_sha?: string | null
+}
 
+/** `DeployPod` schema：`deploy/pods.json` 的一项。 */
+export interface DeployPod {
+  name: string
+  role?: string | null
+  node?: string | null
+  namespace?: string | null
+  /** K8s Pod phase 原值 */
+  phase?: string | null
+  ready?: boolean
+  restarts?: number
+  logs?: LogSegment[]
+}
+
+/** `LogSegment` schema：一份 Deploy 日志文件的覆盖区间（前端目前只展示元信息，不下载）。 */
+export interface LogSegment {
+  file: string
+  start?: Timestamp | null
+  end?: Timestamp | null
+  restarts?: number
+  truncated?: boolean
+}
+
+/** `DeploySnapshot` schema：`GET /runs/{run_id}/deploy` 的应答。 */
+export interface DeploySnapshot {
+  run_id: string
+  /** 没有 Deploy（service 模式 / 独立 Task）时为 null */
+  deploy: Deploy | null
+  /** 实际提交给 Genet 的参数快照（原文，平台不解析拓扑） */
+  manifest?: Record<string, unknown> | null
+  pods: DeployPod[]
+  deploy_timeout_seconds?: number
+}
+
+/* ================================================================ Run */
+
+/** `Run.task_counts`：`failed` 含 canceled、`pending` 含 queued（契约只必填 total/succeeded/failed）。 */
 export interface TaskCounts {
   total: number
   succeeded: number
   failed: number
-  skipped?: number
-  running?: number
   pending?: number
+  running?: number
+  skipped?: number
 }
 
-export interface RunSummary {
+/** `Run` schema：列表项不带 `tasks`，详情（`GET /runs/{run_id}`）带 Task 摘要。 */
+export interface Run {
   id: string
   name: string
   kind: RunKind
   status: RunStatus
+  cleanup_policy: CleanupPolicy
   submitted_by: string
-  submitted_at: string
-  finished_at?: string | null
-  endpoint?: EndpointRef | null
-  /** 列表页的 Task 进度（4 / 4）；后端未给时前端从 `tasks` 兜底算 */
-  task_counts?: TaskCounts | null
-  duration_seconds?: number | null
-  error?: ApiErrorBody | null
+  submitted_at: Timestamp
+  started_at?: Timestamp | null
+  finished_at?: Timestamp | null
+  endpoint?: Endpoint | null
+  deploy?: Deploy | null
+  error?: Failure | null
+  task_counts?: TaskCounts
+  revision?: number
+  /** 仅详情返回（TaskSummary） */
+  tasks?: TaskSummary[]
 }
 
-export interface RunDetail extends RunSummary {
-  cleanup_policy?: CleanupPolicy
-  deploy?: DeploySnapshot | null
-  tasks: TaskSummary[]
-  env?: Record<string, string>
-  secrets?: Record<string, string> | string[]
-  submitter_role?: string | null
-  retry_of?: string | null
-}
+/** 列表项的别名（同一个 `Run`，只是不带 tasks）。 */
+export type RunSummary = Run
 
-/* ---------------------------------------------------------------- Task / Attempt */
+/* ================================================================ Task / Attempt */
 
+/** `TaskSummary` schema：Run 详情里的 Task 摘要 —— 只有这几个字段（没有 tester/seq/耗时）。 */
 export interface TaskSummary {
   id: string
-  run_id?: string
-  /** tests[] 里的顺序，Pre-Check 是 0 或 1（platform-injected） */
-  seq: number
   name: string
   status: TaskStatus
-  tester: string
-  version?: string | null
-  exclusive?: boolean
-  on_failure?: FailurePolicy
   waiting_reason?: WaitingReason | null
-  /** 已产生的 Attempt 数（0 表示还没开始） */
+  /** 最新 Attempt 序号（`current_attempt`）；0 = 还没跑过 */
   attempts: number
-  /** 当前 Attempt 序号（从 1 开始） */
-  attempt?: number | null
-  started_at?: string | null
-  finished_at?: string | null
-  duration_seconds?: number | null
-  error?: ApiErrorBody | null
-  /** 参数原文（只读快照，平台只做词法切分） */
-  args?: string | null
-  image_ref?: string | null
-  /** 重试时复用的上游 Task（P1 失败续跑） */
-  reused_from_task_id?: string | null
+  error?: Failure | null
 }
 
+/** `SecretEnv` schema：只存引用名，永不返回值。 */
+export interface SecretEnv {
+  name: string
+  source?: string | null
+}
+
+/** `RetryPolicy` schema。 */
+export interface RetryPolicy {
+  retry_on?: string[]
+  max_attempts?: number
+  backoff_seconds?: number
+}
+
+/** `Task` schema：Task 详情（`GET /tasks/{id}` / `GET /tasks`）。 */
+export interface Task {
+  id: string
+  run_id: string
+  /** `tests[]` 里的顺序；Pre-Check 为 0 */
+  seq: number
+  name: string
+  tester_name: string
+  tester_version: string
+  image_ref: string
+  profile?: string
+  /** 提交时的参数原文 */
+  args_raw: string
+  args_argv?: string[]
+  /** 平台注入的公共参数 argv */
+  injected_argv?: string[]
+  env?: Record<string, string>
+  secret_env?: SecretEnv[]
+  on_failure: OnFailure
+  timeout_seconds?: number
+  retry_policy?: RetryPolicy
+  status: TaskStatus
+  /** 仅 skipped 时有值 */
+  status_reason?: SkippedReason | null
+  waiting_reason?: WaitingReason | null
+  /** 端点互斥键；queued 前必须非空 */
+  endpoint_key?: string | null
+  endpoint_exclusive?: boolean
+  current_attempt: number
+  available_at?: Timestamp | null
+  cancel_requested?: boolean
+  result_ref?: string | null
+  error?: Failure | null
+  created_at: Timestamp
+  updated_at: Timestamp
+}
+
+/** `TaskDetail` schema：Task + Attempt 列表（`GET /tasks/{id}`）。 */
+export interface TaskDetail extends Task {
+  attempts: Attempt[]
+}
+
+/** `ExecutorRef` schema。 */
+export interface ExecutorRef {
+  cluster: string
+  namespace: string
+  job: string
+}
+
+/** `Attempt` schema：Attempt 投影。 */
 export interface Attempt {
+  id: string
+  task_id: string
+  /** 从 1 连续；(task_id, idx) 唯一 */
   idx: number
   status: AttemptStatus
+  phase?: string | null
   exit_code?: number | null
-  started_at?: string | null
-  finished_at?: string | null
-  duration_seconds?: number | null
-  error?: ApiErrorBody | null
   image_digest?: string | null
-  note?: string | null
+  started_at?: Timestamp | null
+  finished_at?: Timestamp | null
+  log_ref?: string | null
+  artifact_ref?: string | null
+  result_ref?: string | null
+  error?: Failure | null
+  executor_ref?: ExecutorRef | null
 }
 
-/* ---------------------------------------------------------------- Deploy */
+/* ================================================================ Tester */
 
-export interface DeployPod {
-  name: string
-  /** all-in-one / router / prefill / decode … 由 Genet 决定，前端不枚举 */
-  role: string
-  status: string
-  node?: string | null
-  restarts?: number | null
-  log_from?: string | null
-  log_to?: string | null
-}
-
-export interface DeploySnapshot {
-  state: DeployState
-  provider?: string | null
-  queue_position?: number | null
-  queued_at?: string | null
-  started_at?: string | null
-  ready_at?: string | null
-  duration_seconds?: number | null
-  endpoint?: EndpointRef | null
-  pods?: DeployPod[]
-  /** Manifest 里 deploy 段的原文（YAML 文本） */
-  manifest_yaml?: string | null
-  /** 后端给的人话原因（如「Genet 队列已满」「镜像拉取失败」） */
-  reason?: string | null
-  error?: ApiErrorBody | null
-}
-
-/* ---------------------------------------------------------------- Tester */
-
-export type TesterRole = 'pre_check' | 'test'
-
-export interface TesterParameter {
-  name: string
+/** `TesterParameter` schema：`tester.yaml.parameters.<name>`（文档语义，平台不渲染不校验）。 */
+export interface TesterParameterDecl {
   type: string
-  required: boolean
-  description: string
-  default?: string | null
-  /** 公共参数由平台注入，args 里不得出现（07 §4.1） */
-  public?: boolean
+  required?: boolean
+  default?: string
+  description?: string
 }
 
-export interface TesterEnvDecl {
+/** `EnvVarDecl` schema：`tester.yaml.env.<name>`。 */
+export interface EnvVarDecl {
+  required?: boolean
+  secret?: boolean
+  description?: string
+}
+
+/** `ConcurrencyPolicy` schema。 */
+export interface ConcurrencyPolicy {
+  endpoint_exclusive: boolean
+}
+
+/** `Tester` schema（wire）：`tester.yaml` 结构 + 注册表元数据。`parameters` / `env` 都是 **map**。 */
+export interface TesterWire {
   name: string
-  required: boolean
-  secret: boolean
+  version: string
+  display_name: string
   description: string
+  role: TesterRole
+  on_failure: OnFailure
+  entry: string
+  image: string
+  resources?: Record<string, unknown>
+  concurrency?: ConcurrencyPolicy
+  mounts?: Array<{ name: string; path: string; required?: boolean }>
+  parameters: Record<string, TesterParameterDecl>
+  env?: Record<string, EnvVarDecl>
+  placeholder?: string
+  content_sha?: string
+  source_file?: string
+  orphaned?: boolean
+  removed_at?: Timestamp | null
+  registered_at?: Timestamp
+  registered_by?: string
 }
 
+/**
+ * UI 侧归一后的 Tester：`parameters` / `env` 变成数组、`exclusive` 提平。
+ * 归一发生在 `api/normalize.ts`（wire 形状始终是上面的 `TesterWire`）。
+ */
 export interface Tester {
   name: string
   version: string
   display_name?: string
   description?: string
   role: TesterRole
-  on_failure: FailurePolicy
-  /** 独占 Endpoint（同一 Endpoint 上不与其它 Task 并行） */
-  exclusive: boolean
-  image: string
+  on_failure: OnFailure
   entry?: string
-  /** args 输入框的占位示例 */
+  image: string
+  /** 来自 `concurrency.endpoint_exclusive` */
+  exclusive: boolean
   placeholder?: string
-  parameters: TesterParameter[]
-  env: TesterEnvDecl[]
-  /** 目录里文件已消失（孤儿条目） */
+  parameters: Array<TesterParameterDecl & { name: string }>
+  env: Array<EnvVarDecl & { name: string }>
   orphaned?: boolean
+  source_file?: string
+  registered_at?: Timestamp
 }
 
-/* ---------------------------------------------------------------- 事件（SSE） */
+/* ================================================================ 集群 / 队列 */
+
+/** `Cluster` schema：集群概要（不返回凭据）。 */
+export interface Cluster {
+  name: string
+  api_server: string
+  description?: string | null
+  last_check_at?: Timestamp | null
+  /** 最近一次连通性检查的结论（原文） */
+  last_check_result?: string | null
+}
+
+/** `EndpointSlot` schema：端点互斥租约。 */
+export interface EndpointSlot {
+  endpoint_key: string
+  exclusive?: boolean
+  holders: string[]
+}
+
+/** `PlatformSlots` schema：平台自身槽位。 */
+export interface PlatformSlots {
+  concurrency_max: number
+  active: number
+  available: number
+  endpoints?: EndpointSlot[]
+}
+
+/** `WaitingReasonCounts` schema：六个取值都必填，没有排队记 0（不省略键）。 */
+export interface WaitingReasonCounts {
+  precheck_gate: number
+  slot_waiting: number
+  global_limit: number
+  queue_full: number
+  insufficient_resources: number
+  gang_pending: number
+}
+
+/** `WaitingTask` schema：排队中的一个 Task。 */
+export interface WaitingTask {
+  task_id: string
+  run_id: string
+  name: string
+  status: TaskStatus
+  waiting_reason: WaitingReason
+  seq?: number
+  endpoint_key?: string | null
+  since?: Timestamp | null
+  detail?: Record<string, unknown>
+}
+
+/** `WaitingSummary` schema。 */
+export interface WaitingSummary {
+  total: number
+  by_reason: WaitingReasonCounts
+  tasks?: WaitingTask[]
+}
+
+/** `VolcanoQueue` schema：一个 Volcano Queue 的概要。 */
+export interface VolcanoQueue {
+  name: string
+  state?: string | null
+  capability?: Record<string, unknown>
+  allocated?: Record<string, unknown>
+  pending_jobs?: number
+  longest_wait_seconds?: number
+  reason?: WaitingReason
+}
+
+/** `VolcanoSnapshot` schema：不可达时只降级本块。 */
+export interface VolcanoSnapshot {
+  available: boolean
+  detail?: string | null
+  queues?: VolcanoQueue[]
+}
+
+/** `QueueStatus` schema：`GET /queue-status`。 */
+export interface QueueStatus {
+  generated_at?: Timestamp
+  slots: PlatformSlots
+  waiting: WaitingSummary
+  volcano?: VolcanoSnapshot
+}
+
+/* ================================================================ 事件 */
 
 export type RunEventType =
   | 'run.submitted'
@@ -280,133 +451,151 @@ export type RunEventType =
   | 'report.written'
   | 'resync_required'
 
-/** SSE 信封（07 §7；design/impl/web-and-delivery.md §3） */
+/** `Event` schema：SSE 帧的 data 与 `events/history` 的 items 同构。 */
 export interface RunEvent {
   seq: number
   type: RunEventType
   run_id: string
   task_id?: string | null
-  attempt?: number | null
-  at: string
+  attempt_id?: string | null
+  at: Timestamp
+  from?: string | null
+  to?: string | null
+  reason?: string | null
   payload?: Record<string, unknown> | null
 }
 
-/* ---------------------------------------------------------------- 日志 */
+/* ================================================================ 日志 / 身份 / 元信息 */
 
+/** 日志读取结果（`text/plain` + `X-Log-Offset` / `X-Log-Coverage` 响应头）。 */
 export interface LogChunk {
   text: string
-  /** 服务端已返回到的字节偏移（X-Log-Offset） */
   offset?: number
-  /** 覆盖时间区间（X-Log-Coverage） */
   coverage?: string | null
 }
 
-/* ---------------------------------------------------------------- 提交 */
-
-export interface DeploySpec {
-  provider: string
-  parameters: Record<string, unknown>
+/** `GET /api/v1/me`（dev 模式：`Authorization: Bearer <subject>`）。 */
+export interface Identity {
+  user: string
+  role?: string
+  csrf_token?: string
+  groups?: string[]
 }
 
-export interface ServiceSpec {
-  url: string
-  model_name?: string
-  model_path?: string
-}
-
-export interface ManifestTest {
-  name: string
-  tester: string
-  version?: string
-  execution?: { profile?: string }
-  args?: string
-  on_failure?: FailurePolicy
-  exclusive?: boolean
-}
-
-/** Manifest（07 §4.1；也接受 JSON 对象） */
-export interface RunManifest {
-  run: {
-    name: string
-    deploy?: DeploySpec | null
-    service?: ServiceSpec | null
-    precheck?: 'auto' | 'off' | { tester?: string }
-    env?: Record<string, string>
-    secrets?: Record<string, string>
-    cleanup?: { policy: CleanupPolicy }
-    tests: ManifestTest[]
-  }
-}
-
-export interface SubmitResult {
-  run: RunSummary
-  tasks: Array<{ id: string; name: string; status: TaskStatus }>
-}
-
-export interface DryRunResult {
-  valid: boolean
-  issues: ValidationIssue[]
-  resolved_preview?: unknown
-}
-
-/* ---------------------------------------------------------------- 集群 / 队列 / 元信息 */
-
-/** 集群概要（`GET /clusters`，不返回凭据）。 */
-export interface Cluster {
-  name: string
-  namespace?: string | null
-  is_default?: boolean
-  healthy?: boolean | null
-  last_checked_at?: string | null
-  node_count?: number | null
-  /** 凭据在 Secret 里的 key 名，不是凭据本身 */
-  kubeconfig_key?: string | null
-  message?: string | null
-}
-
-/** 平台槽位（`GET /queue-status`）。 */
-export interface PlatformSlots {
-  used: number
-  total: number
-  queue_depth?: number | null
-}
-
-/** 一条队列的分配状态（Volcano queue / deserved vs allocated）。 */
-export interface QueueEntry {
-  name: string
-  /** open / closed … */
-  state?: string | null
-  deserved?: number | null
-  allocated?: number | null
-  pending?: number | null
-  longest_wait_seconds?: number | null
-  reason?: string | null
-}
-
-export interface PendingTaskRef {
-  task_id: string
-  name?: string | null
-  run_id?: string | null
-  waiting_reason?: WaitingReason | null
-  waited_seconds?: number | null
-}
-
-/** `GET /queue-status`：平台槽位 + Volcano 等待原因（07 §5.3）。 */
-export interface QueueStatus {
-  slots?: PlatformSlots | null
-  queues: QueueEntry[]
-  pending_tasks?: PendingTaskRef[]
-  updated_at?: string | null
-}
-
-/** `GET /meta`：版本协商（07 §5.3、§1 版本）。 */
+/** `GET /api/v1/meta`。 */
 export interface Meta {
   version: string
   api_version: string
   features?: Record<string, boolean>
 }
 
-/* ---------------------------------------------------------------- 查询参数 */
+/* ================================================================ Manifest（提交） */
+
+/** `DeployManifest` schema。 */
+export interface DeployManifest {
+  provider: string
+  parameters?: Record<string, unknown>
+}
+
+/** `ServiceManifest` schema：不部署时直接给已有服务。 */
+export interface ServiceManifest {
+  url: string
+  model_name?: string
+  model_path?: string
+}
+
+/** `ExecutionSpec` schema：只能引用已登记的 Profile。 */
+export interface ExecutionSpec {
+  profile: string
+}
+
+/** `TestSpec` schema：`tests[]` 的一个 Task 提交意图（name/tester/version/execution 必填）。 */
+export interface TestSpec {
+  name: string
+  tester: string
+  version: string
+  execution: ExecutionSpec
+  args?: string
+  on_failure?: OnFailure
+  timeout_seconds?: number
+  retry?: RetryPolicy
+}
+
+/** `PrecheckSpec` schema：显式指定 Pre-Check 的形态。 */
+export interface PrecheckSpec {
+  tester: string
+  version: string
+  execution: ExecutionSpec
+  args?: string
+  on_failure?: OnFailure
+  timeout_seconds?: number
+  retry?: RetryPolicy
+}
+
+/** `CleanupSpec` schema。 */
+export interface CleanupSpec {
+  policy: CleanupPolicy
+}
+
+/** `RunBody` schema：Manifest 的 `run:` 内容（deploy / service 二选一）。 */
+export interface RunBody {
+  name: string
+  deploy?: DeployManifest
+  service?: ServiceManifest
+  precheck?: 'auto' | 'off' | PrecheckSpec
+  env?: Record<string, string>
+  secrets?: Record<string, string>
+  tests?: TestSpec[]
+  cleanup?: CleanupSpec
+}
+
+/** `RunManifest` schema：提交体，顶层是 `run:`。 */
+export interface RunManifest {
+  run: RunBody
+}
+
+/** `DryRunResult` schema（`?dry_run=true`，200）。 */
+export interface DryRunResult {
+  valid: boolean
+  issues?: ValidationIssue[]
+  resolved_preview?: Record<string, unknown>
+}
+
+/** `AcceptedRun` schema（202 里只带这几个字段）。 */
+export interface AcceptedRun {
+  id: string
+  status: RunStatus
+  kind: RunKind
+  submitted_at: Timestamp
+}
+
+/** `AcceptedTask` schema。 */
+export interface AcceptedTask {
+  id: string
+  name: string
+  status: TaskStatus
+}
+
+/** `RunAccepted` schema：`POST /runs` 的 202 应答。 */
+export interface SubmitResult {
+  run: AcceptedRun
+  tasks: AcceptedTask[]
+}
+
+/** `CancelAccepted` schema：202 与「已是 cancelling/canceled」的 200 同构。 */
+export interface CancelResult {
+  run_id: string
+  status: RunStatus
+}
+
+/** `TaskCancelAccepted` schema。 */
+export interface TaskCancelResult {
+  task_id: string
+  run_id?: string
+  status: TaskStatus
+}
+
+/* ================================================================ 查询参数 */
 
 export interface RunListQuery {
   status?: string
@@ -429,9 +618,9 @@ export interface TesterListQuery {
   orphaned?: boolean
 }
 
-/* ---------------------------------------------------------------- 统计 */
+/* ================================================================ 看板统计（前端现算） */
 
-/** 看板 KPI：由 `GET /runs` + `GET /testers` 现算，不依赖 P1 的 /board */
+/** P0 没有 `/board`：由 `/runs` + `/testers` + `/queue-status` 现算。 */
 export interface DashboardStats {
   active_runs: number
   queued_tasks: number

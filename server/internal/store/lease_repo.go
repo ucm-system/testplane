@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // LeaseRepo 是 endpoint_leases 表的读写（端点互斥槽位，C-4.3）。
@@ -66,8 +68,13 @@ func (r *LeaseRepo) TryAcquire(ctx context.Context, tx pgx.Tx, taskID, endpointK
 		                                    acquired_at = now()`,
 		taskID, endpointKey, exclusive)
 	if err != nil {
-		// 唯一索引冲突 = 另一个独占持有者先落库，按"未拿到"返回。
-		return false, nil
+		// 唯一索引冲突（23505）= 另一个独占持有者先落库，按"未拿到"返回；
+		// 其它错误必须上报，否则调用方会以为只是"槽位被占"而静默失败。
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return false, nil
+		}
+		return false, fmt.Errorf("store: lease: insert %s: %w", endpointKey, err)
 	}
 	return true, nil
 }

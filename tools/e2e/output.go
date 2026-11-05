@@ -19,11 +19,11 @@ type check struct {
 }
 
 type eventsSummary struct {
-	Source  string   `json:"source"`
-	Count   int      `json:"count"`
-	FirstSeq int64   `json:"first_seq"`
-	LastSeq int64    `json:"last_seq"`
-	Types   []string `json:"types"`
+	Source   string   `json:"source"`
+	Count    int      `json:"count"`
+	FirstSeq int64    `json:"first_seq"`
+	LastSeq  int64    `json:"last_seq"`
+	Types    []string `json:"types"`
 }
 
 // resultJSON 是 stdout 上那一行机器可读结果。
@@ -89,6 +89,7 @@ type App struct {
 	statusTrace  []string
 	events       []Event
 	eventsSource string
+	connectErr   error
 }
 
 func newApp(opts Options) *App {
@@ -141,13 +142,17 @@ func (a *App) allChecksOK() bool {
 // finish 打印人类摘要 + 输出一行 JSON，返回进程退出码：
 // 0 全通过；1 断言失败；2 参数/配置错误；3 连不上控制面。
 func (a *App) finish(command string, start time.Time, runErr error) int {
+	checks := a.checks
+	if checks == nil {
+		checks = []check{}
+	}
 	res := resultJSON{
 		Command:     command,
 		RunID:       a.opts.RunID,
 		Expected:    a.opts.Expect,
 		StatusTrace: a.statusTrace,
 		DurationMS:  time.Since(start).Milliseconds(),
-		Checks:      a.checks,
+		Checks:      checks,
 		Warnings:    a.warnings,
 	}
 	if a.run != nil {

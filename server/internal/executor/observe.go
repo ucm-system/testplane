@@ -170,8 +170,12 @@ func (e *Executor) checkAndNotify(ctx context.Context, h ports.JobHandle, obs po
 func (e *Executor) evaluate(ctx context.Context, h ports.JobHandle) (*ports.JobOutcome, bool, error) {
 	ns := e.namespaceOf(h)
 	job, err := e.client.BatchV1().Jobs(ns).Get(ctx, h.JobName, metav1.GetOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return nil, false, fmt.Errorf("executor: get job %s/%s: %w", ns, h.JobName, err)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, false, fmt.Errorf("executor: get job %s/%s: %w", ns, h.JobName, err)
+		}
+		// NotFound 时 fake/真实客户端都可能带一个零值对象回来，显式置空。
+		job = nil
 	}
 	jobID := ""
 	if job != nil {

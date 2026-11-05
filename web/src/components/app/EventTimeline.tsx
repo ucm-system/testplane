@@ -17,16 +17,14 @@ const DOT: Record<string, string> = {
   resync_required: 'bg-danger',
 }
 
+/** 事件文案：契约里状态转移在 `from` / `to`，说明性文字在 `payload.text`。 */
 function eventText(event: RunEvent): string {
   const payload = event.payload ?? {}
   const text = typeof payload['text'] === 'string' ? payload['text'] : null
   if (text) return text
-  const from = payload['from']
-  const to = payload['to']
   const base = EVENT_TYPE_CN[event.type] ?? event.type
-  if (typeof from === 'string' || typeof to === 'string') {
-    return `${base}：${String(from ?? '?')} → ${String(to ?? '?')}`
-  }
+  if (event.from || event.to) return `${base}：${event.from ?? '∅'} → ${event.to ?? '∅'}`
+  if (event.reason) return `${base}（${event.reason}）`
   return base
 }
 

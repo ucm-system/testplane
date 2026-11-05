@@ -235,8 +235,11 @@ func (s *Store) effectWriteReportIntent(ctx context.Context, tx pgx.Tx, tr domai
 	return nil
 }
 
-// effectBackfillEndpoint 把 endpoint_key 回填到该 Run 的全部 Task（C-5.3：
-// 回填与状态转移同事务，避免"已 testing 但 Task 还没 key"的窗口）。
+// effectBackfillEndpoint 把 endpoint_key 与注入后的公共参数回填到该 Run 的全部 Task
+// （C-5.3：回填与状态转移同事务，避免"已 testing 但 Task 还没 key"的窗口）。
+//
+// payload.print_argv 是平台注入的公共参数 token（domain.PublicParamArgv 的结果）；
+// injected_argv = args_argv || 注入 token，与提交时 domain.BuildArgv 的口径一致。
 func (s *Store) effectBackfillEndpoint(ctx context.Context, tx pgx.Tx, tr domain.Transition) error {
 	if tr.Entity != domain.EntityRun {
 		return nil
@@ -256,6 +259,22 @@ func (s *Store) effectBackfillEndpoint(ctx context.Context, tx pgx.Tx, tr domain
 		`UPDATE tasks SET endpoint_key = $2, updated_at = now()
 		  WHERE run_id = $1 AND endpoint_key IS NULL`, tr.ID, key); err != nil {
 		return fmt.Errorf("store: effects: backfill endpoint %s: %w", tr.ID, err)
+	}
+
+	tokens := payloadStrings(tr.Payload, "print_argv")
+	if len(tokens) == 0 {
+		return nil
+	}
+	extra, err := json.Marshal(tokens)
+	if err != nil {
+		return fmt.Errorf("store: effects: marshal print_argv %s: %w", tr.ID, err)
+	}
+	// 只有"还没注入过"的 Task 才拼（injected_argv 为空数组的 deploy 模式 Task）。
+	if _, err := tx.Exec(ctx, `
+		UPDATE tasks
+		   SET injected_argv = args_argv || $2::jsonb, updated_at = now()
+		 WHERE run_id = $1 AND jsonb_array_length(injected_argv) = 0`, tr.ID, extra); err != nil {
+		return fmt.Errorf("store: effects: backfill injected_argv %s: %w", tr.ID, err)
 	}
 	return nil
 }

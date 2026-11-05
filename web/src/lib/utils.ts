@@ -70,6 +70,25 @@ export function durationBetween(
   return Math.max(0, (b.getTime() - a.getTime()) / 1000)
 }
 
+/**
+ * Run 的耗时（秒）：契约里 Run 只有 `started_at` / `finished_at`，没有 `duration_seconds`。
+ * 运行中按"到现在"算，没开始算 null。
+ */
+export function runDuration(run: {
+  started_at?: string | null
+  finished_at?: string | null
+  submitted_at?: string | null
+  status?: string
+}): number | null {
+  const start = run.started_at ?? run.submitted_at ?? null
+  if (!start) return null
+  const from = new Date(start).getTime()
+  if (Number.isNaN(from)) return null
+  const to = run.finished_at ? new Date(run.finished_at).getTime() : Date.now()
+  if (Number.isNaN(to)) return null
+  return Math.max(0, Math.round((to - from) / 1000))
+}
+
 /** 数字千分位；小数最多两位。 */
 export function formatNumber(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return '—'

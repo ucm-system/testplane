@@ -57,6 +57,7 @@ func (s *Store) CreateRun(ctx context.Context, p SubmitParams) (*Run, []*Task, e
 		}
 	}
 
+	var submittedSeq int64
 	err := s.InTx(ctx, func(tx pgx.Tx) error {
 		if err := s.Runs.Insert(ctx, tx, p.Run); err != nil {
 			return err
@@ -71,6 +72,7 @@ func (s *Store) CreateRun(ctx context.Context, p SubmitParams) (*Run, []*Task, e
 		if err != nil {
 			return err
 		}
+		submittedSeq = seq
 		payload := p.SubmittedPayload
 		if payload == nil {
 			payload = map[string]any{}
@@ -104,6 +106,9 @@ func (s *Store) CreateRun(ctx context.Context, p SubmitParams) (*Run, []*Task, e
 	})
 	if err != nil {
 		return nil, nil, err
+	}
+	if s.notifier != nil && submittedSeq > 0 {
+		s.notifier.Notify(p.Run.ID, submittedSeq)
 	}
 	return p.Run, p.Tasks, nil
 }

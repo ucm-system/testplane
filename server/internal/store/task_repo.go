@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -96,9 +97,15 @@ func (r *TaskRepo) Insert(ctx context.Context, tx pgx.Tx, t *Task) error {
 // ListByRun 按 (run_id, seq) 取 Task 列表，seq 游标分页。
 func (r *TaskRepo) ListByRun(ctx context.Context, tx pgx.Tx, runID, cursor string, limit int) ([]Task, string, error) {
 	limit = normalizeLimit(limit)
-	since, err := DecodeSeqCursor(cursor)
-	if err != nil {
-		return nil, "", err
+	// 空 cursor = 首屏：seq 从 -1 起（`seq > -1` 含 seq=0 的 Pre-Check）。
+	// 若直接用 DecodeSeqCursor("")=0，`seq > 0` 会漏掉 precheck（QA 报的回归）。
+	since := int64(-1)
+	if cursor != "" {
+		v, err := DecodeSeqCursor(cursor)
+		if err != nil {
+			return nil, "", err
+		}
+		since = v
 	}
 	rows, err := r.s.db(tx).Query(ctx, `SELECT `+taskCols+`
 		  FROM tasks WHERE run_id = $1 AND seq > $2 ORDER BY seq LIMIT $3`, runID, since, limit+1)
@@ -282,6 +289,77 @@ func (r *TaskRepo) QueueTasks(ctx context.Context, tx pgx.Tx, runID string, only
 		return nil, fmt.Errorf("store: queue tasks %s: %w", runID, err)
 	}
 	return collectIDs(rows)
+}
+
+// WaitingBreakdown 返回等待中的 Task 按 waiting_reason 分组计数（/queue-status 用）。
+// 只返回 6 个合法取值；没有写 waiting_reason 的 Task 归入 "unknown" 桶，
+// 由调用方决定如何呈现（openapi 的 by_reason 只允许 6 个键）。
+func (r *TaskRepo) WaitingBreakdown(ctx context.Context, tx pgx.Tx) (map[string]int, error) {
+	out := map[string]int{
+		domain.WaitPrecheckGate: 0, domain.WaitSlotWaiting: 0, domain.WaitGlobalLimit: 0,
+		domain.WaitQueueFull: 0, domain.WaitInsufficientResources: 0, domain.WaitGangPending: 0,
+	}
+	rows, err := r.s.db(tx).Query(ctx, `
+		SELECT COALESCE(waiting_reason, 'unknown'), count(*)
+		  FROM tasks WHERE status IN ('pending','queued')
+		 GROUP BY 1`)
+	if err != nil {
+		return nil, fmt.Errorf("store: waiting breakdown: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var reason string
+		var n int
+		if err := rows.Scan(&reason, &n); err != nil {
+			return nil, fmt.Errorf("store: scan waiting breakdown: %w", err)
+		}
+		if _, known := out[reason]; known {
+			out[reason] = n
+		} else {
+			out["unknown"] += n
+		}
+	}
+	return out, rows.Err()
+}
+
+// WaitingTaskRow 是 /queue-status 的排队明细（C-4.7）。
+type WaitingTaskRow struct {
+	TaskID        string
+	RunID         string
+	Name          string
+	Seq           int
+	Status        string
+	WaitingReason *string
+	EndpointKey   *string
+	Since         *time.Time
+}
+
+// WaitingTasks 返回排队明细，按 (run.submitted_at, seq) 升序即调度 FIFO 顺序（C-4.6）。
+func (r *TaskRepo) WaitingTasks(ctx context.Context, tx pgx.Tx, limit int) ([]WaitingTaskRow, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := r.s.db(tx).Query(ctx, `
+		SELECT t.id, t.run_id, t.name, t.seq, t.status, t.waiting_reason, t.endpoint_key,
+		       COALESCE(t.available_at, t.updated_at)
+		  FROM tasks t JOIN runs r ON r.id = t.run_id
+		 WHERE t.status IN ('pending','queued')
+		 ORDER BY r.submitted_at, t.seq
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: waiting tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []WaitingTaskRow
+	for rows.Next() {
+		var w WaitingTaskRow
+		if err := rows.Scan(&w.TaskID, &w.RunID, &w.Name, &w.Seq, &w.Status,
+			&w.WaitingReason, &w.EndpointKey, &w.Since); err != nil {
+			return nil, fmt.Errorf("store: scan waiting task: %w", err)
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
 }
 
 func collectTasks(rows pgx.Rows) ([]Task, error) {

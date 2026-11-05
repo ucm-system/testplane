@@ -1636,6 +1636,29 @@ components:
           anyOf:
             - $ref: '#/components/schemas/Failure'
             - type: 'null'
+        task_counts:
+          type: object
+          description: |
+            Task 计数摘要，供列表页与看板显示进度（"3 / 4"）。列表与详情都返回；
+            精确的任务清单仍以 `tasks[]` 或 `GET /api/v1/runs/{run_id}/tasks` 为准。
+          required: [total, succeeded, failed]
+          properties:
+            total:
+              type: integer
+              description: 该 Run 的 Task 总数（含平台注入的 Pre-Check）
+            pending:
+              type: integer
+              description: pending + queued 的数量
+            running:
+              type: integer
+              description: preparing + running 的数量
+            succeeded:
+              type: integer
+            failed:
+              type: integer
+              description: failed + canceled 的数量
+            skipped:
+              type: integer
         revision:
           type: integer
           format: int64

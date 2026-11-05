@@ -1,15 +1,16 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
-import { api } from '@/api'
+import { stringify as toYaml } from 'yaml'
+import { API_BASE, api } from '@/api'
 import { toApiError } from '@/api/client'
-import type { ApiErrorBody, Attempt, DeploySnapshot, RunDetail, TaskSummary } from '@/api/types'
+import type { ApiErrorBody, Attempt, Deploy, DeploySnapshot, Run, TaskDetail, TaskSummary } from '@/api/types'
 import { EventTimeline } from '@/components/app/EventTimeline'
 import { LogViewer } from '@/components/app/LogViewer'
 import { RightRail, RailCard } from '@/components/app/RightRail'
 import { DeployStateBadge, RunStatusBadge, TaskStatusBadge, WaitingReasonTag } from '@/components/app/StatusBadge'
 import { Badge, Tag } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
+import { Button, buttonClassName } from '@/components/ui/button'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
 import { Dialog } from '@/components/ui/dialog'
 import { KV } from '@/components/ui/input'
@@ -19,8 +20,14 @@ import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/tabl
 import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
 import { useRunEvents } from '@/hooks/useRunEvents'
-import { attemptStatusMeta, isTerminalRun, runStatusMeta, taskStatusMeta, waitingReasonLabel } from '@/lib/status'
-import { cn, formatClock, formatDateTime, formatDuration } from '@/lib/utils'
+import {
+  attemptStatusMeta,
+  isTerminalRun,
+  runStatusMeta,
+  taskStatusMeta,
+  waitingReasonLabel,
+} from '@/lib/status'
+import { cn, formatClock, formatDateTime, formatDuration, runDuration } from '@/lib/utils'
 
 /* ---------------------------------------------------------------- 小件 */
 
@@ -38,26 +45,21 @@ function FlowNode({
   badge,
   meta,
   tone,
-  active,
   onClick,
 }: {
   name: string
   badge: string
   meta: string
   tone: string
-  active: boolean
   onClick: () => void
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      aria-pressed={active}
       className={cn(
-        'flex w-[172px] shrink-0 flex-col gap-1 rounded-[10px] border bg-surface px-3 py-2 text-left transition-all duration-150',
-        active
-          ? 'border-primary shadow-[0_0_0_3px_rgba(59,130,246,0.15)]'
-          : 'border-line-strong hover:border-primary/40 hover:bg-surface-2',
+        'flex w-[172px] shrink-0 flex-col gap-1 rounded-[10px] border border-line-strong bg-surface px-3 py-2 text-left',
+        'transition-all duration-150 hover:border-primary/40 hover:bg-surface-2',
       )}
     >
       <span className="flex items-center gap-1.5 text-sm font-medium text-fg">
@@ -73,31 +75,59 @@ function FlowNode({
 
 function taskMeta(task: TaskSummary): string {
   if (task.waiting_reason) return waitingReasonLabel(task.waiting_reason)
-  if (task.status === 'running') return formatDuration(task.duration_seconds ?? null) === '—' ? '进行中' : formatDuration(task.duration_seconds)
+  if (task.status === 'running') return '进行中'
   if (task.attempts === 0) return '未开始'
-  return formatDuration(task.duration_seconds)
+  return `Attempt #${task.attempts}`
 }
 
 /* ---------------------------------------------------------------- Deploy 区块 */
 
-function DeploySection({ run, version }: { run: RunDetail; version: number }) {
-  const deploy: DeploySnapshot | null = run.deploy ?? null
-  const [pod, setPod] = useState<string | null>(null)
+function manifestText(snapshot: DeploySnapshot | null): string | null {
+  const manifest = snapshot?.manifest
+  if (!manifest) return null
+  try {
+    return toYaml(manifest).trimEnd()
+  } catch {
+    return JSON.stringify(manifest, null, 2)
+  }
+}
 
-  const pods = deploy?.pods ?? []
-  const activePod = pod ?? pods[0]?.name ?? null
+function deployStateText(deploy: Deploy): string {
+  switch (deploy.state) {
+    case 'queued':
+      return '排队中：等部署方资源，平台不按分钟级判失败'
+    case 'accepted':
+      return '已受理：部署方开始调度'
+    case 'deploying':
+      return '部署中：Pod 正在拉起'
+    case 'ready':
+      return '就绪：是否真的可用由 Pre-Check 判定'
+    case 'blocked':
+      return '被阻塞：终止，附后端原因'
+    case 'failed':
+      return '失败：看 queue_reason / Run 的 error'
+    case 'canceled':
+      return '已取消'
+    default:
+      return deploy.state
+  }
+}
 
-  const logs = useAsync(async () => {
-    if (!run.id || !activePod) return null
-    return api.getDeployLogs(run.id, activePod)
-  }, [run.id, activePod, version])
+function DeploySection({ run, version }: { run: Run; version: number }) {
+  const deploy = run.deploy ?? null
+  const snapshot = useAsync(async () => {
+    if (!deploy) return null
+    return api.getDeploy(run.id)
+  }, [run.id, version, Boolean(deploy)])
 
   if (!deploy) return null
 
+  const pods = snapshot.data?.pods ?? []
   const waited =
     deploy.state === 'queued' && deploy.queued_at
       ? Math.round((Date.now() - new Date(deploy.queued_at).getTime()) / 1000)
       : null
+  const manifest = manifestText(snapshot.data)
 
   return (
     <Card>
@@ -110,239 +140,126 @@ function DeploySection({ run, version }: { run: RunDetail; version: number }) {
           </span>
         }
         sub={deploy.provider ? `provider: ${deploy.provider}` : 'Genet'}
-        actions={run.deploy && !isTerminalRun(run.status) ? <Badge tone="primary">日志追加中</Badge> : null}
+        actions={!isTerminalRun(run.status) ? <Badge tone="primary">状态由后端推</Badge> : null}
       />
 
       <CardBody className="flex flex-col gap-3">
         {deploy.state === 'queued' ? (
-          <Banner tone="warn" title={`Genet 队列排队中${deploy.queue_position ? ` · 位次 ${deploy.queue_position}` : ''}`}>
+          <Banner tone="warn" title={`部署方队列排队中${deploy.queue_position ? ` · 位次 ${deploy.queue_position}` : ''}`}>
             {waited == null ? null : `已等待 ${formatDuration(waited)}。`}
-            {deploy.reason ? `原因：${deploy.reason}。` : '排队计入 Deployment 总窗口（默认 72h），期间可以取消。'}
+            {deploy.queue_reason ? `原因：${deploy.queue_reason}。` : '排队计入部署总窗口（默认 72h），期间可以取消。'}
           </Banner>
         ) : null}
-        {deploy.reason && deploy.state !== 'queued' ? <Banner tone="info" title={deploy.reason} /> : null}
+        {deploy.queue_reason && deploy.state !== 'queued' ? <Banner tone="info" title={deploy.queue_reason} /> : null}
 
         <dl className="grid gap-x-8 gap-y-2 sm:grid-cols-2">
           <KV label="状态">{deployStateText(deploy)}</KV>
-          <KV label="耗时">{formatDuration(deploy.duration_seconds)}</KV>
+          <KV label="Deployment ID">
+            <span className="font-mono text-2xs">{deploy.deployment_id ?? '—'}</span>
+          </KV>
           <KV label="Pod">
-            {pods.length === 0 ? '尚未产生 Pod' : `${pods.length} 个（${pods.map((p) => p.role).join(' / ')}）`}
+            {pods.length === 0 ? '尚未产生 Pod' : `${pods.length} 个（${pods.map((p) => p.role ?? '—').join(' / ')}）`}
           </KV>
           <KV label="Endpoint">
-            {deploy.endpoint || run.endpoint ? (
-              <span className="break-all font-mono text-2xs">{deploy.endpoint?.url ?? run.endpoint?.url}</span>
+            {run.endpoint?.url ? (
+              <span className="break-all font-mono text-2xs">{run.endpoint.url}</span>
             ) : (
               '—'
             )}
           </KV>
           <KV label="排队时间">{formatDateTime(deploy.queued_at)}</KV>
-          <KV label="就绪时间">{formatDateTime(deploy.ready_at)}</KV>
+          <KV label="部署窗口">
+            {snapshot.data?.deploy_timeout_seconds ? formatDuration(snapshot.data.deploy_timeout_seconds) : '—'}
+          </KV>
         </dl>
 
-        {deploy.manifest_yaml ? (
+        {manifest ? (
           <details className="rounded-md border border-line-soft bg-surface-2 px-3 py-2" open>
-            <summary className="cursor-pointer text-2xs text-fg-2">Manifest 里的 deploy 段</summary>
-            <pre className="mt-2 overflow-x-auto font-mono text-[11.5px] leading-relaxed text-fg-2">
-              {deploy.manifest_yaml}
-            </pre>
+            <summary className="cursor-pointer text-2xs text-fg-2">实际提交给部署方的参数（原文快照）</summary>
+            <pre className="mt-2 overflow-x-auto font-mono text-[11.5px] leading-relaxed text-fg-2">{manifest}</pre>
           </details>
         ) : null}
       </CardBody>
 
-      {pods.length > 0 ? (
-        <>
-          <div className="border-t border-line-soft">
-            <CardHeader tone="info" title="Pods" sub="多节点 / PD 分离时一个 Deploy 对应多个 Pod" className="border-b-0 px-5 py-3" />
-            <TableWrap>
-              <Table>
-                <THead>
-                  <TR className="hover:bg-transparent">
-                    <TH>Pod</TH>
-                    <TH>角色</TH>
-                    <TH>状态</TH>
-                    <TH>节点</TH>
-                    <TH>重启</TH>
-                  </TR>
-                </THead>
-                <TBody>
-                  {pods.map((item) => (
-                    <TR key={item.name}>
-                      <TD className="font-mono text-2xs text-fg">{item.name}</TD>
-                      <TD>
-                        <Tag mono>{item.role}</Tag>
-                      </TD>
-                      <TD>
-                        <Badge tone={item.status === 'Running' ? 'ok' : 'warn'}>{item.status}</Badge>
-                      </TD>
-                      <TD className="text-2xs">{item.node ?? '—'}</TD>
-                      <TD className="tabular-nums">{item.restarts ?? 0}</TD>
-                    </TR>
-                  ))}
-                </TBody>
-              </Table>
-            </TableWrap>
-          </div>
+      {snapshot.error ? (
+        <CardBody className="pt-0">
+          <ErrorState error={snapshot.error} onRetry={snapshot.reload} compact />
+        </CardBody>
+      ) : null}
 
+      {pods.length > 0 ? (
+        <div className="border-t border-line-soft">
+          <CardHeader
+            tone="info"
+            title="Pods"
+            sub="多节点 / PD 分离时一个 Deploy 对应多个 Pod"
+            className="border-b-0 px-5 py-3"
+          />
+          <TableWrap>
+            <Table>
+              <THead>
+                <TR className="hover:bg-transparent">
+                  <TH>Pod</TH>
+                  <TH>角色</TH>
+                  <TH>phase</TH>
+                  <TH>就绪</TH>
+                  <TH>节点</TH>
+                  <TH>重启</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {pods.map((pod) => (
+                  <TR key={pod.name}>
+                    <TD className="font-mono text-2xs text-fg">{pod.name}</TD>
+                    <TD>{pod.role ? <Tag mono>{pod.role}</Tag> : <span className="text-fg-3">—</span>}</TD>
+                    <TD className="text-2xs">{pod.phase ?? '—'}</TD>
+                    <TD>
+                      <Badge tone={pod.ready ? 'ok' : 'warn'}>{pod.ready ? '已就绪' : '未就绪'}</Badge>
+                    </TD>
+                    <TD className="text-2xs">{pod.node ?? '—'}</TD>
+                    <TD className="tabular-nums">{pod.restarts ?? 0}</TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          </TableWrap>
           <div className="border-t border-line-soft px-5 py-4">
-            <div className="mb-2 flex flex-wrap items-center gap-2">
+            <div className="mb-1 flex flex-wrap items-center gap-2">
               <span className="text-sm font-semibold text-fg">Pod 日志</span>
               <span className="text-2xs text-fg-3">按 Pod 分别落盘，不合并</span>
             </div>
-            <div className="mb-2 flex flex-wrap gap-1.5">
-              {pods.map((item) => (
-                <button
-                  key={item.name}
-                  type="button"
-                  onClick={() => setPod(item.name)}
-                  className={cn(
-                    'rounded-full border px-2.5 py-1 font-mono text-2xs transition-colors',
-                    item.name === activePod
-                      ? 'border-primary bg-primary-weak text-primary-text'
-                      : 'border-line-strong text-fg-2 hover:bg-surface-2',
-                  )}
-                >
-                  {item.name}
-                  {item.restarts ? <span className="ml-1 text-warn-text">↻{item.restarts}</span> : null}
-                </button>
-              ))}
-            </div>
-            <LogViewer
-              text={logs.data?.text ?? ''}
-              loading={logs.loading}
-              error={logs.error}
-              coverage={logs.data?.coverage ?? null}
-              live={!isTerminalRun(run.status)}
-              onRetry={logs.reload}
-              hint={activePod ? `logs/deploy/${activePod}.log` : undefined}
-            />
+            <p className="text-2xs leading-relaxed text-fg-3">
+              MVP 的 Deploy 是 mock 阶段，日志端点不在接口契约内，前端不请求；这里只展示 Pod 拓扑与日志分段元信息。
+            </p>
           </div>
-        </>
+        </div>
       ) : deploy.state === 'queued' || deploy.state === 'accepted' ? (
         <CardBody className="pt-0">
-          <p className="text-2xs text-fg-3">尚未产生 Pod —— 排队期没有日志；Pod 起来后这里会按 Pod 分页签展示。</p>
+          <p className="text-2xs text-fg-3">尚未产生 Pod —— 排队 / 部署初期没有 Pod 拓扑。</p>
         </CardBody>
       ) : null}
     </Card>
   )
 }
 
-function deployStateText(deploy: DeploySnapshot): string {
-  switch (deploy.state) {
-    case 'queued':
-      return '排队中：等服务资源，平台不按分钟级判失败'
-    case 'accepted':
-      return '已受理：Genet 开始调度'
-    case 'deploying':
-      return '部署中：Pod 正在拉起'
-    case 'ready':
-      return '就绪：是否可用由 Pre-Check 判定'
-    case 'blocked':
-      return '被阻塞：终止，附后端原因'
-    case 'failed':
-      return '失败：看 reason / error'
-    case 'canceled':
-      return '已取消'
-    default:
-      return deploy.state
-  }
-}
-
 /* ---------------------------------------------------------------- Task 面板 */
 
-function TaskPanels({ run, version }: { run: RunDetail; version: number }) {
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
-  const tasks = run.tasks ?? []
-  const selected = tasks.find((t) => t.id === selectedTaskId) ?? tasks[0] ?? null
-
-  return (
-    <Card>
-      <CardHeader
-        tone="primary"
-        title="Task 列表"
-        sub={`${tasks.length} 个 · 按 tests[] 顺序排列，独占型 Tester 天然串行`}
-        actions={<span className="text-2xs text-fg-3">点一行看 Attempt 与日志</span>}
-      />
-      {tasks.length === 0 ? (
-        <EmptyState title="没有 Task" description="这个 Run 还没解析出 Task。" />
-      ) : (
-        <TableWrap>
-          <Table>
-            <THead>
-              <TR className="hover:bg-transparent">
-                <TH className="w-10">#</TH>
-                <TH>名称</TH>
-                <TH>Tester</TH>
-                <TH>状态</TH>
-                <TH>Attempt</TH>
-                <TH>排队原因</TH>
-                <TH>耗时</TH>
-                <TH>错误</TH>
-              </TR>
-            </THead>
-            <TBody>
-              {tasks.map((task) => {
-                const isActive = selected?.id === task.id
-                return (
-                  <TR
-                    key={task.id}
-                    onClick={() => setSelectedTaskId(task.id)}
-                    className={cn('cursor-pointer', isActive && 'bg-primary-weak/60')}
-                  >
-                    <TD className="tabular-nums text-2xs text-fg-3">{task.seq}</TD>
-                    <TD className="max-w-[14rem] truncate text-fg" title={task.name}>
-                      {task.name}
-                    </TD>
-                    <TD>
-                      <div className="flex items-center gap-1">
-                        <Tag mono>{task.tester}</Tag>
-                        {task.exclusive ? <Tag>独占</Tag> : null}
-                      </div>
-                    </TD>
-                    <TD>
-                      <TaskStatusBadge status={task.status} />
-                    </TD>
-                    <TD className="tabular-nums">{task.attempts === 0 ? '—' : `#${task.attempt ?? task.attempts}`}</TD>
-                    <TD>
-                      <WaitingReasonTag reason={task.waiting_reason} />
-                      {!task.waiting_reason ? <span className="text-fg-3">—</span> : null}
-                    </TD>
-                    <TD className="whitespace-nowrap tabular-nums">{formatDuration(task.duration_seconds)}</TD>
-                    <TD>
-                      {task.error ? (
-                        <span className="flex items-center gap-1" title={task.error.message}>
-                          <Badge tone="err" className="font-mono">
-                            {task.error.code}
-                          </Badge>
-                        </span>
-                      ) : (
-                        <span className="text-fg-3">—</span>
-                      )}
-                    </TD>
-                  </TR>
-                )
-              })}
-            </TBody>
-          </Table>
-        </TableWrap>
-      )}
-
-      {selected ? <TaskAttemptsPanel key={selected.id} task={selected} run={run} version={version} /> : null}
-    </Card>
-  )
-}
-
-function TaskAttemptsPanel({ task, run, version }: { task: TaskSummary; run: RunDetail; version: number }) {
+function TaskAttemptsPanel({ summary }: { summary: TaskSummary }) {
+  const detail = useAsync(() => api.getTask(summary.id), [summary.id])
   const [attemptIdx, setAttemptIdx] = useState<number | null>(null)
 
-  const attempts = useAsync(() => api.listAttempts(task.id), [task.id, version])
-  const list: Attempt[] = attempts.data ?? []
-  const active: Attempt | null =
-    list.find((item) => item.idx === attemptIdx) ?? list[list.length - 1] ?? null
+  const task: TaskDetail | null = detail.data
+  const attempts: Attempt[] = task?.attempts ?? []
+  const active = attempts.find((item) => item.idx === attemptIdx) ?? attempts[attempts.length - 1] ?? null
 
   const logs = useAsync(async () => {
     if (!active) return null
-    return api.getAttemptLogs(task.id, active.idx)
-  }, [task.id, active?.idx, version])
+    return api.getAttemptLogs(summary.id, active.idx)
+  }, [summary.id, active?.idx])
+
+  if (detail.loading && !task) return <LoadingBlock label="加载 Task 详情…" />
+  if (detail.error) return <ErrorState error={detail.error} onRetry={detail.reload} compact />
+  if (!task) return null
 
   return (
     <div className="flex flex-col gap-4 border-t border-line-soft px-5 py-4">
@@ -351,18 +268,28 @@ function TaskAttemptsPanel({ task, run, version }: { task: TaskSummary; run: Run
           Task #{task.seq} · {task.name}
         </h3>
         <TaskStatusBadge status={task.status} />
-        <Tag mono>{task.tester}</Tag>
-        {task.version ? <Tag mono>v{task.version}</Tag> : null}
+        <Tag mono>{task.tester_name}</Tag>
+        <Tag mono>v{task.tester_version}</Tag>
+        {task.endpoint_exclusive ? <Tag>独占</Tag> : null}
         <span className="ml-auto font-mono text-2xs text-fg-3">{task.id}</span>
       </div>
 
       <dl className="grid gap-x-8 gap-y-2 sm:grid-cols-2">
         <KV label="参数原文">
-          <code className="break-all font-mono text-2xs text-fg-2">{task.args ?? '（无）'}</code>
+          <code className="break-all font-mono text-2xs text-fg-2">{task.args_raw || '（无）'}</code>
         </KV>
-        <KV label="镜像">{task.image_ref ? <span className="break-all font-mono text-2xs">{task.image_ref}</span> : '—'}</KV>
+        <KV label="注入参数">
+          <code className="break-all font-mono text-2xs text-fg-3">
+            {(task.injected_argv ?? []).join(' ') || '—'}
+          </code>
+        </KV>
+        <KV label="执行环境">{task.profile ?? '—'}</KV>
+        <KV label="镜像">
+          <span className="break-all font-mono text-2xs">{task.image_ref}</span>
+        </KV>
         <KV label="失败策略">{task.on_failure === 'abort_run' ? 'abort_run（失败终止整个 Run）' : 'continue'}</KV>
-        <KV label="开始时间">{formatDateTime(task.started_at)}</KV>
+        <KV label="超时">{task.timeout_seconds ? formatDuration(task.timeout_seconds) : '—'}</KV>
+        {task.status_reason ? <KV label="跳过原因">{task.status_reason}</KV> : null}
       </dl>
 
       {task.error ? (
@@ -375,33 +302,26 @@ function TaskAttemptsPanel({ task, run, version }: { task: TaskSummary; run: Run
         </div>
       ) : null}
 
-      {attempts.error ? <ErrorState error={attempts.error} onRetry={attempts.reload} compact /> : null}
-
-      {attempts.loading && list.length === 0 ? (
-        <LoadingBlock label="加载 Attempt…" />
-      ) : list.length === 0 ? (
+      {attempts.length === 0 ? (
         <p className="text-2xs text-fg-3">该 Task 还没有 Attempt（未开始或已跳过）。</p>
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-1.5">
-            {list.map((item) => {
-              const meta = attemptStatusMeta(item.status)
-              return (
-                <button
-                  key={item.idx}
-                  type="button"
-                  onClick={() => setAttemptIdx(item.idx)}
-                  className={cn(
-                    'rounded-full border px-2.5 py-1 text-2xs transition-colors',
-                    active?.idx === item.idx
-                      ? 'border-primary bg-primary-weak text-primary-text'
-                      : 'border-line-strong text-fg-2 hover:bg-surface-2',
-                  )}
-                >
-                  Attempt #{item.idx} · {meta.label}
-                </button>
-              )
-            })}
+            {attempts.map((item) => (
+              <button
+                key={item.idx}
+                type="button"
+                onClick={() => setAttemptIdx(item.idx)}
+                className={cn(
+                  'rounded-full border px-2.5 py-1 text-2xs transition-colors',
+                  active?.idx === item.idx
+                    ? 'border-primary bg-primary-weak text-primary-text'
+                    : 'border-line-strong text-fg-2 hover:bg-surface-2',
+                )}
+              >
+                Attempt #{item.idx} · {attemptStatusMeta(item.status).label}
+              </button>
+            ))}
             <span className="ml-auto text-2xs text-fg-3">重试是追加 Attempt，历史不覆盖</span>
           </div>
 
@@ -411,24 +331,24 @@ function TaskAttemptsPanel({ task, run, version }: { task: TaskSummary; run: Run
                 <TR className="hover:bg-transparent">
                   <TH className="w-16">Attempt</TH>
                   <TH>状态</TH>
+                  <TH>phase</TH>
                   <TH>退出码</TH>
                   <TH>开始</TH>
                   <TH>结束</TH>
-                  <TH>耗时</TH>
                   <TH>镜像 digest</TH>
                 </TR>
               </THead>
               <TBody>
-                {list.map((item) => (
+                {attempts.map((item) => (
                   <TR key={item.idx}>
                     <TD className="tabular-nums">#{item.idx}</TD>
                     <TD>
                       <Badge tone={attemptStatusMeta(item.status).tone}>{attemptStatusMeta(item.status).label}</Badge>
                     </TD>
+                    <TD className="text-2xs">{item.phase ?? '—'}</TD>
                     <TD className="tabular-nums">{item.exit_code ?? '—'}</TD>
                     <TD className="whitespace-nowrap text-2xs">{formatClock(item.started_at)}</TD>
                     <TD className="whitespace-nowrap text-2xs">{formatClock(item.finished_at)}</TD>
-                    <TD className="tabular-nums">{formatDuration(item.duration_seconds)}</TD>
                     <TD className="max-w-[10rem] truncate font-mono text-2xs text-fg-3" title={item.image_digest ?? ''}>
                       {item.image_digest ?? '—'}
                     </TD>
@@ -443,13 +363,84 @@ function TaskAttemptsPanel({ task, run, version }: { task: TaskSummary; run: Run
             loading={logs.loading}
             error={logs.error}
             coverage={logs.data?.coverage ?? null}
-            live={!isTerminalRun(run.status) && active?.status === 'running'}
+            live={active?.status === 'running'}
             onRetry={logs.reload}
             hint={active ? `tasks/${task.id}/attempts/${active.idx}/logs` : undefined}
           />
         </>
       )}
     </div>
+  )
+}
+
+function TaskPanels({ run }: { run: Run }) {
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
+  const tasks = run.tasks ?? []
+  const selected = tasks.find((t) => t.id === selectedTaskId) ?? tasks[0] ?? null
+
+  return (
+    <Card>
+      <CardHeader
+        tone="primary"
+        title="Task 列表"
+        sub={`${tasks.length} 个 · 详情里只有摘要，完整字段点开 Task 拉取（GET /tasks/{id}）`}
+        actions={<span className="text-2xs text-fg-3">点一行看 Attempt 与日志</span>}
+      />
+      {tasks.length === 0 ? (
+        <EmptyState title="没有 Task" description="这个 Run 还没解析出 Task。" />
+      ) : (
+        <TableWrap>
+          <Table>
+            <THead>
+              <TR className="hover:bg-transparent">
+                <TH>#</TH>
+                <TH>名称</TH>
+                <TH>状态</TH>
+                <TH>Attempt</TH>
+                <TH>排队原因</TH>
+                <TH>错误</TH>
+              </TR>
+            </THead>
+            <TBody>
+              {tasks.map((task, index) => {
+                const isActive = selected?.id === task.id
+                return (
+                  <TR
+                    key={task.id}
+                    onClick={() => setSelectedTaskId(task.id)}
+                    className={cn('cursor-pointer', isActive && 'bg-primary-weak/60')}
+                  >
+                    <TD className="tabular-nums text-2xs text-fg-3">{index}</TD>
+                    <TD className="max-w-[16rem] truncate text-fg" title={task.name}>
+                      {task.name}
+                    </TD>
+                    <TD>
+                      <TaskStatusBadge status={task.status} />
+                    </TD>
+                    <TD className="tabular-nums">{task.attempts === 0 ? '—' : `#${task.attempts}`}</TD>
+                    <TD>
+                      <WaitingReasonTag reason={task.waiting_reason} />
+                      {!task.waiting_reason ? <span className="text-fg-3">—</span> : null}
+                    </TD>
+                    <TD>
+                      {task.error ? (
+                        <Badge tone="err" className="font-mono" title={task.error.message}>
+                          {task.error.code}
+                        </Badge>
+                      ) : (
+                        <span className="text-fg-3">—</span>
+                      )}
+                    </TD>
+                  </TR>
+                )
+              })}
+            </TBody>
+          </Table>
+        </TableWrap>
+      )}
+
+      {selected ? <TaskAttemptsPanel key={selected.id} summary={selected} /> : null}
+    </Card>
   )
 }
 
@@ -471,8 +462,6 @@ export function RunDetailPage() {
     if (!run.data) return
     setLive(!isTerminalRun(run.data.status))
   }, [run.data])
-
-  const deployNodes = useMemo(() => (run.data?.deploy ? 1 : 0), [run.data?.deploy])
 
   const cancel = async () => {
     setCancelling(true)
@@ -508,6 +497,7 @@ export function RunDetailPage() {
 
   const detail = run.data
   const terminal = detail ? isTerminalRun(detail.status) : false
+  const tasks = detail?.tasks ?? []
 
   return (
     <>
@@ -516,8 +506,8 @@ export function RunDetailPage() {
           <EventTimeline events={events} status={status} />
         </RailCard>
         <RailCard title="边界说明" tone="muted">
-          <p>状态流转与错误都记在 events.jsonl 里，UI 只读，不做乐观更新。</p>
-          <p className="mt-2">日志内容不走 SSE，由日志面板按 Attempt 单独读流。</p>
+          <p>状态流转与错误都记在 events 流里，UI 只读，不做乐观更新。</p>
+          <p className="mt-2">日志内容不走 SSE，由日志面板按 Attempt 单独读。</p>
         </RailCard>
       </RightRail>
 
@@ -531,6 +521,17 @@ export function RunDetailPage() {
           <Button size="sm" variant="dangerGhost" onClick={() => setConfirmOpen(true)}>
             取消 Run
           </Button>
+        ) : null}
+        {terminal ? (
+          <a
+            className={buttonClassName({ size: 'sm' })}
+            href={`${API_BASE}/runs/${encodeURIComponent(runId)}/report.md`}
+            target="_blank"
+            rel="noreferrer"
+            title="新窗口打开 report.md（Run 结束后才写出）"
+          >
+            打开报告
+          </a>
         ) : null}
         <span className="ml-auto font-mono text-2xs text-fg-3">{runId}</span>
       </div>
@@ -580,6 +581,7 @@ export function RunDetailPage() {
                     {detail.error.code}
                   </Badge>
                   <span className="text-fg">{detail.error.message}</span>
+                  {detail.error.retryable ? <Badge tone="warn">可重试</Badge> : null}
                 </div>
               ) : null}
 
@@ -587,9 +589,10 @@ export function RunDetailPage() {
                 <KV label="状态说明">{runStatusMeta(detail.status).label}</KV>
                 <KV label="提交人">{detail.submitted_by}</KV>
                 <KV label="创建时间">{formatDateTime(detail.submitted_at)}</KV>
+                <KV label="开始时间">{formatDateTime(detail.started_at)}</KV>
                 <KV label="结束时间">{formatDateTime(detail.finished_at)}</KV>
-                <KV label="耗时">{formatDuration(detail.duration_seconds)}</KV>
-                <KV label="清理策略">{detail.cleanup_policy ?? '—'}</KV>
+                <KV label="耗时">{formatDuration(runDuration(detail))}</KV>
+                <KV label="清理策略">{detail.cleanup_policy}</KV>
                 <KV label="Endpoint">
                   {detail.endpoint ? (
                     <span className="break-all font-mono text-2xs">{detail.endpoint.url}</span>
@@ -598,38 +601,16 @@ export function RunDetailPage() {
                   )}
                 </KV>
                 <KV label="模型">{detail.endpoint?.model_name ?? '—'}</KV>
-                <KV label="Task 数">
-                  {detail.tasks.length}
-                  <span className="ml-1 text-2xs text-fg-3">（含平台注入的 Pre-Check）</span>
+                <KV label="互斥键">
+                  <span className="break-all font-mono text-2xs">{detail.endpoint?.key ?? '—'}</span>
                 </KV>
+                <KV label="Task 进度">
+                  {detail.task_counts
+                    ? `成功 ${detail.task_counts.succeeded} / 共 ${detail.task_counts.total}`
+                    : `${tasks.length} 个`}
+                </KV>
+                <KV label="revision">{detail.revision ?? '—'}</KV>
               </dl>
-
-              <div className="flex flex-wrap items-center gap-2 border-t border-line-soft pt-3 text-2xs text-fg-3">
-                <span>env</span>
-                {detail.env && Object.keys(detail.env).length > 0 ? (
-                  Object.entries(detail.env).map(([key, value]) => (
-                    <Tag key={key} mono>
-                      {key}={value}
-                    </Tag>
-                  ))
-                ) : (
-                  <span>—</span>
-                )}
-                <span className="ml-3">secrets</span>
-                {detail.secrets ? (
-                  (Array.isArray(detail.secrets) ? detail.secrets : Object.values(detail.secrets)).length > 0 ? (
-                    (Array.isArray(detail.secrets) ? detail.secrets : Object.values(detail.secrets)).map((item) => (
-                      <Tag key={item} mono>
-                        {item}
-                      </Tag>
-                    ))
-                  ) : (
-                    <span>—</span>
-                  )
-                ) : (
-                  <span>—</span>
-                )}
-              </div>
             </CardBody>
           </Card>
 
@@ -638,7 +619,7 @@ export function RunDetailPage() {
               tone="primary"
               title="执行链路"
               sub="点任一节点看它自己的详情；按 tests[] 顺序排列，独占型 Tester 天然串行"
-              actions={<span className="text-2xs text-fg-3">共 {deployNodes + detail.tasks.length} 个节点</span>}
+              actions={<span className="text-2xs text-fg-3">共 {(detail.deploy ? 1 : 0) + tasks.length} 个节点</span>}
             />
             <CardBody>
               <ol className="flex items-center gap-2 overflow-x-auto pb-1" aria-label="执行链路">
@@ -647,9 +628,8 @@ export function RunDetailPage() {
                     <FlowNode
                       name="Deploy"
                       badge={detail.deploy.state}
-                      meta={detail.deploy.pods?.length ? `${detail.deploy.pods.length} pod` : '排队中'}
+                      meta={detail.deploy.queue_position ? `位次 ${detail.deploy.queue_position}` : detail.deploy.state}
                       tone={detail.deploy.state === 'ready' ? 'ok' : detail.deploy.state === 'failed' ? 'err' : 'info'}
-                      active={false}
                       onClick={() => {
                         document.getElementById('deploy-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
                       }}
@@ -659,7 +639,7 @@ export function RunDetailPage() {
                     </span>
                   </li>
                 ) : null}
-                {detail.tasks.map((task) => {
+                {tasks.map((task) => {
                   const meta = taskStatusMeta(task.status)
                   return (
                     <li key={task.id} className="flex shrink-0 items-center gap-2">
@@ -668,7 +648,6 @@ export function RunDetailPage() {
                         badge={meta.label}
                         meta={taskMeta(task)}
                         tone={meta.tone}
-                        active={false}
                         onClick={() => {
                           document
                             .getElementById('task-panels')
@@ -683,7 +662,7 @@ export function RunDetailPage() {
                 })}
               </ol>
               <p className="mt-2 text-2xs text-fg-3">
-                非独占 Task 可在 Pre-Check 通过后并行（§6.7），链路不假设只有一条运行中的分支。
+                非独占 Task 可在 Pre-Check 通过后并行，链路不假设只有一条运行中的分支。
               </p>
             </CardBody>
           </Card>
@@ -693,12 +672,14 @@ export function RunDetailPage() {
           </div>
 
           <div id="task-panels">
-            <TaskPanels run={detail} version={version} />
+            <TaskPanels run={detail} />
           </div>
 
           <Card>
             <CardFooter>
-              <span>事件共 {events.length} 条，连接状态：{status}</span>
+              <span>
+                事件共 {events.length} 条，连接状态：{status}
+              </span>
             </CardFooter>
           </Card>
         </>
@@ -729,7 +710,7 @@ export function RunDetailPage() {
           </div>
           {detail?.deploy && ['queued', 'accepted', 'deploying'].includes(detail.deploy.state) ? (
             <Banner tone="warn" title="当前 Deploy 未就绪">
-              会先向 Genet 取消排队 / 卸载，可能不是即时生效；清理范围由 cleanup.policy 决定。
+              会先向部署方取消排队 / 卸载，可能不是即时生效；清理范围由 cleanup_policy 决定。
             </Banner>
           ) : null}
         </div>

@@ -67,13 +67,17 @@ export function parseSseFrame(frame: string): RunEvent | null {
   if (!Number.isFinite(seq)) return null
 
   const type = typeof rec['type'] === 'string' ? rec['type'] : (name ?? 'run.state_changed')
+  const str = (key: string) => (typeof rec[key] === 'string' ? (rec[key] as string) : null)
   return {
     seq,
     type: type as RunEvent['type'],
     run_id: String(rec['run_id'] ?? ''),
-    task_id: typeof rec['task_id'] === 'string' ? rec['task_id'] : null,
-    attempt: typeof rec['attempt'] === 'number' ? rec['attempt'] : null,
+    task_id: str('task_id'),
+    attempt_id: str('attempt_id'),
     at: typeof rec['at'] === 'string' ? rec['at'] : new Date().toISOString(),
+    from: str('from'),
+    to: str('to'),
+    reason: str('reason'),
     payload: (rec['payload'] ?? null) as RunEvent['payload'],
   }
 }

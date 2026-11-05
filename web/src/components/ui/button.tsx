@@ -20,6 +20,26 @@ const SIZES: Record<Size, string> = {
   md: 'h-9 px-3.5 text-xs gap-1.5',
 }
 
+/** 按钮外观（供 <a> 等非 button 元素复用，保证链接与按钮同款）。 */
+export function buttonClassName({
+  variant = 'secondary',
+  size = 'md',
+  className,
+}: {
+  variant?: Variant
+  size?: Size
+  className?: string
+}): string {
+  return cn(
+    'inline-flex select-none items-center justify-center whitespace-nowrap rounded-md font-medium',
+    'transition-[background-color,box-shadow,border-color,color,transform] duration-150 ease-out',
+    'focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/60',
+    VARIANTS[variant],
+    SIZES[size],
+    className,
+  )
+}
+
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant
   size?: Size
@@ -42,15 +62,7 @@ export function Button({
     <button
       type={type}
       disabled={disabled || loading}
-      className={cn(
-        'inline-flex select-none items-center justify-center whitespace-nowrap rounded-md font-medium',
-        'transition-[background-color,box-shadow,border-color,color,transform] duration-150 ease-out',
-        'focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/60',
-        'disabled:cursor-not-allowed disabled:opacity-45',
-        VARIANTS[variant],
-        SIZES[size],
-        className,
-      )}
+      className={cn(buttonClassName({ variant, size, className }), 'disabled:cursor-not-allowed disabled:opacity-45')}
       aria-busy={loading || undefined}
       {...rest}
     >

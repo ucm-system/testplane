@@ -1,48 +1,64 @@
 /**
- * 真实接口实现 —— 端点全部来自 design/views/07-api.md §5（MVP 子集）。
- * 基址由 api/client.ts 的 API_BASE 拼接（默认 `/api/v1`），这里只写资源路径。
+ * 真实接口实现 —— 端点与响应形状以 `server/api/openapi.yaml` 为准。
+ * 基址由 api/client.ts 的 `API_BASE` 拼接（默认 `/api/v1`），这里只写资源路径。
  */
 import type { Api, LogOptions } from './contract'
 import { qs, request, requestText } from './client'
 import { asArray, asPage, normalizeTester } from './normalize'
 import type {
   Attempt,
+  CancelResult,
   Cluster,
   DashboardStats,
   DeploySnapshot,
   DryRunResult,
   Identity,
-  LogChunk,
   Meta,
   Page,
-  QueueEntry,
   QueueStatus,
-  RunDetail,
+  Run,
   RunEvent,
   RunListQuery,
   RunManifest,
   RunSummary,
   SubmitResult,
+  Task,
+  TaskCancelResult,
+  TaskDetail,
   TaskListQuery,
-  TaskSummary,
   Tester,
   TesterListQuery,
+  WaitingReasonCounts,
 } from './types'
 
-/** 队列状态：期望 `{slots, queues, pending_tasks}`，也容忍裸数组。 */
+/** `QueueStatus` 的防御性归一：契约保证 slots/waiting 必填，但别让页面因缺字段崩掉。 */
 function normalizeQueueStatus(raw: unknown): QueueStatus {
-  if (Array.isArray(raw)) {
-    return { queues: raw as QueueEntry[], slots: null, pending_tasks: [] }
-  }
   const rec = (raw ?? {}) as Record<string, unknown>
+  const slots = (rec['slots'] ?? {}) as Record<string, unknown>
+  const waiting = (rec['waiting'] ?? {}) as Record<string, unknown>
   return {
-    slots: (rec['slots'] ?? null) as QueueStatus['slots'],
-    queues: Array.isArray(rec['queues']) ? (rec['queues'] as QueueEntry[]) : [],
-    pending_tasks: Array.isArray(rec['pending_tasks']) ? (rec['pending_tasks'] as QueueStatus['pending_tasks']) : [],
-    updated_at: typeof rec['updated_at'] === 'string' ? rec['updated_at'] : null,
+    generated_at: typeof rec['generated_at'] === 'string' ? rec['generated_at'] : undefined,
+    slots: {
+      concurrency_max: Number(slots['concurrency_max'] ?? 0),
+      active: Number(slots['active'] ?? 0),
+      available: Number(slots['available'] ?? 0),
+      endpoints: Array.isArray(slots['endpoints']) ? (slots['endpoints'] as QueueStatus['slots']['endpoints']) : [],
+    },
+    waiting: {
+      total: Number(waiting['total'] ?? 0),
+      by_reason: (waiting['by_reason'] ?? {
+        precheck_gate: 0,
+        slot_waiting: 0,
+        global_limit: 0,
+        queue_full: 0,
+        insufficient_resources: 0,
+        gang_pending: 0,
+      }) as WaitingReasonCounts,
+      tasks: Array.isArray(waiting['tasks']) ? (waiting['tasks'] as QueueStatus['waiting']['tasks']) : [],
+    },
+    volcano: (rec['volcano'] ?? undefined) as QueueStatus['volcano'],
   }
 }
-
 export const realApi: Api = {
   getIdentity(): Promise<Identity> {
     return request<Identity>('/me')
@@ -66,15 +82,15 @@ export const realApi: Api = {
     return asPage<RunSummary>(data)
   },
 
-  getRun(id: string): Promise<RunDetail> {
-    return request<RunDetail>(`/runs/${encodeURIComponent(id)}`)
+  getRun(id: string): Promise<Run> {
+    return request<Run>(`/runs/${encodeURIComponent(id)}`)
   },
 
-  async cancelRun(id: string): Promise<void> {
-    await request<unknown>(`/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
+  cancelRun(id: string): Promise<CancelResult> {
+    return request<CancelResult>(`/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
   },
 
-  async listTasks(query: TaskListQuery = {}): Promise<Page<TaskSummary>> {
+  async listTasks(query: TaskListQuery = {}): Promise<Page<Task>> {
     const data = await request<unknown>(
       `/tasks${qs({
         status: query.status,
@@ -83,19 +99,23 @@ export const realApi: Api = {
         limit: query.limit,
       })}`,
     )
-    return asPage<TaskSummary>(data)
+    return asPage<Task>(data)
   },
 
-  async cancelTask(id: string): Promise<void> {
-    await request<unknown>(`/tasks/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
+  getTask(id: string): Promise<TaskDetail> {
+    return request<TaskDetail>(`/tasks/${encodeURIComponent(id)}`)
+  },
+
+  cancelTask(id: string): Promise<TaskCancelResult> {
+    return request<TaskCancelResult>(`/tasks/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
   },
 
   async listAttempts(taskId: string): Promise<Attempt[]> {
     const data = await request<unknown>(`/tasks/${encodeURIComponent(taskId)}/attempts`)
-    return asArray<Attempt>(data, 'items')
+    return asArray<Attempt>(data).sort((a, b) => a.idx - b.idx)
   },
 
-  async getAttemptLogs(taskId: string, idx: number, opts: LogOptions = {}): Promise<LogChunk> {
+  async getAttemptLogs(taskId: string, idx: number, opts: LogOptions = {}) {
     const text = await requestText(
       `/tasks/${encodeURIComponent(taskId)}/attempts/${idx}/logs${qs({
         stream: opts.stream,
@@ -113,24 +133,12 @@ export const realApi: Api = {
     return request<DeploySnapshot>(`/runs/${encodeURIComponent(runId)}/deploy`)
   },
 
-  async getDeployLogs(runId: string, pod: string, opts: LogOptions = {}): Promise<LogChunk> {
-    const text = await requestText(
-      `/runs/${encodeURIComponent(runId)}/deploy/logs${qs({
-        pod,
-        offset: opts.offset,
-        limit: opts.limit,
-        tail: opts.tail,
-      })}`,
-      { headers: { Accept: 'text/plain' } },
-    )
-    return { text: text.text, offset: text.offset, coverage: text.coverage }
-  },
-
   async getEventsHistory(runId: string, sinceSeq?: number): Promise<RunEvent[]> {
+    // `EventList`：`next_cursor` 是本页末条 seq，续取时作为 since_seq 传回（契约明确不接受 cursor）
     const data = await request<unknown>(
       `/runs/${encodeURIComponent(runId)}/events/history${qs({ since_seq: sinceSeq, limit: 1000 })}`,
     )
-    return asArray<RunEvent>(data, 'items').sort((a, b) => a.seq - b.seq)
+    return asArray<RunEvent>(data).sort((a, b) => a.seq - b.seq)
   },
 
   async listTesters(query: TesterListQuery = {}): Promise<Tester[]> {
@@ -140,7 +148,7 @@ export const realApi: Api = {
         orphaned: query.orphaned === undefined ? undefined : String(query.orphaned),
       })}`,
     )
-    return asArray<unknown>(data, 'items').map(normalizeTester)
+    return asArray<unknown>(data).map(normalizeTester)
   },
 
   async getTester(name: string): Promise<Tester> {
@@ -149,18 +157,18 @@ export const realApi: Api = {
 
   async listClusters(): Promise<Cluster[]> {
     const data = await request<unknown>('/clusters')
-    return asArray<Cluster>(data, 'items')
+    return asArray<Cluster>(data)
   },
 
   async getQueueStatus(): Promise<QueueStatus> {
     return normalizeQueueStatus(await request<unknown>('/queue-status'))
   },
 
-  async submitRun(manifest: RunManifest): Promise<SubmitResult> {
+  submitRun(manifest: RunManifest): Promise<SubmitResult> {
     return request<SubmitResult>('/runs', { method: 'POST', body: JSON.stringify(manifest) })
   },
 
-  async dryRun(manifest: RunManifest): Promise<DryRunResult> {
+  dryRun(manifest: RunManifest): Promise<DryRunResult> {
     return request<DryRunResult>(`/runs${qs({ dry_run: 'true' })}`, {
       method: 'POST',
       body: JSON.stringify(manifest),
@@ -168,7 +176,7 @@ export const realApi: Api = {
   },
 
   async getDashboardStats(): Promise<DashboardStats> {
-    // P0 没有 /board：用列表页的同一份数据 + 队列状态现算（web-and-delivery §15）
+    // P0 没有 /board：用列表页的同一份数据 + 队列状态现算
     const [runs, testers, queue] = await Promise.all([
       realApi.listRuns({ limit: 200 }),
       realApi.listTesters(),
@@ -189,7 +197,7 @@ export const realApi: Api = {
         new Date(r.submitted_at).getTime() >= dayAgo,
     ).length
     const queuedTasks =
-      queue?.pending_tasks?.length ??
+      queue?.waiting?.total ??
       items
         .filter((r) => ['queued', 'deploying'].includes(r.status))
         .reduce((sum, r) => sum + (r.task_counts?.pending ?? 0), 0)

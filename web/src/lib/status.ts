@@ -40,6 +40,7 @@ export const TASK_STATUS_META: Record<TaskStatus, StatusMeta> = {
 }
 
 export const ATTEMPT_STATUS_META: Record<AttemptStatus, StatusMeta> = {
+  pending: { label: '待开始', tone: 'muted' },
   preparing: { label: '准备中', tone: 'info' },
   running: { label: '执行中', tone: 'info' },
   succeeded: { label: '成功', tone: 'ok' },

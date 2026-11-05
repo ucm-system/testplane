@@ -112,6 +112,31 @@ func (c *Client) do(ctx context.Context, method, path string, payload []byte, co
 	return resp.StatusCode, resp.Header, raw, nil
 }
 
+// Stream 建立 SSE 长连接。超时完全由 ctx 控制（不设 http.Client.Timeout，
+// 否则 15s 心跳之前就会被掐断）。
+func (c *Client) Stream(ctx context.Context, path string, extraHeaders map[string]string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.URL(path), nil)
+	if err != nil {
+		return nil, &UsageError{Msg: fmt.Sprintf("构造 SSE 请求失败（%s）：%v", path, err)}
+	}
+	c.authorize(req)
+	req.Header.Set("Accept", "text/event-stream")
+	for k, v := range extraHeaders {
+		req.Header.Set(k, v)
+	}
+	if c.cfg.Verbose && c.cfg.Logf != nil {
+		c.cfg.Logf("→ GET %s（SSE）", req.URL)
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("SSE 请求超时/被取消：%w", err)
+		}
+		return nil, &ConnectError{BaseURL: c.cfg.BaseURL, Err: err}
+	}
+	return resp, nil
+}
+
 // ConnectError 是"连不上控制面"，与"接口返回了错误"严格区分：
 // 前者退出码 3（并明确提示 8080 可能没起），后者是断言失败（退出码 1）。
 type ConnectError struct {

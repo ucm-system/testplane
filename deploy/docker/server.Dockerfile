@@ -67,10 +67,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
       -o /out/testplaned ./cmd/testplaned
 
-# 构建期自检：二进制存在且是静态链接（CGO_ENABLED=0 的实证，不是"应该"）
+# 构建期自检：二进制存在，且**不是**动态链接（CGO_ENABLED=0 的实证，不是"应该"）。
+# 用 ldd 而不是 file：golang:*-alpine 里没有 file，ldd 是 musl 自带的。
+# 静态二进制 `ldd` 会失败 → `! ldd` 成立；若哪天有人加了 CGO 依赖，这一步会让构建失败。
 RUN test -x /out/testplaned && \
-    (file /out/testplaned || true) && \
-    ls -lh /out/testplaned
+    ls -lh /out/testplaned && \
+    ! ldd /out/testplaned 2>/dev/null && \
+    echo "BUILD_CHECK_OK: static binary"
 
 # ---------------------------------------------------------------------------
 # 运行阶段
@@ -89,6 +92,9 @@ COPY --from=build /out/testplaned /testplaned
 
 # Tester Registry 的扫描源（E-10、K-3）。只用 COPY，不做运行时同步。
 COPY testers/ /app/testers/
+# chown 必须放在 COPY 之后：COPY 以 root 落盘，前面那次 chown 覆盖不到它。
+# 注册表只读这些文件，但属主统一到 10001，避免以后有人加写操作踩权限。
+RUN chown -R 10001:10001 /app/testers
 
 ENV TZ=Asia/Shanghai \
     TESTPLANE_LISTEN=:8080 \

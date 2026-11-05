@@ -10,7 +10,7 @@ import { KpiSkeleton, TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
 import { useAsync } from '@/hooks/useAsync'
-import { formatDateTime, formatDuration, formatNumber } from '@/lib/utils'
+import { formatDateTime, formatDuration, formatNumber, runDuration } from '@/lib/utils'
 
 function taskProgress(run: RunSummary): string {
   const counts = run.task_counts
@@ -48,14 +48,14 @@ export function DashboardPage() {
           </div>
         </RailCard>
 
-        <RailCard title="排队中的 Task" tone="warn" sub={queue?.pending_tasks?.length ? `${queue.pending_tasks.length} 个` : undefined}>
-          {queue?.pending_tasks?.length ? (
+        <RailCard title="排队中的 Task" tone="warn" sub={queue?.waiting?.tasks?.length ? `${queue.waiting.tasks.length} 个` : undefined}>
+          {queue?.waiting?.tasks?.length ? (
             <ul className="flex flex-col divide-y divide-line-soft">
-              {queue.pending_tasks.slice(0, 5).map((task) => (
+              {(queue.waiting.tasks ?? []).slice(0, 5).map((task) => (
                 <li key={task.task_id} className="flex items-center justify-between gap-2 py-2 first:pt-0 last:pb-0">
                   <div className="min-w-0">
-                    <p className="truncate text-xs text-fg" title={task.name ?? task.task_id}>
-                      {task.name ?? task.task_id}
+                    <p className="truncate text-xs text-fg" title={task.name}>
+                      {task.name}
                     </p>
                     <p className="font-mono text-2xs text-fg-3">{task.run_id}</p>
                   </div>
@@ -165,7 +165,7 @@ export function DashboardPage() {
                       <RunStatusBadge status={run.status} />
                     </TD>
                     <TD className="tabular-nums">{taskProgress(run)}</TD>
-                    <TD className="tabular-nums">{formatDuration(run.duration_seconds)}</TD>
+                    <TD className="tabular-nums">{formatDuration(runDuration(run))}</TD>
                     <TD className="text-2xs text-fg-3">{formatDateTime(run.submitted_at)}</TD>
                   </TR>
                 ))}

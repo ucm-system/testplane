@@ -49,9 +49,7 @@ func (a *App) wait(ctx context.Context, runID string) (*waitResult, error) {
 				line += " tasks: " + summary
 			}
 			trace = append(trace, line)
-			if a.cfg.Logf != nil {
-				a.cfg.Logf("%s", line)
-			}
+			a.logf("%s", line)
 			lastStatus, lastSummary = run.Status, summary
 		}
 

@@ -109,8 +109,19 @@ var secretEnvPattern = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)=([^/:=]+)[/
 
 // Render 把 JobSpec 渲染成 batch/v1 Job。纯函数：不碰集群、无副作用。
 func Render(spec ports.JobSpec) (*batchv1.Job, error) {
+	job, _, err := RenderWithWarnings(spec)
+	return job, err
+}
+
+// RenderWithWarnings 与 Render 相同，但额外返回不影响执行的告警（execution §4.3.1 的
+// "只记 warning，不重试、不影响状态"口径）：
+//
+//   - `secret_env_unbound`：`tasks.secret_env` 里只声明了变量名、没有映射到
+//     Secret 名与 key（`03-data-view.md §4.6` 的 `secret_ref` 为空）。执行层**跳过**
+//     该变量并告警，不 fail——"required 且完全没绑定"属于提交期校验（C-5.1 第 9 条）。
+func RenderWithWarnings(spec ports.JobSpec) (*batchv1.Job, []string, error) {
 	if err := validateSpec(spec); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	namespace := spec.Namespace
 	if namespace == "" {
@@ -118,34 +129,34 @@ func Render(spec ports.JobSpec) (*batchv1.Job, error) {
 	}
 	subPath, err := OutputSubPath(spec.RunID, spec.TaskID, spec.AttemptNo)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if spec.OutputDir != "" {
 		if err := checkOutputDir(spec.OutputDir, subPath); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	labels, err := buildLabels(spec)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	annotations, err := buildAnnotations(spec)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	env, err := buildEnv(spec)
+	env, warnings, err := buildEnv(spec)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	res, err := buildResources(spec.Resources)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	mounts, volumes, err := buildMounts(spec, subPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	podLabels := map[string]string{
@@ -233,10 +244,10 @@ func Render(spec ports.JobSpec) (*batchv1.Job, error) {
 
 	hash, err := SpecHash(job)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	job.Annotations[AnnSpecHash] = hash
-	return job, nil
+	return job, warnings, nil
 }
 
 // SpecHash 计算用于幂等比对的指纹（§2.3）。指纹覆盖 Job 的名称、label、
@@ -396,7 +407,13 @@ func buildAnnotations(spec ports.JobSpec) (map[string]string, error) {
 
 // buildEnv 渲染容器环境变量（§2.1）：TESTPLANE_* / TZ / HOME 强制覆写，
 // 用户变量按 key 字典序，Secret 变量最后追加 valueFrom.secretKeyRef。
-func buildEnv(spec ports.JobSpec) ([]corev1.EnvVar, error) {
+//
+// 返回的 warnings 是"不影响执行、但要让上游看见"的条目。最有代表性的是
+// `secret_env_unbound`：`tasks.secret_env` 只声明了变量名、`secret_ref` 为空
+// （03-data-view §4.6 允许这种形状，Tester 侧 `required: false` 就表示可以不给）。
+// 执行层只跳过并告警——"声明 required 却没绑定"是提交期校验（C-5.1 第 9 条）的责任，
+// 执行器不承担，也不能因此把整个 Attempt 判死。
+func buildEnv(spec ports.JobSpec) ([]corev1.EnvVar, []string, error) {
 	env := []corev1.EnvVar{
 		{Name: TestplaneEnvRunID, Value: spec.RunID},
 		{Name: TestplaneEnvTaskID, Value: spec.TaskID},
@@ -424,10 +441,17 @@ func buildEnv(spec ports.JobSpec) ([]corev1.EnvVar, error) {
 	secrets := make([]string, 0, len(spec.SecretEnv))
 	secrets = append(secrets, spec.SecretEnv...)
 	sort.Strings(secrets)
+	var warnings []string
 	for _, raw := range secrets {
-		name, secretName, key, err := parseSecretEnv(raw)
-		if err != nil {
-			return nil, err
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		name, secretName, key, ok := parseSecretEnv(raw)
+		if !ok {
+			// 未绑定（只有变量名）或形态不认识：跳过 + 告警，绝不 fail Attempt。
+			warnings = append(warnings, fmt.Sprintf("secret_env_unbound: %s (skipped)", raw))
+			continue
 		}
 		env = append(env, corev1.EnvVar{
 			Name: name,
@@ -439,18 +463,17 @@ func buildEnv(spec ports.JobSpec) ([]corev1.EnvVar, error) {
 			},
 		})
 	}
-	return env, nil
+	return env, warnings, nil
 }
 
 // parseSecretEnv 解析 "ENV=secretName/key" 或 "ENV=secretName:key"。
-// 只给变量名（无映射）会失败：执行层不猜 Secret 名与 key（§2.1 的 secret_env 规则）。
-func parseSecretEnv(raw string) (name, secretName, key string, err error) {
+// 只给变量名（无映射）返回 ok=false：调用方跳过并告警，不猜 Secret 名与 key。
+func parseSecretEnv(raw string) (name, secretName, key string, ok bool) {
 	m := secretEnvPattern.FindStringSubmatch(strings.TrimSpace(raw))
 	if m == nil {
-		return "", "", "", fmt.Errorf("%w: secret env %q must be ENV=secretName/key or ENV=secretName:key",
-			ErrSpecInvalid, raw)
+		return "", "", "", false
 	}
-	return m[1], m[2], m[3], nil
+	return m[1], m[2], m[3], true
 }
 
 func buildResources(req domain.ResourceRequest) (corev1.ResourceRequirements, error) {

@@ -131,15 +131,19 @@ kubectl --context kind-testplane get pv testplane-storage
 | PV/PVC `testplane-storage` | [`k8s/storage.yaml`](k8s/storage.yaml) | 10Gi、`ReadWriteMany`、hostPath `/storage-root`、`Retain` |
 | ConfigMap `testplane-config` | [`k8s/configmap.yaml`](k8s/configmap.yaml) | 非敏感配置；键名对齐 `server/internal/config/config.go` |
 
-**刻意不在 kustomization 里**的五份清单（各自有启用条件）：
+**刻意不在基础层 kustomization 里的清单**（各自有启用条件）：
 
 | 文件 | 什么时候加 |
 |---|---|
-| [`k8s/deployment.yaml`](k8s/deployment.yaml) | 等 `server/cmd/testplaned` 存在、镜像构建并灌进集群后（第 6 步） |
-| [`k8s/migrate-job.yaml`](k8s/migrate-job.yaml) | 同上；迁移**必须**先于控制面启动跑完（`testplaned migrate up`，W-11） |
-| [`k8s/rbac-cluster-executor.yaml`](k8s/rbac-cluster-executor.yaml) | Job 要落到 `testplane` 以外的 namespace 时（扩权，需评审） |
+| [`components/control-plane/deployment.yaml`](components/control-plane/deployment.yaml) | 等镜像 `testplane-server:dev` 构建并灌进集群后；用 `kubectl apply -k deploy/overlays/with-control-plane` 一次性叠加（第 6 步） |
+| [`components/control-plane/migrate-job.yaml`](components/control-plane/migrate-job.yaml) | 同上；迁移**必须**先于控制面启动跑完（`testplaned migrate up`，W-11） |
+| [`k8s/rbac-cluster-executor.yaml`](k8s/rbac-cluster-executor.yaml) | **仅当执行器要跨 namespace 跑 Job 时**才启用（ClusterRole 扩权，需评审）。默认是 namespace 级 `Role`，最小权限 |
 | [`k8s/networkpolicy.yaml`](k8s/networkpolicy.yaml) | 有真 CNI 时。**kind 的默认 CNI（kindnet）不实现 NetworkPolicy**，apply 了也不生效 |
 | [`k8s/pdb.yaml`](k8s/pdb.yaml) | 单副本 + `minAvailable: 1` 会永久阻塞 drain（06 §7.1），dev 不需要 |
+
+> **`get secrets: no` 是硬约束**：平台不读 Secret 明文（K-5 同源），日志不脱敏所以平台
+> 不需要、也不该能读。谁想给 RBAC "顺手补上 secrets"，先回来读 06 §4.4。
+
 
 ### 4.1 存储冒烟（每建一次集群跑一次）
 
@@ -213,15 +217,27 @@ docker build -f deploy/docker/server.Dockerfile -t testplane-server:dev .
 docker exec testplane-control-plane crictl images | Select-String testplane-server
 ```
 
-- 依赖版本（go.mod）已就位后这条才可能成功；`server/cmd/testplaned` 还没写时**必然失败**，
+**改完代码重灌镜像的三条命令**（tag 不变，节点里同名 tag 会被覆盖，
+但运行中的 Pod 不会自己换）：
+
+```powershell
+docker build -f deploy/docker/server.Dockerfile -t testplane-server:dev .
+& .\.tools\kind.exe load docker-image testplane-server:dev --name testplane
+kubectl --context kind-testplane -n testplane rollout restart deploy/testplaned
+```
+
+- 依赖版本（go.mod）已就位后这条才可能成功；`server/cmd/testplaned` 编译不过时**必然失败**，
   这是预期的——Dockerfile 本身可以用 `docker build --check -f deploy/docker/server.Dockerfile .` 静态校验。
 - 前端阶段（`node:22-alpine` → `web/dist` → `go:embed`）写在 Dockerfile 末尾的注释里，
-  等 `web/` 有产物再启用。
+  等 `web/` 有产物再启用。当前 `server/internal/webui/dist/index.html` 是占位，
+  保证不跑前端构建时 `//go:embed all:dist` 也能编译。
 - 运行阶段是 `alpine` + `ca-certificates` + `tzdata`，UID **10001**（`/storage-root` 的属主就是 10001）。
+- 构建期自检会打印 `BUILD_CHECK_OK: static binary`（`! ldd` 断言静态链接），
+  哪天有人引入 CGO 依赖，构建当场失败而不是等到运行期。
 
 ---
 
-## 6 把控制面放进集群（可选，等镜像就绪）
+## 6 把控制面放进集群（等镜像就绪）
 
 ```powershell
 # 1) DB DSN 进 Secret（不落盘、不入库）
@@ -229,21 +245,23 @@ kubectl --context kind-testplane -n testplane create secret generic testplane-db
   --from-literal=dsn='postgres://testplane:testplane@host.docker.internal:5432/testplane?sslmode=disable' `
   --dry-run=client -o yaml | kubectl --context kind-testplane apply -f -
 
-# 2) 先跑迁移，再起控制面（迁移是唯一入口，多副本不得并发迁移 → W-11）
-kubectl --context kind-testplane apply -f deploy/k8s/migrate-job.yaml
+# 2) 基础设施 + 控制面一起叠加（kustomize Component，见 deploy/components/control-plane/）
+kubectl --context kind-testplane apply -k deploy/overlays/with-control-plane
+
+# 3) 先等迁移跑完，再等控制面起来（迁移是唯一入口，多副本不得并发迁移 → W-11）
 kubectl --context kind-testplane -n testplane wait --for=condition=complete job/testplaned-migrate --timeout=300s
 kubectl --context kind-testplane -n testplane logs job/testplaned-migrate
 kubectl --context kind-testplane -n testplane delete job testplaned-migrate
-
-# 3) 启用 Deployment：把 deployment.yaml 加进 kustomization 的 resources
-#    （edit deploy/k8s/kustomization.yaml，取消 `# - deployment.yaml` 的注释）
-kubectl --context kind-testplane apply -k deploy/k8s
-
-# 4) 看状态
 kubectl --context kind-testplane -n testplane rollout status deploy/testplaned --timeout=180s
+
+# 4) 看状态、开本地隧道
 kubectl --context kind-testplane -n testplane get pods -o wide
 kubectl --context kind-testplane -n testplane port-forward svc/testplane 8080:8080
 ```
+
+> 只想先搭环境、暂不起控制面（比如镜像还没灌）：用 `kubectl apply -k deploy/k8s`。
+> 两层命令各自都能单独成功，这是拆 Component 的原因——没灌镜像就 apply 控制面，
+> Pod 只会卡在 `ErrImagePull`，容易被误判成清单有问题。
 
 `psql` 直连（可选，验证 Secret 里的 DSN 拼对了）：
 
@@ -268,6 +286,15 @@ kubectl --context kind-testplane auth can-i list nodes --as=system:serviceaccoun
 docker exec testplane-control-plane crictl images
 ```
 
+控制面起没起：
+
+```powershell
+kubectl --context kind-testplane -n testplane get pods
+kubectl --context kind-testplane -n testplane exec deploy/testplaned -- wget -qO- http://127.0.0.1:8080/healthz   # ok
+kubectl --context kind-testplane -n testplane exec deploy/testplaned -- wget -qO- http://127.0.0.1:8080/readyz    # ok（DB+存储+迁移版本）
+kubectl --context kind-testplane -n testplane logs deploy/testplaned --tail=20
+```
+
 **清理**（只清 TestPlane 自己的东西，别碰别人的容器/集群）：
 
 ```powershell
@@ -290,6 +317,8 @@ docker volume rm testplane-pg-data        # 连数据一起删；只想清集群
 | 冒烟 Job 写不进 `/storage-root` | `Permission denied` | 确认 Pod 的 `runAsUser: 10001` + `fsGroup: 10001`；宿主目录是 drvfs（`0777`），UID 只是约定不是硬约束 |
 | dockerd 的 5432 被占 | `testplane-pg` 起不来 | 换 `-p 5433:5432`，并同步 `deploy/.env.example` 的值 |
 | 端口 8080 | 控制面在集群内监听 `:8080`，宿主没映射 | 用 `kubectl port-forward`，不要给 kind 加 `extraPortMappings`（会和宿主 dev server 抢） |
+| `testplaned-migrate` Job **一直 Running** | 旧镜像里没有 `migrate` 子命令，`/testplaned migrate up` 退化成"起服务"，进程不退出 | 重打镜像（第 5.2 节）→ `kubectl -n testplane delete job testplaned-migrate` → 重新 apply overlay。正常应 5s 内 `Completed` 并打 `数据库迁移完成 schema_version=N` |
+| 重灌同名 tag 后行为没变 | `kind load` 覆盖了节点里的镜像，但旧 Pod 还在跑旧镜像 | `kubectl -n testplane rollout restart deploy/testplaned`，再 `get pods` 看新的 ReplicaSet |
 
 ---
 
@@ -301,19 +330,25 @@ deploy/
 ├── .env.example                 # 环境变量样例（deploy/.env 被 .gitignore 忽略）
 ├── kind/
 │   └── testplane.yaml           # kind 集群定义（含 extraMounts → /storage-root）
-├── k8s/                         # 原生清单 + kustomization
+├── k8s/                         # 基础设施层（不含控制面）
 │   ├── kustomization.yaml       #   kubectl apply -k deploy/k8s
 │   ├── namespace.yaml           #   Namespace + PSA restricted
 │   ├── serviceaccount.yaml      #   SA testplane
 │   ├── rbac.yaml                #   Role/RoleBinding + ClusterRole/CRB testplane-view
-│   ├── rbac-cluster-executor.yaml  # （opt-in）跨 namespace 执行层
+│   ├── rbac-cluster-executor.yaml  # （opt-in）跨 namespace 执行层，需评审
 │   ├── storage.yaml             #   PV + PVC testplane-storage（10Gi RWX）
 │   ├── configmap.yaml           #   testplane-config
-│   ├── deployment.yaml          # （opt-in）Deployment testplaned + Service
-│   ├── migrate-job.yaml         # （opt-in）迁移 Job（testplaned migrate up）
-│   ├── networkpolicy.yaml       # （opt-in）默认拒绝 + 放行条目
+│   ├── networkpolicy.yaml       # （opt-in）默认拒绝 + 放行条目（kindnet 不生效）
 │   ├── pdb.yaml                 # （opt-in）PDB
-│   └── storage-smoke-job.yaml   #   存储冒烟 Job（一次性）
+│   └── storage-smoke-job.yaml   #   存储冒烟 Job（一次性，单独 apply）
+├── components/
+│   └── control-plane/           # 控制面（kustomize Component，按需叠加）
+│       ├── kustomization.yaml   #   kind: Component
+│       ├── deployment.yaml      #   Deployment testplaned + Service
+│       └── migrate-job.yaml     #   迁移 Job（testplaned migrate up）
+├── overlays/
+│   └── with-control-plane/
+│       └── kustomization.yaml   #   kubectl apply -k deploy/overlays/with-control-plane
 └── docker/
     ├── server.Dockerfile        # 控制面镜像（上下文 = 仓库根）
     └── server.Dockerfile.dockerignore  # 该 Dockerfile 专用的上下文过滤
@@ -327,3 +362,6 @@ deploy/
 - 真 RWX：多节点必须换 NFS CSI（06 §5.5）；单节点 hostPath 只是等价物，`accessModes: ReadWriteMany` 在单节点下事实成立、跨节点无保证。
 - 控制面镜像的实际构建：等 `server/cmd/testplaned` 落地（第 5.2 步）。
 - `deploy/versions.lock`（镜像 digest 记录，W-8）：等有了真镜像再记。
+- 已知偏差（不在实现阶段解决，等文档回写统一）：PVC 名三处不一致 —— 实现值是 `testplane-storage`，
+  06 §2 写 `testplane-storage-root`，execution §2.2 示例写 `testplane-artifacts`。已记入
+  [`docs/runbook/local-kind.md`](../docs/runbook/local-kind.md) 的已知偏差表。

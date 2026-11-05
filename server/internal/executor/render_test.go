@@ -1,10 +1,14 @@
 package executor
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"k8s.io/client-go/kubernetes/fake"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -266,7 +270,6 @@ func TestRenderRejectsInvalidSpecs(t *testing.T) {
 		{"zero attempt", func(s *ports.JobSpec) { s.AttemptNo = 0 }, ErrSpecInvalid},
 		{"timeout over max", func(s *ports.JobSpec) { s.TimeoutSeconds = maxTimeoutSeconds + 1 }, ErrSpecInvalid},
 		{"no storage pvc", func(s *ports.JobSpec) { s.StoragePVC = "" }, ErrSpecInvalid},
-		{"bad secret env", func(s *ports.JobSpec) { s.SecretEnv = []string{"ENDPOINT_API_KEY"} }, ErrSpecInvalid},
 		{"output dir mismatch", func(s *ports.JobSpec) { s.OutputDir = "/storage-root/other/tasks/x/attempts/1" }, ErrBadPath},
 	}
 	for _, tc := range cases {
@@ -347,5 +350,84 @@ func TestParseImageDigest(t *testing.T) {
 		if got := ParseImageDigest(in); got != want {
 			t.Errorf("ParseImageDigest(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestRenderSkipsUnboundSecretEnv 覆盖 lead 指出的防御性问题：
+// `tasks.secret_env` 里只声明变量名（secret_ref 为空）时，执行层必须**跳过 + 告警**，
+// 不能 fail Attempt——"required 却没绑定"是提交期校验的责任（C-5.1 第 9 条）。
+func TestRenderSkipsUnboundSecretEnv(t *testing.T) {
+	spec := sampleSpec()
+	spec.SecretEnv = []string{
+		"ENDPOINT_API_KEY",                  // 未绑定：跳过 + WARN
+		"BOUND_KEY=tp-secret-endpoint/api_key", // 绑定：生成 secretKeyRef
+		"COLON_KEY=tp-secret-endpoint:token",   // 冒号形态：同样接受
+	}
+	job, warnings, err := RenderWithWarnings(spec)
+	if err != nil {
+		t.Fatalf("unbound secret env must not fail rendering: %v", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "secret_env_unbound") ||
+		!strings.Contains(warnings[0], "ENDPOINT_API_KEY") {
+		t.Fatalf("warnings = %#v, want one secret_env_unbound for ENDPOINT_API_KEY", warnings)
+	}
+
+	env := map[string]corev1.EnvVar{}
+	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+		env[e.Name] = e
+	}
+	if _, ok := env["ENDPOINT_API_KEY"]; ok {
+		t.Errorf("unbound secret env must be skipped, got %+v", env["ENDPOINT_API_KEY"])
+	}
+	for name, wantKey := range map[string]string{"BOUND_KEY": "api_key", "COLON_KEY": "token"} {
+		v, ok := env[name]
+		if !ok || v.ValueFrom == nil || v.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("env %s must use secretKeyRef: %+v", name, v)
+		}
+		if v.ValueFrom.SecretKeyRef.Name != "tp-secret-endpoint" || v.ValueFrom.SecretKeyRef.Key != wantKey {
+			t.Errorf("env %s secretKeyRef = %+v", name, v.ValueFrom.SecretKeyRef)
+		}
+	}
+
+	// Render 兼容入口不返回告警，但结果一致。
+	plain, err := Render(spec)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if plain.Annotations[AnnSpecHash] != job.Annotations[AnnSpecHash] {
+		t.Errorf("Render and RenderWithWarnings must produce the same job")
+	}
+}
+
+// TestRenderEmptySecretEnvIsFine 保证 []string{} / 空串不会触发任何告警。
+func TestRenderEmptySecretEnvIsFine(t *testing.T) {
+	spec := sampleSpec()
+	spec.SecretEnv = []string{"", "   "}
+	job, warnings, err := RenderWithWarnings(spec)
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("err=%v warnings=%v", err, warnings)
+	}
+	if job == nil {
+		t.Fatal("job is nil")
+	}
+}
+
+// TestSubmitWarnsOnUnboundSecret 确认告警经执行器日志钩子落出（不影响 Submit）。
+func TestSubmitWarnsOnUnboundSecret(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	var logged []string
+	ex := NewWithNamespace(cs, "testplane", Options{
+		PollInterval: 20 * time.Millisecond,
+		Logf: func(format string, args ...any) {
+			logged = append(logged, fmt.Sprintf(format, args...))
+		},
+	})
+	spec := sampleSpec()
+	spec.SecretEnv = []string{"ENDPOINT_API_KEY"}
+	if _, err := ex.Submit(context.Background(), spec); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "secret_env_unbound") {
+		t.Fatalf("logged = %#v, want a secret_env_unbound warning", logged)
 	}
 }

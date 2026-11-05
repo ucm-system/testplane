@@ -46,10 +46,12 @@ const (
 	IssueCodeOnFailure      = "ON_FAILURE_WEAKENED"
 	IssueCodeEnvMissing     = "ENV_MISSING"
 	IssueCodeSecretMissing  = "SECRET_NOT_FOUND"
+	IssueCodeSecretRequired = "SECRET_REQUIRED"
 	IssueCodePrecheckCount  = "PRECHECK_TARGET_AMBIGUOUS"
 	IssueCodeCleanupPolicy  = "CLEANUP_POLICY"
 	IssueCodeTimeoutRange   = "TIMEOUT_OUT_OF_RANGE"
 	IssueCodeNameConflict   = "NAME_CONFLICT"
+	IssueCodeConflict       = "CONFLICT"
 	IssueCodeUnsupported    = "UNSUPPORTED"
 	IssueCodePublicRequired = "PUBLIC_PARAM_REQUIRED"
 )
@@ -85,6 +87,12 @@ var retryableByCode = map[string]bool{
 // Retryable 返回码级默认是否可重试。实例级 Failure.Retryable 优先（01 UC-07）。
 func Retryable(code string) bool { return retryableByCode[code] }
 
+// KnownCode 报告 code 是否是附录 D 的枚举值（用于"自由字符串但只允许枚举"的校验）。
+func KnownCode(code string) bool {
+	_, ok := retryableByCode[code]
+	return ok
+}
+
 // NewFailure 按码级默认 retryable 构造 Failure。
 func NewFailure(code, message string, detail map[string]any) Failure {
 	return Failure{Code: code, Message: message, Detail: detail, Retryable: Retryable(code)}
@@ -93,6 +101,19 @@ func NewFailure(code, message string, detail map[string]any) Failure {
 // Failuref 是 NewFailure 的格式化版本。
 func Failuref(code string, detail map[string]any, format string, args ...any) Failure {
 	return NewFailure(code, fmt.Sprintf(format, args...), detail)
+}
+
+// FailureError 把 domain.Failure 包装成 error，供 adapter / store 在只需要 error
+// 的签名里携带错误码（api 用 errors.As 取回并映射 HTTP 状态）。
+type FailureError struct{ Failure Failure }
+
+func (e *FailureError) Error() string {
+	return e.Failure.Code + ": " + e.Failure.Message
+}
+
+// NewFailureError 构造一个可被 errors.As 取出的失败错误。
+func NewFailureError(code, message string, detail map[string]any) *FailureError {
+	return &FailureError{Failure: NewFailure(code, message, detail)}
 }
 
 // ValidationIssue 是提交校验的字段级问题（07 §3、C-8.3）。

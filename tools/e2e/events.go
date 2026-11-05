@@ -53,11 +53,11 @@ func (e Event) Transition() (from, to string, ok bool) {
 // 转移表：C-3.1（Task）与 C-3.2（Run）。这里是 e2e 的"合法性裁判"，
 // 与设计状态机逐字对应；表外的一律算违约，不做"看起来合理就放行"。
 var runTransitions = map[string][]string{
-	"submitted": {"queued"},
-	"queued":    {"deploying", "testing"},
-	"deploying": {"testing", "service_unavailable"},
-	"testing":   {"cleanup"},
-	"cleanup":   {"succeeded", "completed_with_errors", "service_unavailable", "failed"},
+	"submitted":  {"queued"},
+	"queued":     {"deploying", "testing"},
+	"deploying":  {"testing", "service_unavailable"},
+	"testing":    {"cleanup"},
+	"cleanup":    {"succeeded", "completed_with_errors", "service_unavailable", "failed"},
 	"cancelling": {"canceled"},
 }
 
@@ -70,16 +70,16 @@ var taskTransitions = map[string][]string{
 }
 
 var knownEventTypes = map[string]bool{
-	"run.submitted":       true,
-	"run.state_changed":   true,
-	"task.state_changed":  true,
-	"attempt.started":     true,
-	"attempt.finished":    true,
+	"run.submitted":        true,
+	"run.state_changed":    true,
+	"task.state_changed":   true,
+	"attempt.started":      true,
+	"attempt.finished":     true,
 	"deploy.state_changed": true,
-	"cleanup.started":     true,
-	"run.finished":        true,
-	"report.written":      true,
-	"resync_required":     true,
+	"cleanup.started":      true,
+	"run.finished":         true,
+	"report.written":       true,
+	"resync_required":      true,
 }
 
 // legalTransition 判断 kind=run|task 的 from -> to 是否在转移表内。
@@ -136,6 +136,7 @@ func (a *App) collectEvents(ctx context.Context, runID string) []Event {
 			a.addCheck("events.history", false, fmt.Sprintf("解析失败：%v", err))
 			return nil
 		}
+		a.eventsSource = "history"
 		a.addCheck("events.history", true, fmt.Sprintf("%d 条（GET %s）", len(events), path))
 		return events
 	}
@@ -147,6 +148,7 @@ func (a *App) collectEvents(ctx context.Context, runID string) []Event {
 		a.addCheck("events.sse", false, sseErr.Error())
 		return nil
 	}
+	a.eventsSource = "sse"
 	a.addCheck("events.sse", true, fmt.Sprintf("%d 条", len(events)))
 	return events
 }
@@ -269,7 +271,7 @@ func (a *App) validateEvents(events []Event, run *Run) {
 		firstN(transitionBad, 5, "所有 run/task 状态转移都在 C-3.1/C-3.2 转移表内"))
 	sort.Strings(unknownTypes)
 	if len(unknownTypes) > 0 {
-		a.warn("未知事件类型（C-9.1 未列出）：" + strings.Join(uniqueStrings(unknownTypes), ", "))
+		a.warn("未知事件类型（C-9.1 未列出）：%s", strings.Join(uniqueStrings(unknownTypes), ", "))
 	}
 
 	// 必需事件与收尾
@@ -313,8 +315,8 @@ func (a *App) validateEvents(events []Event, run *Run) {
 			}
 		}
 		if started < task.Attempts || finished < task.Attempts {
-			a.warn(fmt.Sprintf("Task %s 有 %d 个 Attempt，但事件里 attempt.started=%d、attempt.finished=%d（期望各 %d）",
-				task.Name, task.Attempts, started, finished, task.Attempts))
+			a.warn("Task %s 有 %d 个 Attempt，但事件里 attempt.started=%d、attempt.finished=%d（期望各 %d）",
+				task.Name, task.Attempts, started, finished, task.Attempts)
 		}
 	}
 }
@@ -351,8 +353,13 @@ func (a *App) readSSE(ctx context.Context, runID string, window time.Duration) (
 			continue
 		}
 		events = append(events, ev)
-		if ev.Type == "run.finished" || (ev.Type == "run.state_changed" && isTerminalRun(ev.To())) {
+		if ev.Type == "run.finished" {
 			break
+		}
+		if ev.Type == "run.state_changed" {
+			if _, to, ok := ev.Transition(); ok && isTerminalRun(to) {
+				break
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil && len(events) == 0 {

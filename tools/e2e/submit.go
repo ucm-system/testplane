@@ -22,8 +22,8 @@ func (a *App) submit(ctx context.Context) (*submitOutcome, error) {
 	if err != nil {
 		return nil, err
 	}
-	if a.opts.Verbose && a.cfg.Logf != nil {
-		a.cfg.Logf("Manifest（%s，%d 字节）：\n%s", contentType, len(raw), string(raw))
+	if a.opts.Verbose {
+		a.logf("Manifest（%s，%d 字节）：\n%s", contentType, len(raw), string(raw))
 	}
 
 	if a.opts.DryRunFirst {

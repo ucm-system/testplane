@@ -4,7 +4,7 @@ import { Plus, Trash2 } from 'lucide-react'
 import { parse as parseYaml } from 'yaml'
 import { api } from '@/api'
 import { toApiError } from '@/api/client'
-import type { ApiErrorBody, DeploySpec, RunManifest, ValidationIssue } from '@/api/types'
+import type { ApiErrorBody, DeployManifest, RunManifest, ValidationIssue } from '@/api/types'
 import { RightRail, RailCard } from '@/components/app/RightRail'
 import { Badge, Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -43,7 +43,7 @@ function newKey(): string {
 }
 
 /** 把 YAML 文本解析成 deploy 段；返回错误信息而不是抛。 */
-function parseDeploy(text: string): { deploy: DeploySpec | null; error: string | null } {
+function parseDeploy(text: string): { deploy: DeployManifest | null; error: string | null } {
   if (!text.trim()) return { deploy: null, error: 'deploy 段不能为空' }
   let parsed: unknown
   try {
@@ -79,6 +79,8 @@ export function SubmitPage() {
   const [modelName, setModelName] = useState('Qwen3-32B')
   const [modelPath, setModelPath] = useState('')
   const [precheck, setPrecheck] = useState<PrecheckMode>('auto')
+  /** 执行环境 profile：TestSpec.execution.profile 必填；MVP 没有 /profiles 端点，给可编辑默认值 */
+  const [profile, setProfile] = useState('k8s-npu')
   const [envRows, setEnvRows] = useState<KeyValueRow[]>([{ key: 'LOG_LEVEL', value: 'info' }])
   const [secretRows, setSecretRows] = useState<KeyValueRow[]>([{ key: 'ENDPOINT_API_KEY', value: '' }])
   const [tests, setTests] = useState<TestDraft[]>([
@@ -117,7 +119,7 @@ export function SubmitPage() {
       run: {
         name: name.trim(),
         ...(mode === 'deploy'
-          ? { deploy: deployParse.deploy }
+          ? { deploy: deployParse.deploy ?? undefined }
           : {
               service: {
                 url: serviceUrl.trim(),
@@ -129,11 +131,17 @@ export function SubmitPage() {
         env,
         secrets,
         cleanup: { policy: 'always' },
-        tests: tests.map((test) => ({
-          name: test.name.trim(),
-          tester: test.tester || defaultTester,
-          args: test.args,
-        })),
+        tests: tests.map((test) => {
+          const testerName = test.tester || defaultTester
+          const tester = testerList.find((t) => t.name === testerName)
+          return {
+            name: test.name.trim(),
+            tester: testerName,
+            version: tester?.version ?? '',
+            execution: { profile: profile.trim() || 'k8s-npu' },
+            args: test.args,
+          }
+        }),
       },
     }
   }
@@ -142,10 +150,11 @@ export function SubmitPage() {
     const result = await api.dryRun(manifest)
     setIssues(result.issues ?? [])
     setDryRunOk(result.valid)
+    const issueCount = result.issues?.length ?? 0
     if (result.valid) {
       toast({ title: '校验通过', description: '没有发现问题，可以提交。', tone: 'ok' })
     } else {
-      toast({ title: `校验未通过：${result.issues.length} 个问题`, tone: 'warn' })
+      toast({ title: `校验未通过：${issueCount} 个问题`, tone: 'warn' })
     }
     return result.valid
   }
@@ -383,6 +392,14 @@ export function SubmitPage() {
           sub="每个 Task 一段参数字符串；执行环境按 Task 指定"
           actions={
             <>
+              <span className="text-2xs text-fg-3">执行环境</span>
+              <Input
+                value={profile}
+                onChange={(e) => setProfile(e.target.value)}
+                aria-label="执行环境 profile"
+                placeholder="k8s-npu"
+                className="h-8 w-32 font-mono text-2xs"
+              />
               <span className="text-2xs text-fg-3">Pre-Check</span>
               <Segmented<PrecheckMode>
                 ariaLabel="Pre-Check 模式"

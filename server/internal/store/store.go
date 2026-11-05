@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"encoding/base32"
 	"fmt"
 	"time"
@@ -28,6 +29,14 @@ type Store struct {
 	Clusters *ClusterRepo
 	Audits   *AuditRepo
 	Profiles *ProfileRepo
+	Artifacts *ArtifactRepo
+
+	// notifier 可为 nil：置位后，提交与 ClaimForExecution 会在提交后 NOTIFY。
+	notifier *Notifier
+	// clusterName 写进 attempts.executor_ref.cluster，默认 cluster-01（与 clusters 种子对齐）。
+	clusterName string
+	// runFinishedHook 在 Run 落终态**提交之后**异步触发（报告生成；事务内不做文件 IO）。
+	runFinishedHook func(ctx context.Context, runID string)
 }
 
 // DBTX 是 *pgxpool.Pool 与 pgx.Tx 的公共子集：让同一个 repo 方法既能跑在
@@ -61,7 +70,7 @@ func New(ctx context.Context, dsn string, maxConns int32) (*Store, error) {
 		return nil, err
 	}
 
-	s := &Store{pool: pool}
+	s := &Store{pool: pool, clusterName: "cluster-01"}
 	s.Runs = &RunRepo{s: s}
 	s.Tasks = &TaskRepo{s: s}
 	s.Attempts = &AttemptRepo{s: s}
@@ -71,11 +80,78 @@ func New(ctx context.Context, dsn string, maxConns int32) (*Store, error) {
 	s.Clusters = &ClusterRepo{s: s}
 	s.Audits = &AuditRepo{s: s}
 	s.Profiles = &ProfileRepo{s: s}
+	s.Artifacts = &ArtifactRepo{s: s}
 	return s, nil
 }
 
 // Pool 暴露连接池给需要自己开事务的调用方（LISTEN、报表）。
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+
+// SetNotifier 注入事件通知器：提交与 ClaimForExecution 在事务提交后推送。
+func (s *Store) SetNotifier(n *Notifier) { s.notifier = n }
+
+// Notifier 返回已注入的通知器（可能为 nil）。
+func (s *Store) NotifierRef() *Notifier { return s.notifier }
+
+// SetClusterName 设置本实例对接的集群名（写进 attempts.executor_ref.cluster）。
+func (s *Store) SetClusterName(name string) {
+	if name != "" {
+		s.clusterName = name
+	}
+}
+
+// SetRunFinishedHook 注册 Run 终态回调（报告生成等外部动作，提交后异步执行）。
+func (s *Store) SetRunFinishedHook(h func(ctx context.Context, runID string)) { s.runFinishedHook = h }
+
+// fireRunFinished 在事务提交后异步触发回调；事务内禁止外部 IO（C-2.5）。
+func (s *Store) fireRunFinished(runID string) {
+	h := s.runFinishedHook
+	if h == nil || runID == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		h(ctx, runID)
+	}()
+}
+
+// EmitRunEvent 追加一条非状态转移事件（如 report.written），并分配 seq。
+func (s *Store) EmitRunEvent(ctx context.Context, runID, typ string, payload map[string]any, actor string) (int64, error) {
+	var seq int64
+	err := s.InTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		seq, err = s.nextSeq(ctx, tx, runID)
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO state_events (run_id, seq, type, payload, actor, created_at)
+			VALUES ($1, $2, $3, $4, $5, now())`, runID, seq, typ, raw, actorOf(actor)); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if s.notifier != nil && seq > 0 {
+		s.notifier.Notify(runID, seq)
+	}
+	return seq, nil
+}
+
+// ClusterName 返回当前集群名。
+func (s *Store) ClusterName() string {
+	if s.clusterName == "" {
+		return "cluster-01"
+	}
+	return s.clusterName
+}
 
 // Close 关闭连接池。
 func (s *Store) Close() { s.pool.Close() }

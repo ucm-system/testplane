@@ -159,6 +159,51 @@ func (r *RunRepo) SetDeploy(ctx context.Context, tx pgx.Tx, id string, deploy []
 	return nil
 }
 
+// RunTaskCounts 是 Run 的 Task 状态聚合（前端列表 "3 / 4" 与看板用）。
+//
+// 口径（openapi Run.task_counts）：pending 含 queued；running 含 preparing；
+// failed 含 canceled；skipped 单独一档。
+type RunTaskCounts struct {
+	Total     int `json:"total"`
+	Pending   int `json:"pending"`
+	Running   int `json:"running"`
+	Succeeded int `json:"succeeded"`
+	Failed    int `json:"failed"`
+	Skipped   int `json:"skipped"`
+}
+
+// TaskCounts 批量取多个 Run 的 Task 计数（一条 GROUP BY，避免 N+1）。
+func (r *RunRepo) TaskCounts(ctx context.Context, tx pgx.Tx, runIDs []string) (map[string]RunTaskCounts, error) {
+	out := make(map[string]RunTaskCounts, len(runIDs))
+	if len(runIDs) == 0 {
+		return out, nil
+	}
+	rows, err := r.s.db(tx).Query(ctx, `
+		SELECT run_id,
+		       count(*),
+		       count(*) FILTER (WHERE status IN ('pending','queued')),
+		       count(*) FILTER (WHERE status IN ('preparing','running')),
+		       count(*) FILTER (WHERE status = 'succeeded'),
+		       count(*) FILTER (WHERE status IN ('failed','canceled')),
+		       count(*) FILTER (WHERE status = 'skipped')
+		  FROM tasks WHERE run_id = ANY($1)
+		 GROUP BY run_id`, runIDs)
+	if err != nil {
+		return nil, fmt.Errorf("store: run task counts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID string
+		var c RunTaskCounts
+		if err := rows.Scan(&runID, &c.Total, &c.Pending, &c.Running,
+			&c.Succeeded, &c.Failed, &c.Skipped); err != nil {
+			return nil, fmt.Errorf("store: scan run task counts: %w", err)
+		}
+		out[runID] = c
+	}
+	return out, rows.Err()
+}
+
 // Summaries 返回 Run 的 Task 摘要（详情页用一条 JOIN 取，避免 N+1，03 §5）。
 type TaskSummaryRow struct {
 	ID            string  `json:"id"`
@@ -167,13 +212,13 @@ type TaskSummaryRow struct {
 	Status        string  `json:"status"`
 	WaitingReason *string `json:"waiting_reason,omitempty"`
 	Attempts      int     `json:"attempts"`
-	ErrorCode     *string `json:"error_code,omitempty"`
+	Error         []byte  `json:"error,omitempty"`
 }
 
 // TaskSummaries 取 Run 的全部 Task 摘要，按 seq 升序。
 func (r *RunRepo) TaskSummaries(ctx context.Context, tx pgx.Tx, runID string) ([]TaskSummaryRow, error) {
 	rows, err := r.s.db(tx).Query(ctx, `
-		SELECT id, seq, name, status, waiting_reason, current_attempt, error->>'code'
+		SELECT id, seq, name, status, waiting_reason, current_attempt, error
 		  FROM tasks WHERE run_id = $1 ORDER BY seq`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("store: task summaries %s: %w", runID, err)
@@ -182,7 +227,7 @@ func (r *RunRepo) TaskSummaries(ctx context.Context, tx pgx.Tx, runID string) ([
 	var out []TaskSummaryRow
 	for rows.Next() {
 		var t TaskSummaryRow
-		if err := rows.Scan(&t.ID, &t.Seq, &t.Name, &t.Status, &t.WaitingReason, &t.Attempts, &t.ErrorCode); err != nil {
+		if err := rows.Scan(&t.ID, &t.Seq, &t.Name, &t.Status, &t.WaitingReason, &t.Attempts, &t.Error); err != nil {
 			return nil, fmt.Errorf("store: scan task summary: %w", err)
 		}
 		out = append(out, t)

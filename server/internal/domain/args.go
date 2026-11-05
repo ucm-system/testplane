@@ -141,11 +141,10 @@ func PublicParamConflict(argv []string) []string {
 	return hits
 }
 
-// InjectPublicParams 按 url → model_name → model_path 的固定顺序把有值的公共参数
-// 追加到 argv 末尾（C-8.5 第 3 条）。空值跳过。返回新切片，不修改入参。
-func InjectPublicParams(argv []string, ep Endpoint) []string {
-	out := make([]string, 0, len(argv)+3)
-	out = append(out, argv...)
+// PublicParamArgv 返回平台注入的公共参数 token，顺序固定 url → model_name → model_path，
+// 只包含有值的项（C-8.5 第 3 条）。
+func PublicParamArgv(ep Endpoint) []string {
+	out := make([]string, 0, 3)
 	if ep.BaseURL != "" {
 		out = append(out, "--"+ParamURL+"="+ep.BaseURL)
 	}
@@ -156,6 +155,26 @@ func InjectPublicParams(argv []string, ep Endpoint) []string {
 		out = append(out, "--"+ParamModelPath+"="+ep.ModelPath)
 	}
 	return out
+}
+
+// InjectPublicParams 按固定顺序把有值的公共参数追加到 argv 末尾（C-8.5 第 3 条）。
+// 空值跳过。返回新切片，不修改入参。
+func InjectPublicParams(argv []string, ep Endpoint) []string {
+	extra := PublicParamArgv(ep)
+	out := make([]string, 0, len(argv)+len(extra))
+	out = append(out, argv...)
+	out = append(out, extra...)
+	return out
+}
+
+// BuildArgv 是提交与回填两处共用的一步到位入口：词法切分 + 公共参数注入。
+// Deploy ready 回填 injected_argv 时也用它，保证"提交时算的"与"ready 时算的"同源。
+func BuildArgv(raw string, ep Endpoint) ([]string, error) {
+	argv, err := SplitArgs(raw)
+	if err != nil {
+		return nil, err
+	}
+	return InjectPublicParams(argv, ep), nil
 }
 
 // NormalizeEndpointKey 计算端点互斥键（C-8.5 第 5 条）：

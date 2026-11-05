@@ -95,10 +95,12 @@ func (m *RunMachine) BeginTesting(ctx context.Context, runID string, ep domain.E
 	})
 }
 
-// DeployReady 执行 R4：deploying → testing，回填 Endpoint 与 Task 参数。
+// DeployReady 执行 R4：deploying → testing，并在**同一事务**里回填 runs.endpoint、
+// 全部 Task 的 endpoint_key 与注入后的 injected_argv（C-5.3 的硬要求）。
 func (m *RunMachine) DeployReady(ctx context.Context, runID string, ep domain.Endpoint) (domain.Applied, error) {
 	payload := endpointPayload(ep, "genet")
 	payload["endpoint_key"] = ep.Key
+	payload["print_argv"] = domain.PublicParamArgv(ep)
 	return m.apply(ctx, domain.Transition{
 		Entity: domain.EntityRun, ID: runID,
 		From:    []domain.Status{domain.RunDeploying.Status()},
@@ -202,6 +204,10 @@ func (m *RunMachine) apply(ctx context.Context, tr domain.Transition) (domain.Ap
 		return domain.Applied{}, err
 	}
 	afterCommit(m.notifier, applied, tr.ID)
+	// Run 落终态：提交后异步触发报告生成等外部动作（事务内禁止文件 IO）。
+	if !applied.Noop && domain.RunStatus(applied.To).IsTerminal() {
+		m.s.fireRunFinished(tr.ID)
+	}
 	return applied, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -67,6 +68,19 @@ func (r *EventRepo) AllByRun(ctx context.Context, tx pgx.Tx, runID string) ([]Ev
 		out = append(out, *e)
 	}
 	return out, rows.Err()
+}
+
+// OldestSeqSince 返回 since 之后（含）最小的事件 seq；没有事件返回 0。
+// SSE 判断"回放起点是否越窗"用（C-9.2）。
+func (r *EventRepo) OldestSeqSince(ctx context.Context, tx pgx.Tx, runID string, since time.Time) (int64, error) {
+	var seq int64
+	err := r.s.db(tx).QueryRow(ctx, `
+		SELECT COALESCE(min(seq), 0) FROM state_events
+		 WHERE run_id = $1 AND created_at >= $2`, runID, since).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("store: oldest event seq %s: %w", runID, err)
+	}
+	return seq, nil
 }
 
 // LatestSeq 返回该 Run 已落库的最大事件 seq（0 表示没有事件）。

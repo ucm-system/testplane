@@ -38,7 +38,9 @@ func Effects(entity EntityType, from, to Status) []EffectKind {
 	case EntityTask:
 		switch TaskStatus(to) {
 		case TaskSucceeded:
-			return []EffectKind{EffectReleaseLeases, EffectWriteReportIntent}
+			// 只释放租约。Task 级 report.json 在 MVP 不生成（Run 终态统一出报告，C-7.2）；
+			// report.pending 也不在 07 §7 的 EventType 枚举里，所以不写这条事件。
+			return []EffectKind{EffectReleaseLeases}
 		case TaskFailed, TaskCanceled, TaskSkipped:
 			return []EffectKind{EffectReleaseLeases}
 		case TaskQueued:

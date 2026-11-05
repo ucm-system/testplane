@@ -217,7 +217,7 @@ func TestEffectsForTransition(t *testing.T) {
 		wantPresence bool
 	}{
 		{"task 终态释放租约", EntityTask, TaskRunning.Status(), TaskSucceeded.Status(), EffectReleaseLeases, true},
-		{"task 成功写报告意图", EntityTask, TaskRunning.Status(), TaskSucceeded.Status(), EffectWriteReportIntent, true},
+		{"task 成功不写事件之外的东西", EntityTask, TaskRunning.Status(), TaskSucceeded.Status(), EffectWriteReportIntent, false},
 		{"task 失败释放租约", EntityTask, TaskRunning.Status(), TaskFailed.Status(), EffectReleaseLeases, true},
 		{"task 重试排 backoff", EntityTask, TaskFailed.Status(), TaskQueued.Status(), EffectScheduleRetry, true},
 		{"task 入队无副作用", EntityTask, TaskPending.Status(), TaskQueued.Status(), EffectReleaseLeases, false},

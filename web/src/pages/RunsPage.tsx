@@ -14,8 +14,7 @@ import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
 import { TERMINAL_LEGEND, isTerminalRun } from '@/lib/status'
-import { formatDateTime, formatDuration, formatRelative } from '@/lib/utils'
-import type { RunStatus } from '@/api/types'
+import { formatDateTime, formatDuration, formatRelative, runDuration } from '@/lib/utils'
 
 type StatusFilter = 'all' | 'active' | 'terminal' | 'failed'
 type TimeFilter = 'all' | '1h' | '24h' | '7d'
@@ -216,10 +215,10 @@ export function RunsPage() {
                       {run.name}
                     </TD>
                     <TD>
-                      <RunStatusBadge status={run.status as RunStatus} />
+                      <RunStatusBadge status={run.status} />
                     </TD>
                     <TD className="tabular-nums">{progress(run)}</TD>
-                    <TD className="whitespace-nowrap tabular-nums">{formatDuration(run.duration_seconds)}</TD>
+                    <TD className="whitespace-nowrap tabular-nums">{formatDuration(runDuration(run))}</TD>
                     <TD className="whitespace-nowrap">{run.submitted_by}</TD>
                     <TD className="whitespace-nowrap text-2xs text-fg-3" title={formatRelative(run.submitted_at)}>
                       {formatDateTime(run.submitted_at)}

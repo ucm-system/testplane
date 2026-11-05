@@ -86,15 +86,15 @@ type Attempt struct {
 type Event struct {
 	ID         int64           `json:"-"`
 	RunID      string          `json:"run_id"`
-	TaskID     *string         `json:"task_id,omitempty"`
-	AttemptID  *string         `json:"attempt_id,omitempty"`
+	TaskID     *string         `json:"task_id"`
+	AttemptID  *string         `json:"attempt_id"`
 	Seq        int64           `json:"seq"`
 	Type       string          `json:"type"`
-	FromStatus *string         `json:"from,omitempty"`
-	ToStatus   *string         `json:"to,omitempty"`
-	Reason     *string         `json:"reason,omitempty"`
+	FromStatus *string         `json:"from"`
+	ToStatus   *string         `json:"to"`
+	Reason     *string         `json:"reason"`
 	Payload    json.RawMessage `json:"payload"`
-	Actor      *string         `json:"actor,omitempty"`
+	Actor      *string         `json:"actor"`
 	CreatedAt  time.Time       `json:"at"`
 }
 

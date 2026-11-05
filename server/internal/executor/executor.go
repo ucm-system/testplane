@@ -43,6 +43,9 @@ type Options struct {
 	CancelWait time.Duration
 	// ForceWait 是强删 Pod 后再次等待的上限（execution §5.2 第 4 步）。
 	ForceWait time.Duration
+	// Logf 是可选日志钩子：渲染告警（如 secret_env_unbound）通过它落日志，
+	// 不影响执行结果（execution §4.3.1 的 warning 口径）。
+	Logf func(format string, args ...any)
 }
 
 func (o Options) withDefaults() Options {
@@ -67,6 +70,7 @@ type Executor struct {
 	namespace string
 	opts      Options
 	now       func() time.Time
+	logf      func(format string, args ...any)
 }
 
 // 确保实现契约（签名与 ports.Executor 逐字一致）。
@@ -74,11 +78,16 @@ var _ ports.Executor = (*Executor)(nil)
 
 // New 构造执行器。
 func New(client kubernetes.Interface, opts Options) *Executor {
+	logf := opts.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	return &Executor{
 		client:    client,
 		namespace: "testplane",
 		opts:      opts.withDefaults(),
 		now:       time.Now,
+		logf:      logf,
 	}
 }
 
@@ -93,9 +102,12 @@ func NewWithNamespace(client kubernetes.Interface, namespace string, opts Option
 
 // Submit 创建 Job（幂等：同名同 spec-hash 视为成功，见 execution §2.3）。
 func (e *Executor) Submit(ctx context.Context, spec ports.JobSpec) (ports.JobHandle, error) {
-	job, err := Render(spec)
+	job, warnings, err := RenderWithWarnings(spec)
 	if err != nil {
 		return ports.JobHandle{}, err
+	}
+	for _, w := range warnings {
+		e.logf("executor: job %s/%s: %s", job.Namespace, job.Name, w)
 	}
 	want := job.Annotations[AnnSpecHash]
 	ns := job.Namespace

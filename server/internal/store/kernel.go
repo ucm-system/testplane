@@ -63,26 +63,39 @@ func (s *Store) Apply(ctx context.Context, tx pgx.Tx, tr domain.Transition) (dom
 	return domain.Applied{}, fmt.Errorf("store: kernel: 未知实体 %q: %w", tr.Entity, domain.ErrIllegalState)
 }
 
-// validateTransitionTable 做步骤 1。From 为空表示"不校验前置状态"，此时只要求
-// 目标状态在表里存在出边（否则一定是编程错误）。
+// validateTransitionTable 做步骤 1。语义是"这组 From 里有没有一条到 To 的合法边"：
+//   - From 为空表示"不校验前置状态"，只要求目标状态在表里有任意入边；
+//   - From 非空时至少有一条合法边即可（同一组前置状态里允许某几个状态到不了 To，
+//     真正的判定在读到当前状态后做：不在集合里 → ErrConflict）。
 func validateTransitionTable(tr domain.Transition) error {
-	if len(tr.From) > 0 {
-		for _, f := range tr.From {
-			if _, ok := domain.LookupTransition(tr.Entity, f, tr.To); !ok {
-				return fmt.Errorf("store: kernel %s %s: 转移表不允许 %s -> %s: %w",
-					tr.Entity, tr.ID, f, tr.To, domain.ErrIllegalState)
-			}
+	var legal int
+	for _, f := range tr.From {
+		if _, ok := domain.LookupTransition(tr.Entity, f, tr.To); ok {
+			legal++
 		}
+	}
+	if legal > 0 {
 		return nil
 	}
-	// From 为空：要求该实体存在任意一条 to == To 的边。
-	for _, from := range allStatuses(tr.Entity) {
-		if _, ok := domain.LookupTransition(tr.Entity, from, tr.To); ok {
-			return nil
+	if len(tr.From) == 0 {
+		for _, from := range allStatuses(tr.Entity) {
+			if _, ok := domain.LookupTransition(tr.Entity, from, tr.To); ok {
+				return nil
+			}
 		}
 	}
-	return fmt.Errorf("store: kernel %s %s: 目标状态 %s 没有任何合法入边: %w",
-		tr.Entity, tr.ID, tr.To, domain.ErrIllegalState)
+	return fmt.Errorf("store: kernel %s %s: 转移表不允许 %v -> %s: %w",
+		tr.Entity, tr.ID, tr.From, tr.To, domain.ErrIllegalState)
+}
+
+// requireEdge 在读到当前状态后确认 current→To 在转移表内；不在则说明调用方给的
+// From 集合与库内事实不符，按 ErrConflict 处理（先落库者胜）。
+func requireEdge(entity domain.EntityType, id string, current, to domain.Status) error {
+	if _, ok := domain.LookupTransition(entity, current, to); ok {
+		return nil
+	}
+	return fmt.Errorf("store: kernel %s %s: 当前状态 %s 没有到 %s 的合法边: %w",
+		entity, id, current, to, domain.ErrConflict)
 }
 
 // allStatuses 枚举某实体的全部状态值，只给 From 为空时的兜底校验用。
@@ -126,6 +139,9 @@ func (s *Store) applyRun(ctx context.Context, tx pgx.Tx, tr domain.Transition, a
 	if len(tr.From) > 0 && !containsStatus(tr.From, cur.Status()) {
 		return domain.Applied{}, fmt.Errorf("store: kernel run %s: 当前状态 %s 不在允许集合 %v: %w",
 			tr.ID, cur, tr.From, domain.ErrConflict)
+	}
+	if err := requireEdge(tr.Entity, tr.ID, cur.Status(), to.Status()); err != nil {
+		return domain.Applied{}, err
 	}
 
 	// 守卫：有 Endpoint 才能进 testing（C-3.4）。
@@ -222,6 +238,9 @@ func (s *Store) applyTask(ctx context.Context, tx pgx.Tx, tr domain.Transition, 
 		return domain.Applied{}, fmt.Errorf("store: kernel task %s: 当前状态 %s 不在允许集合 %v: %w",
 			tr.ID, cur, tr.From, domain.ErrConflict)
 	}
+	if err := requireEdge(tr.Entity, tr.ID, cur.Status(), to.Status()); err != nil {
+		return domain.Applied{}, err
+	}
 
 	// 守卫 1：queued 的 Task 必须有 endpoint_key（C-4.5，不得用占位键绕过）。
 	if to == domain.TaskQueued && (endpointKey == nil || *endpointKey == "") {
@@ -295,6 +314,9 @@ func (s *Store) applyAttempt(ctx context.Context, tx pgx.Tx, tr domain.Transitio
 	if len(tr.From) > 0 && !containsStatus(tr.From, cur.Status()) {
 		return domain.Applied{}, fmt.Errorf("store: kernel attempt %s: 当前状态 %s 不在允许集合 %v: %w",
 			tr.ID, cur, tr.From, domain.ErrConflict)
+	}
+	if err := requireEdge(tr.Entity, tr.ID, cur.Status(), to.Status()); err != nil {
+		return domain.Applied{}, err
 	}
 
 	from := casFrom(tr.From, cur.Status())
@@ -490,6 +512,27 @@ func payloadString(p map[string]any, key string) string {
 		return s
 	}
 	return ""
+}
+
+// payloadStrings 取 []string（或 []any 的字符串元素）型 payload 字段。
+func payloadStrings(p map[string]any, key string) []string {
+	v, ok := p[key]
+	if !ok || v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case []string:
+		return t
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func payloadInt(p map[string]any, key string) *int32 {

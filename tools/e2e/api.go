@@ -105,7 +105,7 @@ var allTaskStatuses = map[string]bool{
 	"succeeded": true, "failed": true, "canceled": true, "skipped": true,
 }
 
-func isTerminalRun(status string) bool { return terminalRunStatuses[status] }
+func isTerminalRun(status string) bool  { return terminalRunStatuses[status] }
 func isTerminalTask(status string) bool { return terminalTaskStatuses[status] }
 
 // 设计允许的终态期望值（--expect）。

@@ -10,7 +10,7 @@ import type { ApiErrorBody } from './types'
 
 const rawBase = String(import.meta.env.VITE_API_BASE ?? '/api/v1')
 export const API_BASE = rawBase.replace(/\/+$/, '')
-export const USE_MOCK = String(import.meta.env.VITE_USE_MOCK ?? '1') === '1'
+export const USE_MOCK = String(import.meta.env.VITE_USE_MOCK ?? '0') === '1'
 
 const SUBJECT_KEY = 'testplane:subject'
 const DEFAULT_SUBJECT = String(import.meta.env.VITE_DEV_USER ?? 'dev') || 'dev'
@@ -139,7 +139,13 @@ export function normalizeErrorBody(status: number, body: unknown): ApiErrorBody 
   const retryableRaw = inner['retryable']
   const retryable = typeof retryableRaw === 'boolean' ? retryableRaw : fallback.retryable
   const traceId = pickString(inner, 'trace_id') ?? pickString(record, 'trace_id')
-  const detail = inner['detail'] ?? inner['issues'] ?? record['detail']
+  const detailRaw = inner['detail'] ?? inner['issues'] ?? record['detail']
+  const detail =
+    detailRaw && typeof detailRaw === 'object' && !Array.isArray(detailRaw)
+      ? (detailRaw as Record<string, unknown>)
+      : Array.isArray(detailRaw)
+        ? { issues: detailRaw }
+        : undefined
 
   return {
     code,
