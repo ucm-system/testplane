@@ -4,8 +4,8 @@
 #   design/views/06-physical-view.md §2（PVC）、§3（目录树与属主）
 #   design/impl/execution.md §3（subPath、目录预创建、权限兜底）
 #
-# 链路：宿主 D:\Project\TestPalne\.data\storage
-#         --(kind extraMounts, deploy/kind/testplane.yaml)--> 节点 /storage-root
+# 链路：宿主 <你渲染时给的目录>（默认 .data\storage，可参数化）
+#         --(kind extraMounts，见 deploy/kind/testplane.yaml 模板 + render.ps1)--> 节点 /storage-root
 #         --(hostPath PV)--> PVC testplane-storage --> 控制面 /storage-root
 #                                                    --> Tester subPath /workspace/output
 #

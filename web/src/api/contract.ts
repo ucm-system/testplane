@@ -49,9 +49,11 @@ export interface LogOptions {
  * `GET /clusters`、`GET /queue-status`。
  */
 export interface Api {
-  /* 身份与元信息 */
+  /* 身份与元信息（OIDC 会话时 getIdentity 会把 csrf_token 收进内存） */
   getIdentity(): Promise<Identity>
   getMeta(): Promise<Meta>
+  /** 登出：`POST /auth/logout`（带 X-CSRF-Token），随后清空内存身份 */
+  logout(): Promise<void>
 
   /* Run */
   listRuns(query?: RunListQuery): Promise<Page<RunSummary>>

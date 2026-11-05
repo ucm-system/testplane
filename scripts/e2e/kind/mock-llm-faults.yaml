@@ -126,8 +126,9 @@ spec:
         - name: mock-llm
           image: testplane/mock-llm:dev
           imagePullPolicy: IfNotPresent
-          # 窗口内永远不会就绪：用于断言 precheck 可重试失败 → service_unavailable
-          args: ["-addr=:18080", "-ready-after=3600s"]
+          # 窗口内永远不会就绪：用于断言 precheck 可重试失败 → service_unavailable。
+          # 用 24h（不是 3600s）：3600s 的 mock 跑满 1h 后会真的就绪，timeout 用例会“意外成功”。
+          args: ["-addr=:18080", "-ready-after=86400s"]
           ports: [{ name: http, containerPort: 18080 }]
           readinessProbe:
             httpGet: { path: /healthz, port: http }

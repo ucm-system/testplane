@@ -473,6 +473,82 @@ FIFO 按 `(run.submitted_at, seq)`。不做优先级、不做抢占——平台�
 
 前三条是平台自身的等待，后三条是 K8s/Volcano 的等待——分开呈现，用户才知道该找谁。§6.9 只列了后三条 + `slot_waiting`；`precheck_gate` 与 `global_limit` 是实现补充的展示原因，拿到 `unknown` 时落 `detail` 而不是新增枚举值（E-11）。
 
+### C-4.8 `GET /api/v1/queue-status` 的数据来源（两套排队，分开呈现）
+
+同一个端点里有两类**互不换算**的排队，响应结构也按它们分成 `slots` / `waiting` / `volcano` 三层（`api/openapi.yaml §QueueStatus`）：
+
+| 层 | 数据源 | 语义 | 时间尺度 | 可用性 |
+|---|---|---|---|---|
+| `slots` + `waiting`（`precheck_gate` / `slot_waiting` / `global_limit`） | **本进程 + DB**（`endpoint_leases`、`attempts` 计数、`tasks.waiting_reason`） | 平台 permit 与端点独占 | 秒~分钟 | 永远可读 |
+| `volcano`（`queue_full` / `gang_pending` / `insufficient_resources` 的原始水位） | **集群 CRD 直读**：`scheduling.volcano.sh/v1beta1` 的 `queues` 与 `podgroups` | 集群资源配额与 gang 调度 | 小时~天 | 可能不可达 → 降级 |
+
+**为什么必须分开**：归责对象相反（平台 vs 集群管理员）、时间尺度差 1~2 个数量级、单位不同（permit 计数 vs 卡/CPU 配额）、可用性不同（DB 永可读 vs CRD 可能不可达）。合成一个"总排队 N"是错的，UI 也必须是两张独立的卡。
+
+**C-4.8.1 读什么（CRD 字段路径）**
+
+不引 `volcano.sh/apis`（避免被 Volcano 版本绑死），用 `dynamic.Interface` + `unstructured`（与 Genet 同策略，`<G>/backend/internal/k8s/volcano.go:32-48`）：
+
+```go
+const volcanoGroup = "scheduling.volcano.sh"
+var (
+    queueGVR    = schema.GroupVersionResource{Group: volcanoGroup, Version: "v1beta1", Resource: "queues"}
+    podGroupGVR = schema.GroupVersionResource{Group: volcanoGroup, Version: "v1beta1", Resource: "podgroups"}
+)
+```
+
+| 目标字段 | CRD 路径 | 说明 |
+|---|---|---|
+| `queues[].name` | `metadata.name` | 统一写成 `"<cluster>/<queue>"`（零契约变更）：cluster 取 `TESTPLANE_CLUSTER_NAME`（默认 `cluster-01`），**P0 单集群也带前缀**，切多集群时 UI/契约不用改；cluster 为空则保持原名 |
+| `queues[].state` | `.status.state` | `Open` / `Closed`；未知值原样透传，不硬映射成 `Closed` |
+| `queues[].capability` | `.spec.capability` | `map[string]string`，**原文透传不做单位换算**；⚠ 队列未设 CPU/内存配额时 Volcano 会兜底成极大值，不可直接当进度条分母 |
+| `queues[].allocated` | `.status.allocated` | 控制器回写、**有滞后**；无 `/metrics` 接入时只能用它，`detail` 注明来源 |
+| `queues[].pending_jobs` | 该 queue 下 `podgroups[].status.phase == "Pending"` 的计数（PodGroup 的 namespace 范围由 `TESTPLANE_VOLCANO_NAMESPACES` 决定，默认 profile 的 namespace；`spec.queue` 为空的 PodGroup 归 `default` 队列） | **不要用** `queue.status.pending`（Volcano 自己的计数，语义可能含 Inqueue） |
+| `queues[].longest_wait_seconds` | `now - min(podgroup.metadata.creationTimestamp)`，限定同 queue 且 `phase ∈ {Pending, Inqueue}` | 无排队 → `0`，不是负数、也不回退成队列创建时间 |
+| `queues[].reason` | 同 queue 下 `phase ∈ {Pending,Inqueue}` 里**等得最久**那条的 `status.conditions[-1].message`（空则 `.reason`），**原文透传** | 归一成 `waiting_reason` 六值是 `waiting.by_reason` 的职责（需 `Task→PodGroup` 关联，见 C-4.8.4 #4），MVP 不做。⚠ `server/api/openapi.yaml` 的 `volcano.queue.reason` 仍 `$ref WaitingReason`，与原文透传不一致，待拍板后同步 |
+
+**C-4.8.2 采样方式**
+
+| 项 | 决定 | 理由 |
+|---|---|---|
+| 轮询 + 15s TTL 缓存，**不用 informer** | 与 `execution.md:412` 的既有约束一致 | 规模小（队列 3 个、PodGroup 数十~数百）；informer 要 watch 语义与常驻 reflector，与"15s 新鲜度"不匹配，多集群还更重 |
+| **单飞**（`sync.Mutex` + `inflight`） | 并发请求最多一个在打 API | `/queue-status` 是 30s 轮询的公共端点，看板一开就是多客户端同时打 |
+| 单查超时 5s；`/queue-status` 整体 3s 内必须返回 | 火山块失败即降级，不等 | E-11 |
+| 失败退避 60s（连续失败后） | 退避窗口内不再打 API，仍回降级快照 | 集群不可达时不要每 15s 打一次（06 §2.1（3）） |
+| PodGroup 的 namespace 范围 | `TESTPLANE_VOLCANO_NAMESPACES`（逗号分隔；默认 profile 的 namespace；`*` = 全部，一次集群级 List） | 只统计测试命名空间，避免把别的租户的 PodGroup 算进 `pending_jobs` |
+| 先 `queues` 后 `podgroups` | 小的先取；后者失败即整体 `available:false` + `queues:[]`（与 openapi 一致） | 大 List 更容易超时 |
+| RBAC | **只 `get,list`**；Queue 是 cluster-scoped → 必须 `ClusterRole`（`testplane-volcano-view`，见 06 §2.1） | 轮询不需要 `watch`；不能给 `queues/status` 写权限（平台只读，不改配额、不插队） |
+| 实现落点 | `server/internal/k8s/volcano.go`（`k8s.Volcano` 实现 `api.VolcanoProvider`），`cmd/testplaned/main.go` 注入 `api.Deps.Volcano`；单测 `server/internal/k8s/volcano_test.go` 用 `client-go/dynamic/fake` 覆盖字段映射、四态、TTL、单飞、退避 | 生产代码不引 `volcano.sh/apis`，测试也不引 |
+
+**C-4.8.3 降级四态（红线：不可达 ≠ 0 排队）**
+
+| 情形 | `volcano` 块 | 其他块 |
+|---|---|---|
+| CRD 未安装（List 返回 `IsNotFound` / `NoMatch`；结果缓存 5 分钟*） | `available:false, detail:"crd_missing", queues:[]` | 照常 |
+| List 返回 `apierrors.IsForbidden` | `available:false, detail:"rbac_forbidden", queues:[]`（不吐原始 RBAC 报错，避免泄露 SA/角色名） | 照常 |
+| 超时 / 连不上 | `available:false, detail:"scheduler_unavailable", queues:[]`；上次成功过则 `stale:true`（**不回放旧队列数字**） | 照常 |
+| `TESTPLANE_VOLCANO_ENABLED=false`（平台未启用队列调度） | `available:false, detail:"disabled", queues:[]` | 照常 |
+
+\* 404/discovery 结果的 5 分钟缓存**尚未实现**：当前由 15s TTL + 60s 退避间接覆盖，且不额外引 discovery（少一次与 RBAC 无关的调用）。
+
+- 队列存在但无 PodGroup：`available:true`，`pending_jobs:0`、`longest_wait_seconds:0`、`reason:null`——UI 显示 `—`，**不要**写"0 个排队"这种绝对断言。
+- CRD 里没有的队列不列（列事实，不列配置期望）。
+- **任何降级都返 `available:false` + `queues:[]`**（唯一的降级出口 `volcanoUnavailable`），且不得影响 `slots` / `waiting`，也不得让 HTTP 非 200（500 只留给真正的平台故障）。
+
+**C-4.8.4 MVP 边界（未确认项先不实现）**
+
+1. `capability` 能否当分母：CPU/内存未设配额时是极大值 → **MVP 只透传**，UI 进度条用加速卡维度且需实机核对；
+2. `queue_full` 的完整判定要 `deserved`（只在调度器内存 metrics 里，CRD 没有）→ **MVP 只按 `state=Closed`（且 queue 内有 Pending）判**，`detail` 写 `deserved_unavailable`；
+3. `gang_pending` 要 `PodGroup.status.running`，该字段未被 Genet 侧代码读取过 → 双路判（有 `status.running` 用它比 `minMember`，否则退回 `phase=Pending` + conditions 关键词），**字段缺失不得判成"gang 已满足"**；
+4. `waiting_reason` 的 K8s 三项需要 `Task → Job → Pod → PodGroup` 关联链路，当前编排层没有 → 先只做 `volcano` 展示层，`waiting.by_reason` 的 K8s 项保持 0 并在 `detail` 说明，**不造数**。
+
+**C-4.8.5 配置（env，以代码为准）**
+
+| env | 默认 | 说明 |
+|---|---|---|
+| `TESTPLANE_VOLCANO_ENABLED` | `true` | 关闭 → `detail:"disabled"`（**不是** `crd_missing`，也不是"0 排队"） |
+| `TESTPLANE_VOLCANO_NAMESPACES` | profile 的 namespace | 逗号分隔；`*` / `all` = 全部 namespace（集群级 List） |
+| `TESTPLANE_VOLCANO_TTL` | `15s` | 快照 TTL；非法值启动即失败（fail fast） |
+
 ---
 
 ## C-5 编排流程
@@ -518,20 +594,85 @@ FIFO 按 `(run.submitted_at, seq)`。不做优先级、不做抢占——平台�
 
 ### C-5.3 Deploy 阶段
 
-事务外调用 Genet：`deploy(ctx, runID, parameters)`，内部幂等键 = `run_id`。之后进入轮询（E-9：前 30s 每 1s，之后 5s 起指数退避、上限 15s；总窗口取 Profile `deploy_timeout_seconds`）：
+Genet 侧的真实语义（调研 `genet-lifecycle.md`）：**一次部署 = 一次 Helm release**，没有部署单、没有作业号，定位符只有 `namespace + release_name`；就绪被拆成两根互不相干的轴——helm `status` 与 `callInfo.endpoint.status`。平台把两者合成自己的五态，并把快照冻结进 `runs.deploy`（形状见 `03-data-view.md §4.4`）。
 
-| Genet 状态 | Run | 说明 |
+**C-5.3.1 拉起（一次 POST，先落库再调用）**
+
+| 步骤 | 动作 | 依据 |
 |---|---|---|
-| `queued` | 保持 `deploying` | **排队中**：记录排队位次/原因（若 Genet 提供），写 `deploy.state_changed`，展示已等待时长；可取消 |
-| `accepted` / `deploying` | 保持 `deploying` | 记录 state，写事件 |
-| `ready` | 写 `endpoint` → `testing` | Endpoint 是权威结果 |
-| `blocked` | `service_unavailable` | 终态，带后端原因，不进入 Task |
-| 超过 `deploy_timeout_seconds`（默认 **72h**）仍未 `ready` | `service_unavailable` | 排队/部署超时，不是平台调不通（E-9） |
-| 调用失败（网络/5xx/鉴权） | `failed` | 平台侧错误 |
+| 1 | 由 `run_id + deploy_id` 派生确定性 `release_name`（`tp-` + `sha256` 前 12 位），**先写 `runs.deploy`**（含 `values`/`values_digest`/`package_type`/`template_path`/`image`/`model_path`/`set`） | Genet 没有幂等头；POST 超时不代表没创建（202 后是后台 goroutine，`<G>/backend/internal/handlers/helm.go:2981-2990`） |
+| 2 | 恢复/重试时先 `GET /api/open/helm/releases/{release_name}`：200 → 直接进轮询；404 且未过 180s 宽限 → 等待，不重发 POST | 同名 release 二次 POST 是 **400**（`already has protected metadata`，`helm.go:2700-2718`），不是幂等成功 |
+| 3 | `POST /api/open/helm/uc-packages/{stack\|pd}/releases`，**`noWait=true`**（恒真，理由见 §4.4） | 带 `wait=true` 时 `timeoutSec` 会把排队判成 `failed`，而 Pod 还在排队（`<G>/jenkins/Helm-Start-Service-MB.Jenkinsfile:21-26`） |
+| 4 | 202 视为 `accepted`，记 `accepted_at`；4xx/5xx 按最终失败处理（403 资源窗/未绑 namespace、424 chart 未配置） | `helm.go:2933-2936`、`:94-104`、`openapi_helm.go:39-45` |
 
-部署失败或 `blocked` 时，所有 Task 一律置 `skipped`（`reason: service_unavailable` 或 `reason: deploy_failed`），**不产生 Attempt**——把"没跑"与"跑了失败"分开（§7.1、§8.5）。
+并发：单 Run 单飞一个 poller（`sync.Map[runID]`），`Poll` 本身幂等无副作用——Genet 后端用 `helm` 子进程，重复打会互相拖慢（调研 D 段）。
 
-Endpoint 写入后：计算 `endpoint_key` 并**回填该 Run 全部 Task**、把公共参数固化进每个 Task 的 `injected_argv`，然后 Run `deploying → testing`。回填与状态转移同事务，避免出现"已 testing 但 Task 还没 key"的窗口。
+**C-5.3.2 状态映射（每次 Poll 按序判定，命中即返回）**
+
+| # | Genet 观测（`GET /releases/{name}`，可选 `/queue/podgroups`） | `deploy.state` | 平台动作 |
+|---|---|---|---|
+| 1 | 404 且距 `accepted_at` **< 180s** | `accepted` | 视为"尚未 apply 出来"，继续轮询（宽限按**时间窗**，不按次数：退避后次数与时间不再线性） |
+| 2 | 404 超过 180s | `blocked` | 视为"启动失败"：`failure.code=DEPLOY_FAILED`（不可重试）→ Run `failed` |
+| 3 | `status` 以 `pending-` 开头，且 `pods == []` 或所有 Pod `nodeName == ""` | `queued` | 记 `queued_at`；`queue` 取 `/queue/podgroups` 的 `phase` 与 `/queue` 的计数（**无位次**）；写 `deploy.state_changed`，展示已等待时长；可取消 |
+| 4 | `status` 以 `pending-` 开头，已有 Pod 被调度（`nodeName != ""`）或已有 `ready=false` 的 Pod | `deploying` | 落 `pods[]` 快照 |
+| 5 | `status == "deployed"` 但 `endpoint.status == "pending"` | `deploying` | **不可**当 ready：`noWait` 下 `deployed` 早于地址出现 |
+| 6 | `endpoint.status == "ready"` 且 `url` 非空 | `ready` | 写 `runs.endpoint` + 回填 Task `endpoint_key`/`injected_argv`，Run → `testing`（同事务，见 C-5.3.4） |
+| 7 | `endpoint.status == "blocked"` | `blocked` | 终态；`failure.message = endpoint.message`（自由文本） |
+| 8 | `status ∈ {failed, superseded, uninstalling, uninstalled}` | `blocked` | 终态；`failure.message = release.description`（helm 原文） |
+| 9 | 距 `accepted_at` 超 `deploy_timeout_seconds`（默认 72h）仍非终态 | `blocked` | `failure.code=DEPLOY_BLOCKED`（可重试）+ `detail.reason="timeout"` → Run `service_unavailable`（D-46/D-47） |
+
+- `queued / accepted / deploying` 的切分是**平台启发式**（Genet 没有"受理"事件、没有队列状态），`state_detail` 里写明判据，别让用户以为是 Genet 的结论。
+- 部署侧失败只折叠成**两个**错误码（附录 D，不新增 `DEPLOY_TIMEOUT`）：`DEPLOY_FAILED`（不可重试：平台侧调 Genet 失败 —— 连接/5xx/同名冲突/安装失败/404 超宽限）→ Run `failed`；`DEPLOY_BLOCKED`（可重试：Genet 报 `blocked` 或超 72h 窗口）→ Run `service_unavailable`，细分靠 `detail.reason ∈ {blocked,timeout,superseded,uninstalling,uninstalled}`（D-47 的折叠在此表达）。
+- 部署失败/阻塞时所有 Task 置 `skipped`（`reason: service_unavailable`），**不产生 Attempt**（§7.1）。
+- `genet_release_status` / `endpoint_status` 两个原值必须落库：排障时要能区分"Genet 说 deployed、我们说 deploying"。
+
+**C-5.3.3 轮询参数**
+
+| 项 | 值 | 依据 |
+|---|---|---|
+| 单飞 | 每 Run 一个 poller，`sync.Map` 去重 | 后端是 helm 子进程，重复请求互相拖慢 |
+| 退避 | 前 30s 每 1s，之后 5s 起指数退避、上限 15s | E-9 |
+| 单请求超时 | 10s（connect 5s） | `execution.md:376` |
+| 总窗口 | `deploy_timeout_seconds`（默认 72h）；排队计入，取消不受限 | E-9 / K-6 |
+| 队列信息 | 每 5 次 Poll 取一次 `/queue` + `/queue/podgroups`；失败**不判 Run 失败**（仅展示） | 现网也是 best-effort（`Jenkinsfile:1856-1860`） |
+| 404 宽限 | `accepted_at + 180s` | 现网 `RELEASE_NOT_FOUND_LIMIT=36`×5s，改为时间窗 |
+
+**C-5.3.4 两道门：地址门 + 服务门**
+
+`endpoint.status == "ready"` **只代表地址解析出来了**（router / hostIP / ClusterIP 三选一），既不保证 Pod Ready，也不保证能推理（`<G>/docs/HELM_RELEASE_CALL_ENDPOINT.md:44`；`helm.go:855-928`）。
+
+所以放行 Task 是两道门，缺一不可：
+
+1. **地址门（Deploy 阶段）**：`endpoint.status=ready` → 写 `runs.endpoint`、算 `endpoint_key`、回填该 Run 全部 Task 的 `endpoint_key` 与 `injected_argv`，Run `deploying → testing`（同事务，避免"已 testing 但 Task 没 key"）。
+2. **服务门（Pre-Check 阶段）**：Run 进 `testing` 后**仍只放 Pre-Check（`seq=0` 且 `runs.resolved.precheck.injected=true`，见 C-4.5）**，Pre-Check 真正探活通过才放行其余 Task。Pre-Check 失败按 C-5.8：实例 `retryable=true` → `service_unavailable`，否则 `completed_with_errors`。
+
+`precheck: "off"` 时没有服务门：地址门一过全部 Task 入池——这是用户显式选择的风险，报告里必须显示"未做服务探活"。
+
+**C-5.3.5 取消与卸载（不可靠，必须补偿）**
+
+取消 = **先落意图再删**：
+
+1. 事务内写 `runs.deploy.cancel_requested_at`，Run → `cancelling`（C-5.2）；
+2. 事务外 `DELETE /api/open/helm/releases/{release_name}?keepHistory=false&force=true`；
+3. **404 一律视为成功**（release 尚未出现也算"没有可泄漏的东西"）；409/500（install 在飞，`helm.go:2438`）→ 不退避重试到底，交给对账：下一轮 Poll 见到任一状态就再删一次；
+4. 卸载成功不改 Run 终态：Run 仍按用户取消落 `canceled`（R9）。
+
+"删干净"的判据（两条同时成立，缺一不可）：
+
+| 检查 | 成功条件 | 说明 |
+|---|---|---|
+| `GET /releases/{name}` | 404 | `keepHistory=false` 下应直接 404 |
+| `GET /releases/{name}/pods` | HTTP 200 且 `items == []` | **必须**区分"查询失败"与"空列表"：查询失败不能判成功（`Jenkinsfile:3045`） |
+
+- 5 分钟未确认 → `force=true` 重试 → 再确认 2 分钟（对齐现网 `CLEANUP_VERIFY_TIMEOUT_SEC=300`）；
+- 仍失败 → `uninstall.state=failed` + `cleanup_errors[]` + `CLEANUP_FAILED` 事件 + 告警；**不改 Run 终态**（`execution.md:371`）；
+- `uninstall.state ∈ pending|running|verified|failed`，`verified_at` 只在两条判据都通过时写。
+
+> 不用 Genet 的"release TTL"——它根本没有；每日 23:00 的 GC 只挂起 Deployment/StatefulSet，**不删 Helm release**，也不豁免 `helm-release-name` 类 label（调研 R4，需实机验证）。泄漏只能靠平台的卸载+对账兜底。
+
+**C-5.3.6 与 `execution.md §9` 的分工**
+
+`execution.md §9` 描述适配层（`ports.Deployer` 的实现 + Genet HTTP 细节），本节描述**编排侧怎么用**这些状态。以下改名需两处同时生效（已按本节写法落地，`§9` 重写时对齐）：`deployment_id → deploy_id`、新增 `namespace` / `release_name` / `package_type` / `chart` / `chart_version` / `values` / `values_digest` / `template_path` / `image` / `model_path` / `model_name` / `set` / `no_wait` / `genet_release_status` / `endpoint_status` / `queue{phase,counts}` / `accepted_at` / `queued_at` / `ready_at` / `last_polled_at` / `failure` / `cancel_requested_at` / `uninstall`，移除 `queue_position` / `queue_reason` / `parameters_sha`。
 
 ### C-5.4 TESTING 推进
 
@@ -539,6 +680,8 @@ Run 进入 `testing` 时：
 
 - **有 Pre-Check**：只把 `seq=0` 置 `queued`，其余保持 `pending`（`waiting_reason=precheck_gate`）；
 - **`precheck: off`**：全部 `pending → queued`（并发由端点槽位决定）。
+
+> "有 Pre-Check"的唯一判据是 **`runs.resolved.precheck.injected = true` 且 `tasks.seq = 0`**（落地 SQL 见 `03-data-view.md §4.2`）；**`task.seq == 0` 单独不构成 Pre-Check**——`precheck: "off"` 时首个测试 Task 的 seq 同样是 0，`endpoint-probe` 这类 Tester 也既可当 Pre-Check 也可当普通测试。门控与放行都读 `store.PrecheckTaskIDs` / `TaskView.IsPrecheck`，不看 `testers.role`。
 
 Task 终态时（同事务）：
 
@@ -581,12 +724,15 @@ UPDATE tasks SET cancel_requested=true, updated_at=now()
 
 ```text
 1. 用户取消完成                 → canceled
-2. 平台侧错误导致 Run 无法继续（Genet 调用失败、K8s API 持续不可用、内部异常）→ failed；**单个 Task 的 `EXECUTOR_UNAVAILABLE` 失败**不在此列，按 Task 失败与 `continue`/`abort_run` 处理
+2. 平台侧错误导致 Run 无法继续（Genet 调用失败、K8s API 持续不可用、内部异常、
+   **非 Pre-Check Task 的 `TASK_TIMEOUT`**）→ failed；**单个 Task 的 `EXECUTOR_UNAVAILABLE` 失败**不在此列，按 Task 失败与 `continue`/`abort_run` 处理
 3. 部署受理但未就绪 / blocked    → service_unavailable
 4. pre_check Task 失败**且错误可重试**（`ENDPOINT_UNREACHABLE` / `PRECHECK_FAILED` / `TASK_TIMEOUT`）→ service_unavailable
 5. 所有非 SKIPPED 的 Task 均 succeeded → succeeded
 6. 其余                        → completed_with_errors
 ```
+
+第 2 条里的 `TASK_TIMEOUT` 只对**非 Pre-Check** Task 生效（判据同上：`resolved.precheck.injected=true` 且 `seq=0` 才是 Pre-Check）；Pre-Check 自己的超时仍走第 4 条按实例 `retryable` 判定，两者不冲突。
 
 第 4 条严格按 §7.5：只有"窗口内一直没就绪"这类可重试错误才归 `SERVICE_UNAVAILABLE`。认证失败、4xx 等 `retryable: false` 的 Pre-Check 失败意味着**服务在、但配置/权限不对**，归 `COMPLETED_WITH_ERRORS`，让用户按 §7.5 的指引去"看具体失败 Task"（其错误码与 `retryable` 已在 Task 报告里）。这样不改写 §7.5 的语义，也满足 P0 #4 的验收条件。
 

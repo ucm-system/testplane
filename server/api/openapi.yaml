@@ -82,7 +82,7 @@ tags:
   - name: health
     description: 运维探针（07 §5.5）
   - name: auth
-    description: 当前身份（07 §2.4）
+    description: 当前身份与认证流程（07 §2.4）：`GET /me`、`/auth/login|callback|logout`（认证端点匿名、不带 /api/v1 前缀）
   - name: meta
     description: 平台元信息与特性开关（C-8.2 `GET /meta`，前端版本对齐用）
   - name: runs
@@ -97,9 +97,17 @@ tags:
     description: 集群概要（07 §5.3，不返回凭据）
   - name: queue
     description: 队列与槽位可见性（07 §5.3、C-4.7，不读凭据）
+  - name: profiles
+    description: Execution Profile 与挂载能力（07 §5.3、06 §3，只读）
+  - name: artifacts
+    description: Run / Attempt 级产物清单（07 §5.1、§5.2、C-7.5）
+  - name: files
+    description: 产物下载（07 §5.1，支持 Range，不越出 Run 目录）
 
 security:
+  # 两种凭据二选一：Cookie 会话（浏览器）或 Bearer JWT（服务间）；RBAC 同一套（07 §2.1）。
   - bearerAuth: []
+  - cookieAuth: []
 
 paths:
   # ======================================================================
@@ -1051,8 +1059,8 @@ paths:
       operationId: getTester
       summary: Tester 最新版本详情
       description: |
-        07 §5.3：`GET /testers/{name}` 返回最新版本。指定版本走 `/testers/{name}/versions/{version}`
-        （本契约不含，见范围说明）。版本不可覆盖：同 `name+version` 不同内容会被拒（05 §5.7）。
+        07 §5.3：`GET /testers/{name}` 返回最新版本。指定版本走
+        `/testers/{name}/versions/{version}`。版本不可覆盖：同 `name+version` 不同内容会被拒（05 §5.7）。
       tags: [testers]
       parameters:
         - name: name
@@ -1150,6 +1158,373 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  # ======================================================================
+  # P0 剩余端点：Profile / Tester 版本 / 产物清单 / 文件下载 / 指标
+  # ======================================================================
+  /api/v1/profiles:
+    get:
+      operationId: listProfiles
+      summary: Execution Profile 与挂载能力（只读）
+      description: |
+        07 §5.3：返回已登记的 Execution Profile（`execution_profiles` 表）及其挂载能力。
+        `mounts[]` 的 `{name, pvc, sub_path, kind}` 供前端提交页渲染可选挂载。
+        提交 Run 时 `execution.profile` 必须命中这里：未登记一律
+        `EXECUTION_PROFILE_NOT_FOUND`（已移除"表为空就放行"的引导期例外，种子保证 `k8s-npu` 存在）。
+      tags: [profiles]
+      responses:
+        '200':
+          description: Profile 列表（数量为个位数，不分页）
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionProfileList'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/testers/{name}/versions/{version}:
+    get:
+      operationId: getTesterVersion
+      summary: Tester 指定版本详情
+      description: |
+        07 §5.3：返回 `name + version` 精确命中的 Tester（含 `parameters` / `env` 声明）。
+        版本不存在 → `TESTER_NOT_FOUND`（404）。版本不可覆盖语义同 `/testers/{name}`。
+      tags: [testers]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Tester 名称（`tester.yaml.name`）
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          description: Tester 版本（`tester.yaml.version`）
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 指定版本的 Tester 详情
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tester'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/runs/{run_id}/artifacts:
+    get:
+      operationId: listRunArtifacts
+      summary: Run 级产物清单
+      description: |
+        07 §5.1：读 `artifacts` 表返回该 Run 的全部产物，`by_kind` 按
+        `result|raw|log|report|other` 分组。`sha256` 是惰性字段：未计算就是 `null`
+        （平台不在读取路径上现算，C-7.5）。路径相对 `<storage-root>/<run_id>/`，
+        可直接拼到 `/runs/{run_id}/files?path=` 下载。
+      tags: [artifacts]
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          description: Run ID（`r-YYYYMMDD-XXXX`）
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 产物清单
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactList'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/tasks/{task_id}/attempts/{idx}/artifacts:
+    get:
+      operationId: listAttemptArtifacts
+      summary: Attempt 级产物清单
+      description: |
+        07 §5.2：该 Attempt 的产物清单（形状同 Run 级）。`idx` 从 1 开始；
+        找不到对应 Attempt 时退化为"该 Task 全部 Attempt 的产物"。
+      tags: [artifacts]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          description: Task ID（`t-XXXXXX`）
+          schema:
+            type: string
+        - name: idx
+          in: path
+          required: true
+          description: Attempt 序号（从 1 开始）
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: 产物清单
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/runs/{run_id}/files:
+    get:
+      operationId: downloadRunFile
+      summary: 产物下载（支持 HTTP Range）
+      description: |
+        07 §5.1：`?path=` 下载 `<storage-root>/<run_id>/` 下的产物。`path` 必须是相对路径：
+        绝对路径、Windows 盘符、`..`、空段一律 400（路径只由 Run 目录 + 校验后的相对路径拼出）。
+        支持 `Range`（206，越界 416）；单文件超过 1 GiB 且未带 `Range` 时返回 413，请分段下载。
+      tags: [files]
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          description: Run ID（`r-YYYYMMDD-XXXX`）
+          schema:
+            type: string
+        - name: path
+          in: query
+          required: true
+          description: 相对 `<storage-root>/<run_id>/` 的文件路径（如 `tasks/t-0002/attempts/1/logs/stdout.log`）
+          schema:
+            type: string
+        - name: Range
+          in: header
+          required: false
+          description: 标准 HTTP Range（如 `bytes=0-1048575`），用于大文件分段读取
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 完整文件
+          headers:
+            Accept-Ranges:
+              description: 恒为 `bytes`
+              schema:
+                type: string
+            Content-Disposition:
+              description: 'inline; filename="..."（不暴露绝对路径）'
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: 部分内容（`Range` 命中）
+          headers:
+            Content-Range:
+              description: '`bytes <start>-<end>/<total>`'
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          description: 文件超过 1 GiB 且未使用 Range
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '416':
+          description: Range 越界（`http.ServeContent` 语义）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus 指标（不带 /api/v1 前缀）
+      description: |
+        07 §5.5：Prometheus 文本格式（`text/plain; version=0.0.4`）。**不带 `/api/v1` 前缀**，
+        且不参与前端静态站点 fallback。至少包含：`testplane_runs_total{status}`、
+        `testplane_tasks_total{status}`、`testplane_attempts_active`、`testplane_queue_waiting{reason}`、
+        `testplane_endpoint_leases`、`testplane_http_requests_total{method,code}`。
+        数据库采样失败时只跳过 DB 类指标，本端点仍返回 200。
+      tags: [health]
+      security: []
+      responses:
+        '200':
+          description: Prometheus 文本 exposition
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  # ======================================================================
+  # 认证端点（07 §2.4）：匿名、不带 /api/v1 前缀
+  # ======================================================================
+  /auth/login:
+    get:
+      operationId: authLogin
+      summary: 跳转统一身份源（OIDC authorization code + PKCE）
+      description: |
+        07 §2.4：302 到 IdP 的 `authorization_endpoint`，带 `response_type=code`、`code_challenge`
+        （S256）、`state`、`nonce`、`redirect_uri`。`return` 只接受站内相对路径（防开放重定向），
+        非法值回退 `/`。同时下发 `tp_auth_tx` 中间态 Cookie（HttpOnly、10 分钟）。
+        `TESTPLANE_AUTH_MODE=dev` 时本端点返回 404（dev 没有登录流程）。
+      tags: [auth]
+      security: []
+      parameters:
+        - name: return
+          in: query
+          required: false
+          description: 登录成功后回跳的站内路径（如 `/runs/r-20261105-0001`）
+          schema:
+            type: string
+      responses:
+        '302':
+          description: 跳转到 IdP 授权端点（`Location` 头）
+          headers:
+            Location:
+              description: IdP 授权地址
+              schema:
+                type: string
+            Set-Cookie:
+              description: '`tp_auth_tx=<签名令牌>; Path=/auth; HttpOnly; SameSite=Lax`'
+              schema:
+                type: string
+        '404':
+          description: 当前是 dev 鉴权模式（无登录流程）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/callback:
+    get:
+      operationId: authCallback
+      summary: 授权码回调：换会话 Cookie 并回跳前端
+      description: |
+        07 §2.4：校验 `state`（与 `tp_auth_tx` 里的一致）→ 用 `code` + PKCE verifier 调
+        `token_endpoint`（支持 `client_secret_basic` 与 `client_secret_post`）→ 校验 ID token
+        签名/`iss`/`aud`/`exp`/`nonce` → 下发签名会话 Cookie（`tp_session`）→ 302 回 `return`。
+        `state` 或 `nonce` 不匹配、token 过期、`aud` 不含本 client → 401 `UNAUTHENTICATED`。
+      tags: [auth]
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          description: IdP 返回的授权码
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          description: 与登录时下发的一致（防 CSRF）
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          description: IdP 返回的错误码（如 `access_denied`）
+          schema:
+            type: string
+      responses:
+        '302':
+          description: 登录成功，回跳前端路径
+          headers:
+            Location:
+              description: 站内路径（`return` 参数，非法则 `/`）
+              schema:
+                type: string
+            Set-Cookie:
+              description: '`tp_session=<签名令牌>; Path=/; HttpOnly; Secure; SameSite=Lax`（并清除 `tp_auth_tx`）'
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /auth/logout:
+    post:
+      operationId: authLogout
+      summary: 清会话 Cookie
+      description: |
+        07 §2.4：清 `tp_session`（`Max-Age=0`）。Cookie 会话调用时需要 `X-CSRF-Token`
+        （与其他写操作一致）；Bearer 调用方直接调用即可。
+      tags: [auth]
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          description: 已登出
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Set-Cookie:
+              description: '`tp_session=; Path=/; Max-Age=0`'
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1157,9 +1532,19 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: |
-        统一身份源签发的 JWT（07 §2.1）：JWKS 校验，`aud == clientId`，`exp/nbf` 容差 60s。
-        Web UI 的会话 Cookie 不是 OpenAPI 能表达的鉴权形态，未在此建模；写操作需要
-        `X-CSRF-Token`（双提交，值来自 `GET /api/v1/me`）。
+        统一身份源签发的 JWT（07 §2.1、D-51）：平台用 JWKS 校验，`RS256`、`aud == clientId`、
+        `iss` 严格匹配、`exp/nbf` 容差 60s；claims 里的 groups 经 `TESTPLANE_ROLE_MAP` 映射成
+        角色（未命中 → viewer），与浏览器会话走**同一套** RBAC。服务间调用（Jenkins/Agent/CLI）
+        用这种方式，不需要 CSRF 头。
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: tp_session
+      description: |
+        浏览器会话（07 §2.1）：OIDC authorization code + PKCE 换取，值为 HMAC-SHA256 签名令牌
+        （`HttpOnly; Secure; SameSite=Lax; Path=/`，TTL 默认 8h）。**Cookie 会话的写操作必须带
+        `X-CSRF-Token`（双提交，值来自 `GET /api/v1/me`）**，否则 403 `FORBIDDEN`；
+        会话过期或签名无效 → 401 `UNAUTHENTICATED`。
 
   parameters:
     RunId:
@@ -1408,6 +1793,9 @@ components:
         - CLEANUP_FAILED
         - CANCELED
         - INTERNAL_ERROR
+        - EXECUTOR_POD_ERROR
+        - DEPLOY_FAILED
+        - DEPLOY_BLOCKED
 
     Error:
       type: object
@@ -2080,17 +2468,26 @@ components:
           example: genet
         deployment_id:
           type: [string, 'null']
-          description: 部署方返回的部署 ID（内部幂等键 = `run_id`）
+          description: |
+            部署定位符。**真实 Genet 下没有部署单 ID**：一次部署 = 一次 Helm release，
+            定位靠 `namespace + release_name`（D-44，见 `impl/execution.md §9`）。
+            MVP 的 mock 仍返回一个占位 ID；换成真实 Genet 后该字段语义变为 `release_name`，
+            完整字段集（`release_name`/`package_type`/`chart`/`values_digest`/`uninstall`…）见
+            `03-data-view.md §4.4`，随真实适配一起进契约。
           example: d-123
         state:
           $ref: '#/components/schemas/DeployState'
         queue_position:
           type: [integer, 'null']
-          description: 排队位次（部署方提供时）
-          example: 12
+          description: |
+            **恒为 null，保留字段只为向后兼容**（D-46）：排队发生在 Volcano 层，Genet 只给
+            「pending/inqueue/running」水位计数，**没有位次**。前端不得展示「第 N 位」，
+            改为展示 `queue_reason` + `queued_at`（已等待时长）。多集群/队列水位见
+            `GET /api/v1/queue-status` 的 `volcano` 块。
+          example: null
         queue_reason:
           type: [string, 'null']
-          description: 排队/阻塞原因（给人看）
+          description: 排队/阻塞原因（给人看；来源是 PodGroup 的 `phase` 或 `conditions[-1].reason/message` 原文，不做翻译）
           example: quota
         queued_at:
           $ref: '#/components/schemas/NullDateTime'
@@ -3319,7 +3716,12 @@ components:
           type: boolean
         detail:
           type: [string, 'null']
-          description: 不可达或无法判定时的说明（例如 `scheduler_unavailable`）
+          description: |
+            不可达或无法判定时的**降级原因**，取四值之一（D-49）：
+            `crd_missing`（集群未装 Volcano CRD）、`rbac_forbidden`（无 queues/podgroups 读权限）、
+            `scheduler_unavailable`（scheduler 不可达/无 PodGroup 状态）、`disabled`（配置关闭）。
+            **红线：`available=false` 不等于「0 排队」**，UI 不得把它显示成"无排队"。
+          enum: [crd_missing, rbac_forbidden, scheduler_unavailable, disabled]
         queues:
           type: array
           description: 已登记的 Volcano Queue 概要；不可达时为 `[]`
@@ -3358,3 +3760,111 @@ components:
         reason:
           $ref: '#/components/schemas/WaitingReason'
           description: 该队列造成排队的主要等待原因（K8s/Volcano 侧的三个取值之一）
+
+    ExecutionProfile:
+      type: object
+      description: |
+        执行环境（`execution_profiles` 表，03 §3.2 / 06 §3）。只读；
+        维护走 P1 的 `/admin/profiles`。
+      required: [name, cluster, namespace, scheduler, deploy_timeout_seconds]
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+        cluster:
+          type: string
+          description: 对应 `clusters.name`
+        namespace:
+          type: string
+          description: Job 与 PVC 所在命名空间
+        mounts:
+          type: array
+          description: 挂载能力；前端提交页据此渲染可选项
+          items:
+            type: object
+            required: [name, pvc]
+            additionalProperties: true
+            properties:
+              name:
+                type: string
+                description: 挂载名（Manifest 里引用）
+              pvc:
+                type: string
+              sub_path:
+                type: [string, 'null']
+              kind:
+                type: [string, 'null']
+                description: 挂载类型（如 model / dataset）
+        scheduler:
+          type: string
+          description: '`default` 或 `volcano`'
+        queue:
+          type: [string, 'null']
+          description: Volcano 队列名（`scheduler=volcano` 时）
+        image_pull_secrets:
+          type: array
+          items:
+            type: string
+        resource_defaults:
+          type: object
+          additionalProperties: true
+        deploy_timeout_seconds:
+          type: integer
+          minimum: 3600
+          maximum: 604800
+          description: 部署排队+部署总窗口（K-6）
+
+    ExecutionProfileList:
+      type: object
+      description: Profile 列表信封（不分页：数量为个位数）
+      required: [items]
+      additionalProperties: true
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExecutionProfile'
+
+    Artifact:
+      type: object
+      description: |
+        产物条目（`artifacts` 表，03 §3.2）。`path` 相对 `<storage-root>/<run_id>/`，
+        可直接用于 `/runs/{run_id}/files?path=`。`sha256` 惰性：未计算为 `null`（C-7.5）。
+      required: [path, kind, size_bytes]
+      additionalProperties: true
+      properties:
+        path:
+          type: string
+        kind:
+          type: string
+          enum: [result, raw, log, report, other]
+        size_bytes:
+          type: integer
+          minimum: 0
+        sha256:
+          type: [string, 'null']
+        task_id:
+          type: [string, 'null']
+        attempt_id:
+          type: [string, 'null']
+
+    ArtifactList:
+      type: object
+      description: Run / Attempt 两级产物清单的统一信封
+      required: [items, total_size_bytes]
+      additionalProperties: true
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Artifact'
+        by_kind:
+          type: object
+          description: 按 `kind` 分组的同一批条目
+          additionalProperties:
+            type: array
+            items:
+              $ref: '#/components/schemas/Artifact'
+        total_size_bytes:
+          type: integer
+          minimum: 0

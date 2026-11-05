@@ -1,0 +1,107 @@
+{{/*
+mock-llm Deployment
+- 非 root（10001，与镜像内 USER 一致）、只读根 + /tmp emptyDir、drop ALL、seccomp RuntimeDefault
+- 探针 /healthz 永远 200，所以"慢就绪"时 Pod 仍 Ready（平台看到的是业务端点未就绪，不是 Pod 没起）
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mock-llm.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mock-llm.labels" . | nindent 4 }}
+  {{- with .Values.podAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mock-llm.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mock-llm.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: mock-llm
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 18080
+              protocol: TCP
+          env:
+            # 键名 = tools/mock-llm/main.go 实际读取的 MOCK_LLM_*（不是通用名）
+            - name: MOCK_LLM_ADDR
+              value: ":18080"
+            - name: MOCK_LLM_MODEL
+              value: {{ .Values.model | quote }}
+            {{- with .Values.faultInjection.failMode }}
+            - name: MOCK_LLM_FAIL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.faultInjection.readyAfter }}
+            - name: MOCK_LLM_READY_AFTER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.faultInjection.slowMs }}
+            - name: MOCK_LLM_SLOW_MS
+              value: {{ .Values.faultInjection.slowMs | quote }}
+            {{- end }}
+            {{- if .Values.faultInjection.errorIn200 }}
+            - name: MOCK_LLM_ERROR_IN_200
+              value: "true"
+            {{- end }}
+            {{- range $k, $v := .Values.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.readinessProbe.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.livenessProbe.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmpSizeLimit }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

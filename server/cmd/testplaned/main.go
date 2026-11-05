@@ -23,9 +23,11 @@ import (
 	"github.com/ucm-system/testplane/server/internal/config"
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/executor"
+	"github.com/ucm-system/testplane/server/internal/genet"
 	"github.com/ucm-system/testplane/server/internal/genet/mocks"
 	"github.com/ucm-system/testplane/server/internal/k8s"
 	"github.com/ucm-system/testplane/server/internal/orchestrator"
+	"github.com/ucm-system/testplane/server/internal/ports"
 	"github.com/ucm-system/testplane/server/internal/registry"
 	"github.com/ucm-system/testplane/server/internal/report"
 	"github.com/ucm-system/testplane/server/internal/store"
@@ -150,11 +152,39 @@ func run() error {
 		}()
 	}
 
+	// ---- Volcano 队列快照（E-11、design/impl/control-plane.md §C-4.8）----
+	// 只读：轮询 `scheduling.volcano.sh/v1beta1` 的 queues + podgroups，
+	// 15s TTL 缓存 + 单飞 + 失败退避 60s（不用 informer）。构造失败就留 nil，
+	// `/queue-status` 的 volcano 块自动降级 scheduler_unavailable，绝不影响其它两块。
+	var volcanoProvider api.VolcanoProvider
+	if cfg.VolcanoEnabled {
+		v, err := k8s.NewVolcano(k8s.Options{Kubeconfig: cfg.Kubeconfig}, k8s.VolcanoOptions{
+			Enabled:    true,
+			Cluster:    cfg.ClusterName,
+			Namespaces: cfg.VolcanoNamespaces,
+			TTL:        cfg.VolcanoTTL,
+			Logger:     logger,
+		})
+		if err != nil {
+			logger.Warn("Volcano 队列快照未接入（降级 scheduler_unavailable）", "err", err)
+		} else {
+			volcanoProvider = v
+			logger.Info("Volcano 队列快照就绪",
+				"cluster", cfg.ClusterName, "namespaces", cfg.VolcanoNamespaces,
+				"ttl", cfg.VolcanoTTL)
+		}
+	} else {
+		// 配置关闭 ≠ 集群没装：四态里的 disabled（不是 crd_missing，也不是"0 排队"）。
+		volcanoProvider = k8s.NewVolcanoWithDynamic(nil, k8s.VolcanoOptions{Enabled: false})
+		logger.Info("Volcano 队列快照已关闭（detail=disabled）")
+	}
+
 	// ---- HTTP ----
 	srv := api.New(api.Deps{
 		Config: cfg, Store: st, Machines: machines,
 		Resolver: reg, Logger: logger,
 		WebUI: webui.FS(), Version: version,
+		Volcano: volcanoProvider,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -223,10 +253,14 @@ func buildController(ctx context.Context, cfg *config.Config, st *store.Store,
 	exec := executor.NewWithNamespace(client, namespace, executor.Options{})
 
 	repos := &storeRepos{st: st, machines: machines, reg: reg}
+	deployer, err := buildDeployer(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
 	c, err := orchestrator.New(orchestrator.Options{
 		Repos:     repos,
 		Executor:  exec,
-		Deployer:  mocks.FromEnv(), // MVP：Genet mocks（D-14）
+		Deployer:  deployer,
 		Validator: validator,
 		Config: orchestrator.Config{
 			Namespace:            namespace,
@@ -333,4 +367,29 @@ func newLogger(level string) *slog.Logger {
 	}
 	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lv})
 	return slog.New(h)
+}
+// buildDeployer 按 TESTPLANE_DEPLOY_PROVIDER 选 Deploy 阶段实现：
+//   - mock（默认）：internal/genet/mocks，kind E2E 用，不联网；
+//   - genet：真实 Genet OpenAPI 客户端（execution §9），凭据/端点全部来自配置。
+func buildDeployer(cfg *config.Config, logger *slog.Logger) (ports.Deployer, error) {
+	switch strings.ToLower(strings.TrimSpace(cfg.DeployProvider)) {
+	case "", "mock":
+		logger.Info("Deploy 阶段使用 mock Genet", "provider", "mock")
+		return mocks.FromEnv(), nil
+	case "genet":
+		client, err := genet.New(genet.Options{
+			BaseURL:       cfg.GenetBaseURL,
+			APIKey:        cfg.GenetAPIKey,
+			CAFile:        cfg.GenetCAFile,
+			Insecure:      cfg.GenetInsecure,
+			DeployTimeout: cfg.DeployTimeout,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("genet: %w", err)
+		}
+		logger.Info("Deploy 阶段使用真实 Genet", "base_url", cfg.GenetBaseURL, "insecure", cfg.GenetInsecure)
+		return client, nil
+	default:
+		return nil, fmt.Errorf("config: 未知的 Deploy provider %q（允许 mock|genet）", cfg.DeployProvider)
+	}
 }

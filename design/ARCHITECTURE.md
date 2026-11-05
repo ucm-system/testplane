@@ -53,6 +53,9 @@ TestPlane 是**对内工具**，以下事项已由团队裁决，本文按结论
 | 0.4 | 2026-11-05 | 可追溯性补充：镜像 tag 可变，执行层记录实际拉取的 digest；失败续跑复用优先比较 digest |
 | 0.5 | 2026-11-05 | **取消提交幂等**：删除 `Idempotency-Key` 与 `idempotency_keys` 表，`POST /runs` / `POST /tasks` 每次都创建新资源；平台不判断两次提交是否等价（硬件 / 驱动 / HDK 版本等环境因素对平台透明）。内部操作（建 Job、Genet 部署）的可重试安全不变 |
 | 0.6 | 2026-11-05 | **MVP 实现回写**（见 `design/IMPLEMENTATION.md §15`）：① Tester 注册只做"镜像内 `tester.yaml` + 启动/周期扫描"，不提供运行时注册 API（D-38）；② 对外错误体为**扁平** `{code,message,detail,retryable,trace_id}`（D-39）；③ 提交体以**嵌套** `run:` 为唯一形态，`03-data-view.md §4.1` 的平级示例按文档缺陷处理（D-40）；④ 产物 PVC 名统一为 `testplane-storage`（D-41）；⑤ 开发环境种子 `cluster-01` + `k8s-npu`，由进程启动时补齐（D-42）；⑥ MVP 的执行环境是宿主 Kind + `kind load docker-image`，Deploy 阶段由 mock 顶替 Genet（D-43） |
+| 0.7 | 2026-11-05 | **Genet 与队列的调研回写**：按 Genet 真实实现（Helm release 为部署单元、无部署单）重写 Deploy 适配（D-44～D-48），并明确 `endpoint.status=ready` **只代表地址可解析**、必须再过 Pre-Check 服务门（D-45）；排队位次不可得（D-46）；Genet 失败终态折叠为 `blocked`（D-47）；控制面用 Open API Key、Web 用 TestPlane 自己的 OIDC client，**不把 Genet 当 IdP**（D-48）；Volcano 队列直接读 CRD、不经 Genet（D-49）；取消/卸载采用"先落意图、后置删除、对账补偿"（D-50） |
+| 0.8 | 2026-11-05 | **部署形态与鉴权落定**：纯内网部署，TestPlane 与 Genet 共用**同一个企业统一身份源**，TestPlane 作为独立 OIDC client（不是 Genet 的 client），服务间用统一身份源签发的 JWT（D-51）；Genet 侧的**独占池**（exclusive pool）语义确认：进入独占池的 namespace/服务不受每日回收影响，TestPlane 通过独占自己的 namespace 获得该保证（D-52）；Genet 将开放 `openAPI`，控制面走 `/api/open/*`（D-53） |
+| 0.9 | 2026-11-05 | **Deploy 收口与可观测收口**：Run 终态后必须卸载 deploy 的 release，**只走 Genet OpenAPI**（直接 `helm uninstall` 会被其 admission webhook 拒绝），并以「`GET 404` + pods 空」作为删干净的判据（D-54）；`runs.deploy` 落 §4.4 全字段（增量合并，不覆盖已冻结键）；新增 `cleanup.failed` 事件类型；OIDC 会话/CSRF/RBAC 已实现（D-51 落地），`dev` 模式仍保留给本地 |
 
 ---
 
@@ -386,7 +389,7 @@ parameters:
    所以参数清单里**不写**"来源"字段（`provided_by` 之类），只在 `description` 说明这三条路径。
 4. **注入与冲突判定**：
 
-   - 平台把有值的公共参数**追加到 argv 末尾**（`--key=value`）。若 `args` 里已出现同名参数，**拒绝提交**（`VALIDATION_ERROR`，子串粗筛，不做语义解析），避免两份值打架。
+   - 平台把有值的公共参数**追加到 argv 末尾**（`--key=value`）。若 `args` 里已出现同名参数，**拒绝提交**（`VALIDATION_ERROR`，按词法切分后的 token **精确匹配**（`--url=` 形式或独立 token `--url`；`--url_extra=` 不算同名），不做语义解析），避免两份值打架。
    - 因此 `tests[].args` **不应该**出现这三个参数：它们由平台统一注入，位置固定在末尾。
    - `service` 只填了部分参数（比如有 `url` 没 `model_path`）时：Tester 声明为 `required: true` 而没值的，**提交阶段拒绝**；`required: false` 的就不注入，由 Tester 用默认行为兜底。
 
@@ -606,7 +609,7 @@ Executor 是平台提供的通用任务执行适配层。它**只负责**：
 
 ### 6.5 Execution Profile
 
-Execution Profile 描述一个可供 Task 使用的 K8s 执行环境：
+Execution Profile 描述一个可供 Task 使用的 K8s 执行环境。Profile 通过 `cluster` 字段引用**已登记的集群对象**（`clusters`：`name` / `api_server` / `kubeconfig_key` / `last_check_at` / `last_check_result`）；kubeconfig 由 Secret 挂载到 `CLUSTERS_DIR`，**不入库、不进日志**（G-10、W-10）。
 
 ```text
 Execution Profiles
@@ -933,6 +936,8 @@ Pre-Check 以**不可重试**错误失败（4xx、认证失败）时，说明"�
 - **不受 `cleanup.policy` 删除影响**：Deploy 日志随 Run 产物保留，不随 Pod 一起回收。
 
 **`attempts/<n>/` 就是 Executor 挂给容器的 `/workspace/output`**（§6.8）：Tester 直接写最终位置，平台不做搬运。因此 `<storage-root>` 必须对所有执行节点可见；"收集产物"退化为校验 `result.json` 并补齐上层的 `report.json`。
+
+`events.jsonl` 是**派生文件**：库里的 `state_events` 才是权威，由单 writer 追加，重启后按 `seq` 幂等补齐，可整份重建（G-8）。
 
 ### 8.2 报告分工
 
@@ -1265,7 +1270,7 @@ task:
 ### 11.4 技术约束
 
 - 前端为 SPA，直连同一套 REST API，**不引入独立 BFF**。
-- 状态推送使用 SSE 订阅 `/runs/{id}/events`，避免轮询。
+- 状态推送使用 SSE 订阅 `/runs/{id}/events`，避免轮询。事件类型、信封与回放语义以 `impl/control-plane.md §C-9` 与 `07-api.md §7` 为准：`seq` 单调、`Last-Event-ID` 续传、**不是日志通道**（G-14）。
 - 新 Tester 上线无需改前端：提交框永远是一个文本输入框，参数说明由 `tester.yaml.parameters` 只读展示，指标展示由 `result.json` 结构驱动。若新增 Tester 需要改前端，视为契约设计缺陷。
 - 鉴权与 API 完全一致，UI 不自行判断权限，以后端返回为准。
 
@@ -1433,7 +1438,7 @@ K8s Secret，由 `admin` 登记与轮换；Manifest 里只有**引用**（如 `e
 | 单 Task 最大执行时长 | 默认 4 小时，配置上限 24 小时 |
 | 报告写入 | 单 Run 报告 ≤ 20 MB，超出则产物外置 |
 | 单次日志读取 | 分页返回，避免整文件加载 |
-| 单次 Attempt 产物上限 | 默认 10 GiB；超出判失败（`ARTIFACT_QUOTA_EXCEEDED`），避免单个 Task 打满共享存储 |
+| 单次 Attempt 产物上限 | 默认 10 GiB；超出判失败（`ARTIFACT_QUOTA_EXCEEDED`），避免单个 Task 打满共享存储。**执行方式**：collector 每 60s 对 `<run>/tasks/<task>/attempts/<n>` 做 `du` 扫描，超限即删 Job 并判该 Attempt 失败（G-7） |
 | 状态查询延迟 | P95 < 300 ms（非日志类接口） |
 
 ---
@@ -1482,7 +1487,7 @@ K8s Secret，由 `admin` 登记与轮换；Manifest 里只有**引用**（如 `e
 | Run 提交 | Manifest 提交后，Run 按 §7.4 走完整状态链，终态正确 |
 | Task 提交 | 已有服务可独立提交 Task（`url` / `model_name` 作为公共参数给出），产物结构与非独立 Task 一致 |
 | Genet 适配 | 部署、状态查询、Endpoint 获取三项可用；部署失败与未就绪可区分 |
-| Pre-Check | `precheck: auto` 时平台注入 Task#1（`role: pre_check`）；它独占该 Endpoint，未通过时按 `abort_run` 终止其余 Task，Run 终态 `SERVICE_UNAVAILABLE` |
+| Pre-Check | `precheck: auto` 时平台注入 Task#1（`role: pre_check`）；它独占该 Endpoint，未通过时按 `abort_run` 终止其余 Task，Run 终态 `SERVICE_UNAVAILABLE`。注入时该 Task 的 `args` 为空，`url`/`model_name`/`model_path` 按 §5.4.1 在末尾注入（G-11）；判别某个 Task 是不是 Pre-Check 的唯一依据是 `runs.resolved.precheck.injected`（`03-data-view.md §4.2`） |
 | Tester Registry | 目录自动发现并通过校验；非法 `tester.yaml` 被拒绝并给出字段级错误 |
 | Tester 契约 | 唯一入口、argv 参数传递、输出目录、`result.json` 全部可校验 |
 | **Tester 独立运行** | 不依赖平台：`docker run <image> --p1=1 --p2=2` 即可跑通并产出符合附录 A 的 `result.json`（§5.10） |
@@ -1777,6 +1782,9 @@ env:                          # 运行期环境变量声明（§12.4）
 | `EXECUTOR_UNAVAILABLE` | 503 | 执行 | 是 | K8s API 不可达 |
 | `IMAGE_PULL_FAILED` | 502 | 执行 | 是 | 镜像拉取失败 |
 | `MOUNT_UNAVAILABLE` | 502 | 执行 | 否 | Profile 未提供声明的挂载 |
+| `EXECUTOR_POD_ERROR` | 502 | 执行 | 是 | Pod 异常终止（`detail.k8s_reason` 保留原文，如 `Evicted`）；`Unschedulable` 不算失败，按 §6.9 留在排队态 |
+| `DEPLOY_FAILED` | 502 | Deploy | 否 | **平台侧**调用 Genet 失败（连接/5xx/同名冲突/安装失败）→ Run `failed`；`detail.reason` 保留 Genet 原文 |
+| `DEPLOY_BLOCKED` | 502 | Deploy | 是 | Genet 报 `blocked`（配额/资源/调度阻塞）或超部署窗口 → Run `service_unavailable`；`detail.reason ∈ {blocked,timeout,superseded,uninstalling,uninstalled}`（D-47） |
 | `ENDPOINT_UNREACHABLE` | 502 | Pre-Check | 是 | 网络不可达或连接被拒 |
 | `PRECHECK_FAILED` | 502 | Pre-Check | 是 | 探测返回非预期状态 |
 | `TASK_TIMEOUT` | 504 | 执行 | 按策略 | 超过 `timeout_seconds` |
@@ -1836,7 +1844,17 @@ env:                          # 运行期环境变量声明（§12.4）
 | D-37 | **不做提交幂等**：`POST /runs` / `POST /tasks` 每次都创建新资源，重复提交产生多个 Run/Task；平台不判断两次提交是否等价——硬件、驱动、HDK 版本等环境因素对平台透明，相同 Manifest 也可能不是同一测试条件。内部操作（Job 创建、Genet 部署）仍须可重试安全，但不属于接口幂等 | §9.2、§11.4、附录 D |
 | D-38 | **Tester 只做镜像内发现，不做运行时注册**：注册表来自镜像内的 `tester.yaml`，启动扫描 + 周期重扫入库；不提供 `POST /testers` 之类的写入端点（与 K-3 一致）。「自发现注册」指的是平台发现，不是提交方上传 | §5.6、`IMPLEMENTATION.md §15` |
 | D-39 | **对外错误体是扁平的**：`{code,message,detail,retryable,trace_id}`，不套 `{error:{…}}` 外壳；`code` 取附录 D 枚举，校验类错误用 `detail.issues[]` | `07-api.md §3` |
-| D-40 | **提交 Manifest 的唯一形态是嵌套 `run:`**：`run:` 内承载 `name`/`deploy`/`service`/`precheck`/`env`/`secrets`/`tests`/`cleanup`；`runs.manifest` 原样保存该形态。`03-data-view.md §4.1` 的平级示例按文档缺陷处理（属实现期发现的回写项） | `07-api.md §4.1` |
+| D-40 | **提交 Manifest 的唯一形态是嵌套 `run:`**：`run:` 内承载 `name`/`deploy`/`service`/`precheck`/`env`/`secrets`/`tests`/`cleanup`；`runs.manifest` 原样保存该形态。`03-data-view.md §4.1` 原示例是平级写法，与 `07-api.md §4.1` 冲突；**v0.6 已把 §4.1 示例改为嵌套形态并注明唯一性**（文档已一致，不再是待修缺陷） | `07-api.md §4.1`、`03-data-view.md §4.1` |
 | D-41 | **产物 PVC 名统一 `testplane-storage`**：`06-physical-view.md §2`（`testplane-storage-root`）与 `impl/execution.md §2.2`（`testplane-artifacts`）属文档不一致，以实现与清单为准回写 | §6.8、附录 B |
 | D-42 | **开发/验收环境的种子由进程启动补齐**：`cluster-01` 与 `k8s-npu`（namespace `testplane`）在表为空时插入；生产仍走 Helm values 首次 seed。种子名沿用全文档示例（`k8s-npu`），不另起名字 | §6.11、`03-data-view.md §9` |
 | D-43 | **MVP 执行环境 = 宿主 Kind + `kind load docker-image`**：不引入镜像仓库，镜像以本地 tag 灌入节点；Deploy 阶段由 mock 顶替 Genet（状态与字段真实，副作用为空），P1 换真实实现时接口不变 | §6.8、§7.4、`impl/execution.md §9` |
+| D-44 | **Genet 的部署单元是 Helm release，没有"部署单"**：定位符 = `namespace`（由 API Key 绑定）+ `releaseName`（调用方自造）；拉起 `POST /api/open/helm/uc-packages/{stack\|pd}/releases`（仅 `releaseName` 必填，202 + `pending-install`；同名再 POST → 400），轮询 `GET /api/open/helm/releases/{name}`，卸载 `DELETE .../releases/{name}?keepHistory=&force=`。内部幂等键 `releaseName = "tp-" + sha256(run_id:deploy_id)[:12]`，且**必须 `noWait=true`**——`timeoutSec` 是 helm `--wait` 的 deadline，排队超过它就会被判 failed（排队可能长达数天） | `impl/execution.md §9`、§9.1 |
+| D-45 | **`endpoint.status=ready` 只代表地址可解析，不等于可服务**：Genet 的就绪拆成两根轴（helm `status` 与 `callInfo.endpoint.status`），ready 既不保证 Pod Ready 也不保证能推理。因此 Deploy 进 `testing` 后仍必须由 Pre-Check 探活通过才放行其余 Task——平台是"地址门 + 服务门"两道门，不把 Genet 的 ready 当作测试开始的充分条件 | §7.4、§9.1、`impl/execution.md §9` |
+| D-46 | **Deploy 阶段不承诺"排队第 N 位"**：排队发生在 Volcano 层，Genet 只给水位计数（无位次）。UI 展示 PodGroup `phase` / 原因 / 已等待时长；`runs.deploy.queue.position` 一律 `null`，不得用本地序号伪造成位次 | §7.4、`impl/control-plane.md §C-5.3`、`03-data-view.md §4.4` |
+| D-47 | **Genet 的失败终态折叠为 `blocked`**：Genet 有 `failed/superseded/uninstalling/uninstalled` 等终态，而 Deploy 子状态只有 `queued/accepted/deploying/ready/blocked`（不新增 `failed`）。这些终态一律落 `blocked` + `Failure`，Run 转 `service_unavailable`（服务没起来，不是平台调不通），错误码按附录 D | §7.5、§9.1 |
+| D-48 | **Genet 身份分两类，不把 Genet 当 IdP**：控制面/CLI 用 `Authorization: Bearer <Open API Key>` 打 `/api/open/*`（key 由管理员创建、服务端存 SHA256、绑定唯一 namespace）；Web 用户走团队统一身份源 + TestPlane 自建 OIDC client 与会话。Genet 无 client-credentials / PAT，其 OIDC Provider 默认关闭且只有硬编码 client；代理头 `X-Auth-Request-*` 可伪造，**禁止**作为身份来源 | `07-api.md §2.1`、`impl/control-plane.md §C-10` |
+| D-49 | **Volcano 队列直接读 CRD，不经 Genet**：数据源是 `scheduling.volcano.sh/v1beta1` 的 `queues`（`.spec.capability`、`.status.state`、`.status.allocated`）与 `podgroups`（`.status.phase`、`.status.conditions[-1]`）；采样用**轮询 + 15s TTL + 单飞**（不用 informer，RBAC 只需 `get,list`，cluster-scoped 需 ClusterRole）。降级四态 `crd_missing/rbac_forbidden/scheduler_unavailable/disabled` 只影响 `volcano` 块——**不可达 ≠ 0 排队**。平台槽位与 Volcano 队列是两类排队，UI 必须分开 | §11、`07-api.md §5.3`、`06-physical-view.md §2` |
+| D-50 | **Genet 部署的取消与卸载：先落意图、后置删除、对账补偿**：取消先写 `runs.deploy.cancel_requested_at` 再发 `DELETE`；release 尚未创建时 DELETE 只会 404，不能当作"取消成功"，必须由对账循环重试直到 `GET 404` 且 `pods.items` 为空（卸载校验），失败记 `uninstall.state=failed` + `CLEANUP_FAILED`，**不改 Run 终态** | §9.1、`impl/execution.md §9` |
+| D-51 | **纯内网部署 + 与 Genet 共用同一个企业统一身份源（不同 client）**：TestPlane 是该 IdP 的独立 OIDC client（自己的 client_id / 回调 / scope），**不把 Genet 当 IdP、不共享 Genet 会话**；Web 用 authorization code + PKCE + `tp_session`/CSRF，服务间（Jenkins / Agent / CLI / MCP）用同一身份源签发的 JWT + JWKS 校验；本地开发仍可 `TESTPLANE_AUTH_MODE=dev`。这样不需要 Genet 提供 client-credentials，也不新增账号体系 | §12.1、`07-api.md §2.1`、`impl/control-plane.md §C-10` |
+| D-52 | **Genet 的独占池（exclusive pool）语义是部署前提**：进入独占池的 namespace/服务不受每日 23:00 回收影响。TestPlane **独占自己的 namespace**（`testplane`）与被测服务的 namespace（如 `testplane-mock`），在 Genet 侧以「独占池 + 专用 API Key」登记；因此 §9.1 里"每日 GC 可能挂起长测"的风险对本部署不成立，但**必须**在部署文档里写明这条前提，否则换到共享池会踩坑 | §9.1、`06-physical-view.md §2`、`impl/execution.md §9` |
+| D-53 | **Genet 将开放 `openAPI`**：控制面统一走 `/api/open/*`（Bearer Open API Key），不再依赖管理页/浏览器会话；Genet 侧 `openAPI.enabled` 的开关与 key 的 scope/命名空间绑定由对接 issue（`ucm-system/genet#1`）确认后再固化。在此之前本地联调可用假 Genet 或源码构建的实例 | `impl/execution.md §9` |

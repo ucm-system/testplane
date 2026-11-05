@@ -1,0 +1,21 @@
+apiVersion: v2
+name: mock-llm
+description: |
+  模拟被测 LLM 服务（OpenAI 兼容 /v1），给 TestPlane 的 Pre-Check 与 e2e 用：
+  不需要真模型/GPU，就能复现"就绪 / 就绪慢 / 500 / 401 / HTTP 200 包错误"这几种现场。
+  镜像来自 tools/mock-llm（仓库内自带，测试用，不对外发布）。
+type: application
+
+# chart 版本：改模板/values 时递增
+version: 0.1.0
+# 镜像默认标签（values.image.tag 为准）
+appVersion: "dev"
+
+keywords:
+  - testplane
+  - mock
+  - llm
+  - e2e
+home: https://github.com/ucm-system/testplane
+maintainers:
+  - name: testplane-infra

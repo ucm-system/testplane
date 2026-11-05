@@ -32,6 +32,22 @@ type storeRepos struct {
 
 var _ orchestrator.Repos = (*storeRepos)(nil)
 
+
+// attemptRefs 把一批 attempt id 转成 AttemptRef，并尽力补齐 TaskID/RunID。
+// 删 Job 只需要 AttemptID，但带上归属能在日志与对账里定位到具体 Run/Task
+// （也避免下游任何"用 ref 拼 subPath"的路径拿到空 RunID）。
+func (r *storeRepos) attemptRefs(ctx context.Context, ids []string) []orchestrator.AttemptRef {
+	out := make([]orchestrator.AttemptRef, 0, len(ids))
+	for _, id := range ids {
+		ref := orchestrator.AttemptRef{AttemptID: id}
+		if taskID, runID, err := r.st.Attempts.Owner(ctx, nil, id); err == nil {
+			ref.TaskID, ref.RunID = taskID, runID
+		}
+		out = append(out, ref)
+	}
+	return out
+}
+
 // buildRunView 把 store.Run 投影成编排层看到的快照。
 func (r *storeRepos) runView(run *store.Run) orchestrator.RunView {
 	v := orchestrator.RunView{
@@ -69,6 +85,10 @@ func (r *storeRepos) runView(run *store.Run) orchestrator.RunView {
 			}
 		}
 	}
+	// DeployJSON 给 Deployer.Start 用：提交时冻结在 runs.manifest.deploy 里的入参
+	// （provider / parameters / values …）+ runs.deploy 里的运行时字段（deployment_id /
+	// release_name / accepted_at …）合并成一份快照。只读这两列，不再查库（execution §9.2）。
+	v.DeployJSON = mergeDeployJSON(run.Manifest, run.Deploy)
 	if len(run.Endpoint) > 0 {
 		var ep domain.Endpoint
 		if json.Unmarshal(run.Endpoint, &ep) == nil {
@@ -85,11 +105,16 @@ func (r *storeRepos) runView(run *store.Run) orchestrator.RunView {
 }
 
 // buildTaskView 把 store.Task 投影成编排层快照（Args 已是含注入的完整 argv）。
-func (r *storeRepos) taskView(t *store.Task) orchestrator.TaskView {
+//
+// isPrecheck 必须由调用方给出：唯一判据是 runs.resolved.precheck.injected == true
+// 且 tasks.seq == 0（03-data-view.md §4.2），**不能**看 Tester 角色 ——
+// endpoint-probe 本身就是 role=pre_check，但用户可以在 precheck:"off" 下把它当普通测试提交。
+func (r *storeRepos) taskView(t *store.Task, isPrecheck bool) orchestrator.TaskView {
 	v := orchestrator.TaskView{
 		ID: t.ID, RunID: t.RunID, Seq: t.Seq, Name: t.Name,
 		TesterName: t.TesterName, TesterVersion: t.TesterVersion,
-		Image: t.ImageRef, OnFailure: t.OnFailure,
+		IsPrecheck: isPrecheck,
+		Image:      t.ImageRef, OnFailure: t.OnFailure,
 		TimeoutSeconds: t.TimeoutSeconds,
 		Status:         domain.TaskStatus(t.Status),
 		EndpointKey:    store.DerefStr(t.EndpointKey),
@@ -158,7 +183,11 @@ func (r *storeRepos) GetTask(ctx context.Context, taskID string) (orchestrator.T
 	if err != nil {
 		return orchestrator.TaskView{}, err
 	}
-	return r.taskView(t), nil
+	flags, err := r.st.PrecheckFlags(ctx, []string{t.ID})
+	if err != nil {
+		return orchestrator.TaskView{}, err
+	}
+	return r.taskView(t, flags[t.ID]), nil
 }
 
 func (r *storeRepos) ListTasks(ctx context.Context, runID string) ([]orchestrator.TaskView, error) {
@@ -169,8 +198,17 @@ func (r *storeRepos) ListTasks(ctx context.Context, runID string) ([]orchestrato
 		if err != nil {
 			return nil, err
 		}
+		// 每页一次 JOIN 判定（批量），不是每个 Task 一次查询。
+		ids := make([]string, 0, len(batch))
 		for i := range batch {
-			out = append(out, r.taskView(&batch[i]))
+			ids = append(ids, batch[i].ID)
+		}
+		flags, err := r.st.PrecheckFlags(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		for i := range batch {
+			out = append(out, r.taskView(&batch[i], flags[batch[i].ID]))
 		}
 		if next == "" {
 			return out, nil
@@ -270,21 +308,37 @@ func (r *storeRepos) ListActiveTasks(ctx context.Context, limit int) ([]orchestr
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]string, 0, len(rows))
+	for i := range rows {
+		ids = append(ids, rows[i].ID)
+	}
+	flags, err := r.st.PrecheckFlags(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]orchestrator.TaskView, 0, len(rows))
 	for i := range rows {
-		out = append(out, r.taskView(&rows[i]))
+		out = append(out, r.taskView(&rows[i], flags[rows[i].ID]))
 	}
 	return out, nil
 }
 
 // AttemptByTask 读该 Task 当前进行中的 Attempt（含 executor_ref 里的 Job 名）。
+//
+// **RunID 必填**：对账/结算路径用它拼产物 subPath（`<run>/tasks/<task>/attempts/<n>`），
+// 漏填会让 result.json 被读成 `<storage-root>/result.json`（QA 的 restart-drill 现场）。
 func (r *storeRepos) AttemptByTask(ctx context.Context, taskID string) (orchestrator.AttemptRef, error) {
 	a, jobName, err := r.st.ActiveAttemptOfTask(ctx, taskID)
 	if err != nil {
 		return orchestrator.AttemptRef{}, err
 	}
+	runID, err := r.st.Tasks.RunIDOf(ctx, nil, taskID)
+	if err != nil {
+		return orchestrator.AttemptRef{}, err
+	}
 	return orchestrator.AttemptRef{
-		AttemptID: a.ID, TaskID: a.TaskID, AttemptNo: a.Idx, JobName: jobName,
+		AttemptID: a.ID, TaskID: a.TaskID, RunID: runID,
+		AttemptNo: a.Idx, JobName: jobName,
 	}, nil
 }
 
@@ -360,9 +414,7 @@ func (r *storeRepos) FinishAttempt(ctx context.Context, in orchestrator.FinishIn
 		AbortTriggered:      res.AbortTriggered,
 		NeedsQueueUnblocked: res.PreCheckPassed && res.TaskTerminal,
 	}
-	for _, attemptID := range res.CancelAttempts {
-		out.CancelJobs = append(out.CancelJobs, orchestrator.AttemptRef{AttemptID: attemptID})
-	}
+	out.CancelJobs = append(out.CancelJobs, r.attemptRefs(ctx, res.CancelAttempts)...)
 	return out, nil
 }
 
@@ -372,9 +424,7 @@ func (r *storeRepos) AbortRun(ctx context.Context, in orchestrator.AbortInput) (
 		return orchestrator.AbortOutcome{}, err
 	}
 	out := orchestrator.AbortOutcome{Skipped: skipped}
-	for _, id := range attempts {
-		out.CancelJobs = append(out.CancelJobs, orchestrator.AttemptRef{AttemptID: id})
-	}
+	out.CancelJobs = append(out.CancelJobs, r.attemptRefs(ctx, attempts)...)
 	return out, nil
 }
 
@@ -383,8 +433,21 @@ func (r *storeRepos) BeginDeploy(ctx context.Context, runID, deployID string) er
 	return err
 }
 
-func (r *storeRepos) RecordDeployState(ctx context.Context, runID string, st ports.DeployState) error {
-	return r.st.RecordDeployState(ctx, runID, st.Phase, st.Reason, 0)
+func (r *storeRepos) RecordDeployState(ctx context.Context, runID string, snap domain.DeploySnapshot) error {
+	return r.st.RecordDeployState(ctx, runID, snap)
+}
+
+// ListDeployCleanupPending 返回"已终态但 deploy 还没卸载干净"的 Run（收口补偿输入）。
+func (r *storeRepos) ListDeployCleanupPending(ctx context.Context, limit int) ([]orchestrator.RunView, error) {
+	runs, err := r.st.ListDeployCleanupPending(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]orchestrator.RunView, 0, len(runs))
+	for i := range runs {
+		out = append(out, r.runView(&runs[i]))
+	}
+	return out, nil
 }
 
 func (r *storeRepos) DeployReady(ctx context.Context, runID string, ep domain.Endpoint) (int, error) {
@@ -436,9 +499,7 @@ func (r *storeRepos) RequestCancelRun(ctx context.Context, runID, actor string) 
 		return orchestrator.CancelOutcome{}, err
 	}
 	out := orchestrator.CancelOutcome{Skipped: skipped, AllStopped: len(attempts) == 0}
-	for _, id := range attempts {
-		out.CancelJobs = append(out.CancelJobs, orchestrator.AttemptRef{AttemptID: id})
-	}
+	out.CancelJobs = append(out.CancelJobs, r.attemptRefs(ctx, attempts)...)
 	return out, nil
 }
 
@@ -448,9 +509,7 @@ func (r *storeRepos) RequestCancelTask(ctx context.Context, taskID, actor string
 		return orchestrator.CancelOutcome{}, err
 	}
 	out := orchestrator.CancelOutcome{Skipped: skipped, AllStopped: len(attempts) == 0}
-	for _, id := range attempts {
-		out.CancelJobs = append(out.CancelJobs, orchestrator.AttemptRef{AttemptID: id})
-	}
+	out.CancelJobs = append(out.CancelJobs, r.attemptRefs(ctx, attempts)...)
 	return out, nil
 }
 
@@ -560,4 +619,47 @@ func nullable(s string) *string {
 		return nil
 	}
 	return &s
+}
+// mergeDeployJSON 合成 Deployer.Start 要的冻结快照（execution §9.2）：
+//   - 提交时冻结的 deploy 入参在 runs.manifest 里（支持平级 `deploy` 与嵌套 `run.deploy` 两种形态）；
+//   - 运行时字段在 runs.deploy 里（deployment_id / state / release_name / accepted_at …），后写覆盖先写。
+//
+// 两列都已在 store.Run 上，不需要额外查询。返回 nil 表示这个 Run 没有 deploy 信息
+// （Deployer.Start 会按 §9.2 明确报错，而不是拿空 values 去装一个空服务）。
+func mergeDeployJSON(manifest, deploy []byte) json.RawMessage {
+	merged := map[string]any{}
+	if len(manifest) > 0 {
+		var m map[string]any
+		if json.Unmarshal(manifest, &m) == nil {
+			// 兼容 {"run":{"deploy":…}} 与 {"deploy":…}。
+			if nested, ok := m["run"].(map[string]any); ok {
+				m = nested
+			}
+			if d, ok := m["deploy"].(map[string]any); ok {
+				for k, val := range d {
+					merged[k] = val
+				}
+			}
+		}
+	}
+	if len(deploy) > 0 {
+		var d map[string]any
+		if json.Unmarshal(deploy, &d) == nil {
+			for k, val := range d {
+				merged[k] = val
+			}
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(merged)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+// AppendRunEvent 追加清理失败事件（目前只有 cleanup.failed 用）。
+func (r *storeRepos) AppendRunEvent(ctx context.Context, runID, typ string, payload map[string]any) error {
+	return r.st.AppendRunEvent(ctx, runID, typ, payload)
 }

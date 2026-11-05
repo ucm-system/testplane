@@ -35,6 +35,35 @@
 
 无匿名端点（`/healthz`、`/metrics` 除外，按部署要求限制）。
 
+**与 Genet 的边界（D-48，2026-11-05 调研结论）**：Genet 只有两类身份——浏览器侧的企业 OAuth 会话 Cookie，与机器侧的 `Authorization: Bearer <Open API Key>`（打 `/api/open/*`，key 绑定唯一 namespace）。它**没有** client-credentials / PAT，其 OIDC Provider 默认 `enabled:false` 且只有两个硬编码 client。因此：
+
+- **TestPlane 的 Web 用户**复用团队统一身份源，TestPlane 自建 OIDC client 与 `tp_session` / CSRF（上表形态不变），**不复用 Genet 会话、不把 Genet 当 IdP**；
+- **TestPlane → Genet 的机器调用**（部署/轮询/卸载）用 `TESTPLANE_GENET_API_KEY`（Bearer，存 Secret），**不**使用 Tester/Job 的身份，也不进日志；
+- Genet 的 API Key 与 namespace 1:1（同 namespace 同时只允许一个活跃写 key），因此一个 TestPlane 实例需要**独占一组 namespace 或独占一把 key**，这一点必须在部署文档里写明。
+
+**部署形态与身份（D-51，2026-11-05 用户确认）**：TestPlane **纯内网部署**，与 Genet 共用**同一个企业统一身份源**。边界是「同一 IdP，不同 client」：
+
+- TestPlane 是该 IdP 的**独立 OIDC client**（自己的 `client_id`/回调/scope），**不是** Genet 的 client，也不共享 Genet 的会话；
+- Web：authorization code + PKCE → `tp_session`（`HttpOnly; Secure; SameSite=Lax`）+ `X-CSRF-Token` 双提交；
+- 服务间（Jenkins / Agent / `tpctl` / MCP）：用**同一个身份源签发的 JWT**，平台用 JWKS 校验（`aud == clientId`、`exp/nbf` 容差 60s），RBAC 与人类用户同一套，不设后门；
+- 本地开发仍用 `TESTPLANE_AUTH_MODE=dev`（默认角色 `admin`、`Authorization: Bearer <subject>` 即身份），生产镜像必须显式切 `oidc` 并在 `/healthz` 打警告（`impl/control-plane.md §C-10`）。
+
+**`oidc` 模式的 Cookie / CSRF / 登录细节（实现口径，2026-11-05 落定）**
+
+| 项 | 取值 / 行为 |
+|---|---|
+| 会话 Cookie | `tp_session`；`HttpOnly; Secure; SameSite=Lax; Path=/`（纯内网 http 部署可用 `TESTPLANE_SESSION_SECURE=false` 关 Secure） |
+| 会话值 | **HMAC-SHA256 签名令牌**（`base64url(payload).base64url(sig)`，密钥 `TESTPLANE_SESSION_SECRET` ≥32B）。payload = `{sub, email, role, groups, csrf, exp}`；不做 JWT、不用库 |
+| 会话 TTL | `TESTPLANE_SESSION_TTL`（默认 `8h`）；过期或签名不符 → 401 `UNAUTHENTICATED`，前端跳 `/auth/login` |
+| 角色 | claims 的 `groups` 经 `TESTPLANE_ROLE_MAP`（`tp-admins=admin,tp-ops=operator`）映射，取**最高**命中；未命中 → `viewer`；`sub` 为空 → 401 |
+| 登录中间态 | `tp_auth_tx`：`{state, nonce, code_verifier, return_to, exp}` 的签名 Cookie，`Path=/auth`、10 分钟；服务端不存任何会话态（多副本天然一致） |
+| CSRF | 双提交：`X-CSRF-Token` 必须等于 `GET /me` 返回的 `csrf_token`（由 `HMAC(secret, "csrf|sub|exp")` 派生，与会话绑定）。**只对 Cookie 会话的写操作生效**；Bearer 调用方不需要该头 |
+| 缺 CSRF | 403 `FORBIDDEN`（不是 401——身份是有效的，缺的是防伪令牌） |
+| 登出 | `POST /auth/logout` 清 `tp_session`（`Max-Age=0`）；IdP 侧会话不主动登出（无 end_session 依赖） |
+| `dev` 模式 | `TESTPLANE_AUTH_MODE=dev` 时 `/auth/*` 返回 404，`Authorization: Bearer <subject>` 直接作为身份、角色固定 `admin`；`TESTPLANE_ENV != dev` 时启动打 WARN |
+
+`/auth/login`、`/auth/callback`、`/auth/logout` 与 `/healthz`、`/readyz`、`/metrics` 一样**不带 `/api/v1` 前缀**，且 `/auth/login|callback` 匿名（登录前不可能有凭据）。
+
 ### 2.2 角色
 
 | 角色 | 能力 |
@@ -245,6 +274,8 @@ X-Log-Coverage: 2026-11-05T01:00:00Z/2026-11-05T01:32:10Z
 | `GET` | `/queue-status` | 平台槽位 + Volcano 等待原因 |
 | `GET` | `/meta` | `{version, api_version, features}` |
 
+**`/queue-status` 的语义（D-49）**：`slots` 是平台自身的槽位（endpoint 独占 / 全局并发）；`waiting` 是平台侧排队（按 `waiting_reason` 六值分组）；`volcano` 是**集群调度器视角**的队列快照，直接读 CRD，**不经 Genet**。三者必须分开展示，不能相加成"一个排队数"。`volcano.available=false` 时 `detail` 取四态之一（`crd_missing`/`rbac_forbidden`/`scheduler_unavailable`/`disabled`），且 **不可达不等于 0 排队**；多集群时 `queues[].name` 用 `"<cluster>/<queue>"`。`volcano.queues[].pending_jobs` 是该队列下 `phase=Pending` 的 PodGroup 计数（不是 `queue.status.pending`），`longest_wait_seconds` 取 `now - min(podgroup.creationTimestamp)`（phase ∈ Pending/Inqueue）。
+
 ### 5.4 Admin
 
 | 方法 | 路径 | 说明 |
@@ -303,7 +334,9 @@ data: {"seq":43,"type":"task.state_changed","run_id":"r-...","task_id":"t-0002",
 | 并发 | 同一用户同一 Run 的连接上限（P1 限流位），超限返回 429 |
 | 内容 | 只发状态事实，不发日志正文、不发凭据 |
 
-事件类型：`run.submitted`、`run.state_changed`、`task.state_changed`、`attempt.started`、`attempt.finished`、`deploy.state_changed`、`cleanup.started`、`run.finished`、`report.written`、`resync_required`。
+事件类型：`run.submitted`、`run.state_changed`、`task.state_changed`、`attempt.started`、`attempt.finished`、`deploy.state_changed`、`cleanup.started`、`cleanup.failed`、`run.finished`、`report.written`、`resync_required`。
+
+> `cleanup.failed`（D-54）：Run 已终态但 **deploy 卸载未通过校验**（`GET /releases/{name}` 仍 200，或 DELETE 失败）时发出，`payload = {release_name, uninstall_state, cleanup_errors[], verified_at}`。它**不改变 Run 终态**，只是把"资源没删干净"这件事暴露出来；对账循环会继续重试，成功后 `runs.deploy.uninstall.state` 转 `verified`。
 
 ---
 

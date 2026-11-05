@@ -1,0 +1,36 @@
+# 重启演练专用：mock-llm 在启动后 15s 内返回 503，之后正常。
+# 目的：让第一个 Attempt 有足够长的 running 窗口，controller 被 kill 后仍能由对账收口。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-llm-delayed
+  labels: { app: mock-llm-delayed }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: mock-llm-delayed }
+  template:
+    metadata:
+      labels: { app: mock-llm-delayed }
+    spec:
+      containers:
+        - name: mock-llm
+          image: testplane/mock-llm:dev
+          imagePullPolicy: IfNotPresent
+          args: ["-addr=:18080", "-ready-after=15s"]
+          ports: [{ name: http, containerPort: 18080 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 200m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-llm-delayed
+spec:
+  selector: { app: mock-llm-delayed }
+  ports: [{ name: http, port: 18080, targetPort: 18080 }]

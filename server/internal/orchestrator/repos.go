@@ -10,6 +10,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
@@ -46,6 +47,10 @@ type RunView struct {
 	HasDeploy     bool
 	DeployID      string
 	DeployState   string
+	// DeployJSON 是 `runs.deploy` 的原样快照（adapter 读一个字段，不查第二次库）。
+	// BeginDeploy 落库后由编排层作为 ports.DeployRequest.Manifest 交给 Deployer.Start
+	// （execution §9.2：先冻结落库再 POST——POST 超时不代表没创建）。
+	DeployJSON    json.RawMessage
 	QueuePosition int
 	QueueReason   string
 	Endpoint      *domain.Endpoint
@@ -61,7 +66,10 @@ type TaskView struct {
 	Name            string
 	TesterName      string
 	TesterVersion   string
-	TesterRole      string // test | pre_check
+	TesterRole      string // test | pre_check（仅展示/审计用，**不是**门控判据）
+	// IsPrecheck 是唯一的门控与终态判据：runs.resolved.precheck.injected == true 且 seq == 0
+	// （03-data-view.md §4.2）。由 adapter 用一条 JOIN 填好，编排层只读它。
+	IsPrecheck      bool
 	Image           string
 	Entry           string
 	Args            []string
@@ -219,11 +227,16 @@ type Repos interface {
 
 	// ---- Deploy（C-5.3）----
 	BeginDeploy(ctx context.Context, runID, deployID string) error
-	RecordDeployState(ctx context.Context, runID string, st ports.DeployState) error
+	// RecordDeployState 把一次增量快照合并进 runs.deploy（键名见 03-data-view §4.4）。
+	RecordDeployState(ctx context.Context, runID string, snap domain.DeploySnapshot) error
 	DeployReady(ctx context.Context, runID string, ep domain.Endpoint) (int, error)
 	DeployBlocked(ctx context.Context, runID string, reason string, f *domain.Failure) error
 	// FinishDeployAsFailed 处理"平台调不通 Genet"（Run → failed）。
 	FinishDeployAsFailed(ctx context.Context, runID string, f *domain.Failure) error
+	// ListDeployCleanupPending 返回"已终态但 deploy 还没卸载干净"的 Run（收口补偿用）。
+	ListDeployCleanupPending(ctx context.Context, limit int) ([]RunView, error)
+	// AppendRunEvent 追加一条 state_events 记录（**只**给 cleanup.failed 用，不开通用事件面）。
+	AppendRunEvent(ctx context.Context, runID, typ string, payload map[string]any) error
 
 	// ---- 收口 ----
 	BeginCleanup(ctx context.Context, runID, reason string) error

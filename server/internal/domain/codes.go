@@ -29,6 +29,9 @@ const (
 	CodeResultMissing           = "RESULT_MISSING"
 	CodeResultInvalid           = "RESULT_INVALID"
 	CodeCleanupFailed           = "CLEANUP_FAILED"
+	// 部署失败只折叠成两个码（附录 D，D-46/D-47）；细分走 Failure.Detail["reason"]。
+	CodeDeployFailed            = "DEPLOY_FAILED"  // 502 不可重试：平台侧调 Genet 失败
+	CodeDeployBlocked           = "DEPLOY_BLOCKED" // 502 可重试：Genet blocked 或超窗口
 	CodeCanceled                = "CANCELED"
 	CodeInternalError           = "INTERNAL_ERROR"
 
@@ -64,6 +67,8 @@ var retryableByCode = map[string]bool{
 	CodeEndpointUnreachable:   true,
 	CodePrecheckFailed:        true,
 	CodeCleanupFailed:         true,
+	CodeDeployFailed:          false, // 调用 Genet 失败属平台侧错误，重试大概率同样失败
+	CodeDeployBlocked:         true,  // 排队/部署未就绪：等服务或扩容后可重试
 	CodeInternalError:         true, // HT 视情况：保守地标可通过实例字段覆盖
 	CodeTaskTimeout:           false, // 按策略：由实例的 Failure.Retryable 覆盖
 	CodeMountUnavailable:      false,

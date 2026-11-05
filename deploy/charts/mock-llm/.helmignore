@@ -1,0 +1,5 @@
+# 打 helm package 时不要打包进 chart 的东西
+.DS_Store
+*.tmp
+*.swp
+.helmignore

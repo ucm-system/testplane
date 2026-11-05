@@ -377,17 +377,17 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 
 ---
 
-## 13. P1 扩展点（只预留，不实现）
+## 13. P1 扩展点
 
-| P1 能力 | 预留方式 |
-|---|---|
-| MCP Server | 复用同一 OpenAPI 生成的客户端；MCP 只是另一层 adapter，无独有逻辑 |
-| CLI `tpctl` | 同上；命令与 API 一一对应 |
-| 失败续跑（跨 Run） | `runs.retry_of` 字段已在 DDL 预留；复用校验条件在 C-5.6 定义 |
-| Run 对比 | 读 `result.json` 的 UI 层能力（按指标名 + labels + workload 对齐）；P1 可依赖 MongoDB 指标集合 |
-| 指标索引（跨 Run 查询） | P0 只存 `result.json` 文件；P1 可写 **MongoDB**（`metrics` 集合：run/task/attempt/name/statistic/unit/value/labels），查询接口不变；也可先加 PostgreSQL `metrics_index` 表过渡 |
-| Matrix 展开 | 提交前的纯函数变换（`args` 展开为多个 Task），不改变调度与契约 |
-| 看板 | `GET /queue-status` + Volcano 只读快照（E-11），前端独立路由 |
+| P1 能力 | 预留方式 | 状态 |
+|---|---|---|
+| MCP Server | 复用同一 OpenAPI 生成的客户端；MCP 只是另一层 adapter，无独有逻辑 | 🟢 进行中（本轮已交付最小可用）：`server/internal/mcp`，stdio + JSON-RPC 2.0，9 个工具 |
+| CLI `tpctl` | 同上；命令与 API 一一对应 | 🟢 进行中（本轮已交付最小可用）：`server/cmd/tpctl`，10 个子命令 |
+| 失败续跑（跨 Run） | `runs.retry_of` 字段已在 DDL 预留；复用校验条件在 C-5.6 定义 | ⬜ 之后 |
+| Run 对比 | 读 `result.json` 的 UI 层能力（按指标名 + labels + workload 对齐）；P1 可依赖 MongoDB 指标集合 | ⬜ 之后 |
+| 指标索引（跨 Run 查询） | P0 只存 `result.json` 文件；P1 可写 **MongoDB**（`metrics` 集合：run/task/attempt/name/statistic/unit/value/labels），查询接口不变；也可先加 PostgreSQL `metrics_index` 表过渡 | ⬜ 之后 |
+| Matrix 展开 | 提交前的纯函数变换（`args` 展开为多个 Task），不改变调度与契约 | ⬜ 之后 |
+| 看板 | `GET /queue-status` + Volcano 只读快照（E-11），前端独立路由 | ⬜ 之后 |
 
 ---
 
@@ -413,7 +413,7 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | REST + SSE（25 operations） | ✅ `/api/v1` 全量；SSE 断点续传 + `events/history` | `server/internal/api`、`server/api/openapi.yaml` |
 | 调度（门控 / 独占 / 全局并发 / 公平性） | ✅ 门控与两类并发上限、`waiting_reason` 六值；公平性仅"按提交时间" | `server/internal/orchestrator` |
 | K8s Job 执行器 | ✅ 真集群跑通（渲染/提交/观测/取消/日志/digest） | `server/internal/executor` |
-| Deploy 阶段（Genet） | 🟡 **mock**：`queued→deploying→ready/blocked`，不发真实 Genet 请求 | `server/internal/genet/mocks` |
+| Deploy 阶段（Genet） | 🟡 **mock**；**适配设计已按 Genet 真实实现定稿**（Helm release 为部署单元、`noWait=true`、ready≠可用、位次不可得，见 D-44～D-48 与 `impl/execution.md §9`），实现待 P1 | `server/internal/genet/mocks` |
 | Tester 注册（自发现） | ✅ 启动扫描 + 周期重扫 + 15 条校验 + 版本钉死 + orphan | `server/internal/registry` |
 | 报告与产物 | ✅ `report.json` / `report.md` / `events.jsonl` / 产物索引，终态后异步写 | `server/internal/report` |
 | Web UI | ✅ 6 路由（概览/列表/详情/提交/Tester/集群），SSE 实时 | `web/` |
@@ -423,7 +423,22 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 独立 Task（`POST /tasks`） | ⬜ 未做 | — |
 | 失败续跑（`POST /runs/{id}/retry`）、`/report` 富指标 | ⬜ 未做（P1） | — |
 
-### 15.2 与设计文档的偏差（已由 ARCHITECTURE v0.6 / D-38…D-43 裁决）
+### 15.2 P0 剩余端点收口（原「延后项」表，PR #18 后全部实现）
+
+| 端点 | 状态 | 实现要点 | 测试 |
+|---|---|---|---|
+| `GET /runs/{id}/artifacts` | **已实现** | 读 `artifacts` 表，`items` + `by_kind`（`result/raw/log/report/other`）+ `total_size_bytes`；`sha256` 惰性（未算即 `null`，不现算，C-7.5） | `TestRunArtifacts`（分组、总大小、未知 Run 404） |
+| `GET /runs/{id}/files?path=` | **已实现** | `http.ServeContent` 提供完整 Range 语义（200/206/416）；路径只由 `<storage-root>/<run_id>` + 校验后的相对路径拼出，绝对路径/盘符/`..`/空段一律 400 并二次校验前缀；>1 GiB 且无 `Range` → 413 提示分段 | `TestRunFile_Download`（200/206/416/5 类穿越/404）、`TestRunFile_TooLargeRequiresRange`（413） |
+| `GET /tasks/{id}/attempts/{idx}/artifacts` | **已实现** | 按 `idx` 定位 Attempt 后查 `artifacts`（`attempt_id` 过滤），形状同 Run 级；idx 非 ≥1 → 400 | `TestAttemptArtifacts`（清单、非法 idx 400） |
+| `GET /profiles` | **已实现** | 读 `execution_profiles` + 挂载能力（`mounts[{name,pvc,sub_path,kind}]`）、`scheduler/queue/image_pull_secrets/resource_defaults/deploy_timeout_seconds`；**同时移除了「表为空就放行任意 profile」的引导期例外**，未登记一律 `EXECUTION_PROFILE_NOT_FOUND`（种子保证 `k8s-npu` 存在） | `TestListProfiles`（种子含 `k8s-npu`、含 `mounts`） |
+| `GET /testers/{name}/versions/{version}` | **已实现** | 精确 `name+version` 命中，返回含 `parameters`/`env` 声明与注册表元数据（`content_sha`/`source_file`/`orphaned`/`registered_at`）；未知版本 404 `TESTER_NOT_FOUND` | `TestGetTesterVersion`（含 `parameters`、未知版本 404） |
+| `GET /metrics` | **已实现** | 手写 Prometheus 文本 exposition（不引 client_golang）：`testplane_runs_total{status}`、`testplane_tasks_total{status}`、`testplane_attempts_active`、`testplane_queue_waiting{reason}`（六个 reason 全部预置 0）、`testplane_endpoint_leases`、`testplane_http_requests_total{method,code}`；**不带 `/api/v1` 前缀、不参与 SPA fallback**；DB 采样失败只跳过 DB 类指标，不 500 | `TestMetrics`（指标齐全、`/api/v1/metrics` 不误命中） |
+
+> 这张表是评审 [PR #13](https://github.com/ucm-system/testplane/pull/13)「API 面比设计少、且没有延后说明」的补记；PR #18 已把 6 项全部实现并补测试，`openapi.yaml` 同步这 6 个 operation（`make openapi-lint` 0 error）。
+>
+> **仍未实现（明确延后，P1）**：`POST /runs/{id}/retry`、`GET /runs/{id}/retry-plan`（失败续跑，需复用判定与 Attempt 生成策略）、`GET /runs/{id}/deploy/logs`（Deploy 多 Pod 日志分段，依赖 collector 分段索引）、`/admin/profiles|clusters|secrets|audit` 与 `DELETE /admin/runs/{id}/artifacts`（admin RBAC 与 OIDC 一起做）、`GET /secrets`（Secret 引用清单，依赖 admin 面）。`GET /tasks` 的 `/tasks/{id}/retry` 同样延后。
+
+### 15.3 与设计文档的偏差（已由 ARCHITECTURE v0.6 / D-38…D-43 裁决）
 
 | # | 偏差 | 处置 |
 |---|---|---|
@@ -436,8 +451,13 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 7 | 未采用 `oapi-codegen` / `sqlc` 生成物，handler 与 DTO 手写 | 05 §5.2 的"重生成 diff 为空"门禁暂不适用；P1 再引入 |
 | 8 | `task_counts` 为 MVP 新增的 Run 投影字段 | 已写入 `server/api/openapi.yaml`；`03/07` 待回写 |
 | 9 | 架构表实为 **11 张**（文档曾按 12 表述） | 以 `03-data-view.md §3.2` 实际 DDL 为准 |
+| 10 | Pre-Check 判别曾有 4 处实现，其中门控（`orchestrator/controller.go`）、放行 SQL（`store/control.go`）、终态判定（`orchestrator/status.go`）误用 `TesterRole` / 单看 `seq=0` | 唯一判据 = `runs.resolved->'precheck'->>'injected' = true` **且** `tasks.seq = 0`（`03-data-view.md §4.2`）；`endpoint-probe` 本身 `role=pre_check`，用户可在 `precheck:"off"` 下把它当普通测试提交，故角色不可作判据。评审 #14 已修：`store.PrecheckTaskIDs`/`PrecheckFlags` + `orchestrator.TaskView.IsPrecheck` |
+| 11 | Job/Pod 正常结束后**没有回收路径**（只有取消才删 Job），也没有孤儿 GC goroutine；评审时集群已积压 53 个已终态 Job | 已按 `execution.md §6` 补齐（PR #14/#15）：`ports.Executor` 增 `Delete(ctx, h, DeletePolicy)`（`Background`/`Foreground`，404 幂等），Attempt 终态**落库之后**异步 `Delete(Background)`；新增 GC 循环（`Config.GCInterval` 默认 10min，`TESTPLANE_JOB_GC_ENABLED` 默认 true）回收"Job 已终态且 Attempt 已终态/无对应 Attempt"的 Job 与孤儿 Pod |
+| 12 | Deploy 阶段从 mock 切到**真实 Genet 客户端**（internal/genet，Helm release 语义：无部署单、无位次、oWait=true、404 宽限、取消先落意图后 DELETE） | 行为表见 impl/execution.md §9（观测 → Deploy 子状态九行映射）；kind E2E 默认仍 mock（TESTPLANE_DEPLOY_PROVIDER=mock），切真实 Genet 需 TESTPLANE_GENET_BASE_URL + TESTPLANE_GENET_API_KEY（+ 可选 _CA_FILE/_INSECURE） |
+| 13 | 卸载失败/校验未过时写 `cleanup.failed` 事件（`state_events.type`）；`Repos` 为此加了一个**最小专用**方法 `AppendRunEvent(ctx, runID, type, payload)`，未开放通用事件 API | payload = `{release_name, cleanup_errors[], attempt, verified_at}`；`uninstall.state` 的四个取值已收进 `domain` 常量。**契约侧待回写**：`03-data-view.md §4.6` 的 type 枚举补 `cleanup.failed`、`07-api.md §5` 的 SSE 事件类型表补一行（Lead 负责） |
+| 14 | `testers/endpoint-probe/tester.yaml` 的 `placeholder` 是多行说明而非一行命令，`parameters.url.description` 里还写了"退出码 2"（`ARCHITECTURE §5.4` 要求一行示例、§5.8 只有 0/非 0） | **不改 Tester 内容**：内容一变就要升版本（K-3 版本钉死，注册表实测会拒绝启动——本轮试改后已回滚）。平台侧取 `placeholder` 首行作占位、退出码一律按 0 / 非 0 归类；待 `/testers/{name}/versions/{version}` 与版本升级流程就绪后，由 Tester 维护者在下一个版本里修（G-15） |
 
-### 15.3 P1 优先项（按投入产出排序）
+### 15.4 P1 优先项（按投入产出排序）
 
 1. 真实 Genet 适配（替换 `internal/genet/mocks`，接口不变）。
 2. OIDC + 会话 + CSRF + RBAC（`TESTPLANE_AUTH_MODE=oidc`）。

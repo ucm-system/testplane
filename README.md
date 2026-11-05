@@ -37,8 +37,9 @@ New-Item -ItemType Directory -Force -Path .tools | Out-Null
 Invoke-WebRequest -Uri 'https://kind.sigs.k8s.io/dl/v0.29.0/kind-windows-amd64' -OutFile '.tools\kind.exe' -UseBasicParsing
 
 # 1. 基础设施：Kind 集群（含宿主 .data\storage → 节点 /storage-root 挂载）+ PostgreSQL 16 + 存储 + RBAC
-New-Item -ItemType Directory -Force -Path .data\storage | Out-Null
-& .\.tools\kind.exe create cluster --config deploy\kind\testplane.yaml --wait 180s
+#    kind 配置是模板（__STORAGE_HOST_PATH__ 占位符），先渲染再用；产物在 .data\ 下、不入库
+pwsh deploy\kind\render.ps1
+& .\.tools\kind.exe create cluster --config .data\kind-testplane.yaml --wait 180s
 docker volume create testplane-pg-data
 docker run -d --name testplane-pg --restart unless-stopped `
   -e POSTGRES_DB=testplane -e POSTGRES_USER=testplane -e POSTGRES_PASSWORD=testplane `
@@ -86,6 +87,8 @@ testers/              Tester 实现，一个目录一个 Tester（已有）
   endpoint-probe/     Pre-Check；契约的参考实现，也是新 Tester 的模板
 
 server/               规划：控制面（API / 状态机 / 编排 / 调度 / 存储）
+  cmd/tpctl/          P1：Agent 亲和 CLI（submit / wait / report / logs / cancel）
+  internal/mcp/       P1：MCP Server（stdio + JSON-RPC 2.0）
 web/                  规划：Web UI，按 design/prototype 落地
 deploy/               规划：镜像构建、K8s 清单、配置
 ```

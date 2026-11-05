@@ -104,6 +104,9 @@ components:
 		t.Fatalf("LoadSpec: %v", err)
 	}
 	checks, _ := spec.StaticChecks()
+	// 端点集合检查现在来自设计文档（DesignChecks），不再有硬编码的 mvp 集合。
+	designChecks, _ := spec.DesignChecks(loadRealDesign(t), loadRealAllow(t))
+	checks = append(checks, designChecks...)
 	byName := map[string]check{}
 	for _, c := range checks {
 		byName[c.Name] = c
@@ -111,7 +114,7 @@ components:
 	if byName["spec.operation_count"].OK {
 		t.Error("operation 数不一致时应失败")
 	}
-	if byName["spec.operations_match_mvp"].OK {
+	if byName["spec.endpoints_match_design"].OK {
 		t.Error("多出 /api/v1/extra 时应失败")
 	}
 	if !byName["spec.refs_resolvable"].OK {

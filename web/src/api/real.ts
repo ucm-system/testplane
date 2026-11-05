@@ -5,6 +5,7 @@
 import type { Api, LogOptions } from './contract'
 import { qs, request, requestText } from './client'
 import { asArray, asPage, normalizeTester } from './normalize'
+import { applyIdentity, clearAuth } from './auth'
 import type {
   Attempt,
   CancelResult,
@@ -60,8 +61,16 @@ function normalizeQueueStatus(raw: unknown): QueueStatus {
   }
 }
 export const realApi: Api = {
-  getIdentity(): Promise<Identity> {
-    return request<Identity>('/me')
+  async getIdentity(): Promise<Identity> {
+    const identity = await request<Identity>('/me')
+    // 有 csrf_token 即 OIDC 会话；没有即 dev 模式（判定逻辑集中在 api/auth.ts）
+    applyIdentity(identity)
+    return identity
+  },
+
+  async logout(): Promise<void> {
+    await request<unknown>('/auth/logout', { method: 'POST' })
+    clearAuth()
   },
 
   getMeta(): Promise<Meta> {

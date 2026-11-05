@@ -50,6 +50,7 @@ import type {
   WaitingTask,
 } from './types'
 import { normalizeTester } from './normalize'
+import { applyIdentity, clearAuth } from './auth'
 
 /* ================================================================ 基础工具 */
 
@@ -556,7 +557,7 @@ function seedAll(): void {
     ],
   })
 
-  // 2) Deploy 排队中（queued，带位次与原因）
+  // 2) Deploy 排队中（queued；D-46：没有位次，只有 queue_reason 原文）
   seedRun({
     id: 'r-20261105-0005',
     name: 'qwen3-32b-canary',
@@ -568,8 +569,8 @@ function seedAll(): void {
       provider: 'genet',
       state: 'queued',
       deployment_id: null,
-      queue_position: 12,
-      queue_reason: 'quota',
+      queue_position: null, // D-46：部署方没有位次，字段保留但恒 null
+      queue_reason: 'PodGroup phase=Pending, reason=Unschedulable(0/8 nodes available)',
       queued_at: iso(18),
       parameters_sha: 'sha256:1a2b',
     },
@@ -1016,7 +1017,15 @@ function validateManifest(manifest: RunManifest): ValidationIssue[] {
 export const mockApi: Api = {
   async getIdentity(): Promise<Identity> {
     await delay(80)
-    return { user: getCurrentUser(), role: 'operator' }
+    // mock 的 /me 没有 csrf_token → api/auth.ts 判成 dev 模式，绝不会触发登录跳转
+    const identity: Identity = { user: getCurrentUser(), role: 'operator' }
+    applyIdentity(identity)
+    return identity
+  },
+
+  async logout(): Promise<void> {
+    await delay(60)
+    clearAuth()
   },
 
   async getMeta(): Promise<Meta> {
@@ -1251,8 +1260,8 @@ export const mockApi: Api = {
           provider: body.deploy.provider,
           state: 'queued',
           deployment_id: null,
-          queue_position: 8,
-          queue_reason: 'quota',
+          queue_position: null, // D-46：没有位次
+          queue_reason: 'PodGroup phase=Pending, reason=Unschedulable(0/8 nodes available)',
           queued_at: nowIso(),
           parameters_sha: 'sha256:mock',
         }

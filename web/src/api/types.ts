@@ -116,8 +116,12 @@ export interface Deploy {
   provider: string
   state: DeployState
   deployment_id?: string | null
+  /**
+   * **恒为 null（D-46）**：部署方只给 pending/inqueue/running 水位计数，排队发生在 Volcano 层，
+   * 没有位次。字段保留只为与 `openapi.yaml` 兼容 —— **不要读取它做展示**。
+   */
   queue_position?: number | null
-  /** 排队 / 阻塞原因（给人看） */
+  /** PodGroup phase / conditions 原文（后端不翻译，前端原样显示） */
   queue_reason?: string | null
   queued_at?: Timestamp | null
   parameters_sha?: string | null

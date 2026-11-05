@@ -69,6 +69,31 @@ type Config struct {
 	DeployTimeout time.Duration
 	// Kubeconfig 透传给 executor（TESTPLANE_KUBECONFIG），平台本身不读。
 	Kubeconfig string
+	// DeployProvider 是 Deploy 阶段实现（TESTPLANE_DEPLOY_PROVIDER）：mock（默认）| genet。
+	DeployProvider string
+	// GenetBaseURL 是 Genet OpenAPI 根地址（TESTPLANE_GENET_BASE_URL），形如 https://genet.dev.huawei.com。
+	GenetBaseURL string
+	// GenetAPIKey 是 Genet OpenAPI 的 Bearer Key（TESTPLANE_GENET_API_KEY）；
+	// 生产用 Secret 注入，本文件只读环境变量名，不落明文。
+	GenetAPIKey string
+	// GenetCAFile 是自签 CA 的 PEM 路径（TESTPLANE_GENET_CA_FILE），空则用系统根证书。
+	GenetCAFile string
+	// GenetInsecure 跳过 Genet 的 TLS 校验（TESTPLANE_GENET_INSECURE，默认 false，仅开发环境）。
+	GenetInsecure bool
+
+	// ---- Volcano 队列快照（E-11、design/impl/control-plane.md §C-4.8） ----
+
+	// VolcanoEnabled 是平台侧是否采样 Volcano 队列（TESTPLANE_VOLCANO_ENABLED，默认 true）。
+	// 关闭时 `/queue-status` 的 volcano 块降级为 detail=disabled（**不是** crd_missing，
+	// 也不是"0 排队"）。
+	VolcanoEnabled bool
+	// VolcanoNamespaces 是 List PodGroup 的 namespace 列表（TESTPLANE_VOLCANO_NAMESPACES，
+	// 逗号分隔）。空 / `*` = 全部 namespace（一次集群级 List）。
+	// 未配置时默认取 profile 的 namespace —— 即 seed 进 execution_profiles 的那个，
+	// 与控制面 namespace 同值（TESTPLANE_NAMESPACE）。
+	VolcanoNamespaces []string
+	// VolcanoTTL 是快照缓存 TTL（TESTPLANE_VOLCANO_TTL，默认 15s，06 §2.1（3））。
+	VolcanoTTL time.Duration
 
 	// ---- 以下为实现细节配置，默认值即设计值 ----
 
@@ -86,8 +111,29 @@ type Config struct {
 	SSEHeartbeat time.Duration
 	// SSEReplayWindow 是 SSE 回放窗口（TESTPLANE_SSE_REPLAY_HOURS，默认 24h）。
 	SSEReplayWindow time.Duration
-	// AuthMode 是鉴权模式（TESTPLANE_AUTH_MODE，MVP 只有 dev）。
+	// AuthMode 是鉴权模式（TESTPLANE_AUTH_MODE）：dev | oidc（07 §2）。
 	AuthMode string
+	// Env 是部署环境（TESTPLANE_ENV，默认 dev）：用于"dev 鉴权用在非本地就打警告"。
+	Env string
+
+	// ---- OIDC（07 §2.1、D-51：独立 client，不把 Genet 当 IdP） ----
+	OIDCIssuer         string   // TESTPLANE_OIDC_ISSUER
+	OIDCClientID       string   // TESTPLANE_OIDC_CLIENT_ID
+	OIDCClientSecret   string   // TESTPLANE_OIDC_CLIENT_SECRET
+	OIDCClientAuth     string   // TESTPLANE_OIDC_CLIENT_AUTH：basic | post（默认 basic）
+	OIDCRedirectURL    string   // TESTPLANE_OIDC_REDIRECT_URL，如 http://127.0.0.1:8080/auth/callback
+	OIDCScopes         []string // TESTPLANE_OIDC_SCOPES，默认 openid profile email groups
+	OIDCRoleClaim      string   // TESTPLANE_OIDC_ROLE_CLAIM，默认 groups
+
+	// ---- 会话与 CSRF ----
+	SessionSecret []byte        // TESTPLANE_SESSION_SECRET（HMAC 密钥，≥32 字节）
+	SessionCookie string        // TESTPLANE_SESSION_COOKIE，默认 tp_session
+	SessionTTL    time.Duration // TESTPLANE_SESSION_TTL，默认 8h
+	SessionSecure bool          // TESTPLANE_SESSION_SECURE，默认 true（纯内网 http 部署可关）
+
+	// RoleMap 是 groups → 角色 的映射（TESTPLANE_ROLE_MAP，形如 tp-admins=admin,tp-ops=operator）。
+	RoleMap map[string]string
+
 	// APIPrefix 是业务端点前缀，固定 /api/v1（07 §1）。
 	APIPrefix string
 }
@@ -104,6 +150,13 @@ func Load() (*Config, error) {
 		LogLevel:             strings.ToLower(env("TESTPLANE_LOG_LEVEL", "info")),
 		TestersDir:           env("TESTPLANE_TESTERS_DIR", "./testers"),
 		Kubeconfig:           env("TESTPLANE_KUBECONFIG", ""),
+		DeployProvider:       strings.ToLower(env("TESTPLANE_DEPLOY_PROVIDER", "mock")),
+		GenetBaseURL:         strings.TrimRight(env("TESTPLANE_GENET_BASE_URL", ""), "/"),
+		GenetAPIKey:          env("TESTPLANE_GENET_API_KEY", ""),
+		GenetCAFile:          env("TESTPLANE_GENET_CA_FILE", ""),
+		GenetInsecure:        envBool("TESTPLANE_GENET_INSECURE", false),
+		VolcanoEnabled:       envBool("TESTPLANE_VOLCANO_ENABLED", true),
+		VolcanoTTL:           15 * time.Second,
 		DBMaxConns:           20,
 		RunMaxTasks:          200,
 		TaskTimeoutDefault:   4 * time.Hour,
@@ -112,8 +165,38 @@ func Load() (*Config, error) {
 		SSEHeartbeat:         15 * time.Second,
 		SSEReplayWindow:      24 * time.Hour,
 		AuthMode:             strings.ToLower(env("TESTPLANE_AUTH_MODE", "dev")),
+		Env:                  strings.ToLower(env("TESTPLANE_ENV", "dev")),
+		OIDCIssuer:           strings.TrimRight(env("TESTPLANE_OIDC_ISSUER", ""), "/"),
+		OIDCClientID:         env("TESTPLANE_OIDC_CLIENT_ID", ""),
+		OIDCClientSecret:     env("TESTPLANE_OIDC_CLIENT_SECRET", ""),
+		OIDCClientAuth:       strings.ToLower(env("TESTPLANE_OIDC_CLIENT_AUTH", "basic")),
+		OIDCRedirectURL:      env("TESTPLANE_OIDC_REDIRECT_URL", ""),
+		OIDCScopes:           splitList(env("TESTPLANE_OIDC_SCOPES", "openid profile email groups")),
+		OIDCRoleClaim:        env("TESTPLANE_OIDC_ROLE_CLAIM", "groups"),
+		SessionSecret:        []byte(env("TESTPLANE_SESSION_SECRET", "")),
+		SessionCookie:        env("TESTPLANE_SESSION_COOKIE", "tp_session"),
+		SessionTTL:           8 * time.Hour, // 下面按 TESTPLANE_SESSION_TTL 覆盖
+		SessionSecure:        envBool("TESTPLANE_SESSION_SECURE", true),
+		RoleMap:              parseRoleMap(env("TESTPLANE_ROLE_MAP", "")),
 		APIPrefix:            "/api/v1",
 	}
+
+	if raw := env("TESTPLANE_SESSION_TTL", ""); raw != "" {
+		d, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("config: TESTPLANE_SESSION_TTL=%q 非法（如 8h）", raw)
+		}
+		c.SessionTTL = d
+	}
+
+	if raw := env("TESTPLANE_VOLCANO_TTL", ""); raw != "" {
+		d, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("config: TESTPLANE_VOLCANO_TTL=%q 非法（如 15s）", raw)
+		}
+		c.VolcanoTTL = d
+	}
+	c.VolcanoNamespaces = volcanoNamespacesFromEnv()
 
 	if c.Role == "" {
 		c.Role = RoleAll
@@ -188,10 +271,52 @@ func Load() (*Config, error) {
 	default:
 		return nil, fmt.Errorf("config: TESTPLANE_LOG_LEVEL=%q 非法，允许 debug|info|warn|error", c.LogLevel)
 	}
+	if c.OIDCClientAuth != "basic" && c.OIDCClientAuth != "post" {
+		return nil, fmt.Errorf("config: TESTPLANE_OIDC_CLIENT_AUTH=%q 非法，允许 basic|post", c.OIDCClientAuth)
+	}
+	if c.AuthMode == "oidc" {
+		var missing []string
+		if c.OIDCIssuer == "" {
+			missing = append(missing, "TESTPLANE_OIDC_ISSUER")
+		}
+		if c.OIDCClientID == "" {
+			missing = append(missing, "TESTPLANE_OIDC_CLIENT_ID")
+		}
+		if c.OIDCRedirectURL == "" {
+			missing = append(missing, "TESTPLANE_OIDC_REDIRECT_URL")
+		}
+		if len(c.SessionSecret) < 32 {
+			missing = append(missing, "TESTPLANE_SESSION_SECRET(≥32 字节)")
+		}
+		if len(missing) > 0 {
+			return nil, fmt.Errorf("config: TESTPLANE_AUTH_MODE=oidc 缺少必需配置: %s", strings.Join(missing, ", "))
+		}
+	}
+
 	switch c.AuthMode {
 	case "dev", "oidc":
 	default:
 		return nil, fmt.Errorf("config: TESTPLANE_AUTH_MODE=%q 非法，允许 dev|oidc", c.AuthMode)
+	}
+	// Deploy 阶段：genet 需要完整接入配置；mock 不校验（kind E2E 用）。
+	switch c.DeployProvider {
+	case "mock":
+	case "genet":
+		if c.GenetBaseURL == "" {
+			return nil, errors.New("config: TESTPLANE_DEPLOY_PROVIDER=genet 需要 TESTPLANE_GENET_BASE_URL")
+		}
+		if _, err := url.Parse(c.GenetBaseURL); err != nil {
+			return nil, fmt.Errorf("config: TESTPLANE_GENET_BASE_URL=%q 非法: %w", c.GenetBaseURL, err)
+		}
+		if c.GenetAPIKey == "" {
+			return nil, errors.New("config: TESTPLANE_DEPLOY_PROVIDER=genet 需要 TESTPLANE_GENET_API_KEY（生产用 Secret 注入）")
+		}
+		if c.GenetInsecure {
+			// 不阻止启动（开发环境常见自签），但必须在日志里看得见。
+			fmt.Fprintln(os.Stderr, "warning: TESTPLANE_GENET_INSECURE=true —— Genet TLS 校验已关闭，仅限开发环境")
+		}
+	default:
+		return nil, fmt.Errorf("config: TESTPLANE_DEPLOY_PROVIDER=%q 非法，允许 mock|genet", c.DeployProvider)
 	}
 	return c, nil
 }
@@ -214,6 +339,65 @@ func joinStorage(root string, parts ...string) string {
 	out := strings.TrimRight(root, `/\`)
 	for _, p := range parts {
 		out += "/" + p
+	}
+	return out
+}
+
+
+// volcanoNamespacesFromEnv 解析 TESTPLANE_VOLCANO_NAMESPACES：
+//   - 未配置 → 默认 profile 的 namespace（与控制面 namespace 同值；这里不能调
+//     k8s.NamespaceFromEnv——config ← api ← k8s 会成导入环，所以按同一套 env 名重读一遍）；
+//   - `*` / `all` → nil（全部 namespace，一次集群级 List）；
+//   - 否则逗号/空白分隔的列表。
+func volcanoNamespacesFromEnv() []string {
+	raw := strings.TrimSpace(env("TESTPLANE_VOLCANO_NAMESPACES", ""))
+	if raw == "" {
+		return []string{envFirst("TESTPLANE_NAMESPACE", "TESTPLANE_EXECUTOR_NAMESPACE", "testplane")}
+	}
+	if raw == "*" || strings.EqualFold(raw, "all") {
+		return nil
+	}
+	if list := splitList(raw); len(list) > 0 {
+		return list
+	}
+	return nil
+}
+
+// splitList 把逗号/空白分隔的字符串切成切片（OIDC scopes 用）。
+func splitList(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// parseRoleMap 解析 TESTPLANE_ROLE_MAP（`tp-admins=admin,tp-ops=operator`）。
+// 非法条目直接忽略（宁可少给权限，不给错权限）。
+func parseRoleMap(raw string) map[string]string {
+	out := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		group, role, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		group = strings.TrimSpace(group)
+		role = strings.ToLower(strings.TrimSpace(role))
+		switch role {
+		case "viewer", "operator", "admin":
+			if group != "" {
+				out[group] = role
+			}
+		}
 	}
 	return out
 }
@@ -325,4 +509,19 @@ func envBytes(primary string, def int64) (int64, error) {
 		return 0, fmt.Errorf("config: %s=%q 不是合法字节数", primary, raw)
 	}
 	return int64(n * float64(mult)), nil
+}
+// envBool 解析布尔型环境变量（1/true/yes 为真，0/false/no 为假，其余取默认）。
+func envBool(name string, def bool) bool {
+	raw, ok := os.LookupEnv(name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
 }

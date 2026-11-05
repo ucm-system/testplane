@@ -243,35 +243,8 @@ func (s *Spec) requireFields(schemaName string, raw []byte) []string {
 
 // ---- 规格侧校验 ----------------------------------------------------------
 
-// mvpOperations 是 Lead 定稿的 MVP 端点集（25 个）。
-// 用硬编码集合而不是"从 spec 反推"，才能抓住 spec 意外增删端点。
-var mvpOperations = map[string]bool{
-	"GET /healthz":                                      true,
-	"GET /readyz":                                       true,
-	"GET /api/v1/meta":                                  true,
-	"GET /api/v1/me":                                    true,
-	"POST /api/v1/runs":                                 true,
-	"GET /api/v1/runs":                                  true,
-	"GET /api/v1/runs/{run_id}":                         true,
-	"POST /api/v1/runs/{run_id}/cancel":                 true,
-	"GET /api/v1/runs/{run_id}/report":                  true,
-	"GET /api/v1/runs/{run_id}/report.md":               true,
-	"GET /api/v1/runs/{run_id}/events":                  true,
-	"GET /api/v1/runs/{run_id}/events/history":          true,
-	"GET /api/v1/runs/{run_id}/tasks":                   true,
-	"GET /api/v1/runs/{run_id}/manifest":                true,
-	"GET /api/v1/runs/{run_id}/deploy":                  true,
-	"GET /api/v1/tasks":                                 true,
-	"GET /api/v1/tasks/{task_id}":                       true,
-	"POST /api/v1/tasks/{task_id}/cancel":               true,
-	"GET /api/v1/tasks/{task_id}/attempts":              true,
-	"GET /api/v1/tasks/{task_id}/attempts/{idx}/result": true,
-	"GET /api/v1/tasks/{task_id}/attempts/{idx}/logs":   true,
-	"GET /api/v1/testers":                               true,
-	"GET /api/v1/testers/{name}":                        true,
-	"GET /api/v1/clusters":                              true,
-	"GET /api/v1/queue-status":                          true,
-}
+// 端点集合的期望来自 design/views/07-api.md §5（外加 §2.4 的认证端点），
+// 见 design.go 的 DesignChecks；这里不再维护硬编码的 MVP 端点表（票 #16）。
 
 // excludedPrefixes/paths 是明确不在 MVP 的端点（票 #3 裁决 + openapi 自述）。
 var excludedOperations = []string{
@@ -297,37 +270,13 @@ func (s *Spec) StaticChecks() (checks []check, warnings []string) {
 	add("spec.openapi_3_1", strings.HasPrefix(version, "3.1"),
 		fmt.Sprintf("openapi=%q（期望 3.1.x）", version))
 
-	// 2) operation 数与集合
-	add("spec.operation_count", len(s.Operations) == len(mvpOperations),
-		fmt.Sprintf("spec 里 %d 个 operation，MVP 定稿 %d 个", len(s.Operations), len(mvpOperations)))
-
+	// 2) 端点集合：在 main 里用 DesignChecks 与 07-api.md §5 双向比对（票 #16）。
+	//    operation 数也由设计端点减去白名单缺失推导，这里不再自证。
 	var actual []string
 	for _, op := range s.Operations {
 		actual = append(actual, op.Method+" "+op.Path)
 	}
 	sort.Strings(actual)
-	var missing, extra []string
-	for want := range mvpOperations {
-		found := false
-		for _, got := range actual {
-			if got == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			missing = append(missing, want)
-		}
-	}
-	for _, got := range actual {
-		if !mvpOperations[got] {
-			extra = append(extra, got)
-		}
-	}
-	sort.Strings(missing)
-	sort.Strings(extra)
-	add("spec.operations_match_mvp", len(missing) == 0 && len(extra) == 0,
-		fmt.Sprintf("缺：%v；多：%v", missing, extra))
 
 	// 3) operationId 唯一且非空
 	ids := map[string]int{}

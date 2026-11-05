@@ -2,12 +2,8 @@ import { Suspense, useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { Layers, List, Menu, PlusCircle, Server } from 'lucide-react'
 import { USE_MOCK } from '@/api'
-import { Button } from '@/components/ui/button'
-import { Dialog } from '@/components/ui/dialog'
+import { UserMenu } from '@/components/app/UserMenu'
 import { Drawer } from '@/components/ui/drawer'
-import { Field, Input } from '@/components/ui/input'
-import { useToast } from '@/components/ui/toast'
-import { useIdentity } from '@/hooks/useIdentity'
 import { cn } from '@/lib/utils'
 
 interface NavItem {
@@ -81,70 +77,6 @@ function NavList({ onNavigate }: { onNavigate?: () => void }) {
   )
 }
 
-/** 右上角身份块：dev 模式下点开可以换 Bearer subject。 */
-function UserMenu() {
-  const { subject, identity, setSubject } = useIdentity()
-  const [open, setOpen] = useState(false)
-  const [draft, setDraft] = useState(subject)
-  const toast = useToast()
-
-  useEffect(() => setDraft(subject), [subject])
-
-  const submit = () => {
-    const next = draft.trim()
-    if (!next) return
-    setSubject(next)
-    setOpen(false)
-    toast({ title: `已切换身份：${next}`, description: '之后的请求都带 Authorization: Bearer ' + next, tone: 'info' })
-  }
-
-  const role = identity?.role ?? '…'
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="flex items-center gap-2 rounded-md py-1 pl-4 pr-2 transition-colors hover:bg-surface-2"
-        title="切换 dev 身份（Authorization: Bearer）"
-      >
-        <span className="grid size-[26px] place-items-center rounded-full bg-primary-weak text-xs text-primary-text">
-          {(subject[0] ?? 'd').toUpperCase()}
-        </span>
-        <span className="hidden text-xs text-fg-2 sm:inline">
-          {subject} · {role}
-        </span>
-      </button>
-
-      <Dialog
-        open={open}
-        onClose={() => setOpen(false)}
-        title="切换 dev 身份"
-        description="MVP 是 dev 鉴权：请求头 Authorization: Bearer <subject>，不带时服务端按 dev 处理。"
-        footer={
-          <>
-            <Button onClick={() => setOpen(false)}>取消</Button>
-            <Button variant="primary" onClick={submit}>
-              保存
-            </Button>
-          </>
-        }
-      >
-        <Field label="Bearer subject" hint="例如 dev / zhangsan / operator-01">
-          <Input
-            value={draft}
-            autoFocus
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submit()
-            }}
-            placeholder="dev"
-          />
-        </Field>
-      </Dialog>
-    </>
-  )
-}
 
 /** 圣杯外壳：固定页头 + 左导航 + 主内容 + 右栏 + 页脚（holy-grail.css）。 */
 export function AppShell() {

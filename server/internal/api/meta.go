@@ -85,12 +85,10 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleMe 是 GET /api/v1/me（openapi Me）：MVP dev 身份 {user, role}。
+// handleMe 是 GET /api/v1/me（openapi Me）：返回身份与（oidc 模式下的）CSRF token。
+// 前端把 csrf_token 存进内存，写操作时作为 `X-CSRF-Token` 回填（双提交，07 §2.1）。
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user": User(r.Context()),
-		"role": Role(r.Context()),
-	})
+	writeJSON(w, http.StatusOK, s.currentIdentity(r))
 }
 
 // handleListTesters 是 GET /api/v1/testers（只读目录，K-3）。
@@ -257,11 +255,7 @@ func (s *Server) handleQueueStatus(w http.ResponseWriter, r *http.Request) {
 			"by_reason": reasonCounts,
 			"tasks":     tasks,
 		},
-		"volcano": map[string]any{
-			"available": false,
-			"detail":    "scheduler_unavailable",
-			"queues":    []any{},
-		},
+		"volcano": s.volcanoBlock(ctx),
 	})
 }
 

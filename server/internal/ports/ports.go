@@ -102,7 +102,22 @@ type Executor interface {
 	Cancel(ctx context.Context, h JobHandle) error
 	// Logs 返回 Tester 的 stdout/stderr 流（明文，不做脱敏，K-5）。
 	Logs(ctx context.Context, h JobHandle) (io.ReadCloser, error)
+	// Delete 删除 Job（Pod 由 Job controller 级联删除）：正常结束后的回收与孤儿 GC
+	// （execution §6）。调用方必须保证"Attempt 终态已落库"（§5.1 的顺序）；404 视为成功。
+	Delete(ctx context.Context, h JobHandle, policy DeletePolicy) error
 }
+
+// DeletePolicy 是 Job 删除的级联策略（对应 K8s propagationPolicy）。
+type DeletePolicy string
+
+const (
+	// DeleteBackground 让 Job controller 异步回收 Pod：正常结束后的清理用它
+	// （此时不再需要 Pod 的实时状态，execution §6 的正常结束路径）。
+	DeleteBackground DeletePolicy = "Background"
+	// DeleteForeground 等 Pod 真正消失再返回：取消/超时收口用它，
+	// 避免容器进程继续写 NFS（§5.2）。
+	DeleteForeground DeletePolicy = "Foreground"
+)
 
 // ---- Deploy 阶段（MVP mock）------------------------------------------------
 
@@ -126,6 +141,23 @@ type DeployState struct {
 	Endpoint domain.Endpoint
 	Failure  *domain.Failure
 	Reason   string // 排队位次、阻塞原因等给人看的一句话
+
+	// ---- 落库用（runs.deploy §4.4）：适配层把 Genet 的原始观测一并带回，编排层只转存 ----
+	// ReleaseStatus 是 helm 原值（pending-install|deployed|failed|superseded|…）。
+	ReleaseStatus string
+	// EndpointStatus 是 callInfo.endpoint.status 原值（pending|ready|blocked）。
+	EndpointStatus string
+	// Queue 是队列水位（只有计数，没有位次）。
+	Queue *domain.DeployQueue
+	// ObservedAt 是该观测的时间（写 last_polled_at）。
+	ObservedAt time.Time
+}
+
+// DeployCleaner 是 Deployer 的**可选**能力：卸载后校验"删干净"（execution §9.7）。
+// 编排层用类型断言取用；不实现它的适配层（如老 mock）按"DELETE 成功即 verified"退化。
+type DeployCleaner interface {
+	// VerifyUninstalled 返回 true 表示 release 已不存在且其 Pod 列表为空。
+	VerifyUninstalled(ctx context.Context, runID string) (bool, error)
 }
 
 // Deployer 是 Genet 适配层接口。MVP：mocks.Genet。

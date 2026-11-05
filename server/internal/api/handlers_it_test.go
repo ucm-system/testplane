@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -51,7 +52,8 @@ func (f *fakeResolver) List(ctx context.Context, role string, includeOrphaned bo
 }
 
 func storeTestNotFound(name string) error {
-	return &testErr{msg: "tester not found: " + name}
+	// 包一层 domain.ErrNotFound，让 failErr 映射成 404 NOT_FOUND（与真实注册表一致）。
+	return fmt.Errorf("tester not found: %s: %w", name, domain.ErrNotFound)
 }
 
 type testErr struct{ msg string }
@@ -86,6 +88,12 @@ func integrationServer(t *testing.T) (*Server, *store.Store, func()) {
 			Name: "endpoint-probe", Version: "1.0.0", Role: domain.RolePreCheck,
 			OnFailure: domain.OnFailureAbortRun, Entry: "/tester/run.sh", Image: "probe:1",
 			Concurrency: domain.ConcurrencyPolicy{EndpointExclusive: true},
+			Parameters: map[string]domain.Param{
+				"url": {Type: "string", Required: true, Description: "服务地址"},
+			},
+			Env: map[string]domain.EnvVar{
+				"ENDPOINT_API_KEY": {Secret: true, Description: "Bearer token"},
+			},
 		},
 		"probe-again@1.0.0": {
 			Name: "probe-again", Version: "1.0.0", Role: domain.RoleTest,

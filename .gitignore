@@ -111,6 +111,7 @@ web/dist/
 # server/internal/webui/dist 里只保留占位 index.html（保证没跑前端构建时 go build 也能过）；
 # 真实产物由 make web 复制，不入库。
 !server/internal/webui/dist/
+server/internal/webui/dist/*
 !server/internal/webui/dist/index.html
 
 # ---------- 部署本地配置（清单本身入库，本地覆盖与密钥不入库） ----------

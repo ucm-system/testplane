@@ -31,8 +31,15 @@ type MemoryRepos struct {
 	MaxGlobalConcurrencyOverride int
 }
 
+// RunEvent 是 state_events 的最小投影（目前只有 cleanup.failed 用）。
+type RunEvent struct {
+	Type    string
+	Payload map[string]any
+}
+
 type memRun struct {
 	RunView
+	Events []RunEvent
 }
 
 type memTask struct {
@@ -93,7 +100,7 @@ func (m *MemoryRepos) SeedTask(t TaskView) {
 		t.OnFailure = domain.OnFailureContinue
 	}
 	cp := t
-	precheck := t.TesterRole == domain.RolePreCheck
+	precheck := t.IsPrecheck
 	m.tasks[t.ID] = &memTask{TaskView: cp, Precheck: precheck}
 }
 
@@ -317,7 +324,7 @@ func (m *MemoryRepos) SeedActiveTask(t TaskView, attempt AttemptRef, leaseKey st
 	cp := t
 	cp.Status = domain.TaskRunning
 	cp.AttemptNo = attempt.AttemptNo
-	m.tasks[t.ID] = &memTask{TaskView: cp, Precheck: t.TesterRole == domain.RolePreCheck}
+	m.tasks[t.ID] = &memTask{TaskView: cp, Precheck: cp.IsPrecheck}
 	m.attempts[attempt.AttemptID] = &memAttempt{
 		AttemptRef: attempt,
 		Status:     domain.AttemptRunning,
@@ -663,14 +670,84 @@ func (m *MemoryRepos) BeginDeploy(ctx context.Context, runID, deployID string) e
 	return nil
 }
 
-func (m *MemoryRepos) RecordDeployState(ctx context.Context, runID string, st ports.DeployState) error {
+// RecordDeployState 把增量快照合并进 RunView.DeployJSON（与 store 的 jsonb 合并同语义）。
+func (m *MemoryRepos) RecordDeployState(ctx context.Context, runID string, snap domain.DeploySnapshot) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if r, ok := m.runs[runID]; ok {
-		r.DeployState = st.Phase
-		r.QueueReason = st.Reason
+	r, ok := m.runs[runID]
+	if !ok {
+		return fmt.Errorf("memory: run %s: %w", runID, domain.ErrNotFound)
+	}
+	merged := map[string]any{}
+	if len(r.DeployJSON) > 0 {
+		_ = json.Unmarshal(r.DeployJSON, &merged)
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		return err
+	}
+	add := map[string]any{}
+	if err := json.Unmarshal(raw, &add); err != nil {
+		return err
+	}
+	for k, v := range add {
+		merged[k] = v
+	}
+	if out, merr := json.Marshal(merged); merr == nil {
+		r.DeployJSON = out
+	}
+	if snap.State != "" {
+		r.DeployState = snap.State
+	}
+	if snap.QueueReason != "" {
+		r.QueueReason = snap.QueueReason
 	}
 	return nil
+}
+
+// AppendRunEvent 只记录清理失败事件（内存实现挂在 memRun 上，便于测试断言）。
+func (m *MemoryRepos) AppendRunEvent(ctx context.Context, runID, typ string, payload map[string]any) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.runs[runID]
+	if !ok {
+		return fmt.Errorf("memory: run %s: %w", runID, domain.ErrNotFound)
+	}
+	r.Events = append(r.Events, RunEvent{Type: typ, Payload: payload})
+	return nil
+}
+
+// ListDeployCleanupPending 返回已终态但 deploy 还没卸载干净的 Run（收口补偿用）。
+func (m *MemoryRepos) ListDeployCleanupPending(ctx context.Context, limit int) ([]RunView, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]RunView, 0, 4)
+	for _, r := range m.runs {
+		if !r.HasDeploy || !r.Status.IsTerminal() || r.Status == domain.RunCanceled {
+			continue
+		}
+		if r.CleanupPolicy == "never" {
+			continue
+		}
+		if r.CleanupPolicy == "on_failure" &&
+			r.Status != domain.RunFailed && r.Status != domain.RunServiceUnavailable {
+			continue
+		}
+		doc := map[string]any{}
+		if len(r.DeployJSON) > 0 {
+			_ = json.Unmarshal(r.DeployJSON, &doc)
+		}
+		if u, ok := doc["uninstall"].(map[string]any); ok {
+			if state, _ := u["state"].(string); state == "verified" || state == "skipped" {
+				continue
+			}
+		}
+		out = append(out, r.RunView)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (m *MemoryRepos) DeployReady(ctx context.Context, runID string, ep domain.Endpoint) (int, error) {

@@ -51,14 +51,124 @@ flowchart LR
 | ConfigMap | `testplane-config` | 非敏感 env（并发、超时、保留期、SSE、日志分段）、`checksum/config` 注解 | 变更触发滚动；敏感项一律不进 ConfigMap |
 | Secret | `testplane-db` / `-oidc` / `-genet` / `-clusters` / `-session` | `existingSecret` 引用 | chart **不生成明文**；kubeconfig 以文件挂到 `/etc/testplane/clusters`（K-4） |
 | ServiceAccount | `testplane` | `automountServiceAccountToken: true` | 只有控制面需要；Tester Pod 一律 `false`（E-2.1） |
-| Role / RoleBinding | `testplane` | `jobs`、`pods`、`pods/log`、`persistentvolumeclaims`、`events`、`leases`（动词见 W-9） | namespace 级；**不授予 `secrets`** |
-| ClusterRole（只读） | `testplane-view` | `nodes`、Volcano `queues`/`podgroups`/`jobs` | 看板与 `waiting_reason` 的数据源 |
+| Role / RoleBinding | `testplane` | `jobs`、`pods`、`pods/log`、`persistentvolumeclaims`、`events`、`leases`（动词见 W-9） | namespace 级；**不授予 `secrets`**、不授予 `pods/exec`（见 §4.4） |
+| ClusterRole（只读） | `testplane-view` | `nodes` | 看板节点状态；`insufficient_resources` 判定的数据源 |
+| ClusterRole（只读） | `testplane-volcano-view` | Volcano `queues` / `podgroups`：`get,list`（**不 watch**；Volcano `jobs` 暂不读） | 队列展示与 `waiting_reason` 的集群侧数据源。**两者都是 cluster-scoped**，namespace 级 `Role` 绑不到（见 §2.1） |
 | PVC | `testplane-storage` | `ReadWriteMany`、`storageClassName: nfs-csi`、容量按保留期规划（示例 `20Ti`，以 03 §8 估算校准） | 只挂控制面到 `/storage-root`；Tester 用同 PVC 的 subPath |
 | NetworkPolicy | `testplane-default-deny` + 放行条目 | ingress/egress 双向默认拒绝 | 见 §4；每 Job 另生成一条同名策略（E-2.1） |
 | PDB | `testplaned` | `minAvailable: 1` | 单副本下会阻塞 drain，见 §7.1 |
 | Lease | `testplane-controller` / `testplane-collector-leader` / `tp-log-<hash>` | TTL 15s / 续约 5s；日志 Lease 30s / 10s | 选主与"同文件单写者"（E-7.3） |
 | Job（运行时） | `tp-<task_id>-a<n>` | `backoffLimit: 0`、`restartPolicy: Never`、`activeDeadlineSeconds = timeout+60`、`automountServiceAccountToken: false` | 平台渲染，**不在 chart 里**（E-2.2） |
 | Job（hook） | `testplaned-migrate` | `pre-install,pre-upgrade`、`hook-delete-policy: before-hook-creation` | 迁移唯一入口，见 §6.2 |
+
+### 2.1 排队与可观测数据源
+
+`GET /api/v1/queue-status` 一个端点装**两套数据源**，这是本节存在的理由。
+（本节的调研依据：Jenkins 侧 `Helm-Start-Service-MB.Jenkinsfile` 的队列面板读 Genet
+`/api/open/queue`；`E2E-Test.jenkinsfile` 本身不读 Volcano。TestPlane 不复用那条路径。）
+
+**（1）两类排队必须分开呈现，永远不相加。**
+
+| | 平台槽位 | Volcano 队列 |
+|---|---|---|
+| 有哪些 | `precheck_gate` / `slot_waiting` / `global_limit` | `queue_full` / `gang_pending` / `insufficient_resources` |
+| 数据源 | 自己的 DB（`endpoint_leases`、`attempts`） | K8s CRD `scheduling.volcano.sh/v1beta1` |
+| 时间尺度 | 秒~分钟 | 小时~天 |
+| 单位 | 并发 permit 计数（默认 20） | 资源配额（卡 / CPU / 内存） |
+| 归责 / 动作 | 平台内（等独占 Task 结束、调 `TESTPLANE_CONCURRENCY_MAX`） | 集群侧（找管理员扩卡 / 开队列 / 调 `minMember`） |
+| 可用性 | 永远可读 | 可能 `scheduler_unavailable` |
+
+合成一张卡或一个"总排队 N"是**错的**：它会让"队列 Open 但本 Task 实际卡在端点独占"这种情况
+把用户支去扩队列。UI 上两张卡并列、标题带归属（`平台槽位（TestPlane）` / `Volcano 队列（只读快照，15s）`），
+`waiting` 明细逐条带 `waiting_reason`，tag 分两组颜色。
+
+**（2）采样路径：直连 CRD，不经过 Genet。**
+
+```text
+controller --(k8s API, scheduling.volcano.sh/v1beta1)--> queues(list) + podgroups(list)
+           --> GET /api/v1/queue-status --> UI（30s 轮询该端点）
+```
+
+不绕 Genet 的理由：它的 `/api/open/queue` 是给**它自己的 UI** 用的（按 API Key 绑定的池返回单个队列，
+带它自己的会话与配额口径），语义是"我这个 key 的池"，不是"这个集群的队列全景"；复用它等于继承
+一套与 TestPlane 无关的鉴权和配额语义。实现用 `dynamic.Interface` + unstructured（只读），
+**不引** `volcano.sh/apis` typed client，避免被 Volcano 版本绑死。
+
+**（3）采样约束。**
+
+| 项 | 值 | 理由 |
+|---|---|---|
+| 缓存 TTL | 15s | E-11 已定；`/queue-status` 本身被 UI 30s 轮询，15s 是新鲜度上限 |
+| 单飞（single-flight） | 并发请求最多一个在打 API | 看板一开多客户端同时打，不单飞会出现 N 倍 `List podgroups` |
+| 单次超时 | 5s（火山块失败即降级，不等） | 不得拖慢 `slots`/`waiting` 的返回 |
+| 失败退避 | 连续失败后降到 60s 重试 | 集群不可达时不要每 15s 打一次 |
+| 分页 | 不需要 | queues 量级 < 50、podgroups 通常 < 数百，一次 list 足够 |
+
+**（4）不可达 ≠ 0 排队（降级四态，只影响 `volcano` 块）。**
+
+| `detail` | 触发 |
+|---|---|
+| `crd_missing` | 该集群没装 Volcano（discovery 返回 404；结果可缓存 5 分钟） |
+| `rbac_forbidden` | List 返回 `IsForbidden`（**不要**把原始 RBAC 报错全文吐给前端，避免泄露 SA/角色名） |
+| `scheduler_unavailable` | 超时 / 连接失败（保留上次快照并标 stale） |
+| `disabled` | CRD 在、但平台侧未启用队列调度 |
+
+任何"不可达 → 显示 0 排队 / 显示空闲"的默认值都是误导。`queue_full` 在 **MVP 只由
+`queue.state = Closed`（且队列内有 Pending）触发**——`deserved` 只存在于 vc-scheduler 的
+`/metrics` 里，CRD 没有，MVP 不接 Prometheus（P1 再评估）。
+
+**（5）多集群（P1）。** 一期只登记一个集群。多集群时 `queues[].name` 用 `"<cluster>/<queue>"`
+前缀（零契约变更）。
+
+**RBAC：Volcano 是集群级资源，必须单独的 ClusterRole。**
+
+```yaml
+# ClusterRole: testplane-volcano-view —— 只读，供 queue-status 采样
+# 注意：queues 与 podgroups 都是 cluster-scoped，namespace 级 Role 绑不到。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: testplane-volcano-view
+rules:
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["queues", "podgroups"]
+    verbs: ["get", "list"]      # 不要 watch：我们是轮询 + 15s TTL，不用 informer
+```
+
+要点：
+
+1. **不给 `watch`**：轮询实现不需要，给了等于允许无限长连接，只扩大权限面。
+2. **不给 `queues/status` / `podgroups/status` 的写权限**：读 `status` 随主资源 `get/list` 一起返回，
+   不需要额外 subresource 规则。Genet 给写是因为它要 `ensure`/reconcile，TestPlane 只读（§4.4）。
+3. **不授 `pods/exec`、不授 `secrets`**，沿用 §4.4 的最小权限原则。
+4. **Volcano 未安装时这个 ClusterRole 漂亮地不生效**：`kubectl apply` 不会报错——ClusterRole
+   只声明 `apiGroups`/`resources`，**不做 discovery**，所以集群里没有那些 CRD 也能建。真正无权限时
+   是 List 阶段返回 `IsForbidden` → 走 `rbac_forbidden` 降级，而不是启动失败。
+
+### 2.2 命名空间划分与 Genet 侧资产（D-52/D-53）
+
+接入 Genet 之后，一套环境里有**五个** namespace，职责不同、不能混用。混用会在两个地方炸：Genet 的
+Helm release 存量和它自己的 OpenAPI 控制态冲突（启动 FATAL），以及"被部署的服务"与"跑测试的 Job"
+落在同一 ns 时清理边界不清。
+
+| namespace | 归属 | 里面放什么 | 谁创建 |
+|---|---|---|---|
+| `testplane` | TestPlane 平台 | 控制面 Deployment、Tester Job、产物 PVC | 平台清单/kustomize |
+| `testplane-mock` | 本地联调 | 假 Genet 装的 mock 服务、跨 ns 网络策略 | 平台清单（仅 dev/kind） |
+| `testplane-svc` | 真 Genet 部署 | **被 Genet 拉起的服务**（Helm release 的实际落地 ns） | **Genet**（API Key 绑定，必须事先不存在） |
+| `genet` | Genet 自身 | `genet-backend` 等 Genet 控制面组件 | Genet 的 Helm chart |
+| `genet-open-api` | Genet OpenAPI 控制态 | `genet-openapi-keys` Secret 与 key 记录 | Genet（`openAPI.namespace`） |
+
+四条硬约束：
+
+1. **API Key 与 namespace 1:1**，且该 namespace **必须事先不存在**——Genet 创建它时会打身份标签，已存在会 409；
+2. 真 Genet 的 release **只能由 Genet 自己卸载**：直接 `helm uninstall` 会被 admission webhook 拒绝
+   （`Helm release storage is managed exclusively by the Genet backend`），平台因此**只能**走
+   `DELETE /api/open/helm/releases/{name}`（D-50）；
+3. 独占池（D-52）：TestPlane 的 key 落在独占池里，其 namespace 内的服务不受 Genet 每日 23:00 回收影响；
+4. 跨 namespace **不能共享 PVC**（PVC 是 namespaced）：Tester 在 `testplane`、被测服务在 `testplane-svc`，
+   两者只能通过 Service DNS（`<svc>.<ns>.svc.cluster.local`）通信，这也是"服务模式/部署模式"都只依赖 URL 的原因。
+
 
 ## 3 存储布局
 

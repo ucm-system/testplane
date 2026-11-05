@@ -9,12 +9,16 @@
 | 项 | 状态 |
 |---|---|
 | `tools/mock-llm`（OpenAI 兼容假服务 + 故障注入） | ✅ 完成，18 个单测通过；真实 `endpoint-probe` 五种场景验证通过 |
-| `tools/e2e`（submit / wait / assert CLI） | ✅ 完成，18 个 fake 控制面测试通过；**尚未对真控制面跑过**（等 #9/#10/#12 落地） |
+| `tools/e2e`（submit / wait / assert CLI） | ✅ 完成，22 个 fake 控制面测试通过；对真控制面 **31/31** 通过 |
 | 无后端时干净报错 | ✅ 退出码 3，提示 `make dev` 与 8080，不崩 |
-| 契约测试（`server/api/openapi.yaml` 实现侧校验） | ⏳ 第二阶段，等 Lead 通知文件就绪 |
-| 前端冒烟（`pnpm build`、`GET /`） | ⏳ 第二阶段 |
-| 失败注入（经平台，`service_unavailable` 路径） | ⏳ 后端可跑后执行 |
-| 验收矩阵 17 项结论 | ⏳ 后端可跑后逐条填，结论交 infra 写 `docs/runbook/acceptance.md` |
+| 契约测试（`tools/contract`） | ✅ 规格 15/15 + 实现 32/32 = **47/47**（设计端点差集 + 白名单） |
+| 前端冒烟（`pnpm build`、`GET /`） | ✅ build 通过、`GET /` 200 text/html |
+| 失败注入（经平台，`service_unavailable` 路径） | ✅ 5/5（success/500/401/200包错误/slow-ready） |
+| 一成一败混合结果（#15） | ✅ `mixed-result-check.ps1` 11/11 |
+| 重启恢复演练（#9） | ✅ `restart-drill.ps1` 13/13（新镜像；Run `r-Q0VT`） |
+| Web UI Playwright 冒烟（#16） | ✅ `web/tests/ui-smoke.spec.ts` 1 passed |
+| deploy 形态（PR #18） | 🟡 `deploy-check.ps1` 已就绪，等卸载收口后跑 |
+| 验收矩阵 17 项结论 | ✅ 见 [`acceptance-matrix.md`](acceptance-matrix.md) |
 
 ## 目录
 
@@ -120,18 +124,80 @@ pwsh scripts/e2e/failure-injection.ps1 -AllowKnownGaps    # 仅修复期临时�
 
 ```powershell
 pwsh scripts/e2e/cancel-check.ps1 -BaseUrl http://127.0.0.1:8093
+pwsh scripts/e2e/cancel-check.ps1 -DryRun          # 只打 Manifest/阈值，不连后端
 ```
 
-`cancelling → canceled` 由 60s 对账循环收口，最坏约 60s；脚本默认超时 60s。
+票 #16 起：轮询上界 180s 与断言阈值 60s **分离**（`-AssertCancelSeconds` / `-LoopLimitSeconds`），
+`docker exec`/`kubectl` 查询失败一律 fail-fast，并拆成 `*.query` 与 `*.empty` 两条断言，
+不会再把“查询挂了”当成“无残留”。
 
 超时路径（平台 watchdog 超时）同样有独立脚本：
 
 ```powershell
 pwsh scripts/e2e/timeout-check.ps1 -BaseUrl http://127.0.0.1:8095
+pwsh scripts/e2e/timeout-check.ps1 -DryRun
 ```
 
 期望：`precheck:"off"` + 单个 test Task 超时 → Run `failed`（TASK_TIMEOUT 属平台 C 类）；
-Attempt 容差 `timeout + 30s`；事件接受 `task.state_changed + payload.error.code=TASK_TIMEOUT`。
+Attempt 容差 `timeout + 30s`（独立于轮询变量）；事件接受
+`task.state_changed + payload.error.code=TASK_TIMEOUT`；kubectl/docker 查询失败同样 fail-fast。
+
+`mock-llm-slow` 用 `-ready-after=86400s`（24h）而不是 1h：否则跑满 1h 后会真的就绪，
+超时用例会“意外成功”。
+
+## 3.1 重启恢复演练（#9）
+
+```powershell
+pwsh scripts/e2e/restart-drill.ps1 -BaseUrl http://127.0.0.1:8098 -DryRun
+pwsh scripts/e2e/restart-drill.ps1 -BaseUrl http://127.0.0.1:8098
+pwsh scripts/e2e/restart-drill.ps1 -RecoveryTimeoutSeconds 1   # 负向：必须 FAIL
+```
+
+- 先用 `kind/mock-llm-delayed.yaml`（15s 后才就绪）制造 running 窗口；
+- 提交 2 个 test，等 testing + Attempt running，然后
+  `kubectl delete pod -l app.kubernetes.io/name=testplaned --grace-period=0 --force`；
+- 脚本自己管理 port-forward（8100 → 恢复后 8101），断言新 Pod Ready、Run 终态、
+  租约/Job 清空、`attempt.finished` 有对账痕迹；`-RecoveryTimeoutSeconds 1` 时
+  必须 exit 1（验证不会把“没恢复”当 PASS）。
+
+## 3.2 一成一败混合结果（#15）
+
+```powershell
+pwsh scripts/e2e/mixed-result-check.ps1 -BaseUrl http://127.0.0.1:8096 -DryRun
+pwsh scripts/e2e/mixed-result-check.ps1 -BaseUrl http://127.0.0.1:8096 -SkipApply
+```
+
+- `kind/mixed-router.yaml` 按 `Authorization` 分流：Task A `ENDPOINT_API_KEY=ok` →
+  mock-llm（成功），Task B `ENDPOINT_API_KEY=fail` → mock-llm-500（失败）；
+- 首次用 `kind load docker-image python:3.12-alpine --name testplane` 把 router 镜像装进集群；
+- 断言 Run `completed_with_errors`、A succeeded/B failed、report counts 1/1、
+  failures 非空、Run.error 取首个失败 Task（Pre-Check 优先）。
+
+## 3.3 Web UI Playwright 冒烟（#16）
+
+```powershell
+cd web
+pnpm add -D @playwright/test    # 仅首次
+pnpm exec playwright test       # 自动起 dev server（5173），system Chrome
+```
+
+也可以先起服务再跑：`$env:PLAYWRIGHT_BASE_URL='http://127.0.0.1:8098'; pnpm exec playwright test`。
+Spec 覆盖 `/runs` → 第一条 → 详情 Task 表 → `/submit` dry-run 报错可见。
+
+## 3.4 deploy 形态（PR #18）
+
+```powershell
+pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107 -DryRun
+pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107
+pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107 -FailureOnly  # 需先把 fake Genet key 改错
+```
+
+- 正常：`deploy:{provider:"genet"}` → `deploy.state` 依次 `queued → accepted/deploying → ready`，
+  `endpoint.source=genet`，precheck `succeeded`，Run `succeeded`；终态后
+  `helm list -n testplane-mock` 为空（本机无 helm CLI 时用 Helm release Secret 等价判断）。
+- 失败：`-FailureOnly` 提交同样 manifest，断言 Run `failed`、`error.code=DEPLOY_FAILED`、
+  `retryable=false`；脚本不主动改服务端 key，避免影响共享控制面。
+- 卸载收口未就绪前，正常分支会在 `helm.empty` 处 FAIL，属预期。
 
 默认**严格**：report 必现（终态后 ≤2s，30s 等待足够）、`/logs` 必非空；只有显式
 `-AllowKnownGaps` 才把当前已知的 report/logs 缺口从失败项里剔除，修复后不要带这个开关。
@@ -168,7 +234,9 @@ precheck:
 
 ```powershell
 # 0) 集群（注意：已有同名集群先删再建；extraMounts 只在建集群时生效）
-.\.tools\kind.exe create cluster --config deploy\kind\testplane.yaml
+#    集群配置是模板，先渲染出本机路径，再建集群（见 deploy/README.md §2）
+pwsh deploy\kind\render.ps1
+.\.tools\kind.exe create cluster --config .data\kind-testplane.yaml
 
 # 1) mock-llm 镜像：本地 build + load（不 push 任何仓库）
 docker build -t testplane/mock-llm:dev tools/mock-llm

@@ -5,8 +5,9 @@ package main
 //
 // 关键取舍：
 //   - 核心只读端点要求精确的 2xx；
-//   - 状态相关端点（report / report.md / deploy / attempt result / logs）允许 spec 声明的 404
-//     （报告异步生成、Run 还没有 Attempt），但 404 的响应体仍必须过 Error 形状校验；
+//   - 状态相关端点的 404 按语义区分：/report、/report.md 未就绪只允许出现在非终态 Run，
+//     终态 Run 必须 200；/deploy 仅在 Run 没有 deploy 时允许 404；attempt result/logs 允许
+//     尚未产出的 404；404 的响应体仍必须过 Error 形状校验；
 //   - 会创建 2 个 fixture Run（A 用于读，B 用于取消），A 在结束时尽力取消。
 
 import (
@@ -324,6 +325,117 @@ func (l *Live) probeOptional(ctx context.Context, opID, path string, successStat
 	}
 }
 
+// ---- 状态相关端点：404 按 Run 状态 / deploy 是否存在区分（票 #16）---------
+
+// isTerminalRunStatus 判断 Run 是否已终态。
+func isTerminalRunStatus(status string) bool {
+	switch status {
+	case "succeeded", "completed_with_errors", "service_unavailable", "failed", "canceled":
+		return true
+	}
+	return false
+}
+
+// liveRunFacts 是判定 /report、/report.md、/deploy 语义所需的 Run 事实。
+type liveRunFacts struct {
+	Status    string
+	HasDeploy bool
+}
+
+func (l *Live) fetchRunFacts(ctx context.Context, runID string) (liveRunFacts, error) {
+	status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID), nil, "", nil)
+	if err != nil {
+		return liveRunFacts{}, err
+	}
+	if status != 200 {
+		return liveRunFacts{}, fmt.Errorf("GET /runs/%s 期望 200，实际 %d", runID, status)
+	}
+	var body struct {
+		Status string          `json:"status"`
+		Deploy json.RawMessage `json:"deploy"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return liveRunFacts{}, fmt.Errorf("解析 Run 详情失败：%w", err)
+	}
+	hasDeploy := len(body.Deploy) > 0 && string(body.Deploy) != "null"
+	return liveRunFacts{Status: body.Status, HasDeploy: hasDeploy}, nil
+}
+
+// probeRunDeploy 校验 /deploy：Run 有 deploy 时必须 200；没有 deploy（service 形态）允许 404。
+func (l *Live) probeRunDeploy(ctx context.Context, runID string) {
+	facts, err := l.fetchRunFacts(ctx, runID)
+	if err != nil {
+		l.recordErr("live.getRunDeploy", err)
+		return
+	}
+	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID)+"/deploy", nil, "", nil)
+	if err != nil {
+		l.recordErr("live.getRunDeploy", err)
+		return
+	}
+	l.markOp("getRunDeploy")
+	ok, detail := l.artifactResponseCheck("getRunDeploy", facts.HasDeploy, status, hdr, raw, "DeploySnapshot", "")
+	if ok && facts.HasDeploy {
+		detail = "Run 有 deploy，HTTP 200，DeploySnapshot required 齐全"
+	}
+	l.add("live.getRunDeploy", ok, detail)
+}
+
+// probeRunReport 校验 /report 与 /report.md：
+//   - 非终态 Run 允许 404（尚未生成），但 Error 形状要正确；
+//   - 终态 Run 必须 200（C-7.2 报告在终态生成；终态 404 是真 bug）。
+func (l *Live) probeRunReport(ctx context.Context, runID, suffix, schemaName, opID string) {
+	facts, err := l.fetchRunFacts(ctx, runID)
+	if err != nil {
+		l.recordErr("live."+opID, err)
+		return
+	}
+	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID)+suffix, nil, "", nil)
+	if err != nil {
+		l.recordErr("live."+opID, err)
+		return
+	}
+	l.markOp(opID)
+	textCT := ""
+	if suffix == "/report.md" {
+		textCT = "text/markdown"
+	}
+	terminal := isTerminalRunStatus(facts.Status)
+	ok, detail := l.artifactResponseCheck(opID, terminal, status, hdr, raw, schemaName, textCT)
+	if ok && terminal && status == 200 {
+		detail = fmt.Sprintf("Run 已终态（%s），HTTP 200", facts.Status)
+	}
+	l.add("live."+opID, ok, detail)
+}
+
+// artifactResponseCheck 是状态相关端点的纯判定（便于单测）：
+// require200=true 时 404 一律失败；false 时 404 必须过 Error 形状。
+func (l *Live) artifactResponseCheck(opID string, require200 bool, status int, hdr http.Header, raw []byte, schemaName, textContentType string) (bool, string) {
+	switch {
+	case status == 200:
+		var issues []string
+		if schemaName != "" {
+			issues = l.validateSuccess(opID, status, hdr, raw, schemaName)
+		} else {
+			issues = l.contentTypeIssues(opID, status, hdr)
+		}
+		if len(issues) > 0 {
+			return false, strings.Join(issues, "；")
+		}
+		return true, "HTTP 200（成功路径）"
+	case status == 404:
+		if require200 {
+			return false, fmt.Sprintf("该端点此时必须返回 200，实际 404：%s", truncate(raw, 300))
+		}
+		if issues := l.validateError(opID, status, hdr, raw); len(issues) > 0 {
+			return false, strings.Join(issues, "；")
+		}
+		return true, "HTTP 404（允许的未就绪状态，Error 形状正确）"
+	default:
+		return false, fmt.Sprintf("期望 HTTP 200 或 404，实际 %d：%s", status, truncate(raw, 300))
+	}
+}
+
 func (l *Live) submitFixture(ctx context.Context, label string) (runID, taskID string) {
 	name := "live.submitRun"
 	detailPrefix := "fixture " + label
@@ -416,9 +528,9 @@ func (l *Live) probeRunReads(ctx context.Context) {
 	l.checkRunTaskListComplete(ctx, l.runA)
 	l.probeSchema(ctx, "listRunEvents", "/api/v1/runs/"+id+"/events/history?since_seq=0&limit=100", 200, "EventList")
 	l.probeSchema(ctx, "getRunManifest", "/api/v1/runs/"+id+"/manifest", 200, "ManifestSnapshot")
-	l.probeOptional(ctx, "getRunDeploy", "/api/v1/runs/"+id+"/deploy", 200, "DeploySnapshot", 404, "")
-	l.probeOptional(ctx, "getRunReport", "/api/v1/runs/"+id+"/report", 200, "Report", 404, "")
-	l.probeOptional(ctx, "getRunReportMarkdown", "/api/v1/runs/"+id+"/report.md", 200, "", 404, "text/markdown")
+	l.probeRunDeploy(ctx, l.runA)
+	l.probeRunReport(ctx, l.runA, "/report", "Report", "getRunReport")
+	l.probeRunReport(ctx, l.runA, "/report.md", "", "getRunReportMarkdown")
 
 	if l.taskA == "" {
 		l.add("live.getTask", false, "fixture Run 没有 Task，无法校验 getTask/attempts")

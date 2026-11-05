@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/executor"
+	"github.com/ucm-system/testplane/server/internal/genet"
 	"github.com/ucm-system/testplane/server/internal/genet/mocks"
 	"github.com/ucm-system/testplane/server/internal/ports"
 	"github.com/ucm-system/testplane/server/internal/report"
@@ -25,13 +27,33 @@ import (
 
 // fakeExec 记录 Submit 并允许测试直接驱动终态回调。
 type fakeExec struct {
-	mu        sync.Mutex
+	mu         sync.Mutex
 	logContent string
 	logErr     error
-	submitted []ports.JobSpec
-	handles   []ports.JobHandle
-	canceled  []ports.JobHandle
-	submitErr error
+	submitted  []ports.JobSpec
+	handles    []ports.JobHandle
+	canceled   []ports.JobHandle
+	deleted    []ports.JobHandle
+	deleteErr  error
+	submitErr  error
+}
+
+// Delete 记录正常结束后的回收调用（execution §6）。
+func (f *fakeExec) Delete(ctx context.Context, h ports.JobHandle, policy ports.DeletePolicy) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deleted = append(f.deleted, h)
+	return nil
+}
+
+// deleteCount 返回 Delete 的调用次数（测试断言"正常结束后 Job 被删"）。
+func (f *fakeExec) deleteCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.deleted)
 }
 
 func (f *fakeExec) Submit(ctx context.Context, spec ports.JobSpec) (ports.JobHandle, error) {
@@ -153,7 +175,7 @@ func TestPrecheckGateBlocksOtherTasksThenReleases(t *testing.T) {
 	seedRunTesting(repos, "r-1",
 		TaskView{
 			ID: "t-0", Seq: 0, Name: "precheck", TesterName: "endpoint-probe", TesterVersion: "1.0.0",
-			TesterRole: domain.RolePreCheck, Image: "registry/probe:1.0.0", Entry: "/tester/run.sh",
+			TesterRole: domain.RolePreCheck, IsPrecheck: true, Image: "registry/probe:1.0.0", Entry: "/tester/run.sh",
 			OnFailure: domain.OnFailureAbortRun, Status: domain.TaskQueued,
 			EndpointKey: "http://ep:8000", Exclusive: true, TimeoutSeconds: 900,
 		},
@@ -337,7 +359,7 @@ func TestPrecheckFailureAbortsRunAsServiceUnavailable(t *testing.T) {
 	seedRunTesting(repos, "r-1",
 		TaskView{
 			ID: "t-0", Seq: 0, Name: "precheck", TesterName: "endpoint-probe", TesterVersion: "1.0.0",
-			TesterRole: domain.RolePreCheck, Image: "i:1", Entry: "/tester/run.sh",
+			TesterRole: domain.RolePreCheck, IsPrecheck: true, Image: "i:1", Entry: "/tester/run.sh",
 			OnFailure: domain.OnFailureAbortRun, Status: domain.TaskQueued,
 			EndpointKey: "http://ep:8000", Exclusive: true, TimeoutSeconds: 900,
 		},
@@ -367,7 +389,7 @@ func TestPrecheckFailureAbortsRunAsServiceUnavailable(t *testing.T) {
 	exec2 := &fakeExec{}
 	seedRunTesting(repos2, "r-2", TaskView{
 		ID: "t-0", Seq: 0, Name: "precheck", TesterName: "endpoint-probe", TesterVersion: "1.0.0",
-		TesterRole: domain.RolePreCheck, Image: "i:1", Entry: "/tester/run.sh",
+		TesterRole: domain.RolePreCheck, IsPrecheck: true, Image: "i:1", Entry: "/tester/run.sh",
 		OnFailure: domain.OnFailureAbortRun, Status: domain.TaskQueued,
 		EndpointKey: "http://ep:8000", Exclusive: true, TimeoutSeconds: 900,
 	})
@@ -396,7 +418,7 @@ func TestDeployMockBringsRunToTesting(t *testing.T) {
 	})
 	repos.SeedTask(TaskView{
 		ID: "t-0", RunID: "r-1", Seq: 0, Name: "precheck", TesterName: "endpoint-probe",
-		TesterVersion: "1.0.0", TesterRole: domain.RolePreCheck, Image: "i:1", Entry: "/tester/run.sh",
+		TesterVersion: "1.0.0", TesterRole: domain.RolePreCheck, IsPrecheck: true, Image: "i:1", Entry: "/tester/run.sh",
 		OnFailure: domain.OnFailureAbortRun, Status: domain.TaskPending, Exclusive: true, TimeoutSeconds: 900,
 	})
 	repos.SeedTask(TaskView{
@@ -527,7 +549,7 @@ func TestFullHappyPathFinishesRun(t *testing.T) {
 	seedRunTesting(repos, "r-1",
 		TaskView{
 			ID: "t-0", Seq: 0, Name: "precheck", TesterName: "endpoint-probe", TesterVersion: "1.0.0",
-			TesterRole: domain.RolePreCheck, Image: "i:1", Entry: "/tester/run.sh",
+			TesterRole: domain.RolePreCheck, IsPrecheck: true, Image: "i:1", Entry: "/tester/run.sh",
 			OnFailure: domain.OnFailureAbortRun, Status: domain.TaskQueued,
 			EndpointKey: "http://ep:8000", Exclusive: true, TimeoutSeconds: 900,
 		},
@@ -601,7 +623,7 @@ func seedReconcileFixture(repos *MemoryRepos, runID, taskID, endpointKey string)
 	}
 	repos.SeedActiveTask(TaskView{
 		ID: taskID, RunID: runID, Seq: 0, Name: "precheck",
-		TesterName: "endpoint-probe", TesterVersion: "1.0.0", TesterRole: domain.RolePreCheck,
+		TesterName: "endpoint-probe", TesterVersion: "1.0.0", TesterRole: domain.RolePreCheck, IsPrecheck: true,
 		Image: "i:1", Entry: "/tester/run.sh", OnFailure: domain.OnFailureAbortRun,
 		Status: domain.TaskRunning, EndpointKey: endpointKey, Exclusive: true, TimeoutSeconds: 900,
 	}, ref, endpointKey, time.Now())
@@ -1260,7 +1282,7 @@ func TestPrecheckRetryableFalseGivesCompletedWithErrors(t *testing.T) {
 func TestPrecheckRetryableTrueGivesServiceUnavailable(t *testing.T) {
 	status, failure := TerminalRunStatus([]TaskView{
 		{
-			ID: "t-1", TesterRole: domain.RolePreCheck, Status: domain.TaskFailed,
+			ID: "t-1", TesterRole: domain.RolePreCheck, IsPrecheck: true, Status: domain.TaskFailed,
 			Failure: &domain.Failure{Code: domain.CodePrecheckFailed, Retryable: true},
 		},
 	})
@@ -1289,7 +1311,7 @@ func TestTerminalRunStatusHonoursInstanceRetryable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			status, _ := TerminalRunStatus([]TaskView{{
-				ID: "t-0", TesterRole: domain.RolePreCheck, Status: domain.TaskFailed,
+				ID: "t-0", TesterRole: domain.RolePreCheck, IsPrecheck: true, Status: domain.TaskFailed,
 				Failure: &domain.Failure{Code: tc.code, Retryable: tc.retr},
 			}})
 			if status != tc.want {
@@ -1308,7 +1330,7 @@ func TestCancelQueuedRunFinishesCanceled(t *testing.T) {
 	seedRunTesting(repos, "r-1",
 		TaskView{
 			ID: "t-0", Seq: 0, Name: "precheck", TesterName: "probe", TesterVersion: "1.0.0",
-			TesterRole: domain.RolePreCheck, Image: "i:1", Entry: "/tester/run.sh",
+			TesterRole: domain.RolePreCheck, IsPrecheck: true, Image: "i:1", Entry: "/tester/run.sh",
 			OnFailure: domain.OnFailureAbortRun, Status: domain.TaskQueued,
 			EndpointKey: "http://ep:8000", Exclusive: true, TimeoutSeconds: 900,
 		},
@@ -1382,7 +1404,7 @@ func TestReconcileFinishesStuckCancellingRun(t *testing.T) {
 	repos := NewMemoryRepos()
 	repos.SeedRun(RunView{ID: "r-legacy", Status: domain.RunCancelling, SubmittedAt: time.Now()})
 	repos.SeedTask(TaskView{
-		ID: "t-0", RunID: "r-legacy", Seq: 0, Name: "precheck", TesterRole: domain.RolePreCheck,
+		ID: "t-0", RunID: "r-legacy", Seq: 0, Name: "precheck", TesterRole: domain.RolePreCheck, IsPrecheck: true,
 		Status: domain.TaskSkipped, StatusReason: domain.SkipUpstreamAbort,
 	})
 	repos.SeedTask(TaskView{
@@ -1455,5 +1477,600 @@ func TestCancelTaskWithoutActiveAttemptFinishesCanceled(t *testing.T) {
 	}
 	if task.CancelRequested {
 		t.Fatalf("cancel_requested must not be left behind")
+	}
+}
+
+// ---- #15：正常结束后回收 Job + 孤儿 GC -----------------------------------
+
+// 成功终态落库后，Job 必须被 Delete(Background) 掉（且日志先落盘）。
+func TestFinishedAttemptDeletesJob(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase string
+	}{
+		{"succeeded", executor.PhaseSucceeded},
+		{"failed", executor.PhaseFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repos := NewMemoryRepos()
+			ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+			exec := &fakeExec{}
+			c, err := New(Options{Repos: repos, Executor: exec, Config: Config{StorageRoot: t.TempDir()}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			exit := int32(0)
+			if tc.phase == executor.PhaseFailed {
+				exit = 1
+			}
+			if err := c.JobFinished(context.Background(), ports.JobOutcome{
+				Handle:   ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+				Phase:    tc.phase,
+				ExitCode: &exit,
+			}); err != nil {
+				t.Fatalf("JobFinished: %v", err)
+			}
+			c.WaitLogCapture()
+			if got := exec.deleteCount(); got != 1 {
+				t.Fatalf("Delete calls = %d, want 1 (normal completion must reclaim the Job)", got)
+			}
+			exec.mu.Lock()
+			defer exec.mu.Unlock()
+			if exec.deleted[0].JobName != ref.JobName {
+				t.Errorf("deleted job = %q, want %q", exec.deleted[0].JobName, ref.JobName)
+			}
+		})
+	}
+}
+
+// Delete 失败只 WARN，不改状态。
+func TestDeleteFailureDoesNotAffectStatus(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	exec := &fakeExec{deleteErr: errors.New("apiserver down")}
+	var warned bool
+	c, err := New(Options{
+		Repos: repos, Executor: exec, Config: Config{StorageRoot: t.TempDir()},
+		Logf: func(format string, args ...any) {
+			if strings.Contains(format, "job_delete_failed") {
+				warned = true
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.JobFinished(context.Background(), ports.JobOutcome{
+		Handle: ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+		Phase:  executor.PhaseSucceeded,
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture()
+	task, _ := repos.GetTask(context.Background(), "t-1")
+	if task.Status != domain.TaskSucceeded {
+		t.Fatalf("task status = %s, delete failure must not change it", task.Status)
+	}
+	if !warned {
+		t.Errorf("expected a job_delete_failed warning")
+	}
+}
+
+// GC 开关：JobGCEnabled=false 时一次都不扫。
+func TestGCOnceDisabledByConfig(t *testing.T) {
+	off := false
+	c, err := New(Options{
+		Repos: NewMemoryRepos(), Executor: &fakeExec{},
+		Config: Config{JobGCEnabled: &off},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.jobGC {
+		t.Fatalf("jobGC must be off")
+	}
+	if err := c.GCOnce(context.Background()); err != nil {
+		t.Fatalf("GCOnce: %v", err)
+	}
+}
+
+// GC 默认开启，且默认周期 10min（execution §6.3）。
+func TestGCDefaults(t *testing.T) {
+	c, err := New(Options{Repos: NewMemoryRepos(), Executor: &fakeExec{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.jobGC {
+		t.Errorf("job GC must be enabled by default")
+	}
+	if got := c.Config().GCInterval; got != DefaultGCInterval {
+		t.Errorf("GCInterval = %v, want %v", got, DefaultGCInterval)
+	}
+}
+
+// ---- #14：Pre-Check 判据只用 IsPrecheck（resolved.precheck.injected && seq==0）----
+
+// precheck: off 时门控不生效：所有 Task 直接放行。
+func TestQueueAfterTestingWithoutPrecheckQueuesAll(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{ID: "r-1", Status: domain.RunTesting})
+	repos.SeedTask(TaskView{ID: "t-0", RunID: "r-1", Seq: 0, Name: "a", TesterRole: domain.RoleTest,
+		Status: domain.TaskPending, EndpointKey: "http://ep:8000"})
+	repos.SeedTask(TaskView{ID: "t-1", RunID: "r-1", Seq: 1, Name: "b", TesterRole: domain.RoleTest,
+		Status: domain.TaskPending, EndpointKey: "http://ep:8000"})
+	c := newTestController(t, repos, &fakeExec{}, Config{}, nil, nil)
+
+	if err := c.queueAfterTesting(context.Background(), "r-1"); err != nil {
+		t.Fatalf("queueAfterTesting: %v", err)
+	}
+	for _, id := range []string{"t-0", "t-1"} {
+		task, _ := repos.GetTask(context.Background(), id)
+		if task.Status != domain.TaskQueued {
+			t.Errorf("%s status = %s, want queued (precheck off ⇒ no gate)", id, task.Status)
+		}
+	}
+}
+
+// 显式在 tests[] 里写了 role: pre_check 但没有注入 precheck → 仍然不是门控。
+func TestQueueAfterTestingIgnoresTesterRole(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{ID: "r-1", Status: domain.RunTesting})
+	repos.SeedTask(TaskView{ID: "t-0", RunID: "r-1", Seq: 0, Name: "explicit",
+		TesterRole: domain.RolePreCheck, IsPrecheck: false, // 没注入
+		Status: domain.TaskPending, EndpointKey: "http://ep:8000"})
+	repos.SeedTask(TaskView{ID: "t-1", RunID: "r-1", Seq: 1, Name: "b", TesterRole: domain.RoleTest,
+		Status: domain.TaskPending, EndpointKey: "http://ep:8000"})
+	c := newTestController(t, repos, &fakeExec{}, Config{}, nil, nil)
+	if err := c.queueAfterTesting(context.Background(), "r-1"); err != nil {
+		t.Fatal(err)
+	}
+	task, _ := repos.GetTask(context.Background(), "t-1")
+	if task.Status != domain.TaskQueued {
+		t.Fatalf("t-1 = %s, want queued (no injected precheck ⇒ no gate)", task.Status)
+	}
+}
+
+// injected=true 且有 seq=0：只放 seq=0，其余保持 pending（等门控）。
+func TestQueueAfterTestingWithInjectedPrecheckQueuesOnlySeqZero(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{ID: "r-1", Status: domain.RunTesting})
+	repos.SeedTask(TaskView{ID: "t-0", RunID: "r-1", Seq: 0, Name: "precheck",
+		TesterRole: domain.RolePreCheck, IsPrecheck: true,
+		Status: domain.TaskPending, EndpointKey: "http://ep:8000"})
+	repos.SeedTask(TaskView{ID: "t-1", RunID: "r-1", Seq: 1, Name: "load", TesterRole: domain.RoleTest,
+		Status: domain.TaskPending, EndpointKey: "http://ep:8000"})
+	c := newTestController(t, repos, &fakeExec{}, Config{}, nil, nil)
+	if err := c.queueAfterTesting(context.Background(), "r-1"); err != nil {
+		t.Fatal(err)
+	}
+	t0, _ := repos.GetTask(context.Background(), "t-0")
+	if t0.Status != domain.TaskQueued {
+		t.Errorf("precheck = %s, want queued", t0.Status)
+	}
+	t1, _ := repos.GetTask(context.Background(), "t-1")
+	if t1.Status != domain.TaskPending {
+		t.Errorf("t-1 = %s, want pending (gated by injected precheck)", t1.Status)
+	}
+}
+
+// HasPrecheck 只看 IsPrecheck。
+func TestHasPrecheckUsesIsPrecheck(t *testing.T) {
+	if HasPrecheck([]TaskView{{TesterRole: domain.RolePreCheck}}) {
+		t.Errorf("tester.yaml role must not be the criterion")
+	}
+	if !HasPrecheck([]TaskView{{IsPrecheck: true}}) {
+		t.Errorf("IsPrecheck=true must be detected")
+	}
+}
+
+// fakeDeployer 记录 Genet 取消调用。
+type fakeDeployer struct {
+	mu        sync.Mutex
+	starts    int
+	polls     int
+	cancels   int
+	cancelErr error
+	startErr  error
+	recordReq bool
+	lastReq   ports.DeployRequest
+	// pollState 是 Poll 的返回值（Phase 为空时默认 deploying）。
+	pollState ports.DeployState
+	// verifyGone / verifyErr 控制 VerifyUninstalled；verifies 计数。
+	verifyGone *bool
+	verifyErr  error
+	verifies   int
+}
+
+func (f *fakeDeployer) Start(ctx context.Context, req ports.DeployRequest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.starts++
+	if f.recordReq {
+		f.lastReq = req
+	}
+	return f.startErr
+}
+
+func (f *fakeDeployer) Poll(ctx context.Context, runID string) (ports.DeployState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.polls++
+	if f.pollState.Phase != "" {
+		return f.pollState, nil
+	}
+	return ports.DeployState{Phase: "deploying"}, nil
+}
+
+func (f *fakeDeployer) Cancel(ctx context.Context, runID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancels++
+	return f.cancelErr
+}
+
+// 取消 deploying 的 Run 时，必须先请求 Genet 卸载（C-6.1 第 2 条）。
+func TestCancelRunRequestsGenetUninstall(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{ID: "r-1", Status: domain.RunDeploying, HasDeploy: true, SubmittedAt: time.Now()})
+	dep := &fakeDeployer{cancelErr: errors.New("genet: cancel not applied yet")}
+	c, err := New(Options{Repos: repos, Executor: &fakeExec{}, Deployer: dep, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 卸载失败（release 未出现）不应让 CancelRun 失败：意图已落库，交给对账补偿。
+	if err := c.CancelRun(context.Background(), "r-1", "user:1"); err != nil {
+		t.Fatalf("CancelRun: %v", err)
+	}
+	dep.mu.Lock()
+	defer dep.mu.Unlock()
+	if dep.cancels != 1 {
+		t.Fatalf("deployer.Cancel calls = %d, want 1", dep.cancels)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunCanceled {
+		t.Errorf("run status = %s, want canceled", run.Status)
+	}
+}
+
+// beginRun 必须把冻结的 runs.deploy 作为 Manifest 交给 Deployer.Start（§9.2）。
+func TestBeginRunPassesFrozenDeployManifest(t *testing.T) {
+	repos := NewMemoryRepos()
+	frozen := json.RawMessage(`{"provider":"genet","parameters":{"model_name":"mock-llm"},"deployment_id":"d-r-1"}`)
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunQueued, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now(), DeployJSON: frozen,
+	})
+	dep := &fakeDeployer{}
+	dep.recordReq = true
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+
+	if err := c.DeployOnce(context.Background()); err != nil {
+		t.Fatalf("DeployOnce: %v", err)
+	}
+	dep.mu.Lock()
+	req := dep.lastReq
+	dep.mu.Unlock()
+	if len(req.Manifest) == 0 {
+		t.Fatal("Deployer.Start 收到空 Manifest：编排层必须在 BeginDeploy 后传入冻结的 runs.deploy（§9.2）")
+	}
+	if !strings.Contains(string(req.Manifest), "mock-llm") {
+		t.Errorf("Manifest = %s, want frozen parameters", req.Manifest)
+	}
+	if req.DeployID != "d-r-1" {
+		t.Errorf("DeployID = %q", req.DeployID)
+	}
+}
+
+// Start 失败 = 平台侧调不通 Genet → DEPLOY_FAILED（不可重试）→ Run failed（D-47）。
+func TestDeployStartFailureUsesDeployFailedCode(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunQueued, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now(), DeployJSON: json.RawMessage(`{"package_type":"stack"}`),
+	})
+	dep := &fakeDeployer{startErr: errors.New("genet: 500 boom")}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+
+	if err := c.DeployOnce(context.Background()); err != nil {
+		t.Fatalf("DeployOnce: %v", err)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunFailed {
+		t.Fatalf("run status = %s, want failed", run.Status)
+	}
+	if run.Failure == nil || run.Failure.Code != domain.CodeDeployFailed {
+		t.Fatalf("failure = %+v, want DEPLOY_FAILED", run.Failure)
+	}
+	if run.Failure.Retryable {
+		t.Errorf("DEPLOY_FAILED must not be retryable")
+	}
+}
+
+// 超窗 = 部署侧问题 → DEPLOY_BLOCKED（可重试）→ Run service_unavailable。
+func TestDeployTimeoutUsesDeployBlockedCode(t *testing.T) {
+	repos := NewMemoryRepos()
+	// SubmittedAt 远早于窗口 → pollDeploy 第一行就判超窗。
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunDeploying, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now().Add(-100 * time.Hour), DeployJSON: json.RawMessage(`{"package_type":"stack"}`),
+	})
+	dep := &fakeDeployer{}
+	c := newTestController(t, repos, &fakeExec{}, Config{DeployTimeout: 72 * time.Hour}, dep, nil)
+
+	if err := c.DeployOnce(context.Background()); err != nil {
+		t.Fatalf("DeployOnce: %v", err)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunServiceUnavailable {
+		t.Fatalf("run status = %s, want service_unavailable", run.Status)
+	}
+	if run.Failure == nil || run.Failure.Code != domain.CodeDeployBlocked {
+		t.Fatalf("failure = %+v, want DEPLOY_BLOCKED", run.Failure)
+	}
+	if !run.Failure.Retryable {
+		t.Errorf("DEPLOY_BLOCKED must be retryable")
+	}
+}
+
+// ---- ports.DeployCleaner 支撑 -------------------------------------------------
+
+// VerifyUninstalled 假实现：默认 true（已删干净），可注入 false / error。
+func (f *fakeDeployer) VerifyUninstalled(ctx context.Context, runID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.verifies++
+	if f.verifyErr != nil {
+		return false, f.verifyErr
+	}
+	if f.verifyGone != nil {
+		return *f.verifyGone, nil
+	}
+	return true, nil
+}
+
+// 收口：Run 已终态且 HasDeploy 时，对账必须发 DELETE 并把 uninstall 记成 verified（§9.7）。
+func TestTerminalDeployRunIsUninstalledOnReconcile(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunSucceeded, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now().Add(-time.Minute),
+		DeployJSON:  json.RawMessage(`{"release_name":"tp-abc123456789","state":"ready"}`),
+	})
+	dep := &fakeDeployer{}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	dep.mu.Lock()
+	cancels, verifies := dep.cancels, dep.verifies
+	dep.mu.Unlock()
+	if cancels != 1 {
+		t.Fatalf("deployer.Cancel calls = %d, want 1（终态必须卸载）", cancels)
+	}
+	if verifies != 1 {
+		t.Errorf("VerifyUninstalled calls = %d, want 1", verifies)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunSucceeded {
+		t.Errorf("run status = %s, want succeeded（卸载不改终态）", run.Status)
+	}
+	doc := deployDoc(t, run)
+	u, _ := doc["uninstall"].(map[string]any)
+	if u == nil || u["state"] != "verified" {
+		t.Fatalf("uninstall = %v, want state=verified", doc["uninstall"])
+	}
+	if _, ok := u["verified_at"]; !ok {
+		t.Errorf("uninstall.verified_at missing: %v", u)
+	}
+	if v, ok := u["force"].(bool); !ok || !v {
+		t.Errorf("uninstall.force = %v, want true", u["force"])
+	}
+	// 冻结字段不能被卸载覆盖掉。
+	if doc["release_name"] != "tp-abc123456789" {
+		t.Errorf("release_name = %v, want preserved", doc["release_name"])
+	}
+}
+
+// DELETE 502：Run 仍 succeeded，uninstall.state=failed；下一轮对账重试成功后 verified。
+func TestCleanupFailureKeepsRunSucceededThenRetries(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunSucceeded, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now().Add(-time.Minute),
+		DeployJSON:  json.RawMessage(`{"release_name":"tp-x","state":"ready"}`),
+	})
+	gone := false // DELETE 502 且 release 仍在 → 不能算删干净
+	dep := &fakeDeployer{cancelErr: errors.New("genet: server error: DELETE 502"), verifyGone: &gone}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunSucceeded {
+		t.Fatalf("run status = %s, want succeeded（卸载失败不改终态）", run.Status)
+	}
+	doc := deployDoc(t, run)
+	u, _ := doc["uninstall"].(map[string]any)
+	if u == nil || u["state"] != "failed" {
+		t.Fatalf("uninstall = %v, want state=failed", doc["uninstall"])
+	}
+	if errs, _ := u["cleanup_errors"].([]any); len(errs) == 0 {
+		t.Errorf("cleanup_errors must carry the failure: %v", u)
+	}
+
+	// 下一轮：Genet 恢复 → verified。
+	dep.mu.Lock()
+	dep.cancelErr = nil
+	okGone := true
+	dep.verifyGone = &okGone
+	dep.mu.Unlock()
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce(2): %v", err)
+	}
+	run, _ = repos.GetRun(context.Background(), "r-1")
+	doc = deployDoc(t, run)
+	u, _ = doc["uninstall"].(map[string]any)
+	if u == nil || u["state"] != "verified" {
+		t.Fatalf("uninstall = %v, want verified after retry", doc["uninstall"])
+	}
+}
+
+// DELETE 成功但 "删干净" 校验未过（release 还能 GET 到）→ uninstall.state=failed，且会重试。
+func TestCleanupVerifyStillPresentMarksFailed(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunSucceeded, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now().Add(-time.Minute),
+		DeployJSON:  json.RawMessage(`{"release_name":"tp-y","state":"ready"}`),
+	})
+	gone := false
+	dep := &fakeDeployer{verifyGone: &gone}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	doc := deployDoc(t, run)
+	u, _ := doc["uninstall"].(map[string]any)
+	if u == nil || u["state"] != "failed" {
+		t.Fatalf("uninstall = %v, want failed（GET 200 不算删干净）", doc["uninstall"])
+	}
+	// 又在待收口列表里 → 下一轮会再试。
+	pending, err := repos.ListDeployCleanupPending(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Errorf("pending = %d, want 1（未 verified 的必须进补偿列表）", len(pending))
+	}
+}
+
+// cleanup_policy=never 的 Run 不卸载。
+func TestCleanupNeverPolicySkipsUninstall(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunSucceeded, HasDeploy: true, CleanupPolicy: "never",
+		SubmittedAt: time.Now().Add(-time.Minute),
+		DeployJSON:  json.RawMessage(`{"release_name":"tp-z","state":"ready"}`),
+	})
+	dep := &fakeDeployer{}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	dep.mu.Lock()
+	defer dep.mu.Unlock()
+	if dep.cancels != 0 {
+		t.Errorf("deployer.Cancel calls = %d, want 0（cleanup.policy=never）", dep.cancels)
+	}
+}
+
+// ---- §4.4 落库 ---------------------------------------------------------------
+
+// deployDoc 取 Run 的 runs.deploy 快照（内存实现里是 RunView.DeployJSON）。
+func deployDoc(t *testing.T, run RunView) map[string]any {
+	t.Helper()
+	doc := map[string]any{}
+	if len(run.DeployJSON) == 0 {
+		return doc
+	}
+	if err := json.Unmarshal(run.DeployJSON, &doc); err != nil {
+		t.Fatalf("decode deploy: %v", err)
+	}
+	return doc
+}
+
+// beginRun 必须落冻结字段：release_name / provider / package_type / accepted_at（§4.4）。
+func TestBeginRunRecordsFrozenDeploySnapshot(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunQueued, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now(),
+		DeployJSON:  json.RawMessage(`{"provider":"genet","package_type":"stack","parameters":{"model_name":"mock-llm"}}`),
+	})
+	dep := &fakeDeployer{}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+	ctx := context.Background()
+	if err := c.DeployOnce(ctx); err != nil {
+		t.Fatalf("DeployOnce: %v", err)
+	}
+	run, _ := repos.GetRun(ctx, "r-1")
+	doc := deployDoc(t, run)
+	// release_name = tp-<sha12(run:deploy)>
+	want := DeployReleaseName("r-1", "d-r-1")
+	if doc["release_name"] != want {
+		t.Errorf("release_name = %v, want %s", doc["release_name"], want)
+	}
+	if doc["provider"] != "genet" {
+		t.Errorf("provider = %v", doc["provider"])
+	}
+	if doc["package_type"] != "stack" {
+		t.Errorf("package_type = %v", doc["package_type"])
+	}
+	for _, key := range []string{"accepted_at", "queued_at", "last_polled_at"} {
+		if _, ok := doc[key]; !ok {
+			t.Errorf("%s missing: %v", key, doc)
+		}
+	}
+	if v, ok := doc["queue_position"]; !ok || v != nil {
+		t.Errorf("queue_position = %v (present=%v), want null", v, ok)
+	}
+}
+
+// Poll 必须回写两根轴原值 + 队列水位 + 时间线（§4.4）。
+func TestPollRecordsBothAxesAndQueue(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunDeploying, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now(),
+		DeployJSON:  json.RawMessage(`{"release_name":"tp-q","provider":"genet","package_type":"stack"}`),
+	})
+	dep := &fakeDeployer{pollState: ports.DeployState{
+		Phase:          "queued",
+		Reason:         "PodGroup Inqueue: insufficient Ascend910",
+		ReleaseStatus:  "pending-install",
+		EndpointStatus: "pending",
+		Queue:          &domain.DeployQueue{Phase: "Inqueue", Pending: 3, Inqueue: 2, Running: 7},
+	}}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+	ctx := context.Background()
+	if err := c.DeployOnce(ctx); err != nil {
+		t.Fatalf("DeployOnce: %v", err)
+	}
+	run, _ := repos.GetRun(ctx, "r-1")
+	doc := deployDoc(t, run)
+	if doc["genet_release_status"] != "pending-install" {
+		t.Errorf("genet_release_status = %v", doc["genet_release_status"])
+	}
+	if doc["endpoint_status"] != "pending" {
+		t.Errorf("endpoint_status = %v", doc["endpoint_status"])
+	}
+	q, _ := doc["queue"].(map[string]any)
+	if q == nil || q["phase"] != "Inqueue" {
+		t.Errorf("queue = %v", doc["queue"])
+	}
+	if doc["state"] != "queued" {
+		t.Errorf("state = %v", doc["state"])
+	}
+	if _, ok := doc["last_polled_at"]; !ok {
+		t.Errorf("last_polled_at missing")
+	}
+	// 冻结字段在轮询后仍然存在（合并而不是覆盖）。
+	if doc["release_name"] != "tp-q" {
+		t.Errorf("release_name lost after poll: %v", doc["release_name"])
+	}
+}
+
+// 编排层的 release 名必须与 genet 客户端逐字一致（两处实现，交叉校验）。
+func TestDeployReleaseNameMatchesGenet(t *testing.T) {
+	for _, tc := range [][2]string{{"r-20261105-0001", "d-r-20261105-0001"}, {"r-1", "d-r-1"}} {
+		got := DeployReleaseName(tc[0], tc[1])
+		want := genet.ReleaseName(tc[0], tc[1])
+		if got != want {
+			t.Errorf("DeployReleaseName(%s,%s) = %s, genet = %s", tc[0], tc[1], got, want)
+		}
 	}
 }

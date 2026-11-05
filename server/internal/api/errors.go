@@ -48,6 +48,8 @@ var httpStatusByCode = map[string]int{
 	domain.CodeResultMissing:           http.StatusInternalServerError,
 	domain.CodeResultInvalid:           http.StatusInternalServerError,
 	domain.CodeCleanupFailed:           http.StatusInternalServerError,
+	domain.CodeDeployFailed:            http.StatusBadGateway,
+	domain.CodeDeployBlocked:           http.StatusBadGateway,
 	domain.CodeCanceled:                http.StatusConflict,
 	domain.CodeInternalError:           http.StatusInternalServerError,
 }

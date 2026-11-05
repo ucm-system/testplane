@@ -45,3 +45,32 @@ func (s *Store) PrecheckTaskIDs(ctx context.Context, tx pgx.Tx, runID string) (m
 	}
 	return out, rows.Err()
 }
+
+// PrecheckFlags 批量判定"哪些 Task 是平台注入的 Pre-Check"（一次查询，禁止 N+1）。
+// 判据同 PrecheckTaskIDs：runs.resolved.precheck.injected == true 且 tasks.seq = 0。
+// 供 adapter 填 orchestrator.TaskView.IsPrecheck（门控与终态都不再用 Tester 角色）。
+func (s *Store) PrecheckFlags(ctx context.Context, taskIDs []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if len(taskIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT t.id
+		  FROM tasks t
+		  JOIN runs r ON r.id = t.run_id
+		 WHERE t.id = ANY($1)
+		   AND t.seq = 0
+		   AND COALESCE((r.resolved -> 'precheck' ->> 'injected')::boolean, false)`, taskIDs)
+	if err != nil {
+		return nil, fmt.Errorf("store: precheck flags: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: scan precheck flags: %w", err)
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}

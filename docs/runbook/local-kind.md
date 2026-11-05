@@ -49,6 +49,21 @@ kubectl --context kind-testplane -n testplane exec deploy/testplaned -- wget -qO
 > apply 一个 `replicas:1` 的 Deployment 也会拉起来——两条路径都要确认**只有一个** controller，
 > 否则两个 controller 同时 dispatch，Job 会被建两遍。
 
+**要用不可变引用（digest）时**：本地 dev 用 `:dev` 可变标签图方便，但"回滚到底跑了哪份代码"
+只有 digest 能回答（W-8）。验收/预发把清单换成 digest，或直接打补丁：
+
+```powershell
+# 方式 A：改 deploy/components/control-plane/deployment.yaml 的 image，再 apply -k
+# 方式 B：不改清单，直接钉住运行中的 Deployment（验收时最省事）
+docker inspect --format '{{index .RepoDigests 0}}' testplane-server:dev    # 取 sha256:
+kubectl --context kind-testplane -n testplane set image deploy/testplaned `
+  testplaned=registry.internal/testplane/testplaned@sha256:<64 位 digest>
+kubectl --context kind-testplane -n testplane rollout status deploy/testplaned --timeout=180s
+```
+
+> kind 里也可以用 `docker inspect` 拿到的 digest 前缀验证"Pod 现在跑的到底是哪一个"（见上面判据 4）。
+> 生产清单必须钉 digest，`:dev` / `:latest` 只允许出现在本地 kind。
+
 跑迁移（表结构变了才需要；正常启动不迁移）：
 
 ```powershell
@@ -73,8 +88,11 @@ kubectl --context kind-testplane get nodes       # Ready 才算起
 & .\.tools\kind.exe start cluster --name testplane
 
 # 彻底重建（存储挂载变更后必须重建）
+#   kind 配置是**模板 + 渲染**：模板里有 __STORAGE_HOST_PATH__ 占位符，
+#   先渲染出 .data\kind-testplane.yaml，再用它建集群（详见 deploy/README.md 第 2 步）
 & .\.tools\kind.exe delete cluster --name testplane
-& .\.tools\kind.exe create cluster --config deploy\kind\testplane.yaml --wait 180s
+pwsh deploy\kind\render.ps1                       # 可选 -StoragePath D:\data\tp-storage
+& .\.tools\kind.exe create cluster --config .data\kind-testplane.yaml --wait 180s
 kubectl --context kind-testplane apply -k deploy/k8s
 # 重建后镜像要重新灌（节点没了，containerd 里的镜像也一起没了）
 ```

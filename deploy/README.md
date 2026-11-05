@@ -23,34 +23,53 @@
 - Docker Desktop 已启动（`docker version` 能打出 Server 段）。
 - `kubectl` 在 PATH 上（本仓库只用它连本集群，改 context 不改别人的集群）。
 - PowerShell 5.1+ 或 pwsh 7+。
+- `helm`（第 1 步装到 `.tools\`，**不要求进 PATH**）。
 
 > **不要碰别人的集群**：`claw-fleet`、`unitest-k3s`、`docker-desktop` 是既有环境。
 > 本文所有 `kubectl` 命令都显式带 `--context kind-testplane`，别省略。
 
 ---
 
-## 1 装 kind.exe（仓库内，不入库）
+## 1 装 kind.exe 与 helm（仓库内，不入库）
 
-`kind.exe` 落在 `.tools\`，由 `.gitignore` 的 `*.exe` 规则挡住（不需要额外改忽略清单）。
+`kind.exe` / `helm.exe` 落在 `.tools\`，由 `.gitignore` 的 `*.exe` 规则挡住（不需要额外改忽略清单）。
 
 ```powershell
 New-Item -ItemType Directory -Force -Path .tools | Out-Null
 $ProgressPreference = 'SilentlyContinue'
+
+# kind：建集群
 Invoke-WebRequest -Uri 'https://kind.sigs.k8s.io/dl/v0.29.0/kind-windows-amd64' `
                   -OutFile '.tools\kind.exe' -UseBasicParsing
 & .\.tools\kind.exe version
 # kind v0.29.0 go1.24.2 windows/amd64
+
+# helm：装被测服务的 chart（deploy/charts/mock-llm）
+Invoke-WebRequest -Uri 'https://get.helm.sh/helm-v3.16.4-windows-amd64.zip' `
+                  -OutFile "$env:TEMP\helm.zip" -UseBasicParsing
+Expand-Archive -Path "$env:TEMP\helm.zip" -DestinationPath "$env:TEMP\helm" -Force
+Copy-Item "$env:TEMP\helm\windows-amd64\helm.exe" .tools\helm.exe -Force
+& .\.tools\helm.exe version
+# version.BuildInfo{Version:"v3.16.4", ...}
 ```
 
+> 本文里 helm 一律写成 `& .\.tools\helm.exe`；想直接敲 `helm` 就把 `.tools` 加进 PATH。
 > WSL 里那个 kind 用不了（WSL 的 docker socket 没通），别在 WSL 里折腾。
 
 ---
 
 ## 2 建集群 `testplane`
 
+**两步：先渲染，再建。** `deploy/kind/testplane.yaml` 是**模板**（含 `__STORAGE_HOST_PATH__` 占位符），
+渲染产物 `.data\kind-testplane.yaml` 才给 kind 用——这样换台机器/换盘只需一个参数，不用改仓库文件。
+
 ```powershell
-New-Item -ItemType Directory -Force -Path .data\storage | Out-Null
-& .\.tools\kind.exe create cluster --config deploy\kind\testplane.yaml --wait 180s
+# 渲染：默认宿主存储路径 = <仓库根>\.data\storage，产物 .data\kind-testplane.yaml
+pwsh deploy\kind\render.ps1
+# 换到别的盘/目录（不存在会自动创建）：
+# pwsh deploy\kind\render.ps1 -StoragePath D:\data\tp-storage
+
+& .\.tools\kind.exe create cluster --config .data\kind-testplane.yaml --wait 180s
 kubectl --context kind-testplane get nodes
 ```
 
@@ -61,12 +80,13 @@ NAME                      STATUS   ROLES           AGE   VERSION
 testplane-control-plane   Ready    control-plane   ...   v1.33.1
 ```
 
-关键点（配置写在 [`deploy/kind/testplane.yaml`](kind/testplane.yaml)）：
+关键点（模板在 [`deploy/kind/testplane.yaml`](kind/testplane.yaml)，渲染脚本 [`deploy/kind/render.ps1`](kind/render.ps1)）：
 
 - 集群名 `testplane`，1 个 control-plane 就够。
-- `extraMounts` 把宿主 `D:\Project\TestPalne\.data\storage` 挂成节点里的 `/storage-root`。
-  这就是 dev 的「RWX 存储」（见第 4 步）。
-- **`extraMounts` 只在建集群时生效**。改了 yaml 要 `kind delete cluster --name testplane` 再建。
+- `extraMounts` 把**渲染进去的宿主目录**挂成节点里的 `/storage-root`（默认 `.data\storage`）。
+  这就是 dev 的「RWX 存储」（见第 4 步）。`render.ps1` 负责：建目录、把 `\` 换成 `/`（Docker Desktop 只认正斜杠）、
+  含空格/引号的路径直接报错（kind 的 `-v` 不支持）。
+- **`extraMounts` 只在建集群时生效**。改模板或换路径后必须 `kind delete cluster --name testplane` 再建。
 - 想验证挂载真的通了：
 
   ```powershell
@@ -127,9 +147,11 @@ kubectl --context kind-testplane get pv testplane-storage
 | Namespace `testplane`（PSA `restricted`） | [`k8s/namespace.yaml`](k8s/namespace.yaml) | 控制面 + Tester Job + PVC + Lease 同处一室 |
 | ServiceAccount `testplane` | [`k8s/serviceaccount.yaml`](k8s/serviceaccount.yaml) | 只有控制面需要 token |
 | Role / RoleBinding `testplane` | [`k8s/rbac.yaml`](k8s/rbac.yaml) | namespace 级：jobs 全套、pods get/list/watch/delete、pods/log、pvc get、events list、leases get/create/update |
-| ClusterRole / Binding `testplane-view` | [`k8s/rbac.yaml`](k8s/rbac.yaml) | 集群级**只读**：nodes + Volcano queues/podgroups/jobs |
+| ClusterRole / Binding `testplane-view` | [`k8s/rbac.yaml`](k8s/rbac.yaml) | 集群级**只读**：`nodes`（`insufficient_resources` 判定的数据源） |
+| ClusterRole / Binding `testplane-volcano-view` | [`k8s/rbac.yaml`](k8s/rbac.yaml) | 集群级**只读**：Volcano `queues`/`podgroups`，`get,list`（不 watch）。两者都是 cluster-scoped，所以必须 ClusterRole（06 §2.1） |
 | PV/PVC `testplane-storage` | [`k8s/storage.yaml`](k8s/storage.yaml) | 10Gi、`ReadWriteMany`、hostPath `/storage-root`、`Retain` |
 | ConfigMap `testplane-config` | [`k8s/configmap.yaml`](k8s/configmap.yaml) | 非敏感配置；键名对齐 `server/internal/config/config.go` |
+| Namespace `testplane-mock` + 3 条 NetworkPolicy | [`k8s/mock-namespace.yaml`](k8s/mock-namespace.yaml) | 被测服务（Genet 装的 / mock-llm chart）专用，与平台 `testplane` 分开；默认拒绝入站，只放行 `testplane` → 18080，出站只放 DNS。PSA 只 audit/warn（装的是别人的 chart），不 enforce |
 
 **刻意不在基础层 kustomization 里的清单**（各自有启用条件）：
 
@@ -235,6 +257,56 @@ kubectl --context kind-testplane -n testplane rollout restart deploy/testplaned
 - 构建期自检会打印 `BUILD_CHECK_OK: static binary`（`! ldd` 断言静态链接），
   哪天有人引入 CGO 依赖，构建当场失败而不是等到运行期。
 
+### 5.3 被测服务：`deploy/charts/mock-llm`（Helm）
+
+E2E 需要一个"可控的被测 LLM 服务"当靶子：没有真模型/GPU，但要能复现
+"就绪 / 慢就绪 / 500 / 401 / HTTP 200 包错误"。镜像来自 `tools/mock-llm`，chart 在本仓库
+（`deploy/charts/mock-llm/`，**不进 `tools/`**）。
+
+```powershell
+# 镜像（只 build 一次；标签不是 :latest，节点里 load 过就不用再拉）
+docker build -t testplane/mock-llm:dev tools/mock-llm
+& .\.tools\kind.exe load docker-image testplane/mock-llm:dev --name testplane
+
+# 装（namespace testplane-mock 由第 4 步的 mock-namespace.yaml 建好；没有就加 --create-namespace）
+& .\.tools\helm.exe lint deploy/charts/mock-llm
+& .\.tools\helm.exe template mock-llm deploy/charts/mock-llm -n testplane-mock > .data\mock-llm.yaml
+kubectl --context kind-testplane apply --dry-run=client -f .data\mock-llm.yaml
+& .\.tools\helm.exe install mock-llm deploy/charts/mock-llm -n testplane-mock
+
+# 验：Pod Ready + /healthz（debug 也可以直接 exec 进去 wget）
+kubectl --context kind-testplane -n testplane-mock get pods
+kubectl --context kind-testplane -n testplane-mock exec deploy/mock-llm -- wget -qO- http://127.0.0.1:18080/healthz   # ok
+
+# 拆
+& .\.tools\helm.exe uninstall mock-llm -n testplane-mock
+kubectl --context kind-testplane -n testplane-mock get pods     # 期望空
+```
+
+**故障注入**（`--set` 或 values 里改，渲染成容器 env，对整条链路生效）：
+
+```powershell
+& .\.tools\helm.exe upgrade mock-llm deploy/charts/mock-llm -n testplane-mock `
+  --reuse-values --set faultInjection.failMode=401          # /v1/* 立即 401，/healthz 仍 200
+& .\.tools\helm.exe upgrade mock-llm deploy/charts/mock-llm -n testplane-mock `
+  --reuse-values --set faultInjection.readyAfter=15s         # 前 15s /v1/* 503（模拟慢就绪）
+& .\.tools\helm.exe upgrade mock-llm deploy/charts/mock-llm -n testplane-mock `
+  --reuse-values --set faultInjection.errorIn200=true        # HTTP 200 但正文是 {"error":...}
+```
+
+> ⚠️ values 里的 `faultInjection.*` 会被渲染成 **`MOCK_LLM_*`** 环境变量——那是
+> `tools/mock-llm/main.go` 真正读取的名字。写成 `FAIL_MODE` / `READY_AFTER` 这类通用名，
+> 二进制不认，会**静默变成正常服务**（我们踩过：功能没生效要先查 env 有没有被读）。
+>
+> 探针走 `/healthz`，它**永远 200**、不受 `readyAfter` 影响 → "慢就绪"时 Pod 依然 Ready，
+> 平台看到的是"服务在、业务端点未就绪"，这才是要测的场景。
+
+**namespace 与网络**：被测服务统一装在 `testplane-mock`（与平台自己的 `testplane` 分开，
+拆服务不误伤平台）。`deploy/k8s/mock-namespace.yaml` 建它并加三条 NetworkPolicy：
+默认拒绝入站、只放行 `testplane` → 18080、出站只放 DNS。
+kind 的默认 CNI（kindnet）**不实现 NetworkPolicy**，本地 apply 只是声明；真正的拦截在
+staging/prod 的真 CNI 上生效。
+
 ---
 
 ## 6 把控制面放进集群（等镜像就绪）
@@ -276,10 +348,12 @@ docker run --rm -e PGPASSWORD=testplane postgres:16-alpine `
 
 ```powershell
 & .\.tools\kind.exe version
+& .\.tools\helm.exe version
 kubectl --context kind-testplane get nodes
 docker exec testplane-pg pg_isready -U testplane -d testplane
 kubectl --context kind-testplane -n testplane get pvc testplane-storage
 kubectl --context kind-testplane get pv testplane-storage
+kubectl --context kind-testplane -n testplane-mock get ns,networkpolicy   # 被测服务 namespace 就绪
 kubectl --context kind-testplane auth can-i create jobs -n testplane --as=system:serviceaccount:testplane:testplane
 kubectl --context kind-testplane auth can-i get secrets -n testplane --as=system:serviceaccount:testplane:testplane   # 期望 no
 kubectl --context kind-testplane auth can-i list nodes --as=system:serviceaccount:testplane:testplane
@@ -329,18 +403,25 @@ deploy/
 ├── README.md                    # 本文件
 ├── .env.example                 # 环境变量样例（deploy/.env 被 .gitignore 忽略）
 ├── kind/
-│   └── testplane.yaml           # kind 集群定义（含 extraMounts → /storage-root）
+│   ├── testplane.yaml           # kind 集群**模板**（含 __STORAGE_HOST_PATH__ 占位符）
+│   └── render.ps1               # 渲染模板 → .data\kind-testplane.yaml（宿主路径参数化）
 ├── k8s/                         # 基础设施层（不含控制面）
 │   ├── kustomization.yaml       #   kubectl apply -k deploy/k8s
 │   ├── namespace.yaml           #   Namespace + PSA restricted
 │   ├── serviceaccount.yaml      #   SA testplane
-│   ├── rbac.yaml                #   Role/RoleBinding + ClusterRole/CRB testplane-view
+│   ├── rbac.yaml                #   Role/RoleBinding + ClusterRole/CRB（testplane-view / -volcano-view）
 │   ├── rbac-cluster-executor.yaml  # （opt-in）跨 namespace 执行层，需评审
 │   ├── storage.yaml             #   PV + PVC testplane-storage（10Gi RWX）
 │   ├── configmap.yaml           #   testplane-config
+│   ├── mock-namespace.yaml      #   Namespace testplane-mock + 3 条 NetworkPolicy（被测服务专用）
 │   ├── networkpolicy.yaml       # （opt-in）默认拒绝 + 放行条目（kindnet 不生效）
 │   ├── pdb.yaml                 # （opt-in）PDB
 │   └── storage-smoke-job.yaml   #   存储冒烟 Job（一次性，单独 apply）
+├── charts/
+│   └── mock-llm/                # 被测服务 chart（Helm；镜像来自 tools/mock-llm）
+│       ├── Chart.yaml
+│       ├── values.yaml          #   image / service.port 18080 / 探针 / faultInjection
+│       └── templates/           #   deployment.yaml（非 root、只读根）/ service.yaml / _helpers.tpl
 ├── components/
 │   └── control-plane/           # 控制面（kustomize Component，按需叠加）
 │       ├── kustomization.yaml   #   kind: Component

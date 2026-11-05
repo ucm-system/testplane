@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/ucm-system/testplane/server/internal/auth"
 	"github.com/ucm-system/testplane/server/internal/config"
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
@@ -38,6 +39,8 @@ type Deps struct {
 	WebUI fs.FS
 	// Version 是二进制版本（/meta 用）。
 	Version string
+	// Volcano 可选：不设时 /queue-status 的 volcano 块降级为 scheduler_unavailable。
+	Volcano VolcanoProvider
 }
 
 // Server 持有 HTTP 层依赖。
@@ -49,6 +52,9 @@ type Server struct {
 	logger   *slog.Logger
 	submit   *Submitter
 	webui    fs.FS
+	volcano  VolcanoProvider
+	metrics  *metricsRegistry
+	authn    *auth.Authenticator
 	version  string
 	now      func() time.Time
 }
@@ -66,9 +72,12 @@ func New(d Deps) *Server {
 		resolver: d.Resolver,
 		logger:   lg,
 		webui:    d.WebUI,
+		volcano:  d.Volcano,
 		version:  d.Version,
 		now:      func() time.Time { return time.Now().UTC() },
+		metrics:  newMetricsRegistry(),
 	}
+	s.authn = s.buildAuthenticator()
 	s.submit = &Submitter{
 		resolver:       d.Resolver,
 		profiles:       d.Store.Profiles,
@@ -86,10 +95,21 @@ func (s *Server) Handler() http.Handler {
 	r.Use(s.middlewareRequestID)
 	r.Use(s.middlewareRecover)
 	r.Use(s.middlewareAccessLog)
+	r.Use(s.middlewareMetrics)
 
-	// 运维端点不带版本（07 §1）。
+	// 运维端点不带版本（07 §1）；/metrics 只读，且不参与静态 fallback。
+	//
+	// **免鉴权是有意的**：这三个端点注册在根路由上，而 middlewareAuth 只挂在
+	// `Route(APIPrefix)` 组内（见下方），所以切到 OIDC 模式后 /metrics 依然公开，
+	// 供 Prometheus 无需令牌抓取。改动路由结构时注意别把它挪进鉴权组。
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
+	r.Get("/metrics", s.handleMetrics)
+
+	// 认证端点（匿名）：07 §2.4。放在根路由，不经过 API 前缀的鉴权/CSRF 中间件。
+	r.Get("/auth/login", s.handleAuthLogin)
+	r.Get("/auth/callback", s.handleAuthCallback)
+	r.Post("/auth/logout", s.handleAuthLogout)
 
 	r.Route(s.cfg.APIPrefix, func(r chi.Router) {
 		r.Use(s.middlewareAuth)
@@ -97,31 +117,43 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/meta", s.handleMeta)
 		r.Get("/me", s.handleMe)
 
-		// Run
-		r.Post("/runs", s.handleSubmitRun)
+		// 写操作：operator 及以上（07 §2.3）。
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireRole(authRoleOperator))
+			r.Post("/runs", s.handleSubmitRun)
+			r.Post("/runs/{id}/cancel", s.handleCancelRun)
+			r.Post("/tasks/{id}/cancel", s.handleCancelTask)
+		})
+
+		// Run（只读：viewer）
+		r.Get("/runs", s.handleListRuns)
+		r.Get("/runs/{id}", s.handleGetRun)
 		r.Get("/runs", s.handleListRuns)
 		r.Get("/runs/{id}", s.handleGetRun)
 		r.Get("/runs/{id}/tasks", s.handleListRunTasks)
-		r.Post("/runs/{id}/cancel", s.handleCancelRun)
 		r.Get("/runs/{id}/events", s.handleRunEvents)
 		r.Get("/runs/{id}/events/history", s.handleRunEventsHistory)
 		r.Get("/runs/{id}/report", s.handleRunReport)
 		r.Get("/runs/{id}/report.md", s.handleRunReportMarkdown)
 		r.Get("/runs/{id}/manifest", s.handleRunManifest)
 		r.Get("/runs/{id}/deploy", s.handleRunDeploy)
+		r.Get("/runs/{id}/artifacts", s.handleRunArtifacts)
+		r.Get("/runs/{id}/files", s.handleRunFile)
 
 		// Task / Attempt
 		r.Get("/tasks", s.handleListTasks)
 		r.Get("/tasks/{id}", s.handleGetTask)
-		r.Post("/tasks/{id}/cancel", s.handleCancelTask)
 		r.Get("/tasks/{id}/attempts", s.handleListAttempts)
 		r.Get("/tasks/{id}/attempts/{idx}/result", s.handleAttemptResult)
 		r.Get("/tasks/{id}/attempts/{idx}/logs", s.handleAttemptLogs)
+		r.Get("/tasks/{id}/attempts/{idx}/artifacts", s.handleAttemptArtifacts)
 
 		// Tester 目录（只读；Tester 随镜像发布，不做运行时注册，K-3）
 		r.Get("/testers", s.handleListTesters)
 		r.Get("/testers/{name}", s.handleGetTester)
+		r.Get("/testers/{name}/versions/{version}", s.handleGetTesterVersion)
 
+		r.Get("/profiles", s.handleListProfiles)
 		r.Get("/clusters", s.handleListClusters)
 		r.Get("/queue-status", s.handleQueueStatus)
 	})
@@ -227,24 +259,6 @@ func (s *Server) middlewareAccessLog(next http.Handler) http.Handler {
 //   - 角色固定 admin（MVP 不做 RBAC 拒绝）。
 //
 // 生产 OIDC 留配置位：AuthMode=oidc 时启动打印未实现告警，仍按 dev 处理。
-func (s *Server) middlewareAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user := "dev"
-		if h := r.Header.Get("Authorization"); h != "" {
-			parts := strings.SplitN(h, " ", 2)
-			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-				fail(w, r, http.StatusUnauthorized, domain.CodeUnauthenticated,
-					"Authorization 头格式非法", nil, false)
-				return
-			}
-			if sub := strings.TrimSpace(parts[1]); sub != "" {
-				user = sub
-			}
-		}
-		ctx := WithIdentity(r.Context(), user, "admin")
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
 
 // staticHandler 提供前端产物；未知路径 fallback 到 index.html（SPA 路由）。
 func (s *Server) staticHandler() http.Handler {
