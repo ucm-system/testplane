@@ -332,7 +332,7 @@ control-plane 据此写 `artifacts(attempt_id, path, size_bytes, sha256, kind, m
 
 ## 9 Genet 适配
 
-> **本节已按真实 Genet 后端代码重写**（调研见 `.data/research/genet-lifecycle.md`，下称 `R-G:行`；`<G>` = `.data/genet` 只读克隆）。旧版"假定 Genet 提供 `POST /deployments`、`GET /deployments/{id}`"**已被证伪**：Genet 没有"部署单"，**一次部署 = 一次 Helm release**，定位符只有 `namespace + releaseName`（`<G>/backend/internal/handlers/helm.go:2992-3000` 的 202 响应只有 `name`；全后端没有 `request_id/job_id/release_id`，`R-G:28`）。字段名集中在 `server/internal/genet/dto.go`（骨架见 §9.9），MVP 实现仍是 `internal/genet/mocks`。
+> **本节已按真实 Genet 后端代码重写**（调研证据见仓库内 [`docs/research/genet-lifecycle.md`](../../docs/research/genet-lifecycle.md)，下称 `R-G:行`；`<G>` = **上游 Genet 仓库**的 `<G>/path:行号`，快照 commit 见 [`docs/research/README.md`](../../docs/research/README.md)）。旧版"假定 Genet 提供 `POST /deployments`、`GET /deployments/{id}`"**已被证伪**：Genet 没有"部署单"，**一次部署 = 一次 Helm release**，定位符只有 `namespace + releaseName`（`<G>/backend/internal/handlers/helm.go:2992-3000` 的 202 响应只有 `name`；全后端没有 `request_id/job_id/release_id`，`R-G:28`）。字段名集中在 `server/internal/genet/dto.go`（骨架见 §9.9），MVP 实现仍是 `internal/genet/mocks`。
 
 ### 9.1 事实基线
 
@@ -681,7 +681,7 @@ Pod / Node 走 `v1` 原生资源（Pod 资源请求与 conditions、节点 `allo
 ## 13 未决问题
 | 编号 | 问题 | 默认建议（未确认前按此实现） |
 |---|---|---|
-| **E-Q1** | ~~Genet REST 契约未定~~ **已关闭**：真实接口是 Helm release 语义（`POST /api/open/helm/uc-packages/{stack\|pd}/releases`、`GET/DELETE /api/open/helm/releases/{name}`），无部署单、无 request_id、无位次，详见 §9 与 `.data/research/genet-lifecycle.md` | 契约收敛在 `internal/genet/dto.go`（§9.9）；幂等键 = `release_name`；`noWait=true`；总窗口默认 **72h**（K-6）不进 Manifest；残留未确认项见 §9.10 |
+| **E-Q1** | ~~Genet REST 契约未定~~ **已关闭**：真实接口是 Helm release 语义（`POST /api/open/helm/uc-packages/{stack\|pd}/releases`、`GET/DELETE /api/open/helm/releases/{name}`），无部署单、无 request_id、无位次，详见 §9 与 [`docs/research/genet-lifecycle.md`](../../docs/research/genet-lifecycle.md) | 契约收敛在 `internal/genet/dto.go`（§9.9）；幂等键 = `release_name`；`noWait=true`；总窗口默认 **72h**（K-6）不进 Manifest；残留未确认项见 §9.10 |
 | **E-Q2** | Pod 级失败原因与错误码枚举不足：`OOMKilled`/`Evicted`/`Preempted`/节点 NotReady 无专门码 | 归 `INTERNAL_ERROR` + `detail.k8s_reason` 保留原文，不自动重试；下版附录 D 增 `CONTAINER_OOM_KILLED`、`POD_EVICTED`（可重试）、`NODE_LOST` |
 | **E-Q3** | 镜像拉取 secret 来源：附录 B 无 `imagePullSecrets` | 由 Execution Profile 的 `image_pull_secrets` 提供（Profile 是平台对象，不动 Job Spec 契约）；为空则不渲染 |
 | **E-Q4** | 日志明文的安全接受 | **已拍板（K-5）**：平台不读 Secret、不做脱敏；Tester 不得主动打印凭据的契约保留，残余风险由团队接受 |

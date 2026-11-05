@@ -9,7 +9,7 @@ DSN     ?= postgres://testplane:testplane@127.0.0.1:5432/testplane?sslmode=disab
 PG_CTR  ?= testplane-pg
 KIND    ?= kind-testplane
 
-.PHONY: help build web server migrate dev-db dev test test-race vet lint fmt tidy openapi-lint clean
+.PHONY: help build web server migrate dev-db dev test test-race vet lint fmt fmt-check tidy openapi-lint clean
 
 help:
 	@echo "make build        前端构建 + 后端编译（产物 bin/testplaned）"
@@ -21,7 +21,7 @@ help:
 	@echo "make migrate      对 $(PG_CTR) 应用 server/migrations/*.sql（只前向）"
 	@echo "make dev-db       起本地 PG（docker）"
 	@echo "make dev          起全栈（PG + 迁移 + --role=all）"
-	@echo "make clean        清构建产物"
+	@echo "make fmt          gofmt 全部 Go 文件（按 LF 形态判定，绕开 Windows CRLF）"`n	@echo "make fmt-check    只检查不修改（CI 门禁用）"`n	@echo "make clean        清构建产物（webui/dist 只留占位 index.html）"
 
 build: web server
 
@@ -38,6 +38,12 @@ test:
 
 test-race:
 	cd server && go test -race ./...
+
+fmt:
+	pwsh scripts/gofmt-check.ps1 -Fix
+
+fmt-check:
+	pwsh scripts/gofmt-check.ps1
 
 vet:
 	cd server && go vet ./...
@@ -66,5 +72,7 @@ dev: dev-db migrate
 
 clean:
 	rm -rf bin web/dist
-	# 保留占位 index.html：webui 用 //go:embed all:dist，删掉目录会让 go build / make test 直接失败
-	@git checkout -- server/internal/webui/dist/index.html 2>/dev/null || true
+	# 保留占位 index.html（//go:embed all:dist 依赖它），但把 make web 复制进来的 assets 等产物删干净，
+	# 否则 clean 之后编出来的二进制里仍然带着上次的前端产物（issue #24-5）。不要用 git checkout 恢复——那会丢掉本地改动。
+	rm -rf server/internal/webui/dist/assets server/internal/webui/dist/*.js server/internal/webui/dist/*.css server/internal/webui/dist/*.map 2>/dev/null || true
+	@test -f server/internal/webui/dist/index.html || printf '<!doctype html><title>TestPlane placeholder</title>\n<p>前端未构建：跑 make web 生成。</p>\n' > server/internal/webui/dist/index.html

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
+	"github.com/ucm-system/testplane/server/internal/executor"
 	"github.com/ucm-system/testplane/server/internal/orchestrator"
 	"github.com/ucm-system/testplane/server/internal/ports"
 	"github.com/ucm-system/testplane/server/internal/registry"
@@ -31,7 +32,6 @@ type storeRepos struct {
 }
 
 var _ orchestrator.Repos = (*storeRepos)(nil)
-
 
 // attemptRefs 把一批 attempt id 转成 AttemptRef，并尽力补齐 TaskID/RunID。
 // 删 Job 只需要 AttemptID，但带上归属能在日志与对账里定位到具体 Run/Task
@@ -115,13 +115,13 @@ func (r *storeRepos) taskView(ctx context.Context, t *store.Task, isPrecheck boo
 		TesterName: t.TesterName, TesterVersion: t.TesterVersion,
 		IsPrecheck: isPrecheck,
 		Image:      t.ImageRef, OnFailure: t.OnFailure,
-		TimeoutSeconds: t.TimeoutSeconds,
-		Status:         domain.TaskStatus(t.Status),
-		EndpointKey:    store.DerefStr(t.EndpointKey),
-		Exclusive:      t.EndpointExclusive,
+		TimeoutSeconds:  t.TimeoutSeconds,
+		Status:          domain.TaskStatus(t.Status),
+		EndpointKey:     store.DerefStr(t.EndpointKey),
+		Exclusive:       t.EndpointExclusive,
 		CancelRequested: t.CancelRequested,
-		AttemptNo:      t.CurrentAttempt,
-		TesterRole:     "test",
+		AttemptNo:       t.CurrentAttempt,
+		TesterRole:      "test",
 	}
 	if t.StatusReason != nil {
 		v.StatusReason = *t.StatusReason
@@ -340,6 +340,19 @@ func (r *storeRepos) AttemptByTask(ctx context.Context, taskID string) (orchestr
 		AttemptID: a.ID, TaskID: a.TaskID, RunID: runID,
 		AttemptNo: a.Idx, JobName: jobName,
 	}, nil
+}
+
+// AttemptStatesByJobNames 批量把 Job 名映射成 Attempt 状态（GC 用，一次查库，票 #20-5）。
+func (r *storeRepos) AttemptStatesByJobNames(ctx context.Context, jobNames []string) (map[string]executor.AttemptState, error) {
+	rows, err := r.st.Attempts.StatesByJobNames(ctx, nil, jobNames)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]executor.AttemptState, len(rows))
+	for job, st := range rows {
+		out[job] = executor.AttemptState{Found: st.Found, Terminal: st.Terminal}
+	}
+	return out, nil
 }
 
 // DeleteLeaseByTask 幂等删除该 Task 的端点租约（C-4.3 泄漏兜底）。
@@ -620,6 +633,7 @@ func nullable(s string) *string {
 	}
 	return &s
 }
+
 // mergeDeployJSON 合成 Deployer.Start 要的冻结快照（execution §9.2）：
 //   - 提交时冻结的 deploy 入参在 runs.manifest 里（支持平级 `deploy` 与嵌套 `run.deploy` 两种形态）；
 //   - 运行时字段在 runs.deploy 里（deployment_id / state / release_name / accepted_at …），后写覆盖先写。
@@ -659,6 +673,7 @@ func mergeDeployJSON(manifest, deploy []byte) json.RawMessage {
 	}
 	return raw
 }
+
 // AppendRunEvent 追加清理失败事件（目前只有 cleanup.failed 用）。
 func (r *storeRepos) AppendRunEvent(ctx context.Context, runID, typ string, payload map[string]any) error {
 	return r.st.AppendRunEvent(ctx, runID, typ, payload)

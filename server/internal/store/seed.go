@@ -19,11 +19,11 @@ import (
 // 注意：03 §3.2 的 execution_profiles **没有 storage_pvc 列**（PVC 名来自 Helm/Profile
 // 挂载配置），所以这里不写 storage_pvc，mounts 留空数组。
 type SeedOptions struct {
-	ClusterName           string
-	APIServer             string
-	ProfileName           string
-	Namespace             string
-	DeployTimeoutSeconds  int
+	ClusterName          string
+	APIServer            string
+	ProfileName          string
+	Namespace            string
+	DeployTimeoutSeconds int
 }
 
 // DefaultSeedOptions 返回设计示例里的默认种子（k8s-npu / cluster-01）。

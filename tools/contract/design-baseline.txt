@@ -1,0 +1,7 @@
+# 设计端点基线（反向锚点）
+# 生成：pwsh tools/contract/design-baseline.ps1；校验：contract --mode spec
+# 统计：design/views/07-api.md §5 端点表 + §2.4 认证表 + §5.5 运维段。
+# 删除/新增设计端点后本文件必须显式更新，且 diff 要 review。
+
+design_endpoints=50
+sha256=f018d57310448e2be3cb817c2493beecaeb43b0c7fbb1b306b2cae8d180c1fe6

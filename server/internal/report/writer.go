@@ -85,11 +85,11 @@ func (w *Writer) WriteRunReport(ctx context.Context, runID string) (string, erro
 			return "", fmt.Errorf("report: 写 report.full.json: %w", err)
 		}
 		summary := map[string]any{
-			"run_id":      payload["run_id"],
-			"status":      payload["status"],
-			"counts":      payload["counts"],
-			"truncated":   true,
-			"report_ref":  "report.full.json",
+			"run_id":         payload["run_id"],
+			"status":         payload["status"],
+			"counts":         payload["counts"],
+			"truncated":      true,
+			"report_ref":     "report.full.json",
 			"schema_version": "1.0",
 		}
 		summaryJSON, err := json.MarshalIndent(summary, "", "  ")
@@ -312,13 +312,13 @@ func buildMetadata(b *store.RunBundle) map[string]any {
 			attemptImages = append(attemptImages, item)
 		}
 		tasks = append(tasks, map[string]any{
-			"task_id":        t.ID,
-			"name":           t.Name,
-			"tester":         t.TesterName + "@" + t.TesterVersion,
-			"image_ref":      t.ImageRef,
-			"profile":        t.Profile,
+			"task_id":         t.ID,
+			"name":            t.Name,
+			"tester":          t.TesterName + "@" + t.TesterVersion,
+			"image_ref":       t.ImageRef,
+			"profile":         t.Profile,
 			"timeout_seconds": t.TimeoutSeconds,
-			"attempts":       attemptImages,
+			"attempts":        attemptImages,
 		})
 	}
 	out := map[string]any{
@@ -349,16 +349,16 @@ func writeEventsJSONL(path string, events []store.Event) error {
 	var sb strings.Builder
 	for _, e := range events {
 		line := map[string]any{
-			"seq":      e.Seq,
-			"type":     e.Type,
-			"run_id":   e.RunID,
-			"at":       e.CreatedAt.UTC(),
-			"task_id":  e.TaskID,
+			"seq":        e.Seq,
+			"type":       e.Type,
+			"run_id":     e.RunID,
+			"at":         e.CreatedAt.UTC(),
+			"task_id":    e.TaskID,
 			"attempt_id": e.AttemptID,
-			"from":     e.FromStatus,
-			"to":       e.ToStatus,
-			"reason":   e.Reason,
-			"actor":    e.Actor,
+			"from":       e.FromStatus,
+			"to":         e.ToStatus,
+			"reason":     e.Reason,
+			"actor":      e.Actor,
 		}
 		if len(e.Payload) > 0 {
 			line["payload"] = json.RawMessage(e.Payload)

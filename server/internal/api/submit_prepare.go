@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
@@ -14,7 +13,8 @@ func (s *Submitter) buildPrepared(m *Manifest, kind string, specs []domain.Teste
 	argv [][]string, pm precheckMode, precheckSpec *domain.TesterSpec,
 	endpoint domain.Endpoint, cleanupPolicy, submittedBy string) (*Prepared, error) {
 
-	now := time.Now().UTC()
+	// 业务时间走注入时钟（票 #31）：提交时间戳与 run_id 的日期段都随它变化。
+	now := s.now()
 	runID := store.NewRunID(now)
 	name := ""
 	if kind == "task" {
@@ -106,10 +106,10 @@ func (s *Submitter) buildPrepared(m *Manifest, kind string, specs []domain.Teste
 
 	// resolved 快照（03 §4.2）
 	snap := map[string]any{
-		"kind":             kind,
-		"tasks":            resolved,
+		"kind":              kind,
+		"tasks":             resolved,
 		"args_snapshot_sha": argsSnapshotSHA(argv),
-		"schema_version":   "1.0",
+		"schema_version":    "1.0",
 	}
 	if precheckInjected {
 		snap["precheck"] = map[string]any{

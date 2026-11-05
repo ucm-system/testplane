@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/client-go/kubernetes/fake"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/ports"
@@ -312,11 +312,11 @@ func TestRenderGPUAndQuantity(t *testing.T) {
 
 func TestRenderImagePullPolicy(t *testing.T) {
 	cases := map[string]corev1.PullPolicy{
-		"repo/app:1.0.0":                    corev1.PullIfNotPresent,
+		"repo/app:1.0.0": corev1.PullIfNotPresent,
 		"repo/app@sha256:" + strings.Repeat("a", 64): corev1.PullIfNotPresent,
-		"repo/app:latest":                   corev1.PullAlways,
-		"repo/app":                          corev1.PullAlways,
-		"registry:5000/repo/app:2.0":        corev1.PullIfNotPresent,
+		"repo/app:latest":            corev1.PullAlways,
+		"repo/app":                   corev1.PullAlways,
+		"registry:5000/repo/app:2.0": corev1.PullIfNotPresent,
 	}
 	for image, want := range cases {
 		if got := imagePullPolicy(image); got != want {
@@ -359,7 +359,7 @@ func TestParseImageDigest(t *testing.T) {
 func TestRenderSkipsUnboundSecretEnv(t *testing.T) {
 	spec := sampleSpec()
 	spec.SecretEnv = []string{
-		"ENDPOINT_API_KEY",                  // 未绑定：跳过 + WARN
+		"ENDPOINT_API_KEY",                     // 未绑定：跳过 + WARN
 		"BOUND_KEY=tp-secret-endpoint/api_key", // 绑定：生成 secretKeyRef
 		"COLON_KEY=tp-secret-endpoint:token",   // 冒号形态：同样接受
 	}

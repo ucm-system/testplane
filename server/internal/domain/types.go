@@ -184,8 +184,8 @@ type TesterSpec struct {
 
 // ResourceRequest 是单次 Attempt 的资源需求。
 type ResourceRequest struct {
-	CPU    string    `json:"cpu" yaml:"cpu"`       // K8s quantity 字符串，如 "1"
-	Memory string    `json:"memory" yaml:"memory"` // K8s quantity 字符串，如 "256Mi"
+	CPU    string     `json:"cpu" yaml:"cpu"`       // K8s quantity 字符串，如 "1"
+	Memory string     `json:"memory" yaml:"memory"` // K8s quantity 字符串，如 "256Mi"
 	GPU    GPURequest `json:"gpu,omitempty" yaml:"gpu"`
 }
 

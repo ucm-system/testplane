@@ -68,7 +68,7 @@ func (v *Validator) ValidateExit(ctx context.Context, runID, taskID, attemptID, 
 	}
 	if v.MaxBytes > 0 && info.Size() > v.MaxBytes {
 		return &domain.Failure{
-			Code: domain.CodeResultInvalid,
+			Code:    domain.CodeResultInvalid,
 			Message: fmt.Sprintf("result.json 超过技术上限 %d 字节", v.MaxBytes),
 			Detail: map[string]any{
 				"too_large": true, "size_bytes": info.Size(), "max_bytes": v.MaxBytes,

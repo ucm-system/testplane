@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
+	"github.com/ucm-system/testplane/server/internal/executor"
 	"github.com/ucm-system/testplane/server/internal/ports"
 )
 
@@ -60,13 +61,13 @@ type RunView struct {
 
 // TaskView 是编排层看到的 Task 快照。
 type TaskView struct {
-	ID              string
-	RunID           string
-	Seq             int
-	Name            string
-	TesterName      string
-	TesterVersion   string
-	TesterRole      string // test | pre_check（仅展示/审计用，**不是**门控判据）
+	ID            string
+	RunID         string
+	Seq           int
+	Name          string
+	TesterName    string
+	TesterVersion string
+	TesterRole    string // test | pre_check（仅展示/审计用，**不是**门控判据）
 	// IsPrecheck 是唯一的门控与终态判据：runs.resolved.precheck.injected == true 且 seq == 0
 	// （03-data-view.md §4.2）。由 adapter 用一条 JOIN 填好，编排层只读它。
 	IsPrecheck      bool
@@ -154,9 +155,9 @@ type FinishInput struct {
 
 // FinishOutcome 汇报推进结果，供编排层决定后续动作。
 type FinishOutcome struct {
-	Applied         domain.Applied
-	TaskTerminal    bool
-	RunAllTerminal  bool
+	Applied        domain.Applied
+	TaskTerminal   bool
+	RunAllTerminal bool
 	// AbortTriggered 表示该 Task 的失败触发了 abort_run（其余 Task 已处理）。
 	AbortTriggered bool
 	// CancelJobs 是需要异步删除 Job 的 Task（取消/abort 的尽力而为部分，C-5.5）。
@@ -167,16 +168,16 @@ type FinishOutcome struct {
 
 // AbortInput 描述一次 abort_run。
 type AbortInput struct {
-	RunID       string
-	FailedTask  string
-	Reason      string // domain.SkipUpstreamAbort 等
-	Failure     *domain.Failure
+	RunID      string
+	FailedTask string
+	Reason     string // domain.SkipUpstreamAbort 等
+	Failure    *domain.Failure
 }
 
 // AbortOutcome 汇报 abort 的落库结果。
 type AbortOutcome struct {
-	Skipped    []string
-	CancelJobs []AttemptRef
+	Skipped        []string
+	CancelJobs     []AttemptRef
 	RunAllTerminal bool
 }
 
@@ -237,6 +238,8 @@ type Repos interface {
 	ListDeployCleanupPending(ctx context.Context, limit int) ([]RunView, error)
 	// AppendRunEvent 追加一条 state_events 记录（**只**给 cleanup.failed 用，不开通用事件面）。
 	AppendRunEvent(ctx context.Context, runID, typ string, payload map[string]any) error
+	// AttemptStatesByJobNames 批量把 Job 名映射成 Attempt 状态（GC 用，一次查库，票 #20-5）。
+	AttemptStatesByJobNames(ctx context.Context, jobNames []string) (map[string]executor.AttemptState, error)
 
 	// ---- 收口 ----
 	BeginCleanup(ctx context.Context, runID, reason string) error

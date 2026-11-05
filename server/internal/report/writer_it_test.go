@@ -51,8 +51,8 @@ func TestWriteRunReport_Files(t *testing.T) {
 	}
 	run := &store.Run{
 		ID: runID, Name: "report-demo", Kind: "run",
-		Manifest: []byte(`{"run":{"name":"report-demo"}}`),
-		Resolved: []byte(`{"kind":"run","tasks":[]}`),
+		Manifest:      []byte(`{"run":{"name":"report-demo"}}`),
+		Resolved:      []byte(`{"kind":"run","tasks":[]}`),
 		CleanupPolicy: "always", SubmittedBy: "dev",
 	}
 	if _, _, err := st.CreateRun(ctx, store.SubmitParams{
@@ -95,16 +95,16 @@ func TestWriteRunReport_Files(t *testing.T) {
 		t.Fatalf("读 report.json: %v", err)
 	}
 	var rep struct {
-		RunID    string `json:"run_id"`
-		Status   string `json:"status"`
-		Counts   map[string]int `json:"counts"`
-		Tasks    []struct {
+		RunID  string         `json:"run_id"`
+		Status string         `json:"status"`
+		Counts map[string]int `json:"counts"`
+		Tasks  []struct {
 			TaskID   string `json:"task_id"`
 			Status   string `json:"status"`
 			Attempts int    `json:"attempts"`
 		} `json:"tasks"`
 		Failures []struct {
-			TaskID   string `json:"task_id"`
+			TaskID    string `json:"task_id"`
 			ErrorCode string `json:"error_code"`
 		} `json:"failures"`
 	}

@@ -1358,6 +1358,15 @@ paths:
               schema:
                 type: string
                 format: binary
+            application/json:
+              schema:
+                type: string
+            text/plain:
+              schema:
+                type: string
+            text/markdown:
+              schema:
+                type: string
         '206':
           description: 部分内容（`Range` 命中）
           headers:
@@ -1370,6 +1379,15 @@ paths:
               schema:
                 type: string
                 format: binary
+            application/json:
+              schema:
+                type: string
+            text/plain:
+              schema:
+                type: string
+            text/markdown:
+              schema:
+                type: string
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1777,8 +1795,9 @@ components:
     ErrorCode:
       type: string
       description: |
-        **顶层**错误码，取附录 D 的全集（24 个）。新增错误码必须先改文档（ARCHITECTURE §15），
-        再改本契约。
+        **顶层**错误码，取附录 D 的全集（`ARCHITECTURE 附录 D` 为唯一权威，不在本文件重复计数；
+        `domain.AllCodes()` 导出同一集合供 `tools/contract` 做三方比对）。新增错误码必须先改文档
+        （ARCHITECTURE §15），再改本契约与 `domain/codes.go`。
 
         注意命名空间：07 §3「`code` 只用附录 D 的枚举」说的是信封顶层的 `code`；`detail.issues[].code`
         是**另一套**字段级码（07 §4.1 的 `PUBLIC_PARAM_CONFLICT`、C-8.4 的 `ARGS_LEX_ERROR` 都不在附录 D），
@@ -2510,6 +2529,95 @@ components:
           type: [string, 'null']
           description: 部署参数的摘要，用于事后比对
 
+        # ---- 以下字段是 `03-data-view.md §4.4` 的落库项（D-44/D-45/D-46/D-47/D-54）----
+        release_name:
+          type: [string, 'null']
+          description: |
+            Helm release 名（D-44）。平台派生 `"tp-" + sha256(run_id + ":" + deploy_id)[:12]`；
+            `(namespace, release_name)` 是定位 release 的唯一键（没有部署单 ID）
+          example: tp-4820f7ec160e
+        namespace:
+          type: [string, 'null']
+          description: release 落地的 namespace——**由 Genet API Key 绑定**，请求体不能指定（D-44/D-52）
+        package_type:
+          type: string
+          enum: [stack, pd]
+          description: Genet 包类型；`stack` 是本地/CI 唯一可测形态（`pd` 还需 kthena router，D-53）
+        chart:
+          type: [string, 'null']
+          description: 实际安装的 chart（Genet 配置固定，调用方不能指定，D-44）
+        chart_version:
+          type: [string, 'null']
+        values_digest:
+          type: [string, 'null']
+          description: 提交的 values 摘要（`sha256`），用于事后回答"当时到底传了什么"
+        genet_release_status:
+          type: [string, 'null']
+          description: |
+            **Helm `status` 原值**（`pending-install`/`pending-upgrade`/`deployed`/`failed`/
+            `superseded`/`uninstalling`/`uninstalled`），原样保留不翻译——这是 D-45 两根轴之一
+        endpoint_status:
+          type: [string, 'null']
+          description: |
+            **`callInfo.endpoint.status` 原值**（`pending`/`ready`/`blocked`），原样保留——两根轴之二。
+            ⚠️ `ready` 只代表地址可解析，**不代表可服务**（D-45：可用性由 Pre-Check 服务门判定）
+        endpoint:
+          anyOf:
+            - $ref: '#/components/schemas/Endpoint'
+            - type: 'null'
+          description: ready 后回填的权威 Endpoint（平台据此注入公共参数）
+        queue:
+          type: object
+          additionalProperties: true
+          description: |
+            队列水位 `{phase,pending,inqueue,running}`（D-46）——**只有计数，没有位次**；
+            跨集群/队列的完整水位见 `GET /api/v1/queue-status` 的 `volcano` 块
+        accepted_at:
+          $ref: '#/components/schemas/NullDateTime'
+        ready_at:
+          $ref: '#/components/schemas/NullDateTime'
+        last_polled_at:
+          $ref: '#/components/schemas/NullDateTime'
+        cancel_requested_at:
+          $ref: '#/components/schemas/NullDateTime'
+        failure:
+          anyOf:
+            - $ref: '#/components/schemas/Failure'
+            - type: 'null'
+          description: |
+            部署失败详情：`code ∈ {DEPLOY_FAILED, DEPLOY_BLOCKED}`（D-47）；
+            `detail.reason ∈ {blocked,timeout,superseded,uninstalling,uninstalled}` 保留 Genet 原文
+        uninstall:
+          anyOf:
+            - $ref: '#/components/schemas/DeployUninstall'
+            - type: 'null'
+
+    DeployUninstall:
+      type: object
+      description: |
+        Run 终态后的卸载收口（D-54、`impl/control-plane.md §C-5.7`）：**先落 Run 终态，再事务外卸载**；
+        失败只记 `state=failed` 并写一条 `cleanup.failed` 事件，**不回溯 Run 终态**。
+      required: [state]
+      additionalProperties: true
+      properties:
+        state:
+          type: string
+          enum: [pending, running, verified, skipped, failed]
+          description: |
+            `verified` = `GET /releases/{name}` 返回 404（+ pods 空）已确认删干净；
+            `skipped` = `cleanup.policy=never`（或 `on_failure` 但全部 Task 成功）主动跳过；
+            `failed` = 卸载失败/未通过校验，由对账重试
+        verified_at:
+          $ref: '#/components/schemas/NullDateTime'
+        force:
+          type: boolean
+          description: 是否用 `?force=true` 卸载（accept 同步等待更久）
+        cleanup_errors:
+          type: array
+          description: 卸载过程中的错误（原文，给人看）
+          items:
+            type: string
+
     DeploySnapshot:
       type: object
       description: |
@@ -3029,6 +3137,7 @@ components:
         - attempt.finished
         - deploy.state_changed
         - cleanup.started
+        - cleanup.failed
         - run.finished
         - report.written
         - resync_required

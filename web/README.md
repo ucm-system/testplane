@@ -25,6 +25,13 @@ pnpm preview
 pnpm typecheck  # 只跑 tsc -b
 ```
 
+真实后端用例（`tests/real-api.spec.ts`，至少打 `/healthz` + `/api/v1/runs`，需控制面可访问）：
+
+```bash
+# 先准备控制面（默认 8080；有 port-forward 就覆盖 TESTPLANE_BACKEND）
+VITE_USE_MOCK=0 TESTPLANE_BACKEND=http://127.0.0.1:8080 pnpm exec playwright test tests/real-api.spec.ts
+```
+
 ## 环境变量（`.env.local`，参考 `.env.example`）
 
 | 变量 | 默认 | 说明 |
@@ -59,7 +66,7 @@ src/
 |---|---|---|
 | `/` | 概览：4 个 KPI（进行中 Run / 排队 Task / 成功率 / Tester 数）+ 最近 Run + 排队 Task | `GET /runs`、`GET /testers`、`GET /queue-status` 现算 |
 | `/runs` | Run 列表：状态过滤（服务端 `?status=a,b`）、时间与关键字（本地）、游标分页 | `GET /runs?limit&cursor&status` |
-| `/runs/:id` | Run 详情：概要、执行链路、Deploy 区块（排队位次 / Pod 拓扑 / 参数快照）、Task 摘要列表 + 点开的 Task 详情（Attempt + 日志）、事件流；页头「打开报告」 | `GET /runs/{id}`、`GET /runs/{id}/deploy`、`GET /tasks/{id}`、`GET /tasks/{id}/attempts`、`GET /tasks/{id}/attempts/{idx}/logs`、`GET /runs/{id}/events`(SSE)、`GET /runs/{id}/events/history`、`GET /runs/{id}/report.md`(新窗口) |
+| `/runs/:id` | Run 详情：概要、执行链路、Deploy 区块（水位与原因原文 / Pod 拓扑 / 参数快照；**不展示位次**，D-46）、Task 摘要列表 + 点开的 Task 详情（Attempt + 日志）、事件流；页头「打开报告」 | `GET /runs/{id}`、`GET /runs/{id}/deploy`、`GET /tasks/{id}`、`GET /tasks/{id}/attempts`、`GET /tasks/{id}/attempts/{idx}/logs`、`GET /runs/{id}/events`(SSE)、`GET /runs/{id}/events/history`、`GET /runs/{id}/report.md`(新窗口) |
 | `/submit` | 提交：部署 / 不部署两形态、env + secrets、执行环境 profile、Task 列表（Tester 下拉 + args） | `GET /testers`、`POST /runs?dry_run=true`、`POST /runs` |
 | `/testers` | Tester 目录（只读）+ 详情抽屉（参数 / env 声明） | `GET /testers`、`GET /testers/{name}` |
 | `/clusters` | 集群与队列：集群连通性、平台槽位、Volcano 队列、排队 Task + 等待原因计数 | `GET /clusters`、`GET /queue-status` |

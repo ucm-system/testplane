@@ -290,7 +290,7 @@ func TestClassifyOutcomeFromPods(t *testing.T) {
 				}},
 			}},
 		}}
-		out, terminal := classifyOutcome(nil, pod)
+		out, terminal := classifyOutcome(nil, pod, time.Unix(1_700_000_000, 0))
 		if !terminal || out.Phase != PhaseFailed {
 			t.Fatalf("out = %+v terminal=%v", out, terminal)
 		}
@@ -313,9 +313,13 @@ func TestClassifyOutcomeFromPods(t *testing.T) {
 				}},
 			}},
 		}}
-		out, terminal := classifyOutcome(nil, pod)
-		if !terminal || OutcomeCode(*out) != CodeInternalError {
+		out, terminal := classifyOutcome(nil, pod, time.Unix(1_700_000_000, 0))
+		// Pod 异常终止统一归 EXECUTOR_POD_ERROR（票 #22），不再是笼统的 INTERNAL_ERROR。
+		if !terminal || OutcomeCode(*out) != CodeExecutorPodError {
 			t.Fatalf("out = %+v code=%q", out, OutcomeCode(*out))
+		}
+		if out.K8sReason != "OOMKilled" {
+			t.Fatalf("K8sReason = %q, 期望 OOMKilled（原样保留）", out.K8sReason)
 		}
 	})
 
@@ -328,7 +332,7 @@ func TestClassifyOutcomeFromPods(t *testing.T) {
 				}},
 			}},
 		}}
-		out, terminal := classifyOutcome(nil, pod)
+		out, terminal := classifyOutcome(nil, pod, time.Unix(1_700_000_000, 0))
 		if !terminal || OutcomeCode(*out) != CodeImagePullFailed {
 			t.Fatalf("out = %+v code=%q", out, OutcomeCode(*out))
 		}
@@ -339,7 +343,7 @@ func TestClassifyOutcomeFromPods(t *testing.T) {
 			Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
 			Reason: "DeadlineExceeded", Message: "deadline",
 		}}}}
-		out, terminal := classifyOutcome(job, nil)
+		out, terminal := classifyOutcome(job, nil, time.Unix(1_700_000_000, 0))
 		if !terminal || out.Phase != PhaseTimeout || OutcomeCode(*out) != CodeTaskTimeout {
 			t.Fatalf("out = %+v", out)
 		}
@@ -348,7 +352,7 @@ func TestClassifyOutcomeFromPods(t *testing.T) {
 	t.Run("running pod is not terminal", func(t *testing.T) {
 		job := &batchv1.Job{Status: batchv1.JobStatus{Active: 1}}
 		pod := &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}}
-		if out, terminal := classifyOutcome(job, pod); terminal {
+		if out, terminal := classifyOutcome(job, pod, time.Unix(1_700_000_000, 0)); terminal {
 			t.Fatalf("running pod must not be terminal: %+v", out)
 		}
 	})
@@ -402,4 +406,40 @@ func repeatHex(n int) string {
 		b[i] = alphabet[i%len(alphabet)]
 	}
 	return string(b)
+}
+
+// 票 #31：FinishedAt 必须来自注入时钟（不是直调 time.Now）。
+func TestClassifyOutcomeUsesInjectedClock(t *testing.T) {
+	fixed := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	// Job 终态但没有 CompletionTime（失败/被删）→ 走时钟。
+	job := &batchv1.Job{
+		Status: batchv1.JobStatus{
+			StartTime: &metav1.Time{Time: fixed.Add(-time.Minute)},
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobFailed, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	out, terminal := classifyOutcome(job, nil, fixed)
+	if !terminal {
+		t.Fatal("expected terminal outcome")
+	}
+	if !out.FinishedAt.Equal(fixed) {
+		t.Fatalf("FinishedAt = %v, want %v（必须来自注入时钟）", out.FinishedAt, fixed)
+	}
+
+	// 有 CompletionTime 时以 K8s 事实为准（时钟只兜底）。
+	completed := fixed.Add(-time.Hour)
+	job2 := &batchv1.Job{
+		Status: batchv1.JobStatus{
+			CompletionTime: &metav1.Time{Time: completed},
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	out2, _ := classifyOutcome(job2, nil, fixed)
+	if !out2.FinishedAt.Equal(completed) {
+		t.Fatalf("FinishedAt = %v, want CompletionTime %v", out2.FinishedAt, completed)
+	}
 }

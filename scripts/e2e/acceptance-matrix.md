@@ -20,10 +20,10 @@
 | 11 | 失败策略（abort_run） | 做过 | failure-injection 中 precheck 失败后其余 Task 全部 `skipped(upstream_abort)`，5/5 场景一致 |
 | 12 | Run 编排全链路 | 做过 | succeeded `6H0Y/7RTG`、service_unavailable `B2PB/2NQR/DVNS`、completed_with_errors `ZMMG/AY4Q/PA16`、canceled `1YZW`、failed `G9D5/70V5` 均实测 |
 | 13 | 报告结构 | 做过 | `7RTG` report 662B / report.md 779B，终态后生成；混合 `PA16` counts/failures、deploy `96QQ` 报告均校验 |
-| 14 | 产物持久化 | ✅ | `artifact-persistence-check.ps1` **28/28 PASS**：Run `r-20261105-YZCW` 基线 artifacts **14 条 / 12884 B / result 2 条**，`tasks/t-YBKF7G/attempts/1/result.json` sha256 `5a80014d6d1432b747a45b056e49a1e3905ac2b37877e77959ba72405f05a202`；**服务端两种 path 形态均 200**（artifacts 原始 `r-xxx/...` 与 run 相对形态，sha256 一致，不再依赖客户端剥前缀）；Job/Pod 消失后条目数、总大小、result 数、路径集合与 sha256 **完全一致**；控制面 rollout restart 后 sha256 仍一致；attempt artifacts 可用、Range `bytes=0-9` → **206 + 10B**；不存在 path → 404、`../../etc/passwd` → 400、带前缀 `r-xxx/../../etc/passwd` → 400 |
+| 14 | 产物持久化 | ✅ | `artifact-persistence-check.ps1` **44/44 PASS**：Run `r-20261105-GEEX`（14 条/12999B/result 2 条）；Job/Pod **删前按名记录并断言存在**，hold-until 期间不被删，删后按名复查；两种 `/files` path 形态均 200 且 sha256 一致；控制面 restart 后 sha256 仍一致；Range 206+10B；404/400（含带前缀穿越）负向通过；`kubectl` 失败时 `k8s.pods_query`/`pod.gone` FAIL，不再假通过 |
 | 15 | 失败隔离 | 做过 | `r-20261105-PA16` **11/11**：A 打 mock-llm succeeded、B 打 mock-llm-500 failed；Run `completed_with_errors`；report counts `{total:2,succeeded:1,failed:1}`、failures 非空；Run.error=首个失败 Task（PRECHECK_FAILED） |
 | 16 | Web UI | 做过 | `pnpm --dir web build` 通过；Playwright **3 passed**（`ui-smoke` + 新增 viewer / operator 取消用例；frontend 已提交） |
-| 17 | API 契约与错误码 | 做过 | 规格 **15/15**、实现 **42/42**、合计 **57/57**；设计 50 / openapi 34 / 白名单 16 / openapi 多出设计 0；new endpoints 全部进 live（profiles/artifacts/files/metrics/queue-status volcano/auth 三端点/Tester version） |
+| 17 | API 契约与错误码 | 做过 | 规格 **17/17**、实现 **43/43**、合计 **60/60**；设计 50 / openapi 34 / 白名单 16（每条带 `IMPLEMENTATION.md:439` 指针）/ openapi 多出设计 0；设计基线 50 + 端点集合 sha256；白名单已实现条目判红；fixture 等终态后 `/report` 200、终态 404 必红 |
 
 ## PR #18 收口（2026-11-05 14:20，最终镜像 `sha256:492ff780…`）
 
@@ -31,9 +31,9 @@
 - **#16 Playwright**：`ui-smoke.spec.ts` + viewer/operator 取消用例 → **3 passed**，system Chrome（`channel: chrome`）。
 - **#9 重启演练**：`restart-drill.ps1` → **13/13 PASS**，Run `r-20261105-DD92`，3.3s 恢复；`startup reconcile` 日志出现；Run succeeded、租约/Job 0；负向 `-RecoveryTimeoutSeconds 1` → exit 1。
 - **#3 Genet deploy**：正常 `96QQ` 9/9；blocked `DVNS` 7/7；500 `70V5` 4/4；超窗单测覆盖（genet 72h + 编排层 blocked），端到端不做。
-- **#17 契约**：`go test ./...` PASS；`--mode all` **57/57**（spec 15 + live 42）；设计 50 / openapi 34 / 白名单 16 / openapi 多出设计 0。
+- **#17 契约**：`go test ./...` PASS；`--mode all` **60/60**（spec 17 + live 43）；设计 50 / openapi 34 / 白名单 16（全带指针）/ openapi 多出设计 0；设计基线 50 + sha256，终态 `/report` 200 强制、终态 404 必红。
 - **#1 生命周期**：`run-local.ps1` 默认 MockURL 自动探测（namespace=default）→ `r-20261105-7RTG` **31/31**。
-- **#14 产物持久化**：`artifact-persistence-check.ps1` → **28/28 PASS**，Run `r-20261105-YZCW`；artifacts 14 条/12884B/result 2 条，**原始 `r-xxx/...` 与 run 相对两种 path 形态均 200 且 sha256 一致**；Job/Pod 消失、控制面 restart 后 sha256 仍 `5a8001…`；Range 206+10B、404/400（含带前缀穿越）负向通过。
+- **#14 产物持久化**：`artifact-persistence-check.ps1` → **44/44 PASS**，Run `r-20261105-GEEX`；Job/Pod 删前按名存在、hold-until 生效、删后按名复查；两种 path 形态 200 且 sha256 一致；restart 后仍一致；Range 206+10B、404/400（含带前缀穿越）负向通过；fake kubectl 时 `pod.gone` FAIL。
 - **环境收尾**：configmap 已还原 `TESTPLANE_GENET_BASE_URL=http://host.docker.internal:18091`、`TESTPLANE_DEPLOY_TIMEOUT=72h`；fake-genet `:18095` 已停。
 
 ## 复跑命令
@@ -75,7 +75,7 @@ pwsh scripts/e2e/failure-injection.ps1          # 需要控制面 + kind executo
 
 取消时延说明：`cancelling → canceled` 走 C-3.5 对账循环（`ReconcileInterval=60s`），最坏约 60s；本次 49.6s 属 tick 相位，不是卡死。若产品要求更快，需要把取消收口挪到 watchdog 或调小 ReconcileInterval。
 
-## 超时路径补充（2026-11-05 11:48，镜像 `0eade6b9…` 后续修复版 / 8095）
+## 超时路径补充（2026-11-05 11:48，镜像 `0eade6b9…` 后续修复版 / 8093）
 
 - `scripts/e2e/timeout-check.ps1`：**14/14 PASS**。
 - `r-20261105-04K3`：`precheck:"off"` + `timeout_seconds=5` + mock-llm-slow。
@@ -86,3 +86,14 @@ pwsh scripts/e2e/failure-injection.ps1          # 需要控制面 + kind executo
   - Job/Pod 已删除，`endpoint_leases` 0。
 - DB 状态分布（收口后）：`service_unavailable 9 / succeeded 9 / canceled 8 / completed_with_errors 4 / failed 1`，无 `cancelling/queued/running` 残留。
 - 判据：`resolved.precheck.injected` 为唯一依据（`precheck:"off"` → false → 全部 Task 走测试语义）；`seq==0` 与 tester role 都不能单独判 Pre-Check。
+
+## 本轮修复回归（2026-11-05 15:10–15:26，镜像 `sha256:093622d5…`）
+
+- **#20 重启/GC**：`restart-drill.ps1` **13/13 PASS**，Run `r-20261105-THES`；控制器恢复 3.4s，终态 succeeded 60.1s，无 Job 残留。GC 真实观察：`r-20261105-GEEX` 的 Job `tp-t-60azqr-a1` 年龄 16s（<1h），终态后仍存在；`testplane.io/hold-until` 打到未来 10min 时未被 GC/正常清理删除；25h 分支由 `gc_test.go` 单测覆盖。
+- **#21 契约门禁**：`--mode all` **60/60**（spec 17 + live 43）；`r-20261105-BKH5` fixture 终态 **succeeded 7.1s**，`/report`、`/report.md` 均 200；设计 50 / openapi 34 / 白名单 16，基线 count=50 + sha256。
+- **#22 Deploy 错误码**：正常 `r-20261105-R4KG` **9/9**；blocked `r-20261105-K96J` **7/7**（`DEPLOY_BLOCKED`）；failure `r-20261105-5FBY` **4/4**（`DEPLOY_FAILED`、`retryable=false`、`cleanup.failed=2`）。
+- **#29 脚本门禁**：
+  - `artifact-persistence-check.ps1` 默认（delayed mock）**44/44 PASS**，Run `r-20261105-GEEX`；Job `tp-t-60azqr-a1` 删除前按名存在、hold-until 生效、删除后按名消失，Pod 按名复查；
+  - fake `kubectl`（exit 1）时 `k8s.pods_query`/`pod.gone` **FAIL**，脚本 exit 1，不再“查询失败反而 PASS”；
+  - 基线 hash 被改成 `deadbeef` 时 spec **16/17 FAIL**；白名单塞入已实现 `GET /api/v1/runs` 时 `spec.allow_missing_not_implemented` **FAIL**；
+  - Playwright 真实后端 `tests/real-api.spec.ts`（`VITE_USE_MOCK=0`）**1 passed**：`/healthz` 200、`/api/v1/runs` 200 且非空、`/runs` 列表渲染非空。

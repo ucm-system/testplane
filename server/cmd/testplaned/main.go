@@ -368,6 +368,7 @@ func newLogger(level string) *slog.Logger {
 	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lv})
 	return slog.New(h)
 }
+
 // buildDeployer 按 TESTPLANE_DEPLOY_PROVIDER 选 Deploy 阶段实现：
 //   - mock（默认）：internal/genet/mocks，kind E2E 用，不联网；
 //   - genet：真实 Genet OpenAPI 客户端（execution §9），凭据/端点全部来自配置。

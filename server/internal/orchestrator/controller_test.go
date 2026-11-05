@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,7 +16,9 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/executor"
@@ -36,10 +39,19 @@ type fakeExec struct {
 	deleted    []ports.JobHandle
 	deleteErr  error
 	submitErr  error
+	// onDelete 在 Delete 真正执行前被调用（票 #20-7：用来断言"删 Job 时库里 Attempt 已终态"）。
+	onDelete func() error
+	// holdActive 为 true 时 HoldActive 返回 true（hold-until 守卫用例）。
+	holdActive bool
 }
 
 // Delete 记录正常结束后的回收调用（execution §6）。
 func (f *fakeExec) Delete(ctx context.Context, h ports.JobHandle, policy ports.DeletePolicy) error {
+	if f.onDelete != nil {
+		if err := f.onDelete(); err != nil {
+			return err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.deleteErr != nil {
@@ -377,9 +389,9 @@ func TestPrecheckFailureAbortsRunAsServiceUnavailable(t *testing.T) {
 
 	// Pre-Check 以"可重试"错误失败 → 其余 skipped(upstream_abort)、Run service_unavailable（C-5.8 第 4 条）。
 	if err := c.JobFinished(ctx, ports.JobOutcome{
-		Handle: ports.JobHandle{JobName: executor.Naming("r-1", "t-0", 1)},
-		Phase:  executor.PhaseFailed,
-		Message: executor.CodeImagePullFailed + ": fake failure",
+		Handle:     ports.JobHandle{JobName: executor.Naming("r-1", "t-0", 1)},
+		Phase:      executor.PhaseFailed,
+		Message:    executor.CodeImagePullFailed + ": fake failure",
 		FinishedAt: time.Now(),
 	}); err != nil {
 		t.Fatal(err)
@@ -1503,6 +1515,22 @@ func TestFinishedAttemptDeletesJob(t *testing.T) {
 			if tc.phase == executor.PhaseFailed {
 				exit = 1
 			}
+			// 票 #20-7：在 Delete 里断言"库里 Attempt 已终态"（而不是只看 Task 状态）。
+			exec.onDelete = func() error {
+				repos.mu.Lock()
+				defer repos.mu.Unlock()
+				if len(repos.attempts) != 1 {
+					return fmt.Errorf("attempts = %d, want 1", len(repos.attempts))
+				}
+				for id, a := range repos.attempts {
+					switch a.Status {
+					case domain.AttemptSucceeded, domain.AttemptFailed, domain.AttemptCanceled:
+					default:
+						return fmt.Errorf("attempt %s 在 Delete 时还不是终态：%s", id, a.Status)
+					}
+				}
+				return nil
+			}
 			if err := c.JobFinished(context.Background(), ports.JobOutcome{
 				Handle:   ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
 				Phase:    tc.phase,
@@ -1557,10 +1585,22 @@ func TestDeleteFailureDoesNotAffectStatus(t *testing.T) {
 }
 
 // GC 开关：JobGCEnabled=false 时一次都不扫。
+// GC 开关：JobGCEnabled=false 时用**真实 Executor**，断言一次 List 都没发生（票 #20-7）。
 func TestGCOnceDisabledByConfig(t *testing.T) {
 	off := false
+	cs := fake.NewSimpleClientset()
+	listCalls := 0
+	cs.PrependReactor("list", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		listCalls++
+		return false, nil, nil
+	})
+	cs.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		listCalls++
+		return false, nil, nil
+	})
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{})
 	c, err := New(Options{
-		Repos: NewMemoryRepos(), Executor: &fakeExec{},
+		Repos: NewMemoryRepos(), Executor: ex,
 		Config: Config{JobGCEnabled: &off},
 	})
 	if err != nil {
@@ -1572,11 +1612,15 @@ func TestGCOnceDisabledByConfig(t *testing.T) {
 	if err := c.GCOnce(context.Background()); err != nil {
 		t.Fatalf("GCOnce: %v", err)
 	}
+	if listCalls != 0 {
+		t.Fatalf("List calls = %d, want 0（开关关掉时不许扫 K8s）", listCalls)
+	}
 }
 
-// GC 默认开启，且默认周期 10min（execution §6.3）。
+// GC 默认开启，默认周期 10min，默认超时 2min（execution §6.3、票 #20-4）。
 func TestGCDefaults(t *testing.T) {
-	c, err := New(Options{Repos: NewMemoryRepos(), Executor: &fakeExec{}})
+	// 显式给 config，不依赖环境变量（票 #20-7）。
+	c, err := New(Options{Repos: NewMemoryRepos(), Executor: &fakeExec{}, Config: Config{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1586,9 +1630,62 @@ func TestGCDefaults(t *testing.T) {
 	if got := c.Config().GCInterval; got != DefaultGCInterval {
 		t.Errorf("GCInterval = %v, want %v", got, DefaultGCInterval)
 	}
+	if DefaultGCInterval != 10*time.Minute {
+		t.Errorf("DefaultGCInterval = %v, want 10m（execution §6.3）", DefaultGCInterval)
+	}
+	if GCOnceTimeout != 2*time.Minute {
+		t.Errorf("GCOnceTimeout = %v, want 2m", GCOnceTimeout)
+	}
 }
 
-// ---- #14：Pre-Check 判据只用 IsPrecheck（resolved.precheck.injected && seq==0）----
+// hold-until 未过期时，终态 Attempt 的 Job 不能被删（票 #20-1：日志 follower 未收尾）。
+func TestFinalizeSkipsHeldJob(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	exec := &fakeExec{holdActive: true}
+	c, err := New(Options{Repos: repos, Executor: exec, Config: Config{StorageRoot: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.JobFinished(context.Background(), ports.JobOutcome{
+		Handle: ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+		Phase:  executor.PhaseSucceeded,
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture()
+	if got := exec.deleteCount(); got != 0 {
+		t.Fatalf("Delete calls = %d, want 0（hold-until 未过期时不许删）", got)
+	}
+}
+
+// GCOnce 用**批量**查询拿 Attempt 状态（票 #20-5：不是 N+1）。
+func TestGCOnceUsesBatchAttemptStates(t *testing.T) {
+	repos := &batchSpyRepos{MemoryRepos: NewMemoryRepos()}
+	cs := fake.NewSimpleClientset()
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{})
+	c, err := New(Options{Repos: repos, Executor: ex, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.GCOnce(context.Background()); err != nil {
+		t.Fatalf("GCOnce: %v", err)
+	}
+	if repos.calls > 1 {
+		t.Fatalf("AttemptStatesByJobNames calls = %d, want <=1（一次批量）", repos.calls)
+	}
+}
+
+// batchSpyRepos 统计批量查询次数。
+type batchSpyRepos struct {
+	*MemoryRepos
+	calls int
+}
+
+func (b *batchSpyRepos) AttemptStatesByJobNames(ctx context.Context, jobNames []string) (map[string]executor.AttemptState, error) {
+	b.calls++
+	return b.MemoryRepos.AttemptStatesByJobNames(ctx, jobNames)
+}
 
 // precheck: off 时门控不生效：所有 Task 直接放行。
 func TestQueueAfterTestingWithoutPrecheckQueuesAll(t *testing.T) {
@@ -2073,4 +2170,157 @@ func TestDeployReleaseNameMatchesGenet(t *testing.T) {
 			t.Errorf("DeployReleaseName(%s,%s) = %s, genet = %s", tc[0], tc[1], got, want)
 		}
 	}
+}
+
+// HoldActive 让 fakeExec 实现 ports.JobHolder（hold-until 守卫用例）。
+func (f *fakeExec) HoldActive(ctx context.Context, h ports.JobHandle) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.holdActive, nil
+}
+
+// ---- #28：卸载收口必须尊重 cleanup_policy --------------------------------
+
+// never + Run 成功 → 不调用 Deployer.Cancel，uninstall.state=skipped。
+func TestCleanupPolicyNeverSkipsUninstall(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunSucceeded, HasDeploy: true, CleanupPolicy: "never",
+		SubmittedAt: time.Now(), DeployJSON: json.RawMessage(`{"release_name":"tp-never","state":"ready"}`),
+	})
+	dep := &fakeDeployer{}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+	c.cleanupDeploy(context.Background(), "r-1")
+
+	dep.mu.Lock()
+	cancels := dep.cancels
+	dep.mu.Unlock()
+	if cancels != 0 {
+		t.Fatalf("deployer.Cancel calls = %d, want 0（cleanup_policy=never）", cancels)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	doc := deployDoc(t, run)
+	u, _ := doc["uninstall"].(map[string]any)
+	if u == nil || u["state"] != domain.UninstallSkipped {
+		t.Fatalf("uninstall = %v, want state=skipped", doc["uninstall"])
+	}
+}
+
+// on_failure + 全部 Task 成功 → 不卸载（skipped）。
+func TestCleanupOnFailureAllSucceededSkips(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunSucceeded, HasDeploy: true, CleanupPolicy: "on_failure",
+		SubmittedAt: time.Now(), DeployJSON: json.RawMessage(`{"release_name":"tp-ok","state":"ready"}`),
+	})
+	repos.SeedTask(TaskView{ID: "t-1", RunID: "r-1", Seq: 0, Name: "a", Status: domain.TaskSucceeded})
+	dep := &fakeDeployer{}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+	c.cleanupDeploy(context.Background(), "r-1")
+
+	dep.mu.Lock()
+	cancels := dep.cancels
+	dep.mu.Unlock()
+	if cancels != 0 {
+		t.Fatalf("deployer.Cancel calls = %d, want 0（on_failure 且全成功）", cancels)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	u, _ := deployDoc(t, run)["uninstall"].(map[string]any)
+	if u == nil || u["state"] != domain.UninstallSkipped {
+		t.Fatalf("uninstall = %v, want skipped", deployDoc(t, run)["uninstall"])
+	}
+}
+
+// on_failure + 有失败的 Task → 必须卸载。
+func TestCleanupOnFailureWithFailedTaskUninstalls(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunCompletedWithErrors, HasDeploy: true, CleanupPolicy: "on_failure",
+		SubmittedAt: time.Now(), DeployJSON: json.RawMessage(`{"release_name":"tp-bad","state":"ready"}`),
+	})
+	repos.SeedTask(TaskView{ID: "t-1", RunID: "r-1", Seq: 0, Name: "a", Status: domain.TaskSucceeded})
+	repos.SeedTask(TaskView{ID: "t-2", RunID: "r-1", Seq: 1, Name: "b", Status: domain.TaskFailed})
+	dep := &fakeDeployer{}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+	c.cleanupDeploy(context.Background(), "r-1")
+
+	dep.mu.Lock()
+	cancels := dep.cancels
+	dep.mu.Unlock()
+	if cancels != 1 {
+		t.Fatalf("deployer.Cancel calls = %d, want 1（有失败 Task → 必须卸载）", cancels)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	u, _ := deployDoc(t, run)["uninstall"].(map[string]any)
+	if u == nil || u["state"] != domain.UninstallVerified {
+		t.Fatalf("uninstall = %v, want verified", deployDoc(t, run)["uninstall"])
+	}
+}
+
+// canceled 终态也必须进收口队列（对账列表覆盖 canceled）。
+func TestCleanupPendingIncludesCanceled(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunCanceled, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now(), DeployJSON: json.RawMessage(`{"release_name":"tp-c","state":"ready"}`),
+	})
+	pending, err := repos.ListDeployCleanupPending(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1（canceled 也要收口）", len(pending))
+	}
+}
+
+// 票 #31 端到端：Attempt 的 finished_at 落库值必须跟随注入时钟（拨到过去 → 落库也是过去）。
+//
+// 这条**只验时钟**；异步日志落盘是 `finalizeAttemptAsync` 的副作用（Windows 上会与
+// t.TempDir 清理抢），所以输出根目录用独立临时目录 + 带重试的清理，并在断言前等收尾。
+func TestAttemptFinishedAtFollowsInjectedClock(t *testing.T) {
+	fixed := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	clock := domain.NewFixedClock(fixed)
+	ex := executor.NewWithNamespace(fake.NewSimpleClientset(), "testplane", executor.Options{Clock: clock})
+	storage := tempDirNoRace(t)
+	c, err := New(Options{Repos: repos, Executor: ex, Config: Config{StorageRoot: storage}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.JobFinished(context.Background(), ports.JobOutcome{
+		Handle:     ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+		Phase:      executor.PhaseSucceeded,
+		FinishedAt: clock.Now(),
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture() // 等异步日志落盘收尾，避免与临时目录清理抢
+	repos.mu.Lock()
+	defer repos.mu.Unlock()
+	for id, a := range repos.attempts {
+		if !a.FinishedAt.Equal(fixed) {
+			t.Fatalf("attempt %s finished_at = %v, want %v（注入时钟）", id, a.FinishedAt, fixed)
+		}
+	}
+}
+
+// tempDirNoRace 造一个"允许异步写入后再删"的临时目录（Windows 上 RemoveAll 会被
+// 异步日志落盘抢成 "The directory is not empty"，所以清理带重试）。
+func tempDirNoRace(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "testplane-attempts-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() {
+		for i := 0; i < 20; i++ {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Logf("WARN: temp dir not removed: %s", dir)
+	})
+	return dir
 }

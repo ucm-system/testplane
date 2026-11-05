@@ -39,8 +39,8 @@ type DeploySnapshot struct {
 	ReadyAt      *time.Time `json:"ready_at,omitempty"`
 	LastPolledAt *time.Time `json:"last_polled_at,omitempty"`
 	// ---- 失败 / 取消 / 卸载 ----
-	Failure           *Failure        `json:"failure,omitempty"`
-	CancelRequestedAt *time.Time      `json:"cancel_requested_at,omitempty"`
+	Failure           *Failure         `json:"failure,omitempty"`
+	CancelRequestedAt *time.Time       `json:"cancel_requested_at,omitempty"`
 	Uninstall         *DeployUninstall `json:"uninstall,omitempty"`
 }
 
@@ -58,6 +58,7 @@ const (
 	UninstallRunning  = "running"  // DELETE 已发出，等确认
 	UninstallVerified = "verified" // GET 404（且 pods 为空）已确认删干净
 	UninstallFailed   = "failed"   // DELETE 失败或校验未过，等对账重试
+	UninstallSkipped  = "skipped"  // 按 cleanup_policy 决定不卸载（never / on_failure 且全部成功）
 )
 
 // EventCleanupFailed 是清理失败的事件类型（state_events.type，03-data-view §4.6）。
@@ -65,10 +66,10 @@ const EventCleanupFailed = "cleanup.failed"
 
 // DeployUninstall 是清理收口的记录（§9.7）。
 type DeployUninstall struct {
-	State         string   `json:"state"` // pending | running | verified | failed
+	State         string     `json:"state"` // pending | running | verified | failed
 	VerifiedAt    *time.Time `json:"verified_at,omitempty"`
-	Force         bool     `json:"force"`
-	CleanupErrors []string `json:"cleanup_errors"`
+	Force         bool       `json:"force"`
+	CleanupErrors []string   `json:"cleanup_errors"`
 }
 
 // QueueSnapshot 与 DeployQueue 的差别：QueueSnapshot 是"一次 Poll 的结果"，

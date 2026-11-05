@@ -75,21 +75,22 @@ func parseArgs(argv []string) (Options, error) {
 	fs.SetOutput(io.Discard)
 
 	var (
-		specPath     = fs.String("spec", "", "openapi.yaml 路径")
-		designPath   = fs.String("design", "", "设计端点目录（07-api.md）")
-		allowMissing = fs.String("allow-missing", "", "“设计有、实现无”的白名单文件；none 关闭")
-		baseURL      = fs.String("base-url", "http://127.0.0.1:8080", "控制面地址")
-		user         = fs.String("user", "dev", "dev 模式身份")
-		token        = fs.String("token", "", "显式 Bearer")
-		noAuth       = fs.Bool("no-auth", false, "不发 Authorization")
-		mode         = fs.String("mode", "all", "spec | live | all")
-		manifest     = fs.String("manifest", "", "fixture Run 的 Manifest 文件")
-		mockURL      = fs.String("mock-url", "http://127.0.0.1:18080/v1", "mock-llm base URL")
-		profile      = fs.String("profile", "k8s-npu", "execution.profile")
-		runName      = fs.String("name", "", "fixture Run 名")
-		timeout      = fs.Duration("timeout", 2*time.Minute, "实现侧总超时")
-		jsonOut      = fs.String("json-out", "", "机器可读结果另存文件")
-		verbose      = fs.Bool("verbose", false, "打印每个 HTTP 请求")
+		specPath      = fs.String("spec", "", "openapi.yaml 路径")
+		designPath    = fs.String("design", "", "设计端点目录（07-api.md）")
+		allowMissing  = fs.String("allow-missing", "", "“设计有、实现无”的白名单文件；none 关闭")
+		baseURL       = fs.String("base-url", "http://127.0.0.1:8080", "控制面地址")
+		user          = fs.String("user", "dev", "dev 模式身份")
+		token         = fs.String("token", "", "显式 Bearer")
+		noAuth        = fs.Bool("no-auth", false, "不发 Authorization")
+		mode          = fs.String("mode", "all", "spec | live | all")
+		manifest      = fs.String("manifest", "", "fixture Run 的 Manifest 文件")
+		mockURL       = fs.String("mock-url", "http://127.0.0.1:18080/v1", "mock-llm base URL")
+		profile       = fs.String("profile", "k8s-npu", "execution.profile")
+		runName       = fs.String("name", "", "fixture Run 名")
+		timeout       = fs.Duration("timeout", 2*time.Minute, "实现侧总超时")
+		jsonOut       = fs.String("json-out", "", "机器可读结果另存文件")
+		verbose       = fs.Bool("verbose", false, "打印每个 HTTP 请求")
+		printBaseline = fs.Bool("print-design-baseline", false, "只打印设计端点基线（count+sha256）")
 	)
 
 	if err := fs.Parse(argv); err != nil {
@@ -103,21 +104,22 @@ func parseArgs(argv []string) (Options, error) {
 	}
 
 	opts := Options{
-		SpecPath:     *specPath,
-		DesignPath:   *designPath,
-		AllowMissing: *allowMissing,
-		BaseURL:      strings.TrimRight(*baseURL, "/"),
-		User:         *user,
-		Token:        *token,
-		NoAuth:       *noAuth,
-		Mode:         *mode,
-		Manifest:     *manifest,
-		MockURL:      *mockURL,
-		Profile:      *profile,
-		RunName:      *runName,
-		Timeout:      *timeout,
-		JSONOut:      *jsonOut,
-		Verbose:      *verbose,
+		SpecPath:            *specPath,
+		DesignPath:          *designPath,
+		AllowMissing:        *allowMissing,
+		BaseURL:             strings.TrimRight(*baseURL, "/"),
+		User:                *user,
+		Token:               *token,
+		NoAuth:              *noAuth,
+		Mode:                *mode,
+		Manifest:            *manifest,
+		MockURL:             *mockURL,
+		Profile:             *profile,
+		RunName:             *runName,
+		Timeout:             *timeout,
+		JSONOut:             *jsonOut,
+		Verbose:             *verbose,
+		PrintDesignBaseline: *printBaseline,
 	}
 	if opts.SpecPath == "" {
 		opts.SpecPath = DefaultSpecPath()

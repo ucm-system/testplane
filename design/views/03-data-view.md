@@ -56,7 +56,7 @@ erDiagram
 | `manifest` | jsonb | 否 | 创建 | 提交原文快照；之后**只读** |
 | `resolved` | jsonb | 否 | 创建 | 解析结果（precheck、argv、timeout）；之后只读 |
 | `endpoint` | jsonb | 是 | Deploy ready / service 提交 | 投影来源；`key` 用于互斥 |
-| `deploy` | jsonb | 是 | Deploy 阶段 | `state`/位次/`queued_at`；终态后只读 |
+| `deploy` | jsonb | 是 | Deploy 阶段 | `state`/`release_name`/两根轴原值/水位/`queued_at`（**无位次**，D-46）；终态后只读 |
 | `cleanup_policy` | text | 否 | 创建 | 只决定卸载，不决定保留期（G-13） |
 | `submitted_by` | text | 否 | 创建 | 身份源 subject；审计用 |
 | `submitted_at` | timestamptz | 否 | 创建 | 排序键（列表按它倒序） |

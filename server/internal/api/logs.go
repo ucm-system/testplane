@@ -14,6 +14,7 @@ import (
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 )
+
 // handleAttemptLogs 是 GET /api/v1/tasks/{id}/attempts/{idx}/logs。
 //
 // MVP 没有 collector 角色，日志直接读 PVC 上的文件（C-7.5 的"不整文件入内存"约束照旧）：
@@ -67,10 +68,10 @@ func (s *Server) handleAttemptLogs(w http.ResponseWriter, r *http.Request) {
 	files := pickLogFiles(dir, stream)
 	if len(files) == 0 {
 		fail(w, r, http.StatusNotFound, domain.CodeNotFound, "日志尚未产出", map[string]any{
-			"reason":    "log_not_ready",
-			"task_id":   task.ID,
+			"reason":      "log_not_ready",
+			"task_id":     task.ID,
 			"attempt_idx": idx,
-			"stream":    stream,
+			"stream":      stream,
 		}, true)
 		return
 	}

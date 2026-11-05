@@ -128,17 +128,17 @@ type Release struct {
 
 // CallInfo 是后端自己算的调用信息（字段名以 Genet 后端 models/helm.go 为准）。
 type CallInfo struct {
-	Endpoint   *Endpoint  `json:"endpoint"`
-	ServiceName string    `json:"serviceName"`
-	Namespace  string     `json:"namespace"`
-	Port       int        `json:"port"`
-	ClusterURL string     `json:"clusterURL"`
-	Model      string     `json:"model"`
-	External   []External `json:"external"`
-	RouterRequired bool   `json:"routerRequired"`
-	RouterAddress  string `json:"routerAddress"`
-	RouterURL      string `json:"routerURL"`
-	RouterMessage  string `json:"routerMessage"`
+	Endpoint       *Endpoint  `json:"endpoint"`
+	ServiceName    string     `json:"serviceName"`
+	Namespace      string     `json:"namespace"`
+	Port           int        `json:"port"`
+	ClusterURL     string     `json:"clusterURL"`
+	Model          string     `json:"model"`
+	External       []External `json:"external"`
+	RouterRequired bool       `json:"routerRequired"`
+	RouterAddress  string     `json:"routerAddress"`
+	RouterURL      string     `json:"routerURL"`
+	RouterMessage  string     `json:"routerMessage"`
 }
 
 // Endpoint 是 callInfo.endpoint：**地址解析结果**，不代表能推理（§9.4）。
@@ -164,17 +164,17 @@ type External struct {
 // Pod 是 release 下的 Pod 视图。字段名以 models.HelmReleasePodDTO 的常见 JSON 为准，
 // 缺字段不影响就绪合成（Pod Ready 只用于展示与日志发现，不参与 endpoint 决策）。
 type Pod struct {
-	Name          string `json:"name"`
-	Namespace     string `json:"namespace"`
-	Phase         string `json:"phase"`
-	Status        string `json:"status"`
-	NodeName      string `json:"nodeName"`
-	PodIP         string `json:"podIP"`
-	HostIP        string `json:"hostIP"`
-	Image         string `json:"image"`
-	Ready         bool   `json:"ready"`
-	RestartCount  int    `json:"restartCount"`
-	CreationTime  string `json:"creationTimestamp"`
+	Name         string `json:"name"`
+	Namespace    string `json:"namespace"`
+	Phase        string `json:"phase"`
+	Status       string `json:"status"`
+	NodeName     string `json:"nodeName"`
+	PodIP        string `json:"podIP"`
+	HostIP       string `json:"hostIP"`
+	Image        string `json:"image"`
+	Ready        bool   `json:"ready"`
+	RestartCount int    `json:"restartCount"`
+	CreationTime string `json:"creationTimestamp"`
 }
 
 // PodList 是 `GET /api/open/helm/releases/{name}/pods` 的响应。
@@ -193,10 +193,10 @@ type UninstallResult struct {
 // QueueSnapshot 是队列水位（`GET /api/open/queue` + `/api/open/queue/podgroups`）。
 // **没有位次**：Genet 只给计数（§9.1、§9.10 R2）。
 type QueueSnapshot struct {
-	Enabled   bool      `json:"enabled"`
-	PoolType  string    `json:"poolType"`
-	QueueName string    `json:"queueName"`
-	Queue     *Queue    `json:"queue"`
+	Enabled   bool       `json:"enabled"`
+	PoolType  string     `json:"poolType"`
+	QueueName string     `json:"queueName"`
+	Queue     *Queue     `json:"queue"`
 	PodGroups []PodGroup `json:"podGroups"`
 }
 
@@ -235,23 +235,23 @@ type Condition struct {
 // DeployManifest 是 `ports.DeployRequest.Manifest`（即 `runs.deploy`）里本层需要的字段。
 // 形状与 `views/03-data-view.md §4.4` 一致；缺字段时用默认值兜底但不臆造 values。
 type DeployManifest struct {
-	DeployID     string     `json:"deploy_id"`
-	Provider     string     `json:"provider"`
-	Namespace    string     `json:"namespace"`
-	ReleaseName  string     `json:"release_name"`
-	PackageType  string     `json:"package_type"`
-	Chart        string     `json:"chart"`
-	ChartVersion string     `json:"chart_version"`
-	Values       string     `json:"values"`
-	ValuesDigest string     `json:"values_digest"`
-	TemplatePath string     `json:"template_path"`
-	Image        string     `json:"image"`
-	ModelPath    string     `json:"model_path"`
-	ModelName    string     `json:"model_name"`
+	DeployID     string `json:"deploy_id"`
+	Provider     string `json:"provider"`
+	Namespace    string `json:"namespace"`
+	ReleaseName  string `json:"release_name"`
+	PackageType  string `json:"package_type"`
+	Chart        string `json:"chart"`
+	ChartVersion string `json:"chart_version"`
+	Values       string `json:"values"`
+	ValuesDigest string `json:"values_digest"`
+	TemplatePath string `json:"template_path"`
+	Image        string `json:"image"`
+	ModelPath    string `json:"model_path"`
+	ModelName    string `json:"model_name"`
 	// Parameters 是用户提交的自由参数（`deploy.parameters`）。
 	// 它**不是**渲染结果：只在 values 缺失时序列化成 chart values 兜底（§9.2、§9.11）。
 	Parameters map[string]any `json:"parameters"`
-	Set          []SetValue `json:"set"`
-	NoWait       *bool      `json:"no_wait"`
-	TimeoutSec   int        `json:"helm_timeout_sec"`
+	Set        []SetValue     `json:"set"`
+	NoWait     *bool          `json:"no_wait"`
+	TimeoutSec int            `json:"helm_timeout_sec"`
 }

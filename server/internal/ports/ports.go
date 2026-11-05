@@ -82,7 +82,10 @@ type JobOutcome struct {
 	ExitCode    *int32
 	Message     string
 	ImageDigest string // 从 Pod status.containerStatuses[].imageID 采集（execution §4.3.1）
-	FinishedAt  time.Time
+	// K8sReason 是 Pod 异常终止的 K8s 原文原因（Evicted / OOMKilled / …）。
+	// 只对 EXECUTOR_POD_ERROR 有意义；编排层落进 Failure.detail.k8s_reason。
+	K8sReason  string
+	FinishedAt time.Time
 }
 
 // JobObserver 由编排层实现，执行器在 Job 到终态时回调一次。
@@ -151,6 +154,12 @@ type DeployState struct {
 	Queue *domain.DeployQueue
 	// ObservedAt 是该观测的时间（写 last_polled_at）。
 	ObservedAt time.Time
+}
+
+// JobHolder 是 Executor 的**可选**能力：读取 Job 的 `testplane.io/hold-until` 守卫
+// （日志 follower 未收尾时不许删 Job，execution §6.3）。
+type JobHolder interface {
+	HoldActive(ctx context.Context, h JobHandle) (bool, error)
 }
 
 // DeployCleaner 是 Deployer 的**可选**能力：卸载后校验"删干净"（execution §9.7）。

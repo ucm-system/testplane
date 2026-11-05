@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 )
@@ -103,19 +104,60 @@ func PKCEChallenge(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-// safeReturn 只允许站内相对路径（防开放重定向）；非法值回退到 "/"。
+// allowedReturnPrefixes 是登录后允许回跳的站内路由白名单（07 §2.4）。
+// 白名单比"黑名单式校验"更稳：XSS/开放重定向的变体（反斜杠、URL 编码、协议相对）
+// 只要归一后不以这些前缀开头，就一律回 "/"。
+var allowedReturnPrefixes = []string{
+	"/runs", "/tasks", "/submit", "/clusters", "/testers",
+	"/profiles", "/queue", "/metrics", "/settings", "/reports",
+}
+
+// safeReturn 只允许**站内白名单路由**的相对路径；其它一律 "/"。
+//
+// 关键：先归一化再判断——`\` 与 `%5C` 在浏览器里等价于 `/`（`/\evil.com` 会被
+// 规范化成 `https://evil.com/`），所以必须先把反斜杠换成斜杠、再做解码与解析，
+// 否则白名单判断会被绕过（票 #27-1）。
 func safeReturn(raw string) string {
 	if raw == "" {
 		return "/"
 	}
-	u, err := url.Parse(raw)
-	if err != nil || u.IsAbs() || u.Host != "" || strings.HasPrefix(raw, "//") {
+	// 1) 反斜杠归一（含 URL 编码形态）：浏览器把 \ 当作路径分隔符。
+	norm := strings.ReplaceAll(raw, "\\", "/")
+	for strings.Contains(norm, "%5c") || strings.Contains(norm, "%5C") {
+		norm = strings.ReplaceAll(norm, "%5c", "/")
+		norm = strings.ReplaceAll(norm, "%5C", "/")
+	}
+	// 2) 其它百分号编码解一次，避免 %2f 之类绕过前缀判断。
+	if decoded, err := url.PathUnescape(norm); err == nil {
+		norm = strings.ReplaceAll(decoded, "\\", "/")
+	}
+	// 3) 绝对 URL / 协议相对 / 空 host 一律拒。
+	if strings.HasPrefix(norm, "//") {
 		return "/"
 	}
-	if !strings.HasPrefix(raw, "/") {
+	u, err := url.Parse(norm)
+	if err != nil || u.IsAbs() || u.Host != "" || u.Scheme != "" {
 		return "/"
 	}
-	return raw
+	if !strings.HasPrefix(norm, "/") {
+		return "/"
+	}
+	// 4) 归一化路径（消掉 /a/../b），确保仍以 / 开头；query 保留（如 ?tab=logs）。
+	cleanPath := path.Clean(u.Path)
+	if !strings.HasPrefix(cleanPath, "/") || strings.HasPrefix(cleanPath, "//") {
+		return "/"
+	}
+	// 5) 白名单前缀（按路径段匹配，避免 /runs-evil 命中 /runs）。
+	for _, prefix := range allowedReturnPrefixes {
+		if cleanPath == prefix || strings.HasPrefix(cleanPath, prefix+"/") {
+			out := cleanPath
+			if u.RawQuery != "" {
+				out += "?" + u.RawQuery
+			}
+			return out
+		}
+	}
+	return "/"
 }
 
 // Cookie 构造工具（Secure/SameSite/Path 统一在这里，别处不要手写）。

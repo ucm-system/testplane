@@ -25,6 +25,9 @@ const (
 	CodeMountUnavailable  = "MOUNT_UNAVAILABLE"
 	CodeInternalError     = "INTERNAL_ERROR"
 	CodeExecutorUnavail   = "EXECUTOR_UNAVAILABLE"
+	// CodeExecutorPodError 是 Pod 异常终止（Evicted/OOMKilled/节点驱逐）：
+	// 平台侧错误、可重试；detail.k8s_reason 保留 K8s 原文（票 #22）。
+	CodeExecutorPodError = "EXECUTOR_POD_ERROR"
 )
 
 // 观测相位（ports.JobOutcome.Phase 的取值）。
@@ -96,10 +99,10 @@ func (e *Executor) consumeWatch(ctx context.Context, h ports.JobHandle, obs port
 	}
 	timeout := int64(e.opts.WatchTimeout.Seconds())
 	w, err := e.client.BatchV1().Jobs(ns).Watch(ctx, metav1.ListOptions{
-		FieldSelector:        selector,
-		ResourceVersion:      list.ResourceVersion,
-		TimeoutSeconds:       &timeout,
-		AllowWatchBookmarks:  true,
+		FieldSelector:       selector,
+		ResourceVersion:     list.ResourceVersion,
+		TimeoutSeconds:      &timeout,
+		AllowWatchBookmarks: true,
 	})
 	if err != nil {
 		return false, nil
@@ -196,14 +199,14 @@ func (e *Executor) evaluate(ctx context.Context, h ports.JobHandle) (*ports.JobO
 			return nil, false, fmt.Errorf("%w: %s/%s", ErrJobNotFound, ns, h.JobName)
 		}
 		// Job 已消失但 Pod 还在（少见）：只能按 Pod 事实判。
-		out, terminal := classifyOutcome(nil, pod)
+		out, terminal := classifyOutcome(nil, pod, e.now())
 		if terminal {
 			out.Handle = h
 		}
 		return out, terminal, nil
 	}
 
-	out, terminal := classifyOutcome(job, pod)
+	out, terminal := classifyOutcome(job, pod, e.now())
 	if !terminal {
 		return nil, false, nil
 	}
@@ -212,29 +215,32 @@ func (e *Executor) evaluate(ctx context.Context, h ports.JobHandle) (*ports.JobO
 }
 
 // classifyOutcome 是纯函数：Job 终态优先，Pod 终止原因更细时以 Pod 为准（§4.3）。
-func classifyOutcome(job *batchv1.Job, pod *corev1.Pod) (*ports.JobOutcome, bool) {
+func classifyOutcome(job *batchv1.Job, pod *corev1.Pod, now time.Time) (*ports.JobOutcome, bool) {
 	out := &ports.JobOutcome{Phase: PhaseUnknown}
-	finished := time.Now().UTC()
+	finished := now.UTC()
 	if job != nil {
 		if job.Status.CompletionTime != nil {
 			finished = job.Status.CompletionTime.Time
 		}
 		if job.Status.StartTime != nil && job.Status.CompletionTime == nil && jobTerminal(job) {
-			finished = time.Now().UTC()
+			// 没有 CompletionTime（失败/被删）时用**注入时钟**，不直调 time.Now()（票 #31）。
+			finished = now.UTC()
 		}
 	}
 
 	var (
-		podExit      *int32
-		podReason    string
-		podMessage   string
-		podCode      string
-		podTerminal  bool
-		imageDigest  string
+		podExit     *int32
+		podReason   string
+		podMessage  string
+		podCode     string
+		podTerminal bool
+		imageDigest string
 	)
+	var podK8sReason string
 	if pod != nil {
 		imageDigest = podImageDigest(pod)
 		facts := podFacts(pod)
+		podK8sReason = facts.terminatedReason
 		podExit = facts.exitCode
 		podReason = facts.terminatedReason
 		podMessage = facts.message
@@ -255,7 +261,14 @@ func classifyOutcome(job *batchv1.Job, pod *corev1.Pod) (*ports.JobOutcome, bool
 	// 2. Pod 已终止：以退出码为准（矛盾时 Pod 更细）。
 	if podTerminal {
 		out.Phase = phaseFromPod(podExit, podReason)
-		out.Message = messageFor(out.Phase, podExit, podReason, podMessage)
+		if isPodAbnormalReason(podReason) {
+			// Pod 异常终止（Evicted/OOMKilled/…）：平台侧错误码 + K8s 原文原因（票 #22）。
+			out.Phase = PhaseFailed
+			out.Message = CodeExecutorPodError + ": " + reasonText(podMessage, podReason)
+			out.K8sReason = podK8sReason
+		} else {
+			out.Message = messageFor(out.Phase, podExit, podReason, podMessage)
+		}
 		out.FinishedAt = finished
 		return out, true
 	}
@@ -310,6 +323,18 @@ func jobTerminal(job *batchv1.Job) bool {
 		}
 	}
 	return false
+}
+
+// isPodAbnormalReason 报告 Pod 是否因**平台/节点**原因异常终止。
+// 注意：**Unschedulable 不在此列**（06 §6.9 / 附录 D：仍留排队态，不许判失败）。
+func isPodAbnormalReason(reason string) bool {
+	switch reason {
+	case "Evicted", "OOMKilled", "NodeShutdown", "NodeAffinity", "UnexpectedAdmissionError",
+		"ContainerStatusUnknown", "DeadlineExceeded", "Preempted":
+		return true
+	default:
+		return false
+	}
 }
 
 func phaseFromPod(exit *int32, reason string) string {
@@ -397,7 +422,8 @@ func OutcomeCode(o ports.JobOutcome) string {
 func isKnownCode(code string) bool {
 	switch code {
 	case CodeTesterNonZeroExit, CodeTaskTimeout, CodeImagePullFailed,
-		CodeMountUnavailable, CodeInternalError, CodeExecutorUnavail:
+		CodeMountUnavailable, CodeInternalError, CodeExecutorUnavail,
+		CodeExecutorPodError:
 		return true
 	}
 	return false
@@ -446,11 +472,11 @@ func podImageDigest(pod *corev1.Pod) string {
 
 // podFacts 是 Pod 侧观测的归约结果。
 type podFactsView struct {
-	exitCode       *int32
+	exitCode         *int32
 	terminatedReason string
-	message        string
-	code           string
-	terminal       bool
+	message          string
+	code             string
+	terminal         bool
 }
 
 func podFacts(pod *corev1.Pod) podFactsView {
