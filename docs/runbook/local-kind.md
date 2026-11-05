@@ -1,13 +1,58 @@
-# TestPlane · 本地 kind 环境运行手册（草稿，随用随补）
+# TestPlane · 本地 kind 环境运行手册
 
-> 状态：**草稿**。正式版是 #11「运行手册与验收记录」，这里先攒材料——
-> 每条都是真踩过的，不凭记忆补。踩到新坑直接加一节，别等最后回忆。
-> 环境事实与一次性搭建步骤见 [`deploy/README.md`](../../deploy/README.md)，
-> 本文只记**操作动作 + 坑 + 判据**。
+> 从裸机到一次 Run 跑完的操作手册 + 真踩过的坑。每条都实跑验证过，不凭记忆写。
+> 环境事实与一次性搭建（kind / PG / 存储 / RBAC）见 [`deploy/README.md`](../../deploy/README.md)，
+> 17 项验收结论见 [`acceptance.md`](acceptance.md)，本文只记**操作动作 + 坑 + 判据**。
 
 ---
 
-## 0 日常起停（一台机器上反复做的事）
+## 0 标准重灌动线（改了 server/ 代码后唯一正确的顺序）
+
+五步，顺序不能换：**先建镜像 → 再灌进节点 → 再 apply 清单 → 再拉起副本 → 最后看健康**。
+`kind` 的节点看不到宿主的 docker 镜像库，所以"灌"这一步永远不能省。
+
+```powershell
+# 1 构建（上下文 = 仓库根，别的路径都不对）
+docker build -f deploy/docker/server.Dockerfile -t testplane-server:dev .
+
+# 2 灌进 kind 节点（只覆盖节点 containerd，不影响宿主镜像）
+& .\.tools\kind.exe load docker-image testplane-server:dev --name testplane
+
+# 3 应用清单（基础设施 + 控制面；只想要基础设施用 -k deploy/k8s）
+kubectl --context kind-testplane apply -k deploy/overlays/with-control-plane
+
+# 4 确保副本是 1（有人排障时会 scale 到 0，避免双 controller）
+kubectl --context kind-testplane -n testplane scale deploy/testplaned --replicas=1
+
+# 5 看健康（三条都要过）
+kubectl --context kind-testplane -n testplane rollout status deploy/testplaned --timeout=180s
+kubectl --context kind-testplane -n testplane exec deploy/testplaned -- wget -qO- http://127.0.0.1:8080/healthz
+kubectl --context kind-testplane -n testplane exec deploy/testplaned -- wget -qO- http://127.0.0.1:8080/readyz
+```
+
+**判据**（四条全中才算重灌成功）：
+
+1. `get pods` → `testplaned-xxxx 1/1 Running`；
+2. `logs deploy/testplaned` 里有 `orchestrator: controller started (ns=testplane, concurrency=20, storage=testplane-storage)`；
+3. `/healthz` 与 `/readyz` 都返回 `ok`（`readyz` 含 DB ping + 存储可写 + 迁移版本）；
+4. 节点里镜像是最新的：`docker exec testplane-control-plane crictl images | Select-String testplane-server`。
+
+> 第 4 步不能漏。`kubectl apply`/`rollout` 只保证"新 Pod 用新镜像"，但若之前有人把副本缩到 0，
+> apply 一个 `replicas:1` 的 Deployment 也会拉起来——两条路径都要确认**只有一个** controller，
+> 否则两个 controller 同时 dispatch，Job 会被建两遍。
+
+跑迁移（表结构变了才需要；正常启动不迁移）：
+
+```powershell
+kubectl --context kind-testplane -n testplane apply -f deploy/components/control-plane/migrate-job.yaml
+kubectl --context kind-testplane -n testplane wait --for=condition=complete job/testplaned-migrate --timeout=180s
+kubectl --context kind-testplane -n testplane logs job/testplaned-migrate    # 期望 schema_version=N
+kubectl --context kind-testplane -n testplane delete job testplaned-migrate
+```
+
+---
+
+## 0.1 日常起停（一台机器上反复做的事）
 
 ```powershell
 # 起（Docker Desktop 先起来）
@@ -80,6 +125,45 @@ spec:
 
 ---
 
+## 3.1 ConfigMap 必填项（缺了集群内跑不起来）
+
+`deploy/k8s/configmap.yaml` 里这几行**不是可选优化**，删了就会有功能直接不可用。
+键名以代码实际读取的为准（`server/internal/config/config.go`、`server/internal/genet/mocks/genet.go`）。
+
+| 键 | 值（dev） | 缺了会怎样 |
+|---|---|---|
+| `TESTPLANE_STORAGE_ROOT` | `/storage-root` | 控制面写不了产物（readyz 会报"存储不可写"） |
+| `TESTPLANE_STORAGE_PVC` | `testplane-storage` | Tester Job 渲染失败：`invalid job spec: storage PVC is required for /workspace/output` |
+| `TESTPLANE_TESTERS_DIR` | `/app/testers` | 注册表扫空 → `GET /testers` 空列表，提交直接 `TESTER_NOT_FOUND` |
+| `TESTPLANE_NAMESPACE` | `testplane` | Job 落到错误的 namespace（默认值恰好也是 testplane，但别赌默认） |
+| `TESTPLANE_CLUSTER_NAME` | `cluster-01` | 与启动 seed 的 clusters 行对不上 |
+| `TESTPLANE_K8S_IN_CLUSTER` | `true` | Pod 内去找 kubeconfig，controller 降级（`k8s: no in-cluster config …`，Run 卡 queued） |
+| `TESTPLANE_MOCK_ENDPOINT_URL` | `http://mock-llm.default.svc:18080/v1` | **deploy 形态不可用**：DeployReady 注入的 Endpoint 指向不存在的地址（默认 `mock-llm.testplane.svc:8080`），pre-check 直接 `ENDPOINT_UNREACHABLE` |
+| `MODEL_NAME` / `DEPLOY_MOCK_MODEL_NAME` | `mock-llm` | 注入的 Endpoint 模型名是默认 `mock-model`，与被测服务不匹配 |
+| `DEPLOY_MOCK_DURATION_SECONDS` | `3` | 部署 mock 默认 5s（能用，只是 E2E 慢一点） |
+
+在 kind 里 deploy 形态要跑通，最少就是这三行（mock Genet，`internal/genet/mocks`，D-14）：
+
+```yaml
+TESTPLANE_MOCK_ENDPOINT_URL: "http://mock-llm.default.svc:18080/v1"
+MODEL_NAME: "mock-llm"
+DEPLOY_MOCK_DURATION_SECONDS: "3"
+```
+
+改完 ConfigMap 必须 `rollout restart`（原生清单没有 Helm 的 `checksum/config` 注解，
+env 不会热更新）：
+
+```powershell
+kubectl --context kind-testplane apply -k deploy/overlays/with-control-plane
+kubectl --context kind-testplane -n testplane rollout restart deploy/testplaned
+kubectl --context kind-testplane -n testplane exec deploy/testplaned -- env | Select-String 'MOCK|MODEL|STORAGE'
+```
+
+另有两个 mock 开关，**只用来验证失败/阻塞路径**，平时不要设：
+`DEPLOY_MOCK_FAIL=true`（部署失败 → Run FAILED）、`DEPLOY_MOCK_BLOCKED=true`（卡 blocked）。
+
+---
+
 ## 4 坑：镜像灌进集群（crictl 看不到 / 拉不到）
 
 | 现象 | 原因 | 处理 |
@@ -91,6 +175,8 @@ spec:
 | `docker build` 找不到 `server/go.sum` 之类 | 构建上下文是**仓库根**，路径要写全 | 用 `-f deploy/docker/server.Dockerfile .`（末尾那个 `.` 是仓库根） |
 
 ### 4.1 重打镜像的标准动线（tag 不变时最容易踩）
+
+完整五步见本文 [§0 标准重灌动线](#0-标准重灌动线改了-server-代码后唯一正确的顺序)。这里只强调最容易漏的两点：
 
 ```powershell
 docker build -f deploy/docker/server.Dockerfile -t testplane-server:dev .
@@ -202,10 +288,23 @@ kubectl --context kind-testplane -n testplane create secret generic tp-secret-en
 
 ---
 
-## 8 待补（写正式手册时补）
+## 8 已知偏差与待补
 
-- 一次完整 Run 的验收动线（提交 → PREPARING → RUNNING → 终态 → 产物下载）。
-- 事件与数据库对账（`state_events` vs Pod 状态）。
-- 保留期 sweep 的验证方法。
-- 日志分段（200MiB）的验证方法。
-- 已知偏差表：PVC 名三处不一致（`testplane-storage` 实现值 / 06 §2 `testplane-storage-root` / execution §2.2 `testplane-artifacts`），等文档回写统一。
+### 8.1 已知偏差（实现 vs 设计，等文档回写统一）
+
+| # | 偏差 | 处置 |
+|---|---|---|
+| 1 | 产物 PVC 名：实现是 `testplane-storage`；06 §2 写 `testplane-storage-root`，execution §2.2 示例写 `testplane-artifacts` | 以实现为准（D-41），文档待回写；**不要**照设计文档改清单 |
+| 2 | 提交体只认**嵌套** `run:` 形态；03 §4.1 的平级写法是文档缺陷 | 以 07 §4.1 / D-40 为准 |
+| 3 | 开发种子 `cluster-01` + `k8s-npu` profile 由进程启动时插入（不是 Helm values） | D-42；`TESTPLANE_CLUSTER_NAME` 要和种子对得上 |
+| 4 | 执行环境是宿主 kind + `kind load docker-image`，**没有镜像仓库** | D-43；部署用 digest 的事等有 registry 再说 |
+| 5 | 真 RWX 用单节点 hostPath 模拟（`accessModes: ReadWriteMany` 在单节点下事实成立、跨节点无保证） | 多节点必须换 NFS CSI（06 §5.5） |
+
+### 8.2 待补（做 P1 或写正式运维手册时补）
+
+- Run 级报告与产物索引的验收动线（当前 `/report` 404，见 `acceptance.md` §3）。
+- 取消语义（`cancelling` → Job/Pod 30s 内消失）的验证方法与判据。
+- 失败注入（precheck 必失败 / 一败一成）的标准动作。
+- 事件与数据库对账（`state_events` vs Pod 状态）在杀 controller 场景下的演练。
+- 保留期 sweep（30 天）与日志分段（200MiB）的验证方法。
+- 多节点 / 真 NFS 的切换步骤（StorageClass 替换 + PVC 重绑）。

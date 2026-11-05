@@ -252,6 +252,7 @@ type AttemptFinishResult struct {
 // FinishAttempt 落一次 Attempt 终态并推进 Task / Run（C-5.4、C-5.8）。
 func (s *Store) FinishAttempt(ctx context.Context, in AttemptFinish) (*AttemptFinishResult, error) {
 	out := &AttemptFinishResult{}
+	var finishedRunID string
 	err := s.InTx(ctx, func(tx pgx.Tx) error {
 		taskID := in.TaskID
 		runID := in.RunID
@@ -262,6 +263,7 @@ func (s *Store) FinishAttempt(ctx context.Context, in AttemptFinish) (*AttemptFi
 			}
 			taskID, runID = tid, rid
 		}
+		finishedRunID = runID
 		if _, err := s.Runs.Lock(ctx, tx, runID); err != nil {
 			return err
 		}
@@ -385,6 +387,11 @@ func (s *Store) FinishAttempt(ctx context.Context, in AttemptFinish) (*AttemptFi
 	})
 	if err != nil {
 		return nil, err
+	}
+	// Run 终态已提交：触发报告生成等外部动作（事务内禁止文件 IO）。
+	// 覆盖"最后一个 Attempt 结束 → Run 终态"这条最常见路径（不只 RunMachine.Finish）。
+	if out.RunStatus.IsTerminal() {
+		s.fireRunFinished(finishedRunID)
 	}
 	return out, nil
 }

@@ -3,7 +3,13 @@ package orchestrator
 import (
 	"context"
 	"io"
+
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 	"sync"
+	"strings"
 	"testing"
 	"time"
 
@@ -560,3 +566,319 @@ type testClock struct{ now time.Time }
 
 func (c *testClock) Now() time.Time          { return c.now }
 func (c *testClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
+
+// ---- 对账（C-3.5）单测：Job 缺失 / Job Failed / Job Success ----------------
+
+// seedReconcileFixture 造一个"库里 running、持租约"的僵尸 Task。
+func seedReconcileFixture(repos *MemoryRepos, runID, taskID, endpointKey string) AttemptRef {
+	repos.SeedRun(RunView{
+		ID: runID, Status: domain.RunTesting, CleanupPolicy: "always",
+		Endpoint: &domain.Endpoint{Key: endpointKey, BaseURL: endpointKey + "/v1", ModelName: "m"},
+	})
+	ref := AttemptRef{
+		AttemptID: taskID + "-a1",
+		TaskID:    taskID,
+		RunID:     runID,
+		AttemptNo: 1,
+		JobName:   executor.Naming(runID, taskID, 1),
+	}
+	repos.SeedActiveTask(TaskView{
+		ID: taskID, RunID: runID, Seq: 0, Name: "precheck",
+		TesterName: "endpoint-probe", TesterVersion: "1.0.0", TesterRole: domain.RolePreCheck,
+		Image: "i:1", Entry: "/tester/run.sh", OnFailure: domain.OnFailureAbortRun,
+		Status: domain.TaskRunning, EndpointKey: endpointKey, Exclusive: true, TimeoutSeconds: 900,
+	}, ref, endpointKey, time.Now())
+	return ref
+}
+
+func assertTaskAndLease(t *testing.T, repos *MemoryRepos, taskID string, wantStatus domain.TaskStatus, wantCode string) {
+	t.Helper()
+	task, err := repos.GetTask(context.Background(), taskID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task.Status != wantStatus {
+		t.Fatalf("task status = %s, want %s", task.Status, wantStatus)
+	}
+	if wantCode != "" {
+		if task.Failure == nil || task.Failure.Code != wantCode {
+			t.Fatalf("failure = %+v, want code %s", task.Failure, wantCode)
+		}
+	}
+	if leases := repos.Leases(); len(leases) != 0 {
+		t.Fatalf("endpoint lease must be released, still held: %+v", leases)
+	}
+}
+
+func TestReconcileLostsJobAndReleasesLease(t *testing.T) {
+	repos := NewMemoryRepos()
+	cs := fake.NewSimpleClientset() // 集群里没有这个 Job
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{PollInterval: 20 * time.Millisecond})
+	seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	c, err := New(Options{Repos: repos, Executor: ex, Prober: ex, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	assertTaskAndLease(t, repos, "t-1", domain.TaskFailed, domain.CodeExecutorUnavailable)
+}
+
+func TestReconcileFinishesFailedJob(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+
+	exit := int32(3)
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: ref.JobName, Namespace: "testplane"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{
+				Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
+				Reason: "BackoffLimitExceeded", Message: "Job has reached the specified backoff limit",
+			}},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pod-1", Namespace: "testplane",
+			Labels: map[string]string{executor.LabelManaged: "true", "job-name": ref.JobName},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodFailed,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: exit, Reason: "Error",
+				}},
+			}},
+		},
+	}
+	cs := fake.NewSimpleClientset(job, pod)
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{PollInterval: 20 * time.Millisecond})
+	c, err := New(Options{Repos: repos, Executor: ex, Prober: ex, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	assertTaskAndLease(t, repos, "t-1", domain.TaskFailed, domain.CodeTesterNonzeroExit)
+}
+
+func TestReconcileFinishesSucceededJob(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+
+	now := metav1.Now()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: ref.JobName, Namespace: "testplane"},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{
+				Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+			}},
+			CompletionTime: &now,
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pod-1", Namespace: "testplane",
+			Labels: map[string]string{executor.LabelManaged: "true", "job-name": ref.JobName},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodSucceeded,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				ImageID: "docker-pullable://repo/app@sha256:" + strings.Repeat("ab", 32),
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode: 0, Reason: "Completed",
+				}},
+			}},
+		},
+	}
+	cs := fake.NewSimpleClientset(job, pod)
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{PollInterval: 20 * time.Millisecond})
+	c, err := New(Options{Repos: repos, Executor: ex, Prober: ex, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	assertTaskAndLease(t, repos, "t-1", domain.TaskSucceeded, "")
+}
+
+func TestReconcileLeavesRunningJobAlone(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: ref.JobName, Namespace: "testplane"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	cs := fake.NewSimpleClientset(job)
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{PollInterval: 20 * time.Millisecond})
+	c, err := New(Options{Repos: repos, Executor: ex, Prober: ex, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	task, _ := repos.GetTask(context.Background(), "t-1")
+	if task.Status != domain.TaskRunning {
+		t.Fatalf("running job must not be touched, task = %s", task.Status)
+	}
+	if len(repos.Leases()) != 1 {
+		t.Fatalf("lease must still be held while the job is running")
+	}
+}
+
+func TestReconcileCleansStaleLeaseOfTerminalTask(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{ID: "r-1", Status: domain.RunTesting})
+	repos.SeedTask(TaskView{ID: "t-9", RunID: "r-1", Seq: 1, Status: domain.TaskSucceeded})
+	// 直接塞一条僵尸租约（模拟旧版本/历史遗留）。
+	repos.mu.Lock()
+	repos.leases["t-9"] = "http://ep:8000"
+	repos.mu.Unlock()
+
+	cs := fake.NewSimpleClientset()
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{PollInterval: 20 * time.Millisecond})
+	c, err := New(Options{Repos: repos, Executor: ex, Prober: ex, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	if leases := repos.Leases(); len(leases) != 0 {
+		t.Fatalf("stale lease of a terminal task must be removed: %+v", leases)
+	}
+}
+
+// ---- 结果校验的存储防御（result_dir_missing）-----------------------------
+
+type missingResultValidator struct{ calls int }
+
+func (v *missingResultValidator) Validate(ctx context.Context, runID, taskID, attemptID, outputDir string) *domain.Failure {
+	v.calls++
+	return &domain.Failure{Code: domain.CodeResultMissing, Message: "result.json not found: " + outputDir}
+}
+
+func seedSucceededJob(t *testing.T, repos *MemoryRepos) (AttemptRef, *fake.Clientset) {
+	t.Helper()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	now := metav1.Now()
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: ref.JobName, Namespace: "testplane"},
+		Status: batchv1.JobStatus{
+			Conditions:     []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+			CompletionTime: &now,
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-1", Namespace: "testplane", Labels: map[string]string{
+			executor.LabelManaged: "true", "job-name": ref.JobName,
+		}},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodSucceeded,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+			}},
+		},
+	}
+	return ref, fake.NewSimpleClientset(job, pod)
+}
+
+// 存储没挂（StorageRoot 为空）：不能冤枉成 RESULT_MISSING，保留退出码成功 + WARN。
+func TestReconcileKeepsExitCodeSuccessWhenStorageNotConfigured(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref, cs := seedSucceededJob(t, repos)
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{PollInterval: 20 * time.Millisecond})
+	val := &missingResultValidator{}
+	var warned bool
+	c, err := New(Options{
+		Repos: repos, Executor: ex, Prober: ex, Validator: val,
+		Config: Config{StorageRoot: ""},
+		Logf: func(format string, args ...any) {
+			if strings.Contains(format, "result_dir_missing") {
+				warned = true
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	assertTaskAndLease(t, repos, "t-1", domain.TaskSucceeded, "")
+	if val.calls != 0 {
+		t.Errorf("validator must not run when the storage root is unconfigured")
+	}
+	if !warned {
+		t.Errorf("expected a result_dir_missing warning")
+	}
+	_ = ref
+}
+
+// 存储挂了但 controller 看不到该 attempt 目录：同样保留退出码成功 + WARN。
+func TestReconcileKeepsExitCodeSuccessWhenDirMissing(t *testing.T) {
+	repos := NewMemoryRepos()
+	_, cs := seedSucceededJob(t, repos)
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{PollInterval: 20 * time.Millisecond})
+	val := &missingResultValidator{}
+	var warned bool
+	root := t.TempDir() // 存在，但里面没有 r-1/tasks/t-1/attempts/1
+	c, err := New(Options{
+		Repos: repos, Executor: ex, Prober: ex, Validator: val,
+		Config: Config{StorageRoot: root},
+		Logf: func(format string, args ...any) {
+			if strings.Contains(format, "result_dir_missing") {
+				warned = true
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	assertTaskAndLease(t, repos, "t-1", domain.TaskSucceeded, "")
+	if val.calls != 0 {
+		t.Errorf("validator must not run when the attempt dir is not visible")
+	}
+	if !warned {
+		t.Errorf("expected a result_dir_missing warning")
+	}
+}
+
+// 存储可见但 Tester 没写产物：必须照常判 RESULT_MISSING（产物即事实）。
+func TestReconcileEnforcesResultValidatorWhenDirPresent(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref, cs := seedSucceededJob(t, repos)
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{PollInterval: 20 * time.Millisecond})
+	val := &missingResultValidator{}
+	root := t.TempDir()
+	dir := filepath.Join(root, "r-1", "tasks", "t-1", "attempts", "1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(Options{
+		Repos: repos, Executor: ex, Prober: ex, Validator: val,
+		Config: Config{StorageRoot: root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	assertTaskAndLease(t, repos, "t-1", domain.TaskFailed, domain.CodeResultMissing)
+	if val.calls != 1 {
+		t.Errorf("validator calls = %d, want 1", val.calls)
+	}
+	if ref.JobName == "" {
+		t.Errorf("job name should be set")
+	}
+}

@@ -89,7 +89,7 @@ func (s *Store) effectSkipUnfinished(ctx context.Context, tx pgx.Tx, tr domain.T
 	for _, id := range ids {
 		var cur domain.TaskStatus
 		err := tx.QueryRow(ctx, `
-			UPDATE tasks SET status = 'skipped', status_reason = $2, updated_at = $3
+			UPDATE tasks SET status = 'skipped', status_reason = $2, waiting_reason = NULL, updated_at = $3
 			 WHERE id = $1 AND status IN ('pending','queued')
 			 RETURNING status`, id, reason, at).Scan(&cur)
 		if err != nil {
@@ -145,7 +145,7 @@ func (s *Store) effectCloseActive(ctx context.Context, tx pgx.Tx, tr domain.Tran
 	for _, id := range ids {
 		var curTask domain.TaskStatus
 		err := tx.QueryRow(ctx, `
-			UPDATE tasks SET status = 'canceled', status_reason = $2, cancel_requested = true, updated_at = $3
+			UPDATE tasks SET status = 'canceled', status_reason = $2, cancel_requested = true, waiting_reason = NULL, updated_at = $3
 			 WHERE id = $1 AND status IN ('preparing','running')
 			 RETURNING status`, id, taskReason, at).Scan(&curTask)
 		if err != nil {

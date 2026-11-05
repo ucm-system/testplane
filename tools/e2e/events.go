@@ -228,9 +228,9 @@ func (a *App) validateEvents(events []Event, run *Run) {
 		a.addCheck("events.seq_monotonic", len(bad) == 0, firstN(bad, 5, fmt.Sprintf("seq 严格递增（%d..%d）", events[0].Seq, prev)))
 	}
 
-	// 状态转移合法性
+	// 状态转移合法性（run 级包含 run.state_changed / cleanup.started / run.finished）
 	var transitionBad []string
-	var terminalCount int
+	terminalStatuses := map[string]bool{}
 	lastRunTo := ""
 	typeCount := map[string]int{}
 	var unknownTypes []string
@@ -241,7 +241,7 @@ func (a *App) validateEvents(events []Event, run *Run) {
 		}
 		var kind string
 		switch ev.Type {
-		case "run.state_changed":
+		case "run.state_changed", "cleanup.started", "run.finished":
 			kind = "run"
 		case "task.state_changed":
 			kind = "task"
@@ -249,6 +249,16 @@ func (a *App) validateEvents(events []Event, run *Run) {
 			continue
 		}
 		from, to, ok := ev.Transition()
+		if ev.Type == "run.finished" {
+			// 实现的 run.finished 可能只带 status（没有 from/to）；终态事实以它为准。
+			if to == "" {
+				to = eventStatus(ev)
+			}
+			if from == "" && to != "" {
+				from = "cleanup"
+			}
+			ok = to != ""
+		}
 		who := ev.RunID
 		if ev.TaskID != "" {
 			who = ev.TaskID
@@ -263,7 +273,7 @@ func (a *App) validateEvents(events []Event, run *Run) {
 		if kind == "run" {
 			lastRunTo = to
 			if isTerminalRun(to) {
-				terminalCount++
+				terminalStatuses[to] = true
 			}
 		}
 	}
@@ -283,17 +293,25 @@ func (a *App) validateEvents(events []Event, run *Run) {
 	if typeCount["run.finished"] == 0 {
 		a.warn("缺少 run.finished 事件（C-9.1）；当前实现可能只发 run.state_changed")
 	}
-	if terminalCount > 1 {
-		a.addCheck("events.terminal_once", false, fmt.Sprintf("Run 终态事件出现 %d 次（应只出现一次）", terminalCount))
-	} else {
-		a.addCheck("events.terminal_once", true, "Run 终态事件至多一次")
+	terminalList := make([]string, 0, len(terminalStatuses))
+	for status := range terminalStatuses {
+		terminalList = append(terminalList, status)
+	}
+	sort.Strings(terminalList)
+	switch {
+	case len(terminalList) == 0:
+		a.addCheck("events.terminal_once", false, "事件流里没有 Run 终态事件（run.state_changed/cleanup.started/run.finished 都没有 terminal to）")
+	case len(terminalList) > 1:
+		a.addCheck("events.terminal_once", false, fmt.Sprintf("Run 终态事件出现多个不同目标：%s", strings.Join(terminalList, ", ")))
+	default:
+		a.addCheck("events.terminal_once", true, "Run 终态事件目标唯一："+terminalList[0])
 	}
 	if lastRunTo == "" {
-		a.addCheck("events.final_state", false, "事件流里没有 run.state_changed，无法核对终态")
+		a.addCheck("events.final_state", false, "事件流里没有 run 级状态转移，无法核对终态")
 	} else if lastRunTo != run.Status {
-		a.addCheck("events.final_state", false, fmt.Sprintf("最后一条 run.state_changed 的 to=%s，与 Run 实际终态 %s 不一致", lastRunTo, run.Status))
+		a.addCheck("events.final_state", false, fmt.Sprintf("最后一条 run 级转移的 to=%s，与 Run 实际终态 %s 不一致", lastRunTo, run.Status))
 	} else {
-		a.addCheck("events.final_state", true, "最后一条 run.state_changed 的 to="+lastRunTo)
+		a.addCheck("events.final_state", true, "最后一条 run 级转移的 to="+lastRunTo)
 	}
 
 	// Attempt 事件覆盖（软性）
@@ -425,6 +443,17 @@ func uniqueStrings(in []string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+// eventStatus 读 run.finished 这类事件里可能的 status 字段。
+func eventStatus(ev Event) string {
+	if ev.Payload == nil {
+		return ""
+	}
+	if s, ok := ev.Payload["status"].(string); ok {
+		return s
+	}
+	return ""
 }
 
 // firstN 生成断言 detail：空切片时用 okDetail，否则拼前 n 条。

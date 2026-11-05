@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -112,6 +113,8 @@ type JobProber interface {
 // Controller 是编排主循环：对账 → 调度 → Submit/Watch → 终态推进 → Deploy/取消/超时。
 type Controller struct {
 	repos     Repos
+	// recon 是可选的对了能力（C-3.5）；adapter 未实现时为 nil，对账走 WARN + no-op。
+	recon     ReconcileRepos
 	exec      ports.Executor
 	deployer  ports.Deployer
 	validator ports.ResultValidator
@@ -143,8 +146,13 @@ func New(opts Options) (*Controller, error) {
 			prober = p
 		}
 	}
+	if _, ok := opts.Repos.(ReconcileRepos); !ok {
+		logf("orchestrator: WARN reconcile disabled: Repos adapter lacks ReconcileRepos (ListActiveTasks/AttemptByTask/DeleteLeaseByTask/ListStaleLeases); stale endpoint_leases will not be reclaimed")
+	}
+	recon, _ := opts.Repos.(ReconcileRepos)
 	return &Controller{
 		repos:     opts.Repos,
+		recon:     recon,
 		exec:      opts.Executor,
 		deployer:  opts.Deployer,
 		validator: opts.Validator,
@@ -166,9 +174,17 @@ func (c *Controller) Run(ctx context.Context) error {
 	defer deploy.Stop()
 	watchdog := time.NewTicker(c.cfg.WatchdogInterval)
 	defer watchdog.Stop()
+	reconcile := time.NewTicker(c.cfg.ReconcileInterval)
+	defer reconcile.Stop()
 
 	c.logf("orchestrator: controller started (ns=%s, concurrency=%d, storage=%s)",
 		c.cfg.Namespace, c.cfg.MaxGlobalConcurrency, c.cfg.StoragePVC)
+
+	// 启动即对账：controller 重启后先按 K8s 事实收口"进程死掉的 Attempt"，
+	// 否则旧 Task 会永久占着 endpoint_leases（C-3.5）。
+	if err := c.ReconcileOnce(ctx); err != nil {
+		c.logf("orchestrator: startup reconcile: %v", err)
+	}
 
 	for {
 		select {
@@ -188,8 +204,180 @@ func (c *Controller) Run(ctx context.Context) error {
 			if err := c.WatchdogOnce(ctx); err != nil {
 				c.logf("orchestrator: watchdog: %v", err)
 			}
+		case <-reconcile.C:
+			if err := c.ReconcileOnce(ctx); err != nil {
+				c.logf("orchestrator: reconcile: %v", err)
+			}
 		}
 	}
+}
+
+// ReconcileOnce 是一次对账（C-3.5「重启恢复与对账」，最小可用版）：
+//
+//  1. 枚举 `preparing|running` 的 Task —— 它们在库里"活着"，但执行它的那个进程可能早已退出；
+//  2. 用 `attempts.executor_ref.job` 去 K8s 查 Job：
+//     - Job 不存在 → 任务失联，按 `EXECUTOR_LOST` 收口（不可重试）；
+//     - Job 已终态 → 用观测到的退出码/错误码走 `FinishAttempt`（成功也要过结果校验）；
+//     - Job 仍在跑 → 不动，交给 Watch；
+//  3. 兜底清理：Task 已终态但 `endpoint_leases` 仍有行 → 删租约（幂等）。
+//
+// 关键点：**每一条收口路径都必须释放租约**，否则同 endpoint 的后续任务会永远
+// `waiting_reason=slot_waiting`（本次 P0 缺陷的根因）。
+func (c *Controller) ReconcileOnce(ctx context.Context) error {
+	if c.prober == nil {
+		return nil
+	}
+	if c.recon == nil {
+		return nil
+	}
+	tasks, err := c.recon.ListActiveTasks(ctx, reconcileBatchLimit)
+	if err != nil {
+		return fmt.Errorf("list active tasks: %w", err)
+	}
+	for _, task := range tasks {
+		if err := c.reconcileTask(ctx, task); err != nil {
+			c.logf("orchestrator: reconcile task %s: %v", task.ID, err)
+		}
+	}
+	// 兜底：历史遗留的僵尸租约（Task 已终态/已不存在，租约还在）。
+	stale, err := c.recon.ListStaleLeases(ctx, reconcileBatchLimit)
+	if err != nil {
+		c.logf("orchestrator: list stale leases: %v", err)
+		return nil
+	}
+	for _, taskID := range stale {
+		if err := c.recon.DeleteLeaseByTask(ctx, taskID); err != nil {
+			c.logf("orchestrator: release stale lease %s: %v", taskID, err)
+			continue
+		}
+		c.logf("orchestrator: released stale endpoint lease held by task %s", taskID)
+	}
+	return nil
+}
+
+// reconcileTask 对账单个活跃 Task。
+func (c *Controller) reconcileTask(ctx context.Context, task TaskView) error {
+	attempt, err := c.recon.AttemptByTask(ctx, task.ID)
+	if err != nil {
+		// 库里没有进行中的 Attempt（事务中断/旧版本遗留）：Task 卡在 preparing/running
+		// 但没有可观测对象，直接按 EXECUTOR_LOST 收口并释放租约。
+		if errors.Is(err, domain.ErrNotFound) {
+			return c.finishLostTask(ctx, task, AttemptRef{TaskID: task.ID, RunID: task.RunID})
+		}
+		return err
+	}
+	if attempt.Job() == "" {
+		return c.finishLostTask(ctx, task, attempt)
+	}
+
+	state, err := c.prober.Probe(ctx, ports.JobHandle{Namespace: c.cfg.Namespace, JobName: attempt.Job()})
+	if err != nil {
+		return fmt.Errorf("probe %s: %w", attempt.Job(), err)
+	}
+	switch {
+	case !state.Exists:
+		// Job 已不存在（被 GC、人工删除、或从未创建成功）→ 任务失联。
+		return c.finishLostTask(ctx, task, attempt)
+	case !state.Terminal:
+		// 仍在跑：不动，等 Watch。
+		return nil
+	}
+	return c.finishReconciledAttempt(ctx, task, attempt, state.Outcome)
+}
+
+// finishLostTask 把失联的 Task 收口为 failed(EXECUTOR_UNAVAILABLE)，并释放租约。
+// 附录 D 是闭合枚举（§4.5 不新增码），因此复用"执行层不可用/不可观测"的既有语义，
+// 用 detail.reason=executor_lost 区分具体原因，retryable=false（不是 Tester 的错，重试无意义）。
+func (c *Controller) finishLostTask(ctx context.Context, task TaskView, attempt AttemptRef) error {
+	failure := &domain.Failure{
+		Code:      domain.CodeExecutorUnavailable,
+		Message:   "executor job is gone; the attempt has been reconciled as lost",
+		Retryable: false,
+		Detail: map[string]any{
+			"reason":  "executor_lost",
+			"task_id": task.ID,
+			"job":     attempt.Job(),
+		},
+	}
+	if task.Failure != nil {
+		failure = task.Failure
+	}
+	if attempt.AttemptID == "" {
+		// 没有 Attempt 可收口：直接删租约，避免僵尸占位。
+		if err := c.recon.DeleteLeaseByTask(ctx, task.ID); err != nil {
+			return err
+		}
+		c.logf("orchestrator: task %s had no active attempt; released its lease", task.ID)
+		return nil
+	}
+	_, err := c.repos.FinishAttempt(ctx, FinishInput{
+		AttemptID:  attempt.AttemptID,
+		TaskID:     task.ID,
+		RunID:      task.RunID,
+		Phase:      "failed",
+		Message:    failure.Message,
+		Failure:    failure,
+		FinishedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	c.logf("orchestrator: reconciled lost attempt %s (job %s) -> failed(%s)",
+		attempt.AttemptID, attempt.Job(), failure.Code)
+	// 双保险：即使 FinishAttempt 的实现忘了释放，这里也幂等删一次。
+	return c.recon.DeleteLeaseByTask(ctx, task.ID)
+}
+
+// finishReconciledAttempt 用 K8s 的终态事实收口 Attempt（成功也要过结果校验）。
+func (c *Controller) finishReconciledAttempt(ctx context.Context, task TaskView, attempt AttemptRef, o ports.JobOutcome) error {
+	phase := o.Phase
+	var failure *domain.Failure
+	switch o.Phase {
+	case executor.PhaseSucceeded:
+		if f := c.validateResult(ctx, attempt); f != nil {
+			phase = "failed"
+			failure = f
+		}
+	default:
+		code := executor.OutcomeCode(o)
+		if code == "" {
+			code = domain.CodeInternalError
+		}
+		failure = &domain.Failure{
+			Code:      code,
+			Message:   o.Message,
+			Retryable: domain.Retryable(code),
+			Detail:    map[string]any{"phase": o.Phase, "reconciled": true},
+		}
+		if o.ExitCode != nil {
+			failure.Detail["exit_code"] = *o.ExitCode
+		}
+	}
+
+	out, err := c.repos.FinishAttempt(ctx, FinishInput{
+		AttemptID:   attempt.AttemptID,
+		TaskID:      task.ID,
+		RunID:       task.RunID,
+		Phase:       phase,
+		ExitCode:    o.ExitCode,
+		Message:     o.Message,
+		ImageDigest: o.ImageDigest,
+		Failure:     failure,
+		FinishedAt:  o.FinishedAt,
+	})
+	if err != nil {
+		return err
+	}
+	for _, ref := range out.CancelJobs {
+		c.cancelJobAsync(ctx, ref)
+	}
+	if out.NeedsQueueUnblocked {
+		if _, err := c.repos.QueueTasks(ctx, attempt.RunID, false); err != nil {
+			c.logf("orchestrator: queue after reconciled precheck: %v", err)
+		}
+	}
+	c.logf("orchestrator: reconciled attempt %s (job %s) -> %s", attempt.AttemptID, attempt.Job(), phase)
+	return c.recon.DeleteLeaseByTask(ctx, task.ID)
 }
 
 // DispatchOnce 是一轮调度（C-4.1）：取候选 → 取 permit → 建 Job → 起观测。
@@ -380,13 +568,9 @@ func (c *Controller) JobFinished(ctx context.Context, o ports.JobOutcome) error 
 	switch o.Phase {
 	case executor.PhaseSucceeded:
 		// 退出码 0 之后才读 result.json（execution §8.1）。
-		if c.validator != nil {
-			outputDir := filepath.Join(c.cfg.StorageRoot,
-				filepath.FromSlash(mustSubPath(attempt)))
-			if f := c.validator.Validate(ctx, attempt.RunID, attempt.TaskID, attempt.AttemptID, outputDir); f != nil {
-				phase = "failed"
-				failure = f
-			}
+		if f := c.validateResult(ctx, attempt); f != nil {
+			phase = "failed"
+			failure = f
 		}
 	default:
 		code := executor.OutcomeCode(o)
@@ -434,6 +618,32 @@ func (c *Controller) JobFinished(ctx context.Context, o ports.JobOutcome) error 
 	}
 	_ = task
 	return nil
+}
+
+// validateResult 在"成功"路径上校验产物目录（execution §8.1、C-7.1），并区分两种"读不到"：
+//
+//   - **存储没挂/目录不可见**（StorageRoot 为空，或 controller 里 `os.Stat` 失败）：
+//     这是平台部署问题，不能判 Tester 的 `RESULT_MISSING`；保留"按退出码成功" + WARN
+//     `result_dir_missing`，把问题交给运维而不是冤枉这次测试。
+//   - **存储可用但产物缺失/非法**：原样交给 ResultValidator → `RESULT_MISSING` / `RESULT_INVALID`。
+//
+// 两者在事件与日志里可区分，报告侧也能据此判断"是没跑对还是没挂好"。
+func (c *Controller) validateResult(ctx context.Context, attempt AttemptRef) *domain.Failure {
+	if c.validator == nil {
+		return nil
+	}
+	if c.cfg.StorageRoot == "" {
+		c.logf("orchestrator: WARN result_dir_missing: storage root is not configured; "+
+			"attempt %s kept as exit-code success (no result validation)", attempt.AttemptID)
+		return nil
+	}
+	dir := filepath.Join(c.cfg.StorageRoot, filepath.FromSlash(mustSubPath(attempt)))
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		c.logf("orchestrator: WARN result_dir_missing: attempt dir %q is not visible from the controller; "+
+			"attempt %s kept as exit-code success (no result validation)", dir, attempt.AttemptID)
+		return nil
+	}
+	return c.validator.Validate(ctx, attempt.RunID, attempt.TaskID, attempt.AttemptID, dir)
 }
 
 func mustSubPath(a AttemptRef) string {

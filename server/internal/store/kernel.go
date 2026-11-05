@@ -264,7 +264,8 @@ func (s *Store) applyTask(ctx context.Context, tx pgx.Tx, tr domain.Transition, 
 		   SET status          = $2,
 		       status_reason   = NULLIF($3, ''),
 		       updated_at      = $4,
-		       waiting_reason  = CASE WHEN $2 = 'queued' THEN NULL ELSE waiting_reason END,
+		       waiting_reason  = CASE WHEN $2 IN ('queued','succeeded','failed','canceled','skipped')
+		                              THEN NULL ELSE waiting_reason END,
 		       error           = COALESCE($5, error)
 		 WHERE id = $1 AND status = ANY($6)`,
 		tr.ID, string(to), tr.Reason, at, nullableBytes(errJSON), from)

@@ -21,8 +21,20 @@ type AttemptRef struct {
 	AttemptID string
 	TaskID    string
 	RunID     string
-	AttemptNo int    // 1-based
-	JobName   string // K8s Job 名（tp-<task_id>-a<n>），来自 attempts.executor_ref.job
+	AttemptNo int // 1-based
+	// JobName 是 K8s Job 名（tp-<task_id>-a<n>），来自 attempts.executor_ref.job。
+	JobName string
+	// JobID 是过渡期兼容字段：wire.go 里仍有旧字面量在用。新代码只写 JobName，
+	// 读取一律走 Job()，backend-core 清理完旧字面量后这里可以删。
+	JobID string
+}
+
+// Job 返回实际可用的 K8s Job 名（JobName 优先，兼容旧的 JobID）。
+func (a AttemptRef) Job() string {
+	if a.JobName != "" {
+		return a.JobName
+	}
+	return a.JobID
 }
 
 // RunView 是编排层看到的 Run 快照（不含无关字段）。
@@ -190,17 +202,6 @@ type Repos interface {
 	// ListCancellingRuns 返回处于 cancelling 的 Run（用于兜底收口）。
 	ListCancellingRuns(ctx context.Context, limit int) ([]RunView, error)
 
-	// ---- 对账（C-3.5「重启恢复与对账」）----
-	// ListActiveTasks 返回 status ∈ {preparing, running} 的 Task（对账的输入集合）。
-	ListActiveTasks(ctx context.Context, limit int) ([]TaskView, error)
-	// AttemptByTask 读该 Task 当前进行中的 Attempt（含 executor_ref 里的 Job 名）。
-	AttemptByTask(ctx context.Context, taskID string) (AttemptRef, error)
-	// DeleteLeaseByTask 幂等删除该 Task 的端点租约（C-4.3 的泄漏兜底）。
-	DeleteLeaseByTask(ctx context.Context, taskID string) error
-	// ListStaleLeases 返回"Task 已终态（或已不存在）但租约还在"的 task_id，
-	// 用于清理旧版本/历史遗留的僵尸租约。
-	ListStaleLeases(ctx context.Context, limit int) ([]string, error)
-
 	// ---- 调度 ----
 	// ClaimForExecution 是原子入口：claimed=false 时 reason 为 C-4.7 的等待原因
 	// （slot_waiting / global_limit / precheck_gate ...），编排层写回 waiting_reason 后下轮重试。
@@ -231,4 +232,26 @@ type Repos interface {
 	// ---- 取消 ----
 	RequestCancelRun(ctx context.Context, runID, actor string) (CancelOutcome, error)
 	RequestCancelTask(ctx context.Context, taskID, actor string) (CancelOutcome, error)
+}
+
+// ReconcileRepos 是「重启恢复与对账」（C-3.5）需要的额外查询。它与 Repos 分开声明，
+// 因为对账属于**可选能力**：adapter 还没补齐时 controller 仍能启动（会打显式 WARN，
+// 对账为 no-op），不会把整条链路卡住；补齐后自动生效。
+//
+// backend-core 的 adapter 需实现这 4 个方法（等价 SQL 即可）：
+//
+//	ListActiveTasks(ctx, limit) ([]TaskView, error)   -- tasks WHERE status IN ('preparing','running')
+//	AttemptByTask(ctx, taskID)  (AttemptRef, error)   -- 进行中的 attempt；JobID 取 executor_ref->>'job'
+//	DeleteLeaseByTask(ctx, taskID) error              -- DELETE FROM endpoint_leases WHERE task_id=$1
+//	ListStaleLeases(ctx, limit) ([]string, error)     -- 租约 JOIN tasks，取已终态/已删除的 task_id
+type ReconcileRepos interface {
+	// ListActiveTasks 返回 status ∈ {preparing, running} 的 Task（对账的输入集合）。
+	ListActiveTasks(ctx context.Context, limit int) ([]TaskView, error)
+	// AttemptByTask 读该 Task 当前进行中的 Attempt（含 executor_ref 里的 Job 名）。
+	AttemptByTask(ctx context.Context, taskID string) (AttemptRef, error)
+	// DeleteLeaseByTask 幂等删除该 Task 的端点租约（C-4.3 的泄漏兜底）。
+	DeleteLeaseByTask(ctx context.Context, taskID string) error
+	// ListStaleLeases 返回"Task 已终态（或已不存在）但租约还在"的 task_id，
+	// 用于清理旧版本/历史遗留的僵尸租约。
+	ListStaleLeases(ctx context.Context, limit int) ([]string, error)
 }

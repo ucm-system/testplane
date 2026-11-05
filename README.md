@@ -29,26 +29,44 @@ P0 的完整验收清单是 [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) �
 
 ### 快速开始（本机 Kind，约 10 分钟）
 
-```bash
-# 1. 基础设施：Kind 集群 + PostgreSQL + RWX 存储 + RBAC
-.\.tools\kind.exe create cluster --config deploy/kind/testplane.yaml   # 或 make 目标见 deploy/README.md
-docker run -d --name testplane-pg -p 5432:5432 -e POSTGRES_USER=testplane -e POSTGRES_PASSWORD=testplane -e POSTGRES_DB=testplane postgres:16
+前置：Docker Desktop 在跑、`kubectl` 在 PATH、Python/Go/Node 就绪。命令都在**仓库根**执行（PowerShell）。
+
+```powershell
+# 0. 装 kind 到仓库内（.tools/ 已 gitignore）
+New-Item -ItemType Directory -Force -Path .tools | Out-Null
+Invoke-WebRequest -Uri 'https://kind.sigs.k8s.io/dl/v0.29.0/kind-windows-amd64' -OutFile '.tools\kind.exe' -UseBasicParsing
+
+# 1. 基础设施：Kind 集群（含宿主 .data\storage → 节点 /storage-root 挂载）+ PostgreSQL 16 + 存储 + RBAC
+New-Item -ItemType Directory -Force -Path .data\storage | Out-Null
+& .\.tools\kind.exe create cluster --config deploy\kind\testplane.yaml --wait 180s
+docker volume create testplane-pg-data
+docker run -d --name testplane-pg --restart unless-stopped `
+  -e POSTGRES_DB=testplane -e POSTGRES_USER=testplane -e POSTGRES_PASSWORD=testplane `
+  -e TZ=Asia/Shanghai -p 5432:5432 -v testplane-pg-data:/var/lib/postgresql/data postgres:16-alpine
 kubectl --context kind-testplane apply -k deploy/k8s
 
-# 2. 构建镜像并灌进集群
+# 2. 构建镜像并灌进集群（kind 节点看不到宿主镜像库，必须 kind load）
 make build                                  # 前端产物 + CGO_ENABLED=0 静态二进制
 docker build -f deploy/docker/server.Dockerfile -t testplane-server:dev .
-.\.tools\kind.exe load docker-image testplane-server:dev --name testplane
+& .\.tools\kind.exe load docker-image testplane-server:dev --name testplane
 
-# 3. 起控制面（migrate 由启动自动执行）
+# 3. 起控制面（启动时自动迁移；也可单独跑 migrate Job，见 runbook）
 kubectl --context kind-testplane apply -k deploy/overlays/with-control-plane
+kubectl --context kind-testplane -n testplane scale deploy/testplaned --replicas=1
+kubectl --context kind-testplane -n testplane rollout status deploy/testplaned --timeout=180s
 
-# 4. 提交第一个 Run（被测服务用 tools/mock-llm 顶替）
+# 4. 被测服务（mock LLM 顶替）+ 提交第一个 Run
 kubectl --context kind-testplane apply -f scripts/e2e/kind/mock-llm.yaml
-curl -sS -X POST http://127.0.0.1:8080/api/v1/runs -H 'Authorization: Bearer dev' -H 'Content-Type: application/json' -d '{"run":{"name":"smoke","service":{"url":"http://mock-llm.default.svc:18080/v1","model_name":"mock-llm"},"precheck":"auto","tests":[{"name":"probe","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"}}]}}'
+kubectl --context kind-testplane -n testplane port-forward svc/testplane 8080:8080   # 另开一个终端跑下面的 curl
+curl -sS -X POST http://127.0.0.1:8080/api/v1/runs -H 'Content-Type: application/json' -d '{"run":{"name":"smoke","service":{"url":"http://mock-llm.default.svc:18080/v1","model_name":"mock-llm"},"precheck":"auto","tests":[{"name":"probe","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"}}]}}'
 ```
 
-完整步骤、排障与已知偏差见 [`docs/runbook/local-kind.md`](docs/runbook/local-kind.md)。
+**判据**：`kubectl -n testplane get pods` 里 `testplaned-*` 是 `1/1 Running`；
+`/healthz` 与 `/readyz` 都返回 `ok`；Run 从 `queued` 走到 `succeeded`，两个 Task（precheck + probe）都成功。
+
+改了代码之后重灌集群是**五步**（构建 → load → apply → scale → 验健康），顺序不能换，见
+[`docs/runbook/local-kind.md`](docs/runbook/local-kind.md) §0；排障、ConfigMap 必填项、常见坑也在那里。
+17 项 P0 验收的逐项状态（做过 / mock / 未做 + 证据）见 [`docs/runbook/acceptance.md`](docs/runbook/acceptance.md)。
 
 ## 目录
 

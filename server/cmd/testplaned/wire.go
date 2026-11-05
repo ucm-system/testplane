@@ -260,8 +260,42 @@ func (r *storeRepos) AttemptByJobName(ctx context.Context, jobName string) (orch
 		return orchestrator.AttemptRef{}, err
 	}
 	return orchestrator.AttemptRef{
-		AttemptID: a.ID, TaskID: taskID, RunID: runID, AttemptNo: a.Idx,
+		AttemptID: a.ID, TaskID: taskID, RunID: runID, AttemptNo: a.Idx, JobName: jobName,
 	}, nil
+}
+
+// ListActiveTasks 返回对账输入集合（preparing/running 的 Task）。
+func (r *storeRepos) ListActiveTasks(ctx context.Context, limit int) ([]orchestrator.TaskView, error) {
+	rows, err := r.st.ListActiveTasks(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]orchestrator.TaskView, 0, len(rows))
+	for i := range rows {
+		out = append(out, r.taskView(&rows[i]))
+	}
+	return out, nil
+}
+
+// AttemptByTask 读该 Task 当前进行中的 Attempt（含 executor_ref 里的 Job 名）。
+func (r *storeRepos) AttemptByTask(ctx context.Context, taskID string) (orchestrator.AttemptRef, error) {
+	a, jobName, err := r.st.ActiveAttemptOfTask(ctx, taskID)
+	if err != nil {
+		return orchestrator.AttemptRef{}, err
+	}
+	return orchestrator.AttemptRef{
+		AttemptID: a.ID, TaskID: a.TaskID, AttemptNo: a.Idx, JobName: jobName,
+	}, nil
+}
+
+// DeleteLeaseByTask 幂等删除该 Task 的端点租约（C-4.3 泄漏兜底）。
+func (r *storeRepos) DeleteLeaseByTask(ctx context.Context, taskID string) error {
+	return r.st.Leases.Delete(ctx, nil, taskID)
+}
+
+// ListStaleLeases 返回 Task 已终态（或已不存在）但租约还在的 task_id。
+func (r *storeRepos) ListStaleLeases(ctx context.Context, limit int) ([]string, error) {
+	return r.st.ListStaleLeases(ctx, limit)
 }
 
 func (r *storeRepos) ClaimForExecution(ctx context.Context, req orchestrator.ClaimRequest) (orchestrator.ClaimResult, bool, string, error) {
