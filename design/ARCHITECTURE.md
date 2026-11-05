@@ -49,6 +49,9 @@ TestPlane 是**对内工具**，以下事项已由团队裁决，本文按结论
 |---|---|---|
 | 0.1 | — | 初版设计约束 |
 | 0.2 | 2026-11-03 | 更名为 ARCHITECTURE；删除 Gate 与 `GATE_FAILED`；新增 Task 状态机、Attempt 模型与失败策略；新增 Pre-Check 阶段与 `SERVICE_UNAVAILABLE` 终态；新增 Web UI 章节；细化 `result.json` / Job Spec / `tester.yaml` 三份契约；明确不承诺数据级复现；修正 Task 粒度规则矛盾 |
+| 0.3 | 2026-11-04 | 落地实践后的修订：取消 Blocked 图里的 `PENDING/QUEUED → CANCELED` 箭头（与 §7.6 对齐）；明确 Pre-Check 门控后其余 Task 可并发（不另加串行顺序）；`SERVICE_UNAVAILABLE` 仅限可重试的 Pre-Check 失败；`cleanup.policy` 与产物保留期解耦；Deploy 增加排队状态与 72h 窗口；删除平台日志脱敏义务（团队裁决日志明文） |
+| 0.4 | 2026-11-05 | 可追溯性补充：镜像 tag 可变，执行层记录实际拉取的 digest；失败续跑复用优先比较 digest |
+| 0.5 | 2026-11-05 | **取消提交幂等**：删除 `Idempotency-Key` 与 `idempotency_keys` 表，`POST /runs` / `POST /tasks` 每次都创建新资源；平台不判断两次提交是否等价（硬件 / 驱动 / HDK 版本等环境因素对平台透明）。内部操作（建 Job、Genet 部署）的可重试安全不变 |
 
 ---
 
@@ -459,10 +462,13 @@ Tester 采用平台维护者管理的**白名单注册**机制。注册流程：
 
 - 已发布的 `name + version` 组合**不得**被静默覆盖；重新发布必须提升版本号（错误码 `TESTER_VERSION_PINNED`）。
 - Task 记录并冻结：Tester 名称、版本、镜像引用、参数快照（即 `args` 原文）。
+- 执行层把 K8s 实际拉取的镜像 `imageID` 解析为 **digest** 写入 Attempt（可得时）：引用是"要什么"，digest 是"实际跑了什么"。镜像 tag 可变，只有 digest 能回答"同一个 tag 当时背后是哪份代码"。平台仍不解析、不校验镜像引用，只记录 K8s 给出的事实。
 - 历史 Run 可以确认"当时用的是哪个版本的哪个 Tester、传了什么参数"，但**不保证**重跑得到相同数字。
 - 数据集与模型内容的变化由 Tester 与外部资源负责；平台不做内容指纹（hash / manifest），因此也不承诺跨时间点的结果可比性。可比性判断交给下游与 Agent。
 
-这条裁决同时简化了**失败续跑**的复用条件：复用已成功 Task 结果时，只需校验 Tester 版本、镜像引用、参数快照、Endpoint 标识四者未变；不校验数据内容。
+这条裁决同时简化了**失败续跑**的复用条件：复用已成功 Task 结果时，只需校验 Tester 版本、镜像引用与**实际 digest（可得时优先比较 digest）**、参数快照、Endpoint 标识四者未变；不校验数据内容。tag 可变，若 digest 缺失则退回引用比较并在报告中标注。
+
+**提交不做幂等**（D-37）：平台不判断两次提交是否"一样"，也不合并。硬件型号、驱动、HDK 版本等环境条件对平台透明；即使 Manifest 完全相同，也可能是不同的测试条件。`POST /runs` 每次都创建新 Run，由提交者自己承担"重复提交"的后果（可取消）。只有平台**内部操作**（同一 `run_id` 的 Genet 部署、同一 `job_id` 的 Job 创建）需要"重复执行不产生副作用"的安全语义，那是实现细节，不是对外接口承诺。
 
 ### 5.8 退出语义
 
@@ -710,23 +716,23 @@ Executor 渲染任务时，必须把两个目录挂到固定容器路径，且**
 ```text
               PENDING
                  │
-     ┌───────────┼───────────┐
-     ▼           ▼           ▼
-  SKIPPED     QUEUED      CANCELED
-                 │
-        ┌────────┼────────┐
-        ▼        ▼        ▼
-     SKIPPED  PREPARING  CANCELED
-                 │
-        ┌────────┼────────┐
-        ▼        ▼        ▼
-     FAILED   RUNNING   CANCELED
-                 │
-        ┌────────┼────────┐
-        ▼        ▼        ▼
-   SUCCEEDED   FAILED   CANCELED
-                 │
-                 └──► QUEUED（重试策略允许时，新建 Attempt）
+        ┌────────┴────────┐
+        ▼                 ▼
+     SKIPPED           QUEUED
+                          │
+              ┌───────────┼───────────┐
+              ▼           ▼           ▼
+           SKIPPED   PREPARING     CANCELED
+                          │
+              ┌───────────┼───────────┐
+              ▼           ▼           ▼
+           FAILED      RUNNING      CANCELED
+                          │
+              ┌───────────┼───────────┐
+              ▼           ▼           ▼
+          SUCCEEDED     FAILED      CANCELED
+                          │
+                          └──► QUEUED（重试策略允许时，新建 Attempt）
 ```
 
 | 状态 | 语义 | 终态 |
@@ -746,6 +752,7 @@ Executor 渲染任务时，必须把两个目录挂到固定容器路径，且**
 - `FAILED` 在重试策略允许时不是终态：立即转回 `QUEUED` 并创建新的 Attempt。
 - 终态判定 = 最后一次 Attempt 已结束且无剩余重试。
 - `SKIPPED` 与 `FAILED` 严格区分：`SKIPPED` 表示"没跑"，`FAILED` 表示"跑了但失败"。报告与 UI 不得把二者混为一谈。
+- **大小写约定**：本文状态名用大写表示概念；库 / API / 报告中的 token 统一小写（与 §8.4 示例一致），前端展示为大写徽标。
 
 ### 7.2 Attempt 模型
 
@@ -837,6 +844,10 @@ CANCELLING ──► CANCELED
 
 **没有独立的 `PRECHECK` 阶段**：注入的 pre_check 就是 Task 链上的第一个 Task（§10.1），它跑在 `TESTING` 里，失败时按 `abort_run` 终止其余 Task。
 
+**TESTING 内的顺序：** Pre-Check（若有）先于其他 Task；Pre-Check 通过后，其余 Task 按端点互斥规则并发调度（§6.7），平台**不额外施加串行顺序**，是否并行由 Tester 的 `concurrency.endpoint_exclusive` 声明决定。
+
+**`DEPLOYING` 可能较久**：Genet 侧可能排队数小时到数天，平台必须能表示 `queued` 状态、展示已等待时长并允许取消；部署总窗口由平台配置（默认 72 小时）。
+
 **注意：不存在 `GATING` 阶段，也不存在 `GATE_FAILED` 终态。** 指标是否达标由下游系统或 Agent 判断，平台只保证把事实完整、准确地交付出去。
 
 ### 7.5 Run 终态语义
@@ -846,6 +857,8 @@ CANCELLING ──► CANCELED
 | `SUCCEEDED` | 全部 Task 成功 | 所有非 `SKIPPED` 的 Task 均为 `SUCCEEDED` |
 | `COMPLETED_WITH_ERRORS` | 流程走完但存在失败 | 至少一个 Task `FAILED`，且失败策略允许继续 |
 | `SERVICE_UNAVAILABLE` | 被测服务不可用 | 注入的 pre_check Task 失败且错误可重试（即窗口内一直没就绪），或部署后服务未就绪 |
+
+Pre-Check 以**不可重试**错误失败（4xx、认证失败）时，说明"服务在但配置/权限不对"，Run 归 `COMPLETED_WITH_ERRORS`，由具体 Task 的错误码定位；不把它记成服务不可用。
 | `FAILED` | 平台侧无法完成流程 | Genet 请求失败、Executor 不可用、平台内部错误、清理之外的编排异常 |
 | `CANCELED` | 用户主动取消 | 收到取消请求并完成资源回收 |
 
@@ -1033,7 +1046,7 @@ Deployment 由 Genet 渲染，平台没有权限往里加 sidecar，也不该为
 
 **停止条件：**
 
-Run 进入 `CLEANUP` 后停止采集；`cleanup.policy` 决定产物保留多久，但**日志的保留期与其他产物一致**，不单独提前删除。
+Run 进入 `CLEANUP` 后停止采集；**`cleanup.policy` 只决定被测服务是否卸载，不决定产物保留期**——产物与日志的保留期由平台配置（默认 30 天）统一决定，日志不单独提前删除。
 
 **为什么不用集群日志系统：**
 
@@ -1066,6 +1079,11 @@ TestPlane 不负责 Helm 渲染、服务安装、镜像部署和集群资源管�
 
 部署失败的归属：`FAILED`（平台侧调用 Genet 失败）与 `SERVICE_UNAVAILABLE`（Genet 受理但服务未就绪）必须区分，见 §7.5。
 
+**Deploy 会排队。** 配额紧张时 Genet 可能把部署排到队列里，时长从数小时到数天不等。平台必须：
+- 表示 `queued` 状态并展示排队位次/已等待时长（Genet 提供时）；
+- 使用足够长的部署窗口（平台默认 72 小时，Profile 可覆盖），不按分钟级超时误判失败；
+- 排队期间允许取消（先向 Genet 取消排队/卸载，失败只记 `CLEANUP_FAILED`）。
+
 ### 9.2 Jenkins
 
 Jenkins 是 TestPlane 的普通调用方，不享有特权路径。
@@ -1076,6 +1094,7 @@ Jenkins 是 TestPlane 的普通调用方，不享有特权路径。
 - 测试执行逻辑逐步迁移到 Tester。
 - Jenkins 通过 REST API 提交 Run 或 Task、查询状态、下载报告。
 - Jenkins 不再维护独立的测试命令拼装和结果解析逻辑。
+- **提交不做幂等**（D-37）：流水线重试提交会产生新的 Run；Jenkins 侧必须自己避免"盲目重试提交"，或提交前先查询、提交后记录 Run ID。
 - 最终 Jenkins 退化为上层流水线客户端。
 
 ### 9.3 下游消费系统
@@ -1369,8 +1388,8 @@ K8s Secret，由 `admin` 登记与轮换；Manifest 里只有**引用**（如 `e
 
 平台把 Run 级 `env` 与 `secrets` 展开到每个 Task 的 Job Spec（`env` / `secret_env`，附录 B），Executor 从 Secret Store 取值注入。此外：
 
-- 凭据不得出现在 `args`、产物目录、日志里。
-- 平台在收集日志时对已知 secret 值做脱敏替换；Tester 也不得主动打印。
+- 凭据不得出现在 `args` 与产物目录；Tester 不得主动打印凭据。
+- **平台不做日志脱敏**（团队裁决 2026-11-04）：Tester 与 Deploy 日志按明文落盘，平台不读取 Secret 值做替换；凭据一旦被 Tester 打印即会进入日志，该风险由团队显式接受。
 - 轮换只改 Secret，不改 Manifest，也不必重建 Tester 版本。
 
 **UI 上的位置**：提交表单是「一个参数输入框 + 一组 Run 级环境变量 + 一组凭据引用」。凭据是下拉，只列已登记 Secret 的名称与说明，不渲染明文；没有可用凭据时给登记入口。凭据不属于参数输入框——这正是 `args` 里不能出现 token 的原因。
@@ -1806,3 +1825,11 @@ env:                          # 运行期环境变量声明（§12.4）
 | D-27 | **公共参数的取值点统一**：`deploy` 或 `service` 二选一（互斥），平台总是从这一处取 `url` / `model_name` / `model_path` 注入；取消"平台没值就由调用方写进 `args`"的分支，`args` 里出现公共参数一律拒绝 | §5.4.1、§9.1、§10.1、§10.3、§11.2 |
 | D-28 | **调度可见性与看板**：调度归 Volcano，平台只读暴露队列 / 节点 / 等待原因；`QUEUED` 必须带 `waiting_reason`；看板为 P1 的固定一屏，不做趋势与告警 | §6.9、§11.2、§11.5 |
 | D-29 | **日志持续采集并直接落盘**：平台侧 collector 流式写入共享存储；Pod 重启续写并插入 restart 标记，允许 gap 但不伪造连续；日志体积不影响 Task 结果 | §8.6、§9.1 |
+| D-30 | **日志明文、平台不脱敏**：Tester 与 Deploy 日志按明文落盘，平台不读取 Secret 做替换；Tester 仍不得主动打印凭据 | §8.6、§12.4 |
+| D-31 | **Deploy 排队是一等状态**：Genet 可能排队数小时到数天，平台表示 `queued`、展示已等待时长、允许取消，部署窗口默认 72 小时可配 | §7.4、§9.1 |
+| D-32 | **Pre-Check 门控 + 其余并发**：Pre-Check 先于其他 Task；通过后其余 Task 按端点互斥规则并发，平台不额外施加串行顺序，是否并行由 Tester 的 `endpoint_exclusive` 声明决定 | §6.7、§7.4、§10.1 |
+| D-33 | **`cleanup.policy` 与产物保留期解耦**：policy 只决定被测服务是否卸载；产物/日志保留由平台配置统一决定 | §8.6、§10.1 |
+| D-34 | **状态 token 小写**：库 / API / 报告统一小写（与 §8.4 示例一致），文档与 UI 展示用大写 | §7.1、§8.4 |
+| D-35 | **Pre-Check 不可重试失败归 `COMPLETED_WITH_ERRORS`**：只有"窗口内一直没就绪"这类可重试失败才记 `SERVICE_UNAVAILABLE` | §7.5 |
+| D-36 | **可追溯性以"引用 + 实际 digest"为准**：执行层记录 K8s 实际拉取的镜像 digest；续跑复用优先比较 digest；引用只表示"要什么"，digest 表示"实际跑了什么" | §5.7、§7.7、§12.4 |
+| D-37 | **不做提交幂等**：`POST /runs` / `POST /tasks` 每次都创建新资源，重复提交产生多个 Run/Task；平台不判断两次提交是否等价——硬件、驱动、HDK 版本等环境因素对平台透明，相同 Manifest 也可能不是同一测试条件。内部操作（Job 创建、Genet 部署）仍须可重试安全，但不属于接口幂等 | §9.2、§11.4、附录 D |

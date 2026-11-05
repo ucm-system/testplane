@@ -10,13 +10,15 @@
 
 | 部分 | 状态 | 位置 |
 |---|---|---|
-| 设计约束文档（系统边界 / 契约 / 语义） | ✅ 定稿 | [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) |
+| 设计约束文档（系统边界 / 契约 / 语义） | ✅ 定稿（v0.5） | [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) |
 | 可点击原型（6 个页面 + 全状态谱） | ✅ 可交互 | [`design/prototype/`](design/prototype/) |
 | 参考 Tester：endpoint-probe（Pre-Check） | ✅ 可运行 | [`testers/endpoint-probe/`](testers/endpoint-probe/) |
+| 实现技术方案（总览 + 三份分册） | 🟢 提案 v3（12 项决策已并入） | [`design/IMPLEMENTATION.md`](design/IMPLEMENTATION.md) |
+| 4+1 设计视图（场景 / 逻辑 / 数据 / 进程 / 开发 / 部署 / API） | 🟢 可开发基线 | [`design/views/`](design/views/) |
 | 控制面：API / 状态机 / 编排 / 存储 | ⬜ P0 待实现 | 规划 `server/` |
-| Executor：K8s Job、超时与取消、日志采集 | ⬜ P0 待实现 | 规划 `server/executor/` |
-| Genet 适配：部署 / 状态查询 / Endpoint | ⬜ P0 待实现 | 规划 `server/genet/` |
-| Tester Registry：目录发现与校验 | ⬜ P0 待实现 | 规划 `server/registry/` |
+| Executor：K8s Job、超时与取消、日志采集 | ⬜ P0 待实现 | 规划 `server/internal/executor/k8s` |
+| Genet 适配：部署 / 状态查询 / Endpoint | ⬜ P0 待实现 | 规划 `server/internal/genet` |
+| Tester Registry：目录发现与校验 | ⬜ P0 待实现 | 规划 `server/internal/registry` |
 | Web UI：列表 / 详情 / 报告 / 日志 / 提交 | ⬜ P0 待实现 | 规划 `web/` |
 | 部署与镜像 | ⬜ 待实现 | 规划 `deploy/` |
 | P1：MCP Server / CLI / SSE / 失败续跑 / Run 对比 | ⬜ 之后 | 见 §14.2 |
@@ -28,6 +30,9 @@ P0 的完整验收清单是 [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) �
 ```text
 design/               设计文档与可点击原型（已有）
   ARCHITECTURE.md     设计裁决集合（1800+ 行）
+  IMPLEMENTATION.md   实现技术方案：选型 / 模块 / 交付路线 / 待拍板项
+  impl/               实现分册：控制面、执行层、Web 与交付
+  views/              4+1 设计视图：用例、逻辑、数据、进程、开发、部署、API
   prototype/          单文件原型 + 渲染截图 + 自托管字体
 
 testers/              Tester 实现，一个目录一个 Tester（已有）
