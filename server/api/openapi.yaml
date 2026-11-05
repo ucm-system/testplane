@@ -3885,7 +3885,14 @@ components:
           enum: [run_not_terminal, retry_in_progress, run_canceled, nothing_to_retry]
         reuse:
           type: array
-          description: 将复用的 Task（状态 succeeded 且产物已校验通过）。
+          description: |
+            将复用的 Task（状态 `succeeded` 且产物已校验通过）。产物目录按来源区分：
+            自己跑成功的在 `tasks/<task>/attempts/<n>/`，从旧 Run 复用的在
+            `tasks/<task>/reused/`；两者都要通过 `report.ValidateResult`。
+
+            **已复用的 Task 不会被同时放进 `rerun` / `blocked_items`**——只有当
+            `reused/result.json` 确实缺失或校验失败时才降级为重跑，并在 `blocked_items`
+            里写明"复用的 result.json 不存在/校验未通过"。
           items:
             type: object
             required: [task_id, name, reason]
@@ -3896,7 +3903,9 @@ components:
                 type: string
               reason:
                 type: string
-                description: 复用依据（MVP 固定为 succeeded）。
+                description: |
+                  复用依据：`succeeded`（本 Run 自己跑成功，产物在 `attempts/<n>/`）
+                  或 `reused`（本 Task 本身是从旧 Run 复用的，产物在 `tasks/<task>/reused/`）。
         rerun:
           type: array
           description: 将重跑的 Task（失败 / 跳过 / 被 abort / 产物不可复用）。

@@ -107,6 +107,14 @@ func (s *Server) buildRetryPlan(ctx context.Context, src *store.RetrySource) *re
 			continue
 		}
 		// succeeded：先验证产物，再决定复用还是重跑。
+		//
+		// 注意：**已复用的 Task 不得同时出现在 rerun / blocked_items 里**（票 #QA-1）——
+		// 它本身没有 Attempt，产物在 reused/ 目录；只有 reused/ 下确实缺失或校验失败时
+		// 才降级为重跑，并且理由要说清"复用的 result.json 缺失/校验失败"。
+		reasonOf := "succeeded"
+		if t.ReusedFromTaskID != nil && *t.ReusedFromTaskID != "" {
+			reasonOf = "reused"
+		}
 		if reason := s.reuseBlockedReason(ctx, src.Run.ID, t); reason != "" {
 			dto.BlockedItems = append(dto.BlockedItems, retryBlockedItem{
 				TaskID: t.ID, Name: t.Name, Reason: reason,
@@ -117,7 +125,7 @@ func (s *Server) buildRetryPlan(ctx context.Context, src *store.RetrySource) *re
 			plan.rerun = append(plan.rerun, t)
 			continue
 		}
-		dto.Reuse = append(dto.Reuse, retryReuseItem{TaskID: t.ID, Name: t.Name, Reason: "succeeded"})
+		dto.Reuse = append(dto.Reuse, retryReuseItem{TaskID: t.ID, Name: t.Name, Reason: reasonOf})
 		plan.reuse = append(plan.reuse, t)
 	}
 
@@ -141,24 +149,47 @@ func (s *Server) buildRetryPlan(ctx context.Context, src *store.RetrySource) *re
 }
 
 // reuseBlockedReason 返回非空字符串表示"不能复用，原因如下"。
+//
+// 产物目录按 Task 的来源判定（顺序很重要）：
+//  1. **本 Task 自己就是复用的**（`reused_from_task_id` 非空，attempts=0）→
+//     `<storage-root>/<run>/tasks/<task>/reused/result.json`。这是 retry 落复用产物时的
+//     固定约定（见 materializeReusedArtifacts：复用不伪造 Attempt 目录）。
+//  2. 否则（正常执行过的 Task）→ `<storage-root>/<run>/tasks/<task>/attempts/<n>/result.json`。
+//
+// 两条路径都要过 `report.ValidateResult`；不通过的原因按"来源"区分措辞，
+// 避免把"复用的产物丢了"误报成"没跑过"（QA retry-check 抓到的那个 bug）。
 func (s *Server) reuseBlockedReason(ctx context.Context, runID string, t *store.Task) string {
-	if t.ResultRef == nil || *t.ResultRef == "" {
-		// result_ref 没落库时仍按路径约定探测（历史数据/兼容）。
+	reused := t.ReusedFromTaskID != nil && *t.ReusedFromTaskID != ""
+	label := "result.json"
+	var dir string
+	if reused {
+		dir = s.taskReusedDir(runID, t.ID)
+		label = "复用的 result.json"
+	} else {
+		dir = s.taskOutputDir(runID, t.ID, t.CurrentAttempt)
 	}
-	dir := s.taskOutputDir(runID, t.ID, t.CurrentAttempt)
 	if dir == "" {
 		return "storage_root 未配置"
 	}
 	if _, err := os.Stat(filepath.Join(dir, "result.json")); err != nil {
 		if os.IsNotExist(err) {
-			return "result.json 不存在"
+			return label + " 不存在"
 		}
-		return "读取产物失败: " + err.Error()
+		return "读取" + label + "失败: " + err.Error()
 	}
 	if f := report.ValidateResult(ctx, runID, t.ID, "", dir, s.resultMaxBytes()); f != nil {
-		return fmt.Sprintf("产物校验未通过（%s: %s）", f.Code, f.Message)
+		return fmt.Sprintf("%s 校验未通过（%s: %s）", label, f.Code, f.Message)
 	}
 	return ""
+}
+
+// taskReusedDir 是"复用产物"的固定目录（与 materializeReusedArtifacts 写入位置一致）：
+// `<storage-root>/<run>/tasks/<task>/reused`。
+func (s *Server) taskReusedDir(runID, taskID string) string {
+	if s.cfg == nil || strings.TrimSpace(s.cfg.StorageRoot) == "" {
+		return ""
+	}
+	return filepath.Join(s.cfg.StorageRoot, runID, "tasks", taskID, "reused")
 }
 
 // taskOutputDir 拼出某个 Attempt 的产物目录（storage-root 相对 → 绝对）；

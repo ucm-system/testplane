@@ -31,9 +31,9 @@ function Call {
     $uri = "$BaseUrl$Path"
     if ($null -ne $Body) {
         $json = $Body | ConvertTo-Json -Depth 8 -Compress
-        return Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -PassThru -Method $Method -Uri $uri -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $json
+        return Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method $Method -Uri $uri -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $json
     }
-    return Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -PassThru -Method $Method -Uri $uri -Headers $headers
+    return Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method $Method -Uri $uri -Headers $headers
 }
 function JsonOf($Resp) { try { return $Resp.Content | ConvertFrom-Json } catch { return $null } }
 function Wait-Run([string]$RunID, [int]$Seconds = 120) {
@@ -67,33 +67,54 @@ Write-Host "失败续跑验收：$BaseUrl（mock=$MockURL）" -ForegroundColor C
 
 $manifest = @{
     run = @{
-        name = "retry-$stamp"; service = @{ url = $MockURL; model_name = 'mock-llm' }; precheck = 'off';
+        name = "retry-$stamp"; service = @{ url = $MockURL; model_name = 'mock-llm' }; precheck = 'auto';
         cleanup = @{ policy = 'never' };
         tests = @(
-            @{ name = 'retry-a'; tester = 'endpoint-probe'; version = '1.0.0'; execution = @{ profile = 'k8s-npu' }; args = '--wait_timeout_seconds=1 --retry_interval_seconds=1' },
-            @{ name = 'retry-b'; tester = 'endpoint-probe'; version = '1.0.0'; execution = @{ profile = 'k8s-npu' }; args = '--wait_timeout_seconds=20 --retry_interval_seconds=1' }
+            @{ name = 'retry-a'; tester = 'endpoint-probe'; version = '1.0.0'; execution = @{ profile = 'k8s-npu' }; args = '--wait_timeout_seconds=10 --retry_interval_seconds=1' }
         )
     }
 } | ConvertTo-Json -Depth 8 -Compress
-$r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -PassThru -Method POST -Uri "$BaseUrl/api/v1/runs" -Headers $headers -ContentType 'application/json' -Body $manifest
+$r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method POST -Uri "$BaseUrl/api/v1/runs" -Headers $headers -ContentType 'application/json' -Body $manifest
 $accepted = JsonOf $r
 $runID = $accepted.run.id
 Add-Check 'run.submit_202' ($r.StatusCode -eq 202 -and $runID) ("status=" + $r.StatusCode + " run=" + $runID)
+
+# 等 Pre-Check 成功：此时 service 已 ready；立刻停 mock，让随后的测试 Task 失败。
+$precheckOK = $false
+$deadline = (Get-Date).AddSeconds(90)
+do {
+    Start-Sleep -Milliseconds 800
+    $run = JsonOf (Call GET "/api/v1/runs/$runID")
+    $pc = @($run.tasks | Where-Object { $_.seq -eq 0 })[0]
+    if ($pc -and $pc.status -eq 'succeeded') { $precheckOK = $true; break }
+} while ((Get-Date) -lt $deadline)
+Add-Check 'old.precheck_succeeded' $precheckOK ("status=" + $pc.status)
+if ($mockProc) { Stop-Process -Id $mockProc.Id -Force -ErrorAction SilentlyContinue }
+Add-Check 'mock.stopped_after_precheck' ($mockProc -ne $null) ("pid=" + $mockProc.Id)
 $run = Wait-Run $runID
 Add-Check 'run.terminal_not_succeeded' ($run.status -in @('failed', 'completed_with_errors') -and $run.status -ne 'succeeded') ("status=" + $run.status)
 $tasks = @($run.tasks)
 $failed = @($tasks | Where-Object { $_.name -eq 'retry-a' })[0]
-$okTask = @($tasks | Where-Object { $_.name -eq 'retry-b' })[0]
+$pc = @($tasks | Where-Object { $_.seq -eq 0 })[0]
 Add-Check 'old.retry_a_failed' ($failed.status -eq 'failed') ("status=" + $failed.status)
-Add-Check 'old.retry_b_succeeded' ($okTask.status -eq 'succeeded') ("status=" + $okTask.status)
 
-# retry-plan：reuse retry-b / rerun retry-a
+# 重新起 mock（已 ready）；retry 才能成功。
+$log2 = Join-Path $outDir "mock-retry-$stamp.log"
+$mockProc = Start-Process -FilePath $MockExe -ArgumentList @('-addr', ":$MockPort", '-quiet') -PassThru -WindowStyle Hidden -RedirectStandardOutput $log2 -RedirectStandardError "$log2.err"
+$deadline = (Get-Date).AddSeconds(15)
+do {
+    Start-Sleep -Milliseconds 300
+    try { $h = Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:$MockPort/healthz" -TimeoutSec 2; if ($h.StatusCode -eq 200) { break } } catch { }
+} while ((Get-Date) -lt $deadline)
+Add-Check 'mock.restarted_ready' ($null -ne $mockProc -and $mockProc.Id -gt 0) ("pid=" + $mockProc.Id)
+
+# retry-plan：reuse precheck / rerun retry-a
 $r = Call GET "/api/v1/runs/$runID/retry-plan"
 $plan = JsonOf $r
 $reuseNames = @($plan.reuse | ForEach-Object { $_.name })
 $rerunNames = @($plan.rerun | ForEach-Object { $_.name })
 Add-Check 'plan.200_retryable' ($r.StatusCode -eq 200 -and $plan.retryable -eq $true) ("status=" + $r.StatusCode + " retryable=" + $plan.retryable)
-Add-Check 'plan.reuse_retry_b' ($reuseNames -contains 'retry-b') ("reuse=" + ($reuseNames -join ','))
+Add-Check 'plan.reuse_precheck' ($reuseNames -contains 'precheck') ("reuse=" + ($reuseNames -join ','))
 Add-Check 'plan.rerun_retry_a' ($rerunNames -contains 'retry-a') ("rerun=" + ($rerunNames -join ','))
 
 # retry：202 + new_run_id；立即重复 retry 必须 409（负向）
@@ -108,10 +129,10 @@ Add-Check 'retry.duplicate_409' ($dup.StatusCode -eq 409 -and $dupJ.code -eq 'CO
 $newRun = Wait-Run $newRunID 120
 $newTasks = @($newRun.tasks)
 $newA = @($newTasks | Where-Object { $_.name -eq 'retry-a' })[0]
-$newB = @($newTasks | Where-Object { $_.name -eq 'retry-b' })[0]
+$newPC = @($newTasks | Where-Object { $_.seq -eq 0 })[0]
 Add-Check 'new_run.succeeded' ($newRun.status -eq 'succeeded') ("status=" + $newRun.status)
 Add-Check 'new.retry_a_succeeded' ($newA.status -eq 'succeeded') ("status=" + $newA.status)
-Add-Check 'new.retry_b_reused' ($newB.status -eq 'succeeded' -and $newB.attempts -eq 0) ("status=" + $newB.status + " attempts=" + $newB.attempts)
+Add-Check 'new.precheck_reused' ($newPC.status -eq 'succeeded' -and $newPC.attempts -eq 0) ("status=" + $newPC.status + " attempts=" + $newPC.attempts)
 
 # 新 Run 已无失败 Task：plan 不应再 retryable（200 false 或 409 均接受）
 $r = Call GET "/api/v1/runs/$newRunID/retry-plan"

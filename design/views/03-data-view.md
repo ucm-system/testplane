@@ -339,7 +339,7 @@ CREATE TABLE audit_log (
   id          bigserial PRIMARY KEY,
   actor       text NOT NULL,
   role        text NOT NULL,
-  action      text NOT NULL,                                -- submit|cancel|retry|rotate|...
+  action      text NOT NULL,                                -- 见下方 §4.6.1 的动作枚举（含 register/update/delete_profile/delete_cluster/secret_rotated/cleanup_artifacts）
   object_type text NOT NULL,
   object_id   text,
   detail      jsonb NOT NULL DEFAULT '{}',
@@ -347,6 +347,22 @@ CREATE TABLE audit_log (
 );
 CREATE INDEX audit_at_idx     ON audit_log (at DESC);
 CREATE INDEX audit_object_idx ON audit_log (object_type, object_id);
+### 4.6.1 审计动作枚举（`audit_log.action`）
+
+写操作必须落审计；**失败的尝试也记**（`detail.result = "rejected"`，含 `code` 与对象标识），只有"畸形 JSON / 超大 body"这类**无法归属对象**的请求不记。
+
+| action | 触发 | object_type |
+|---|---|---|
+| `submit` | 提交 Run / 独立 Task | `run` / `task` |
+| `cancel` | 取消 Run / Task | `run` / `task` |
+| `retry` | 重试 Run / 重跑 Task | `run` / `task` |
+| `register` | 新建 Profile / Cluster / Secret 引用 | `execution_profile` / `cluster` / `secret_ref` |
+| `update` | 更新 Profile / Cluster | `execution_profile` / `cluster` |
+| `delete_profile` / `delete_cluster` | 删除 Profile / Cluster | 同名 object_type |
+| `secret_rotated` | 轮换校验（D-55 窄例外：只对登记项做存在性检查，不读值） | `secret_ref` |
+| `cleanup_artifacts` | 人工清理某 Run 的产物 | `run` |
+
+> `actor` / `role` 由服务端按当前身份记录，**不接受客户端传**；`detail` 里禁止出现任何 Secret 值（`06 §4.4` + D-55）。
 ```
 
 ---

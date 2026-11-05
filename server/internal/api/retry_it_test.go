@@ -378,3 +378,115 @@ func doPost(t *testing.T, srv *Server, path, body string) *httptest.ResponseReco
 	srv.Handler().ServeHTTP(rec, req)
 	return rec
 }
+
+// TestRetryPlan_SecondRetryRunNothingToRetry 是 QA retry-check 抓到的回归：
+// 对"retry 产生的新 Run"再取 plan，必须不可重试（nothing_to_retry）——
+// 新 Run 里的复用 Task（reused_from_task_id 非空、attempts=0）产物在
+// tasks/<task>/reused/，不能被误判成"result.json 不存在 → 需重跑"。
+func TestRetryPlan_SecondRetryRunNothingToRetry(t *testing.T) {
+	srv, st, runID, succeeded, _, cleanup := retryTestEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 第一次 retry：生成 run2（复用 succeeded，另一个 pending）。
+	rec := doPost(t, srv, "/api/v1/runs/"+runID+"/retry", "")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("第一次 retry status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var first struct {
+		NewRunID string `json:"new_run_id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &first)
+	if first.NewRunID == "" {
+		t.Fatal("没拿到 new_run_id")
+	}
+
+	// 模拟 run2 自然跑到终态：pending 的 Task 补一份 result.json 并置 succeeded。
+	run2Tasks, _, err := st.Tasks.ListByRun(ctx, nil, first.NewRunID, "", 100)
+	if err != nil {
+		t.Fatalf("列 run2 Task: %v", err)
+	}
+	for i := range run2Tasks {
+		task := run2Tasks[i]
+		if task.ReusedFromTaskID != nil {
+			continue // 复用 Task 的产物由 retry 时硬链接进 reused/
+		}
+		dir := filepath.Join(srv.cfg.StorageRoot, first.NewRunID, "tasks", task.ID, "attempts", "1")
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		body := map[string]any{
+			"schema_version": "1.0", "run_id": first.NewRunID, "task_id": task.ID,
+			"attempt_id": task.ID + "-a1",
+			"tester":     map[string]any{"name": "probe", "version": "1.0.0"},
+			"status":     "succeeded",
+			"started_at": "2026-11-05T02:00:00Z", "finished_at": "2026-11-05T02:00:10Z",
+			"metrics": []any{},
+		}
+		raw, _ := json.Marshal(body)
+		if err := os.WriteFile(filepath.Join(dir, "result.json"), raw, 0o640); err != nil {
+			t.Fatalf("write result.json: %v", err)
+		}
+		if _, err := st.Pool().Exec(ctx, `
+			UPDATE tasks SET status='succeeded', current_attempt=1, result_ref=$2 WHERE id=$1`,
+			task.ID, filepath.ToSlash(filepath.Join(first.NewRunID, "tasks", task.ID, "attempts", "1", "result.json"))); err != nil {
+			t.Fatalf("置 succeeded: %v", err)
+		}
+	}
+	if _, err := st.Pool().Exec(ctx,
+		`UPDATE runs SET status='succeeded', finished_at=now() WHERE id=$1`, first.NewRunID); err != nil {
+		t.Fatalf("置 run2 终态: %v", err)
+	}
+
+	// 取 run2 的 plan：必须 retryable=false + nothing_to_retry，且复用项都进 reuse。
+	planRec := doGet(t, srv, "/api/v1/runs/"+first.NewRunID+"/retry-plan")
+	if planRec.Code != http.StatusOK {
+		t.Fatalf("plan status = %d", planRec.Code)
+	}
+	var plan struct {
+		Retryable bool   `json:"retryable"`
+		Reason    string `json:"reason"`
+		Reuse     []struct {
+			TaskID string `json:"task_id"`
+			Reason string `json:"reason"`
+		} `json:"reuse"`
+		Rerun []struct {
+			TaskID string `json:"task_id"`
+		} `json:"rerun"`
+		BlockedItems []struct {
+			TaskID string `json:"task_id"`
+			Reason string `json:"reason"`
+		} `json:"blocked_items"`
+	}
+	if err := json.Unmarshal(planRec.Body.Bytes(), &plan); err != nil {
+		t.Fatalf("解析 plan: %v", err)
+	}
+	if plan.Retryable {
+		t.Fatalf("retry 出来的 Run 不应再可重试: %s", planRec.Body.String())
+	}
+	if plan.Reason != "nothing_to_retry" {
+		t.Fatalf("reason = %q, 期望 nothing_to_retry（body=%s）", plan.Reason, planRec.Body.String())
+	}
+	if len(plan.Rerun) != 0 || len(plan.BlockedItems) != 0 {
+		t.Fatalf("复用的 Task 不得进 rerun/blocked_items: rerun=%+v blocked=%+v",
+			plan.Rerun, plan.BlockedItems)
+	}
+	if len(plan.Reuse) != 2 {
+		t.Fatalf("reuse 应包含 2 个 Task（复用来源 + 本轮跑成功），实际 %+v", plan.Reuse)
+	}
+	// 复用来源的那条要标 reason=reused（不是 succeeded），便于前端区分。
+	reusedTagged := false
+	for _, it := range plan.Reuse {
+		if it.Reason == "reused" {
+			reusedTagged = true
+		}
+	}
+	if !reusedTagged {
+		t.Fatalf("复用来源的 Task 应标 reason=reused: %+v", plan.Reuse)
+	}
+	// 再 POST retry 也必须 409（nothing_to_retry）。
+	if rec := doPost(t, srv, "/api/v1/runs/"+first.NewRunID+"/retry", ""); rec.Code != http.StatusConflict {
+		t.Fatalf("对无可重跑项的 Run 再 retry status = %d, 期望 409", rec.Code)
+	}
+	_ = succeeded
+}

@@ -26,9 +26,9 @@ function Call {
     $uri = "$BaseUrl$Path"
     if ($null -ne $Body) {
         $json = $Body | ConvertTo-Json -Depth 8 -Compress
-        return Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -PassThru -Method $Method -Uri $uri -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $json
+        return Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method $Method -Uri $uri -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $json
     }
-    return Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -PassThru -Method $Method -Uri $uri -Headers $headers
+    return Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method $Method -Uri $uri -Headers $headers
 }
 function JsonOf($Resp) {
     try { return $Resp.Content | ConvertFrom-Json } catch { return $null }
@@ -80,7 +80,9 @@ Add-Check 'secret.create_no_value_echo' ($r.Content -notmatch '"value"|"secret_v
 
 $r = Call POST "/api/v1/admin/secrets/$secretRef/rotate" @{}
 $j = JsonOf $r
-Add-Check 'secret.rotate_missing_404' ($r.StatusCode -eq 404 -and $j.code -eq 'NOT_FOUND') ("status=" + $r.StatusCode + " code=" + $j.code)
+$rotateNegativeOK = (($r.StatusCode -eq 404 -and $j.code -eq 'NOT_FOUND') -or
+                     ($r.StatusCode -eq 503 -and $j.code -eq 'EXECUTOR_UNAVAILABLE'))
+Add-Check 'secret.rotate_missing_negative' $rotateNegativeOK ("status=" + $r.StatusCode + " code=" + $j.code + "（404 或 RBAC 未就绪的 503 均接受）")
 
 $r = Call GET '/api/v1/admin/audit?limit=100'
 $j = JsonOf $r
@@ -98,7 +100,7 @@ $slowManifest = @{
         tests = @(@{ name = 'slow-a'; tester = 'endpoint-probe'; version = '1.0.0'; execution = @{ profile = 'k8s-npu' }; args = '--wait_timeout_seconds=30 --retry_interval_seconds=1' })
     }
 } | ConvertTo-Json -Depth 8 -Compress
-$r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -PassThru -Method POST -Uri "$BaseUrl/api/v1/runs" -Headers $headers -ContentType 'application/json' -Body $slowManifest
+$r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method POST -Uri "$BaseUrl/api/v1/runs" -Headers $headers -ContentType 'application/json' -Body $slowManifest
 $slowRun = (JsonOf $r).run.id
 Add-Check 'cleanup.nonterminal_submit' ($r.StatusCode -eq 202 -and $slowRun) ("run=" + $slowRun)
 if ($slowRun) {
@@ -115,7 +117,7 @@ $manifest = @{
         tests = @(@{ name = 'artifact-a'; tester = 'endpoint-probe'; version = '1.0.0'; execution = @{ profile = 'k8s-npu' }; args = '--wait_timeout_seconds=10 --retry_interval_seconds=1' })
     }
 } | ConvertTo-Json -Depth 8 -Compress
-$r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -PassThru -Method POST -Uri "$BaseUrl/api/v1/runs" -Headers $headers -ContentType 'application/json' -Body $manifest
+$r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method POST -Uri "$BaseUrl/api/v1/runs" -Headers $headers -ContentType 'application/json' -Body $manifest
 $artifactRun = (JsonOf $r).run.id
 Add-Check 'cleanup.terminal_submit' ($r.StatusCode -eq 202 -and $artifactRun) ("run=" + $artifactRun)
 if ($artifactRun) {

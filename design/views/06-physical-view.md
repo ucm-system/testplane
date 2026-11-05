@@ -263,6 +263,8 @@ Helm release 存量和它自己的 OpenAPI 控制态冲突（启动 FATAL），�
 | 依据 | `--url` 不限制地址，**可达性由策略决定**（§12.2）；平台不做地址白名单 |
 
 ### 4.4 平台不授予的权限
+> **窄例外（D-55）**：POST /admin/secrets/{name}/rotate 需要对**已登记的那一个** Secret 做 get（只判存在 + key 非空）。RBAC 必须用 esourceNames 限定，不得授予通配 secrets get/list/watch；值不进日志/不落库/不回显，失败即 503 EXECUTABLE_…→EXECUTOR_UNAVAILABLE（可重试），不得降级成成功。
+
 
 | 不授予 | 原因 | 依据 |
 |---|---|---|
