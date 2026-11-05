@@ -1,0 +1,19 @@
+# TestPlane · kustomization（dev overlay 的默认入口）
+#
+# 应用：kubectl apply -k deploy/k8s
+# 预览：kubectl kustomize deploy/k8s
+# 删除：kubectl delete -k deploy/k8s
+#
+# 刻意**不在这里**的三份清单（各自有启用条件，见文件头注释与 deploy/README.md）：
+#   deployment.yaml                 等 server/ 有 cmd/testplaned 且镜像已灌入
+#   rbac-cluster-executor.yaml      Job 要落到 testplane 以外的 namespace 时
+#   networkpolicy.yaml / pdb.yaml   默认拒绝策略与 PDB 会挡掉 dev 的直连调试
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - rbac.yaml
+  - storage.yaml
+  - configmap.yaml
+  # - networkpolicy.yaml
+  # - pdb.yaml
+  # - deployment.yaml

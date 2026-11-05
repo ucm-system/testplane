@@ -1,0 +1,54 @@
+# TestPlane · 执行层 ClusterRole 变体（**默认不启用，opt-in**）
+#
+# 什么时候用：Job 需要落到 `testplan` **以外**的 namespace，或一个控制面同时管多个
+# 执行 namespace。此时 namespace 级 Role（deploy/k8s/rbac.yaml）绑不到目标 ns，
+# 改用本文件的 ClusterRole + ClusterRoleBinding。
+#
+# 怎么用：
+#   1. 先删掉 rbac.yaml 里的 Role testplane / RoleBinding testplane（或改用 kustomize patch）
+#   2. kubectl apply -f deploy/k8s/rbac-cluster-executor.yaml
+#
+# 权限面明显更大：**任意 namespace** 里都能建/删 Job、删 Pod——只读 pods/log 和 event
+# 仍是 namespace 无关的。上线前必须评审（06 §4.4 只列了"最小集"，这一步是扩权）。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: testplane-executor
+  labels:
+    app.kubernetes.io/name: testplane
+    app.kubernetes.io/part-of: testplane
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: testplane-executor
+  labels:
+    app.kubernetes.io/name: testplane
+    app.kubernetes.io/part-of: testplane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: testplane-executor
+subjects:
+  - kind: ServiceAccount
+    name: testplane
+    namespace: testplane

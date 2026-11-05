@@ -1,0 +1,66 @@
+# TestPlane · 非敏感配置（ConfigMap）
+#
+# 依据 design/views/06-physical-view.md §2（ConfigMap testplane-config）与
+# design/impl/web-and-delivery.md §10（配置项表）。
+#
+# ⚠️ 键名以**代码实际读取**的为准，不照抄设计表：
+#   server/internal/config/config.go 与 server/internal/k8s/client.go 是唯一事实源。
+#   本文件与 server 代码不一致时改本文件（这是环境侧清单，代码是契约）。
+#   已核对：2026-11-05，server/internal/config/config.go 的 envFirst/env 调用。
+#
+# 边界：**敏感项一律不进这里**。DB DSN / OIDC client secret / Genet token /
+# session key / kubeconfig 全部走 Secret（deployment.yaml 引 testplane-db），
+# chart 不生成明文（W-9）。
+#
+# 变更触发滚动：原生清单没有 Helm 的 checksum/config 注解，改完自己重启：
+#   kubectl -n testplane rollout restart deploy/testplaned
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: testplane-config
+  namespace: testplane
+  labels:
+    app.kubernetes.io/name: testplane
+    app.kubernetes.io/part-of: testplane
+data:
+  # ---- 监听与角色（config.go: HTTP_ADDR 优先，LISTEN 是别名）----
+  TESTPLANE_HTTP_ADDR: ":8080"
+  TESTPLANE_LOG_LEVEL: "info"
+
+  # ---- 存储与 Tester 注册表 ----
+  TESTPLANE_STORAGE_ROOT: "/storage-root"
+  TESTPLANE_TESTERS_DIR: "/app/testers"
+
+  # ---- 执行层（k8s/client.go: TESTPLANE_NAMESPACE 优先，EXECUTOR_NAMESPACE 是旧名）----
+  TESTPLANE_NAMESPACE: "testplane"
+  # Pod 内跑：走 ServiceAccount 而不是 kubeconfig（client-go in-cluster）
+  TESTPLANE_K8S_IN_CLUSTER: "true"
+
+  # ---- 认证：dev 用 dev；任何正式环境都必须 oidc（06 §6.1 红线）----
+  TESTPLANE_AUTH_MODE: "dev"
+
+  # ---- 并发与连接池 ----
+  TESTPLANE_DB_MAX_OPEN_CONNS: "20"
+  TESTPLANE_MAX_GLOBAL_CONCURRENCY: "20"
+  TESTPLANE_RUN_MAX_TASKS: "200"
+
+  # ---- 超时 ----
+  TESTPLANE_TASK_TIMEOUT: "4h"
+  TESTPLANE_TASK_TIMEOUT_MAX: "24h"
+  TESTPLANE_DEPLOY_TIMEOUT: "72h"
+  TESTPLANE_RESULT_MAX_BYTES: "100MiB"
+
+  # ---- SSE ----
+  TESTPLANE_SSE_HEARTBEAT: "15s"
+  TESTPLANE_SSE_REPLAY_HOURS: "24"
+
+  # ------------------------------------------------------------------------
+  # 设计里有、**当前代码还不读**的键（写在这里只作登记，加了等于没加，
+  # 别指望它生效；等 config.go 补上再启用）：
+  #
+  #   TESTPLANE_RETENTION_DAYS: "30"           # 保留期 sweep（06 §3.4）
+  #   TESTPLANE_ARTIFACT_MAX_BYTES: "10GiB"    # 单 Attempt 产物上限（E-8.3）
+  #   TESTPLANE_LOG_SEGMENT_MAX_BYTES: "200MiB"# Deploy 日志分段（E-7.2）
+  #   TESTPLANE_CLUSTERS_DIR: "/etc/testplane/clusters"  # 多集群 kubeconfig 目录（P1，W-10）
+  #   TESTPLANE_GENET_BASE_URL / _TOKEN_FILE / _TIMEOUT   # Genet 适配（E-9）
+  # ------------------------------------------------------------------------

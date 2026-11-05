@@ -1,0 +1,98 @@
+# TestPlane · 存储冒烟 Job（部署后自检，不参与业务）
+#
+# 作用：验证「宿主目录 ↔ 节点 /storage-root ↔ PVC ↔ Pod 内 /storage-root」这条链路
+# 真的通、而且 **UID 10001 能写**（06 §3.2 的属主约定）。
+#
+# 应用与看结果：
+#   kubectl apply -f deploy/k8s/storage-smoke-job.yaml
+#   kubectl -n testplane wait --for=condition=complete job/testplane-storage-smoke --timeout=120s
+#   kubectl -n testplane logs job/testplane-storage-smoke
+#   Get-ChildItem .data\storage\smoke        # 宿主侧能看到同一个文件才算通
+#   kubectl -n testplane delete job testplane-storage-smoke
+#
+# 不在 kustomization 里：冒烟是一次性动作，不该每次 apply -k 都重跑。
+#
+# 安全上下文刻意与 Tester Job 对齐（restricted：非 root、drop ALL、seccomp），
+# 顺带证明 namespace 的 PSA restricted 不会把 Tester 挡在门外。
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: testplane-storage-smoke
+  namespace: testplane
+  labels:
+    app.kubernetes.io/name: testplane-storage-smoke
+    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/component: smoke
+spec:
+  backoffLimit: 0
+  completions: 1
+  parallelism: 1
+  # 一份冒烟产物留在盘上就够，不设 ttlSecondsAfterFinished（与 E-2.4 同口径）
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: testplane-storage-smoke
+        app.kubernetes.io/part-of: testplane
+        app.kubernetes.io/component: smoke
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: smoke
+          image: alpine:3.20
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "== whoami =="
+              id
+              echo "== pvc root =="
+              ls -ln /storage-root
+              echo "== write =="
+              # 一行一个目录：busybox 的 /bin/sh **不支持 brace expansion**，
+              # 写成 {logs,raw} 会建出一个名字就叫 "{logs,raw}" 的目录。
+              mkdir -p /storage-root/smoke/r-0001/tasks/t-0001/attempts/1/logs
+              mkdir -p /storage-root/smoke/r-0001/tasks/t-0001/attempts/1/raw
+              echo "written by uid=$(id -u) at $(date -u +%FT%TZ) from pod=${HOSTNAME}" \
+                > /storage-root/smoke/r-0001/tasks/t-0001/attempts/1/logs/stdout.log
+              echo '{"ok":true}' > /storage-root/smoke/r-0001/result.json
+              echo "== readback =="
+              cat /storage-root/smoke/r-0001/tasks/t-0001/attempts/1/logs/stdout.log
+              cat /storage-root/smoke/r-0001/result.json
+              echo "== tree =="
+              find /storage-root/smoke -maxdepth 6 | sort
+              echo "STORAGE_SMOKE_OK"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: storage-root
+              mountPath: /storage-root
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: storage-root
+          persistentVolumeClaim:
+            claimName: testplane-storage
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi

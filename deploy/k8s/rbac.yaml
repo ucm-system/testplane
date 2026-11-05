@@ -1,0 +1,104 @@
+# TestPlane · RBAC（最小集）
+#
+# 设计依据
+#   design/views/06-physical-view.md §2（对象清单）、§4.4（平台不授予的权限）
+#   design/impl/web-and-delivery.md §9「RBAC（最小集）」表
+#
+# 两层结构（W-9）：
+#   1) Role testplane          —— namespace 级，执行层要写的东西（Job/Pod/Lease…）
+#   2) ClusterRole testplane-view —— 集群级只读，看板与 waiting_reason 的数据源
+#
+# 刻意**不授予**（06 §4.4，任何一条都不要"顺手补上"）：
+#   secrets get/list/watch     日志明文不脱敏（K-5），凭据只由 kubelet 注入
+#   pods/exec、attach、portforward  平台不代执行命令
+#   deployments/services/ingresses  部署归 Genet，平台只建 Job
+#   nodes 写 / drain / evict    只读可见性，不替运维做节点决策
+#   volcano 写（权重、抢占、删 PodGroup）  平台没有调度决策权
+#
+# 作用域说明：控制面与 Tester Job 同处 namespace `testplane`
+# （TESTPLANE_EXECUTOR_NAMESPACE），所以 namespace 级 Role 足够。
+# 若将来 Job 要落到**其它** namespace，用 deploy/k8s/rbac-cluster-executor.yaml
+# 里的 ClusterRole 变体替换本文件的 Role/RoleBinding——那是更大的权限面，需评审。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: testplane
+  namespace: testplane
+  labels:
+    app.kubernetes.io/name: testplane
+    app.kubernetes.io/part-of: testplane
+rules:
+  # 创建 / 跟踪 / 取消 Task Job（E-2、E-5.2）
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # 状态对账（E-4）、按 label 发现 Deploy Pod、取消时兜底删 Pod（E-5.2）
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  # 日志采集 follow（E-7）
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # 渲染期校验 Profile 挂载的 PVC 是否存在（E-3.4）
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get"]
+  # 复核 Pod 的 FailedMount / FailedScheduling（E-4.4）
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+  # 选主：controller / collector leader（E-7.3）
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: testplane
+  namespace: testplane
+  labels:
+    app.kubernetes.io/name: testplane
+    app.kubernetes.io/part-of: testplane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: testplane
+subjects:
+  - kind: ServiceAccount
+    name: testplane
+    namespace: testplane
+---
+# 集群级**只读**：看板节点状态 + Volcano 队列/PodGroup/Job（E-11）。
+# Volcano 未安装时这些 resource 只是"查不到"，不影响授权本身。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: testplane-view
+  labels:
+    app.kubernetes.io/name: testplane
+    app.kubernetes.io/part-of: testplane
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["queues", "podgroups", "jobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: testplane-view
+  labels:
+    app.kubernetes.io/name: testplane
+    app.kubernetes.io/part-of: testplane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: testplane-view
+subjects:
+  - kind: ServiceAccount
+    name: testplane
+    namespace: testplane

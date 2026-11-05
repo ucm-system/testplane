@@ -116,8 +116,12 @@ type DeployRequest struct {
 }
 
 // DeployState 是轮询结果。Ready 时 Endpoint 必填（平台据此注入公共参数）。
+//
+// Phase 取值以 design/impl/control-plane.md §C-5.3 为准：
+// queued | accepted | deploying | ready | blocked（没有 failed —— 部署失败体现为
+// Run 的 error 字段 + Run 转 failed，Deploy 子状态本身不引入第二个失败态）。
 type DeployState struct {
-	Phase    string // queued | deploying | ready | blocked | failed
+	Phase    string // queued | accepted | deploying | ready | blocked
 	Ready    bool
 	Endpoint domain.Endpoint
 	Failure  *domain.Failure
