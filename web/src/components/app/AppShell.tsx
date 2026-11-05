@@ -45,12 +45,13 @@ const NAV_GROUPS: Array<{ title: string; items: NavItem[] }> = [
 const TITLES: Array<{ test: (path: string) => boolean; title: string; sub: string }> = [
   { test: (p) => p === '/', title: '概览', sub: '集群忙不忙、谁在排队、有没有东西挂着' },
   { test: (p) => p === '/runs', title: '运行列表', sub: '一次 Run = 一组 Task；Pre-Check 是平台注入的第一个 Task' },
+  // 报告页必须排在 `/runs/` 之前：否则 `/runs/:id/report` 会被「Run 详情」先命中（B1）
+  { test: (p) => /^\/runs\/[^/]+\/report$/.test(p), title: '报告', sub: 'report.json 与产物' },
   { test: (p) => p.startsWith('/runs/'), title: 'Run 详情', sub: '状态由服务端推，UI 只读' },
   { test: (p) => p === '/submit', title: '提交运行', sub: '参数是一段字符串，平台只做词法切分' },
   { test: (p) => p === '/testers', title: 'Tester 目录', sub: '随镜像内置，平台启动时扫描目录自动发现' },
   { test: (p) => p === '/clusters', title: '集群与队列', sub: '只回答「卡在队列还是卡在平台槽位」' },
   { test: (p) => p === '/admin', title: '管理台', sub: 'Profile / 集群 / Secret 引用 / 审计（仅 admin）' },
-  { test: (p) => /^\/runs\/[^/]+\/report$/.test(p), title: 'Run 报告', sub: 'report.json：只做组织与索引' },
 ]
 
 function titleFor(pathname: string): { title: string; sub: string } {
@@ -167,6 +168,10 @@ export function AppShell() {
           >
             <Outlet />
           </Suspense>
+
+          {/* ≤1024px 时右栏被收成两列：页面把右栏内容 portal 到这里（主内容底部的可展开区块），
+              折叠 ≠ 隐藏 —— 事件流与边界说明仍然可达（C4） */}
+          <div id="rail-inline" data-testid="rail-inline" className="min-[1025px]:hidden" />
         </main>
 
         {/* 左栏（col 1）：sticky，高度锁一屏（页头 56 + 页脚 40） */}

@@ -36,7 +36,6 @@ export function DashboardPage() {
     <>
       <RightRail>
         <RailCard title="快捷操作" tone="muted">
-          {/* T42：概览不放"产品级操作"（新建 Run 已在左侧导航），这里只留查看类入口 */}
           <div className="flex flex-col gap-2">
             <Link to="/runs" className="block">
               <Button className="w-full">查看运行列表</Button>
@@ -68,10 +67,20 @@ export function DashboardPage() {
         </RailCard>
 
         <RailCard title="这页怎么看" tone="muted">
-          <p>队列满 = 等资源；队列空却还在排队 = 卡在平台槽位。</p>
-          <p className="mt-2">KPI 由 /runs 与 /queue-status 现算，P0 没有独立看板接口。</p>
+          <p>队列满了 = 在等资源；队列空着却还在排队 = 卡在平台自己的并发名额上。</p>
+          <p className="mt-2">这里的数字是打开页面时那一次的结果，不会自己跳：想确认最新情况，重新打开这一页。</p>
         </RailCard>
       </RightRail>
+
+      {/* 看板是「新建 Run」的入口之一（B12）；页面级操作放页头行，不塞进卡片 */}
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-2xs text-fg-3">打开页面时刷新的数字，不会自己跳</span>
+        <Link to="/submit" className="ml-auto">
+          <Button variant="primary" data-testid="new-run">
+            新建 Run
+          </Button>
+        </Link>
+      </div>
 
       {error ? <ErrorState error={error} onRetry={reload} /> : null}
 

@@ -1,73 +1,76 @@
-import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react'
-import { cn } from '@/lib/utils'
+import type { ReactNode } from 'react'
+import { Toaster, toast as sonnerToast } from 'sonner'
 import type { Tone } from '@/lib/status'
+
+/**
+ * Toast —— 用 **sonner**（成熟、可堆叠、可带 action、可关闭、自带无障碍播报），
+ * 不再手搓定时器与堆叠布局。
+ *
+ * 保留一层薄适配：调用方仍是 `useToast()({ title, description, tone, action })`，页面零改动。
+ * sonner 的容器自带 `aria-live="polite"` / `role="status"` 语义，`role="status"` 的断言仍成立。
+ */
+
+export interface ToastAction {
+  label: string
+  onClick: () => void
+}
 
 export interface ToastOptions {
   title: string
-  description?: string
+  description?: ReactNode
   tone?: Tone
+  /** 需要用户立刻做的事（复制 ID、跳到详情…）；没有动作就别放 toast */
+  action?: ToastAction
+  dismissible?: boolean
+  durationMs?: number
 }
 
-interface ToastItem extends ToastOptions {
-  id: number
-}
+const TONE_TO_SONNER = {
+  ok: 'success',
+  warn: 'warning',
+  err: 'error',
+  info: 'info',
+  primary: 'info',
+  muted: 'info',
+} as const
 
-const DURATION_MS = 2800
-
-const TONE_BAR: Record<Tone, string> = {
-  ok: 'bg-success',
-  warn: 'bg-warn',
-  err: 'bg-danger',
-  info: 'bg-primary',
-  primary: 'bg-primary',
-  muted: 'bg-line-strong',
-}
-
-const ToastContext = createContext<((options: ToastOptions) => void) | null>(null)
-
-/** 轻量 toast（Sonner 的等价物）：右下角堆叠，2.8s 自动消失。 */
+/** Provider：挂 sonner 的 Toaster，外观跟项目 token 对齐（右下、深底）。 */
 export function ToastProvider({ children }: { children: ReactNode }) {
-  const [items, setItems] = useState<ToastItem[]>([])
-  const counter = useRef(0)
-
-  const toast = useCallback((options: ToastOptions) => {
-    counter.current += 1
-    const id = counter.current
-    setItems((prev) => [...prev, { ...options, id }])
-    window.setTimeout(() => {
-      setItems((prev) => prev.filter((item) => item.id !== id))
-    }, DURATION_MS)
-  }, [])
-
-  const value = useMemo(() => toast, [toast])
-
   return (
-    <ToastContext.Provider value={value}>
+    <>
       {children}
-      <div
-        aria-live="polite"
-        aria-atomic="false"
-        className="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-[min(22rem,calc(100vw-2rem))] flex-col gap-2"
-      >
-        {items.map((item) => (
-          <div
-            key={item.id}
-            className="pointer-events-auto flex animate-fade-in items-start gap-2.5 rounded-md bg-ink px-3.5 py-2.5 text-xs text-white shadow-modal"
-          >
-            <span className={cn('mt-0.5 size-1.5 shrink-0 rounded-full', TONE_BAR[item.tone ?? 'muted'])} aria-hidden />
-            <div className="min-w-0">
-              <p className="font-medium">{item.title}</p>
-              {item.description ? <p className="mt-0.5 break-words text-2xs text-white/70">{item.description}</p> : null}
-            </div>
-          </div>
-        ))}
-      </div>
-    </ToastContext.Provider>
+      <Toaster
+        position="bottom-right"
+        closeButton
+        visibleToasts={4}
+        duration={4000}
+        gap={8}
+        offset={16}
+        toastOptions={{
+          classNames: {
+            toast:
+              'group flex w-[min(22rem,calc(100vw-2rem))] items-start gap-2.5 rounded-md border-0 bg-ink px-3.5 py-2.5 text-xs text-white shadow-modal',
+            title: 'font-medium',
+            description: '!mt-0.5 break-words text-2xs !text-white/70',
+            actionButton: '!rounded-sm !bg-white/15 !px-2 !py-1 text-2xs !text-white hover:!bg-white/25',
+            closeButton: '!border-white/20 !bg-transparent !text-white/60 hover:!text-white',
+          },
+        }}
+      />
+    </>
   )
 }
 
+/** 与旧 API 同签名：`const toast = useToast(); toast({ title, description, tone })` */
 export function useToast(): (options: ToastOptions) => void {
-  const ctx = useContext(ToastContext)
-  if (!ctx) throw new Error('useToast 必须在 <ToastProvider> 里使用')
-  return ctx
+  return (options: ToastOptions) => {
+    const { title, description, tone = 'muted', action, dismissible = true, durationMs = 4000 } = options
+    const kind = TONE_TO_SONNER[tone]
+    sonnerToast[kind](title, {
+      description,
+      duration: durationMs,
+      dismissible,
+      action: action ? { label: action.label, onClick: action.onClick } : undefined,
+    })
+  }
 }

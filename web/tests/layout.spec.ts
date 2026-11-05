@@ -263,7 +263,8 @@ test('页头分隔线只有 240 与 vw−288 两条，且品牌与导航左边�
 /**
  * 提交页两件事（用户截图级反馈）：
  *  - 「服务来源」是一张卡两种形态：部署 / 不部署，同一张卡里换字段（URL / 模型名 / 模型路径）；
- *  - Deploy YAML 有**语法高亮**（透明 textarea + 高亮 pre 叠层），可编辑、Tab 缩进 2 空格。
+ *  - Deploy YAML 有**语法高亮**（B11 起换成 CodeMirror 6 + `@codemirror/lang-yaml`），
+ *    可编辑、有行号、Tab 缩进 2 个空格。
  */
 test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 Tab 缩进', async ({ page }) => {
   mkdirSync(OUT_DIR, { recursive: true })
@@ -275,27 +276,29 @@ test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 T
   await expect(page.getByText('服务来源')).toBeVisible()
   await expect(page.getByText('一张卡两形态', { exact: false })).toBeVisible()
 
-  // 部署形态：YAML 编辑器在，且底层是 textarea + 高亮 pre 两层
+  // 部署形态：CodeMirror 编辑器在，且真做了语法高亮（key / 字符串至少两种颜色）+ 行号
   const editor = page.getByLabel('deploy 段 YAML')
   await expect(editor).toBeVisible()
-  const layering = await page.evaluate(() => {
-    const textarea = document.querySelector('textarea[aria-label="deploy 段 YAML"]') as HTMLTextAreaElement | null
-    if (!textarea) return null
-    const pre = textarea.parentElement?.querySelector('pre') ?? null
-    const spans = pre ? Array.from(pre.querySelectorAll('span')) : []
-    const colors = new Set(spans.map((span) => getComputedStyle(span).color))
+  await expect(page.getByTestId('yaml-editor')).toBeVisible()
+  const highlight = await page.evaluate(() => {
+    const content = document.querySelector('.cm-content')
+    if (!content) return null
+    const base = getComputedStyle(content).color
+    // 与正文不同的颜色 = 真的上了语法高亮（YAML 的 key 会被 tag 成 propertyName）
+    const colors = new Set(Array.from(content.querySelectorAll('span')).map((span) => getComputedStyle(span).color))
+    colors.delete(base)
     return {
-      textareaTransparent: getComputedStyle(textarea).color.includes('rgba(0, 0, 0, 0)'),
-      hasPre: Boolean(pre),
       tokenColors: colors.size,
-      hasLineNumbers: Boolean(textarea.parentElement?.parentElement?.querySelector('[aria-hidden]')),
+      hasLineNumbers: Boolean(document.querySelector('.cm-lineNumbers')),
+      whiteSpace: getComputedStyle(content).whiteSpace,
     }
   })
-  expect(layering?.hasPre, 'YAML 应该有高亮层 <pre>').toBe(true)
-  expect(layering?.textareaTransparent, 'textarea 文字应透明（否则两层文字重影）').toBe(true)
-  expect(layering?.tokenColors ?? 0, '高亮至少要有两种颜色（key / 字符串）').toBeGreaterThanOrEqual(2)
+  expect(highlight, 'YAML 应该渲染成 CodeMirror 的 .cm-content').not.toBeNull()
+  expect(highlight?.tokenColors ?? 0, '高亮：key 的颜色必须与正文不同').toBeGreaterThanOrEqual(1)
+  expect(highlight?.hasLineNumbers, 'YAML 编辑器要有行号').toBe(true)
+  expect(highlight?.whiteSpace, '不折行：长值靠横向滚动').not.toBe('pre-wrap')
 
-  // 可编辑 + Tab 缩进 2 空格
+  // 可编辑 + Tab 缩进 2 个空格（YAML 不允许用制表符缩进）
   await editor.click()
   await page.keyboard.press('Control+End')
   await page.keyboard.press('Enter')
@@ -303,7 +306,7 @@ test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 T
   await page.keyboard.type('note: demo')
   await page.keyboard.press('Enter')
   await page.keyboard.type('# 注释演示')
-  const value = await editor.inputValue()
+  const value = await page.locator('.cm-content').innerText()
   expect(value, 'Tab 应插入 2 个空格').toContain('\n  note: demo')
   expect(value).toContain('# 注释演示')
 

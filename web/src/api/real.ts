@@ -3,7 +3,7 @@
  * 基址由 api/client.ts 的 `API_BASE` 拼接（默认 `/api/v1`），这里只写资源路径。
  */
 import type { Api, LogOptions } from './contract'
-import { qs, request, requestText } from './client'
+import { API_BASE, ApiClientError, authHeaders, normalizeErrorBody, qs, request, requestText } from './client'
 import { asArray, asPage, normalizeTester } from './normalize'
 import { applyIdentity, clearAuth } from './auth'
 import type {
@@ -28,6 +28,7 @@ import type {
   ProfileWrite,
   QueueStatus,
   Report,
+  Result,
   RetryPlan,
   Run,
   RunEvent,
@@ -138,6 +139,11 @@ export const realApi: Api = {
     return asArray<Attempt>(data).sort((a, b) => a.idx - b.idx)
   },
 
+  /** Attempt 的 result.json 原文（报告页指标表的数据来源；文件缺失时后端 404） */
+  getAttemptResult(taskId: string, idx: number): Promise<Result> {
+    return request<Result>(`/tasks/${encodeURIComponent(taskId)}/attempts/${idx}/result`)
+  },
+
   async getAttemptLogs(taskId: string, idx: number, opts: LogOptions = {}) {
     const text = await requestText(
       `/tasks/${encodeURIComponent(taskId)}/attempts/${idx}/logs${qs({
@@ -217,6 +223,26 @@ export const realApi: Api = {
   /** 产物清单：与 `/files?path=` 配对使用（下载链接直接拼 API_BASE） */
   listRunArtifacts(runId: string): Promise<ArtifactList> {
     return request<ArtifactList>(`/runs/${encodeURIComponent(runId)}/artifacts`)
+  },
+
+  /** 整包下载：必须走带鉴权的 fetch（`<a href>` 在 dev/OIDC 下会 401），拿到 Blob 再触发保存 */
+  async downloadBundle(runId: string): Promise<Blob> {
+    const res = await fetch(`${API_BASE}/runs/${encodeURIComponent(runId)}/bundle`, {
+      headers: authHeaders(),
+      credentials: 'same-origin',
+    })
+    if (!res.ok) throw new ApiClientError(res.status, normalizeErrorBody(res.status, await res.json().catch(() => null)))
+    return res.blob()
+  },
+
+  /** 单文件下载：同上，`path` 用 artifacts 返回的 storage-root 相对路径 */
+  async downloadFile(runId: string, path: string): Promise<Blob> {
+    const res = await fetch(`${API_BASE}/runs/${encodeURIComponent(runId)}/files?path=${encodeURIComponent(path)}`, {
+      headers: authHeaders(),
+      credentials: 'same-origin',
+    })
+    if (!res.ok) throw new ApiClientError(res.status, normalizeErrorBody(res.status, await res.json().catch(() => null)))
+    return res.blob()
   },
 
   /* 报告（契约内） */

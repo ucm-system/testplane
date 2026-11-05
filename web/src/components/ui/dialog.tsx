@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
+import * as RadixDialog from '@radix-ui/react-dialog'
 import { X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -21,7 +21,13 @@ export interface DialogProps {
   dismissible?: boolean
 }
 
-/** 模态弹窗：焦点陷阱的简化版（首元素聚焦 + Esc + overlay 点击）。 */
+/**
+ * 模态弹窗：基于 `@radix-ui/react-dialog`（focus trap + 关闭后焦点归还触发按钮）。
+ *
+ * 对外 props 与改造前完全一致（`open` / `onClose` / `title` / `description` / `footer` / `size` /
+ * `dismissible`），所以「重跑 Run」「取消 Run」「取消 Task」「管理台删除」这些调用点不用改；
+ * 无障碍细节交给 Radix：`role="dialog"` + `aria-modal` + Tab 循环 + Esc + 遮罩点击。
+ */
 export function Dialog({
   open,
   onClose,
@@ -34,80 +40,90 @@ export function Dialog({
 }: DialogProps) {
   const titleId = useId()
   const descId = useId()
-  const panelRef = useRef<HTMLDivElement>(null)
+  /**
+   * 焦点归还：本组件的触发按钮在调用点，不是 `Dialog.Trigger`，
+   * Radix 内部的 `triggerRef` 因此是空的（关闭时它 preventDefault 后无处可还，焦点会掉到 body）。
+   * 这里自己记住「最近一个弹窗外的焦点」，关闭时还给它。
+   */
+  const lastOutsideFocusRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
-    if (!open) return
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && dismissible) {
-        event.stopPropagation()
-        onClose()
-      }
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target
+      if (!(target instanceof HTMLElement)) return
+      if (target.closest('[role="dialog"]')) return
+      lastOutsideFocusRef.current = target
     }
-    document.addEventListener('keydown', onKeyDown)
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    const focusable = panelRef.current?.querySelector<HTMLElement>(
-      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-    )
-    focusable?.focus()
-    return () => {
-      document.removeEventListener('keydown', onKeyDown)
-      document.body.style.overflow = previousOverflow
-    }
-  }, [open, onClose, dismissible])
+    document.addEventListener('focusin', onFocusIn)
+    return () => document.removeEventListener('focusin', onFocusIn)
+  }, [])
 
-  if (!open) return null
-
-  return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div
-        className="absolute inset-0 animate-fade-in bg-[rgb(15_23_42_/_0.45)]"
-        onClick={() => dismissible && onClose()}
-        aria-hidden
-      />
-      <div
-        ref={panelRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={description ? descId : undefined}
-        className={cn(
-          'relative z-10 flex max-h-[calc(100vh-3rem)] w-full animate-fade-in flex-col overflow-hidden',
-          'rounded-xl border border-line bg-surface shadow-modal',
-          SIZES[size],
-        )}
-      >
-        <header className="flex items-start gap-3 border-b border-line-soft px-5 py-4">
-          <div className="min-w-0 flex-1">
-            <h2 id={titleId} className="text-sm font-semibold text-fg">
-              {title}
-            </h2>
-            {description ? (
-              <p id={descId} className="mt-1 text-xs leading-relaxed text-fg-2">
-                {description}
-              </p>
+  return (
+    <RadixDialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        // Radix 的关闭来源统一收敛到 onClose（Esc / 遮罩 / 关闭按钮 / 外部交互）
+        if (!next) onClose()
+      }}
+    >
+      <RadixDialog.Portal>
+        <RadixDialog.Overlay className="fixed inset-0 z-50 animate-fade-in bg-[rgb(15_23_42_/_0.45)]" />
+        <RadixDialog.Content
+          aria-labelledby={titleId}
+          /* 没有 description 时必须显式置空，否则 Radix 会告警「缺 Description」 */
+          aria-describedby={description ? descId : undefined}
+          onCloseAutoFocus={(event) => {
+            const target = lastOutsideFocusRef.current
+            if (!target || !target.isConnected) return
+            event.preventDefault()
+            target.focus()
+          }}
+          onEscapeKeyDown={(event) => {
+            if (!dismissible) event.preventDefault()
+          }}
+          onPointerDownOutside={(event) => {
+            if (!dismissible) event.preventDefault()
+          }}
+          onInteractOutside={(event) => {
+            if (!dismissible) event.preventDefault()
+          }}
+          className={cn(
+            'fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100vh-3rem)] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2',
+            'animate-fade-in flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-modal',
+            SIZES[size],
+          )}
+        >
+          <header className="flex items-start gap-3 border-b border-line-soft px-5 py-4">
+            <div className="min-w-0 flex-1">
+              <RadixDialog.Title id={titleId} className="text-sm font-semibold text-fg">
+                {title}
+              </RadixDialog.Title>
+              {description ? (
+                <RadixDialog.Description id={descId} className="mt-1 text-xs leading-relaxed text-fg-2">
+                  {description}
+                </RadixDialog.Description>
+              ) : null}
+            </div>
+            {dismissible ? (
+              <RadixDialog.Close asChild>
+                <button
+                  type="button"
+                  aria-label="关闭"
+                  className="-mr-1 rounded-md p-1 text-fg-3 transition-colors hover:bg-line-soft hover:text-fg"
+                >
+                  <X className="size-4" aria-hidden />
+                </button>
+              </RadixDialog.Close>
             ) : null}
-          </div>
-          {dismissible ? (
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="关闭"
-              className="-mr-1 rounded-md p-1 text-fg-3 transition-colors hover:bg-line-soft hover:text-fg"
-            >
-              <X className="size-4" aria-hidden />
-            </button>
+          </header>
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+          {footer ? (
+            <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line-soft bg-surface-2 px-5 py-3">
+              {footer}
+            </footer>
           ) : null}
-        </header>
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
-        {footer ? (
-          <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line-soft bg-surface-2 px-5 py-3">
-            {footer}
-          </footer>
-        ) : null}
-      </div>
-    </div>,
-    document.body,
+        </RadixDialog.Content>
+      </RadixDialog.Portal>
+    </RadixDialog.Root>
   )
 }
