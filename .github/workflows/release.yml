@@ -124,12 +124,20 @@ jobs:
           echo "short=${short}" >> "$GITHUB_OUTPUT"
           echo "平台：${{ inputs.platforms || 'linux/amd64,linux/arm64' }}"
 
+      # 组织策略把默认 workflow 权限锁成 read 时，GITHUB_TOKEN 拿不到 packages:write
+      # （报 `denied: permission_denied: write_package`）。所以优先用带 write:packages 的
+      # PAT（仓库 secret GHCR_TOKEN），没有才退回 GITHUB_TOKEN。
       - name: 登录 GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.GHCR_USERNAME || github.actor }}
+          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: preflight：确认能写包
+        run: |
+          if ! docker push --help >/dev/null 2>&1; then exit 1; fi
+          echo "使用凭据：${{ secrets.GHCR_TOKEN != '''' && ''GHCR_TOKEN（PAT）'' || ''GITHUB_TOKEN'' }}"
 
       - name: 构建并推送（多架构）
         id: build
