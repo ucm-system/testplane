@@ -75,3 +75,13 @@ image:
 
 > **首次发版后要做一次手工设置**：GitHub → 仓库 → Packages → 选中包 → Package settings →
 > Change visibility → Public。否则匿名拉取会 401（私有包需要 `image.pullSecrets`）。
+
+## 镜像发布的两个前置设置（一次性）
+
+1. **`GHCR_TOKEN` 仓库 Secret**（PAT，scope 至少 `write:packages`）——本组织把 Actions 的默认 workflow 权限锁成了
+   `read`（`PUT /repos/{repo}/actions/permissions/workflow` 返回 `409 Write permissions for workflows are disabled by the organization`），
+   所以 `GITHUB_TOKEN` 拿不到 `packages: write`，release job 会报
+   `denied: permission_denied: write_package`。workflow 里优先用这个 secret，缺失才退回 `GITHUB_TOKEN`。
+2. **包可见性**：首次发版后到 *仓库 → Packages → 选包 → Package settings → Change visibility → Public*。
+   默认是 `internal`，匿名拉取会 401（集群里要配 `image.pullSecrets` 才能拉）。
+   用 API 改会 404（`PATCH /orgs/{org}/packages/container/{name}` 目前不可用），只能 UI 改。

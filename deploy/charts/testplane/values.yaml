@@ -19,8 +19,10 @@ image:
   # "回滚到底跑了哪份代码"无从回答）。digest 由 `deploy/docker/build-push.ps1` 打印。
   # tag 与 digest 二选一；生产请用 digest。
   # digest 来自 `release.yml`（打 v* tag）或 `deploy/docker/build-push.ps1 -Push` 的输出。
-  tag: "0.1.0"
-  digest: ""
+  # 下面的值对应 2026-11-05 的 v0.1.0-rc.2 发布（多架构 index digest），可直接装起来试；
+  # 正式发版后换成你自己的 digest。
+  tag: "0.1.0-rc.2"
+  digest: "sha256:db47b19a194f20b9449925e09e29e574b0199d09227fbe2f6f7f72e43f927d8d"
   pullPolicy: IfNotPresent
   pullSecrets: []
 

@@ -168,4 +168,5 @@ git tag -a v0.1.0 -m "TestPlane v0.1.0" && git push origin v0.1.0
 digest 在 Actions 的 job summary 里，直接填 `image.digest`。
 
 > 首次发版后去 **Packages → Package settings → Change visibility → Public**，否则匿名拉取 401。
+> CI 用 `GHCR_TOKEN`（PAT，`write:packages`）：本组织把默认 workflow 权限锁成 `read`，`GITHUB_TOKEN` 拿不到 `packages: write`。
 > 需要私有包时用 `image.pullSecrets`（`kubectl create secret docker-registry ghcr-pull ...`）。
