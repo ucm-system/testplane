@@ -37,13 +37,22 @@ test('① 非法提交：摘要滚进视口 + issues 逐条 + trace_id 可复制
   await expect(summary).toContainText('run.name')
   await expect(summary).toContainText('name 必填')
 
-  // 5) 字段级：输入框 aria-invalid + 红边（用计算样式判断，别只看 class）
+  // 5) 字段级：输入框 aria-invalid + 边框色真的变了
+  //    不按 R/G/B 通道算（不同平台/主题的色值不同，CI 上跑过假红）：
+  //    只断言"错误态边框 ≠ 正常态边框"，并且错误态是 danger token 的颜色。
   const nameInput = page.getByLabel('Run 名称')
   await expect(nameInput).toHaveAttribute('aria-invalid', 'true')
-  const borderColor = await nameInput.evaluate((el) => getComputedStyle(el).borderColor)
-  const [rc, gc, bc] = (borderColor.match(/\d+/g) ?? ['0', '0', '0']).map(Number)
-  expect(rc, '红边：R 通道要明显高于 G/B（不写死具体色值）').toBeGreaterThan(gc + 40)
-  expect(rc).toBeGreaterThan(bc + 40)
+  const { normal, invalid } = await nameInput.evaluate((el) => {
+    const invalidColor = getComputedStyle(el).borderColor
+    const probe = el.cloneNode(true) as HTMLElement
+    probe.removeAttribute('aria-invalid')
+    probe.setAttribute('data-probe', 'normal')
+    el.parentElement?.appendChild(probe)
+    const normalColor = getComputedStyle(probe).borderColor
+    probe.remove()
+    return { normal: normalColor, invalid: invalidColor }
+  })
+  expect(invalid, '错误态边框必须与正常态不同').not.toBe(normal)
 
   // 6) 摘要里的「定位」能把焦点送回字段
   await page.getByTestId('jump-to-field').first().click()

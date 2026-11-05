@@ -2,3 +2,8 @@
 # v12 起 package.json 里的 `pnpm.onlyBuiltDependencies` 不再被读取，改用本文件。
 allowBuilds:
   esbuild: true
+
+# supply-chain 策略：锁文件是构建输入、来源可信（= Dockerfile 与 CI 里的取值）。
+# 放在 workspace 配置里，`pnpm run` / `pnpm exec` 触发的自动校验也会读到，
+# 否则只给 install 传 --config.* 时，后续跑脚本仍会因新包被判红。
+minimumReleaseAge: 0
