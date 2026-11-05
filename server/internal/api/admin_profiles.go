@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
@@ -152,17 +154,25 @@ func (s *Server) handleAdminCreateProfile(w http.ResponseWriter, r *http.Request
 		NetworkPolicy:        jsonRaw(mapOrEmpty(req.NetworkPolicy)),
 		CreatedBy:            Actor(ctx),
 	}
-	if err := s.st.Profiles.Create(ctx, nil, p); err != nil {
-		if errors.Is(err, domain.ErrConflict) {
+	// 业务变更 + 审计同事务：审计失败整体回滚（PR #33 #6）。
+	err := s.st.InAuditedTx(ctx, s.auditEntry(r, action, objectType, name, map[string]any{
+		"cluster": cluster, "namespace": namespace,
+	}), func(tx pgx.Tx) error {
+		return s.st.Profiles.Create(ctx, tx, p)
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrConflict):
 			s.rejectWrite(w, r, action, objectType, name,
 				http.StatusConflict, domain.CodeConflict,
 				"Execution Profile 名字已存在", map[string]any{"name": name}, false)
-			return
+		case errors.Is(err, domain.ErrTx):
+			s.failAuditTx(w, r, action, objectType, name, err)
+		default:
+			s.failWriteErr(w, r, action, objectType, name, err)
 		}
-		s.failErr(w, r, err)
 		return
 	}
-	s.auditOK(r, action, objectType, p.Name, map[string]any{"cluster": p.Cluster, "namespace": p.Namespace})
 	writeJSON(w, http.StatusCreated, toAdminProfileDTO(p))
 }
 
@@ -259,20 +269,26 @@ func (s *Server) handleAdminUpdateProfile(w http.ResponseWriter, r *http.Request
 		merged.NetworkPolicy = jsonRaw(mapOrEmpty(req.NetworkPolicy))
 	}
 
-	if err := s.st.Profiles.Update(ctx, nil, &merged); err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			s.rejectWrite(w, r, action, objectType, name,
-				http.StatusNotFound, domain.CodeNotFound,
-				"Execution Profile 不存在", map[string]any{"name": name}, false)
-			return
-		}
-		s.failErr(w, r, err)
-		return
-	}
-	s.auditOK(r, action, objectType, name, map[string]any{
+	entry := s.auditEntry(r, action, objectType, name, map[string]any{
 		"cluster": merged.Cluster, "namespace": merged.Namespace,
 		"scheduler": merged.Scheduler, "deploy_timeout_seconds": merged.DeployTimeoutSeconds,
 	})
+	err = s.st.InAuditedTx(ctx, entry, func(tx pgx.Tx) error {
+		return s.st.Profiles.Update(ctx, tx, &merged)
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrNotFound):
+			s.rejectWrite(w, r, action, objectType, name,
+				http.StatusNotFound, domain.CodeNotFound,
+				"Execution Profile 不存在", map[string]any{"name": name}, false)
+		case errors.Is(err, domain.ErrTx):
+			s.failAuditTx(w, r, action, objectType, name, err)
+		default:
+			s.failWriteErr(w, r, action, objectType, name, err)
+		}
+		return
+	}
 	writeJSON(w, http.StatusOK, toAdminProfileDTO(&merged))
 }
 
@@ -300,22 +316,33 @@ func (s *Server) handleAdminDeleteProfile(w http.ResponseWriter, r *http.Request
 		s.failErr(w, r, err)
 		return
 	}
-	refs, err := s.st.Profiles.CountTaskRefs(ctx, nil, name)
+	refs := 0
+	detail := map[string]any{"referencing_tasks": 0}
+	entry := s.auditEntry(r, action, objectType, name, detail)
+	// 计数 + 删除 + 审计同事务：删除生效就一定有审计，反之亦然。
+	err := s.st.InAuditedTx(ctx, entry, func(tx pgx.Tx) error {
+		n, err := s.st.Profiles.CountTaskRefs(ctx, tx, name)
+		if err != nil {
+			return err
+		}
+		refs = n
+		detail["referencing_tasks"] = n
+		entry.Detail["referencing_tasks"] = n
+		return s.st.Profiles.Delete(ctx, tx, name)
+	})
 	if err != nil {
-		s.failErr(w, r, err)
-		return
-	}
-	if err := s.st.Profiles.Delete(ctx, nil, name); err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
+		switch {
+		case errors.Is(err, domain.ErrNotFound):
 			s.rejectWrite(w, r, action, objectType, name,
 				http.StatusNotFound, domain.CodeNotFound,
 				"Execution Profile 不存在", map[string]any{"name": name}, false)
-			return
+		case errors.Is(err, domain.ErrTx):
+			s.failAuditTx(w, r, action, objectType, name, err)
+		default:
+			s.failWriteErr(w, r, action, objectType, name, err)
 		}
-		s.failErr(w, r, err)
 		return
 	}
-	s.auditOK(r, action, objectType, name, map[string]any{"referencing_tasks": refs})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name": name, "deleted": true, "referencing_tasks": refs,
 	})

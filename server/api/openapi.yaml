@@ -846,7 +846,7 @@ paths:
 
         多 Pod 场景下 `pods[]` 是唯一能还原拓扑的地方；**Endpoint 的 `url` 只取 Genet 返回值**，
         平台不按角色推导主 URL（execution §9.1）。没有 Deploy 的 Run（`service` 模式或独立 Task）
-        返回 `deploy: null`、`pods: []`。本端点**不含日志正文**（`/runs/{id}/deploy/logs` 不在本契约内）；
+        返回 `deploy: null`、`pods: []`。本端点**不含日志正文**——日志走 `GET /runs/{id}/deploy/logs`（`?pod=` 必选，单 Pod 游标）；
         `deploy.state` 的 `blocked` 会让 Run 收口为 `service_unavailable`（C-5.3）。
       tags: [runs]
       parameters:
@@ -897,14 +897,20 @@ paths:
         - $ref: '#/components/parameters/RunId'
         - name: pod
           in: query
-          required: false
-          description: 只看这个 Pod（前端页签）
+          required: true
+          description: |
+            **必选**：要读哪个 Pod 的日志（前端 Pod 页签）。
+            多 Pod 共用一个游标会让短 Pod 永远轮不到（评审 #4），所以游标只在单个 Pod 内生效；
+            `pods[]` 仍一次返回全部 Pod，供页签渲染。
+            指定的 Pod 不在当前列表里 → `404 NOT_FOUND`（`detail.reason=pod_not_found`，附 `available_pods`）。
           schema:
             type: string
         - name: offset
           in: query
           required: false
-          description: 每个 Pod 日志流的行偏移（默认 0）
+          description: |
+            **该 Pod** 日志流的行偏移（默认 0）。与 `tail_lines` 互斥：
+            同时给出 → `400 VALIDATION_ERROR`（tail_lines 是"窗口末尾"语义，无法稳定翻页）。
           schema:
             type: integer
             minimum: 0
@@ -921,7 +927,9 @@ paths:
         - name: tail_lines
           in: query
           required: false
-          description: 只取每个 Pod 末尾 N 行（默认 0 = 不限，上限 5000）
+          description: |
+            只取该 Pod 末尾 N 行（默认 0 = 不限，上限 5000）。
+            与 `offset` 互斥（同时给出 → 400）。
           schema:
             type: integer
             minimum: 0
@@ -941,6 +949,8 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/NotFound'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '502':
           description: |
             执行集群不可用，或缺少 `pods/log` 权限（`EXECUTOR_UNAVAILABLE`）。
@@ -2071,13 +2081,15 @@ paths:
       summary: Secret 轮换校验 + 审计（admin）
       description: |
         07 §5.4 / C-10 / UC-18：值由 admin 在 Secret Store 侧更新，随后调本端点。
-        平台对**已登记的那一个** (namespace, secret_name) 做一次**存在性校验**：
-        Secret 存在且该 key 非空 → `{rotated:true, checked_at}`，并在 `audit_log` 记
-        action=`secret_rotated`（`detail.verified=true` + `checked_at`）。
+        平台对**已登记的那一条** (namespace, secret_name) 做一次**存在性校验**：
+        Secret 存在且该 key 非空 → `{rotated:true, verified:true, checked_at}`，并在
+        `audit_log` 记 action=`secret_rotated`（`detail.verified=true` + `checked_at`）。
 
-        D-55 的窄例外：只允许对这一条登记做 `get`（RBAC 用 `resourceNames` 限定），
+        D-55 的窄例外：只允许对这一条登记做 `get`（RBAC 用 `resourceNames` 限定，
+        清单由 `deploy/k8s/gen-secret-rotate-role.ps1` 按登记项生成），
         **不读值当数据使用、不打印、不落库、不回显**；平台没有 Secret 写权限。
-        轮换失败不回滚登记行；无权限 / 集群不可达 → 503 `EXECUTOR_UNAVAILABLE`（可重试），
+        轮换失败不回滚登记行；无权限 / 集群不可达 → 503 `EXECUTOR_UNAVAILABLE`（可重试，
+        `detail.reason` 区分 `forbidden`（RBAC 没 apply）与 `k8s_unavailable`（不可达）），
         绝不降级成"看起来成功"。
       tags: [admin]
       parameters:
@@ -5137,13 +5149,17 @@ components:
       description: |
         rotate 的成功响应（07 §5.4 / C-10 / D-55）：只说明"登记项校验通过"与检查时间，
         不含任何值。失败分别是 404（引用或 Secret 不存在）、400（key 为空）、
-        503（无权限 / 集群不可达，可重试）。
-      required: [rotated, checked_at]
+        503（无权限 / 集群不可达，可重试；`detail.reason=forbidden|k8s_unavailable`）。
+        e2e 以 `verified=true` 判定"部署 SA 的 D-55 窄授权确实生效"。
+      required: [rotated, verified, checked_at]
       additionalProperties: true
       properties:
         rotated:
           type: boolean
           description: 恒为 true（失败路径不走本结构）
+        verified:
+          type: boolean
+          description: 恒为 true（失败路径不走本结构）；e2e 用它证明 SA 有合法读权限
         checked_at:
           type: string
           format: date-time
@@ -5171,13 +5187,15 @@ components:
           type: string
           description: |
             动作：`register` / `update` / `delete_profile` / `delete_cluster` /
-            `secret_rotated` / `cleanup_artifacts`，以及既有的 `submit` / `cancel` / `retry` 等
+            `secret_rotated` / `cleanup_artifacts`，既有的 `submit` / `cancel` / `retry`，
+            以及接入层拒绝 `rbac_rejected` / `csrf_rejected` / `auth_rejected`
+            （PR #33 #6：403/401/CSRF 在中间件就被拒，也必须能查到"谁被拒了"）
         object_type:
           type: string
-          description: '对象类型：`execution_profile` / `cluster` / `secret_ref` / `run` / `task` 等'
+          description: '对象类型：`execution_profile` / `cluster` / `secret_ref` / `run` / `task` / `http_request`（拒绝类）'
         object_id:
           type: [string, 'null']
-          description: 对象标识（名字或 ID）
+          description: 对象标识（名字、ID 或拒绝时的请求路径）
         detail:
           type: object
           additionalProperties: true

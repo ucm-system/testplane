@@ -300,12 +300,13 @@ func Load() (*Config, error) {
 
 	switch c.AuthMode {
 	case "dev":
-		// 红线（06 §6.1、07 §2.1、票 #27-2）：dev 鉴权等于"任何人以任意身份操作"，
-		// 在 staging/prod 必须**启动即失败**，而不是打条 WARN 继续跑。
+		// 红线（06 §6.1、07 §2.1、票 #27-2 / #33 评审第 7 条）：dev 鉴权等于"任何人以任意身份操作"，
+		// 只允许在**显式声明的本地环境**下启用；其它任何取值（含未设置时的默认值以外的 staging/prod）都启动即失败。
 		switch c.Env {
-		case "staging", "prod", "production":
+		case "dev", "local":
+		default:
 			return nil, fmt.Errorf(
-				"config: TESTPLANE_AUTH_MODE=dev 不允许用在 TESTPLANE_ENV=%q（dev 模式无鉴权）；请设 TESTPLANE_AUTH_MODE=oidc",
+				"config: TESTPLANE_AUTH_MODE=dev 只能与 TESTPLANE_ENV=dev|local 一起用（当前 TESTPLANE_ENV=%q）；正式环境请设 TESTPLANE_AUTH_MODE=oidc",
 				c.Env)
 		}
 	case "oidc":

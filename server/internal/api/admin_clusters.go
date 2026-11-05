@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
@@ -107,20 +109,25 @@ func (s *Server) handleAdminCreateCluster(w http.ResponseWriter, r *http.Request
 		KubeconfigKey: kubeconfigKey,
 		Description:   optionalText(req.Description),
 	}
-	if err := s.st.Clusters.Create(ctx, nil, c); err != nil {
-		if errors.Is(err, domain.ErrConflict) {
+	// 审计记文件名，不记内容（内容本来就不接收）；与登记同事务。
+	err := s.st.InAuditedTx(ctx, s.auditEntry(r, action, objectType, name, map[string]any{
+		"api_server": c.APIServer, "kubeconfig_key": c.KubeconfigKey,
+	}), func(tx pgx.Tx) error {
+		return s.st.Clusters.Create(ctx, tx, c)
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrConflict):
 			s.rejectWrite(w, r, action, objectType, name,
 				http.StatusConflict, domain.CodeConflict,
 				"集群名字已存在", map[string]any{"name": name}, false)
-			return
+		case errors.Is(err, domain.ErrTx):
+			s.failAuditTx(w, r, action, objectType, name, err)
+		default:
+			s.failWriteErr(w, r, action, objectType, name, err)
 		}
-		s.failErr(w, r, err)
 		return
 	}
-	// 审计记文件名，不记内容（内容本来就不接收）。
-	s.auditOK(r, action, objectType, name, map[string]any{
-		"api_server": c.APIServer, "kubeconfig_key": c.KubeconfigKey,
-	})
 	writeJSON(w, http.StatusCreated, toAdminClusterDTO(c))
 }
 
@@ -181,22 +188,28 @@ func (s *Server) handleAdminUpdateCluster(w http.ResponseWriter, r *http.Request
 		merged.Description = optionalText(req.Description)
 	}
 
-	if err := s.st.Clusters.Update(ctx, nil, &merged); err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			s.rejectWrite(w, r, action, objectType, name,
-				http.StatusNotFound, domain.CodeNotFound,
-				"集群不存在", map[string]any{"name": name}, false)
-			return
-		}
-		s.failErr(w, r, err)
-		return
-	}
 	kubeconfigChanged := merged.KubeconfigKey != cur.KubeconfigKey
-	s.auditOK(r, action, objectType, name, map[string]any{
+	// kubeconfig_key 变更必须留审计；与更新同事务。
+	err = s.st.InAuditedTx(ctx, s.auditEntry(r, action, objectType, name, map[string]any{
 		"api_server":             merged.APIServer,
 		"kubeconfig_key_changed": kubeconfigChanged,
 		"kubeconfig_key":         merged.KubeconfigKey,
+	}), func(tx pgx.Tx) error {
+		return s.st.Clusters.Update(ctx, tx, &merged)
 	})
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrNotFound):
+			s.rejectWrite(w, r, action, objectType, name,
+				http.StatusNotFound, domain.CodeNotFound,
+				"集群不存在", map[string]any{"name": name}, false)
+		case errors.Is(err, domain.ErrTx):
+			s.failAuditTx(w, r, action, objectType, name, err)
+		default:
+			s.failWriteErr(w, r, action, objectType, name, err)
+		}
+		return
+	}
 	writeJSON(w, http.StatusOK, toAdminClusterDTO(&merged))
 }
 
@@ -234,23 +247,27 @@ func (s *Server) handleAdminDeleteCluster(w http.ResponseWriter, r *http.Request
 			map[string]any{"cluster": name, "profiles": profiles}, false)
 		return
 	}
-	if err := s.st.Clusters.Delete(ctx, nil, name); err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
+	err = s.st.InAuditedTx(ctx, s.auditEntry(r, action, objectType, name, map[string]any{}),
+		func(tx pgx.Tx) error {
+			return s.st.Clusters.Delete(ctx, tx, name)
+		})
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrNotFound):
 			s.rejectWrite(w, r, action, objectType, name,
 				http.StatusNotFound, domain.CodeNotFound,
 				"集群不存在", map[string]any{"name": name}, false)
-			return
-		}
-		if errors.Is(err, domain.ErrPrecondition) {
+		case errors.Is(err, domain.ErrPrecondition):
 			s.rejectWrite(w, r, action, objectType, name,
 				http.StatusConflict, domain.CodeConflict,
 				"仍有 Execution Profile 引用该集群", map[string]any{"cluster": name}, false)
-			return
+		case errors.Is(err, domain.ErrTx):
+			s.failAuditTx(w, r, action, objectType, name, err)
+		default:
+			s.failWriteErr(w, r, action, objectType, name, err)
 		}
-		s.failErr(w, r, err)
 		return
 	}
-	s.auditOK(r, action, objectType, name, map[string]any{})
 	writeJSON(w, http.StatusOK, map[string]any{"name": name, "deleted": true})
 }
 

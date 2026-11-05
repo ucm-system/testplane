@@ -79,15 +79,21 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 状态推进 + 审计同事务（PR #33 #6）：取消生效就一定有一条 audit_log。
+	entry := s.auditEntry(r, "cancel", "task", taskID, map[string]any{"status_before": task.Status})
 	switch status {
 	case domain.TaskPending, domain.TaskQueued:
-		_, err = s.machines.Tasks.Skip(ctx, taskID, domain.SkipCanceled)
+		_, err = s.machines.Tasks.SkipAudited(ctx, taskID, domain.SkipCanceled, entry)
 	case domain.TaskPreparing, domain.TaskRunning:
-		_, err = s.machines.Tasks.Cancel(ctx, taskID, Actor(ctx))
+		_, err = s.machines.Tasks.CancelAudited(ctx, taskID, Actor(ctx), entry)
 	default:
 		err = fmt.Errorf("store: cancel task %s: 状态 %s 不支持取消: %w", taskID, status, domain.ErrPrecondition)
 	}
 	if err != nil {
+		if errors.Is(err, domain.ErrTx) {
+			s.failAuditTx(w, r, "cancel", "task", taskID, err)
+			return
+		}
 		if errors.Is(err, domain.ErrConflict) {
 			if cur, getErr := s.st.Tasks.Get(ctx, nil, taskID); getErr == nil {
 				writeJSON(w, http.StatusOK, map[string]any{"task_id": taskID, "status": cur.Status})

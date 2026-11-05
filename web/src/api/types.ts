@@ -764,46 +764,71 @@ export interface ExecutionProfile {
   deploy_timeout_seconds: number
 }
 
-/* ================================================================ P1：重试 / 管理（openapi 未收录） */
+/* ================================================================ 重试 / 管理（契约内） */
 
 /*
- * 下面这几组端点**不在 `server/api/openapi.yaml` 的 MVP 契约内**（契约开头明确把
- * `POST /runs/{id}/retry`、`GET /runs/{id}/retry-plan`、`POST /tasks/{id}/retry`、`/admin/*`
- * 列为 P1）。这里按 Lead 指定的路径与字段先落地，后端实现后以 openapi 为准对齐。
+ * 重试与管理端点**已收录进 `server/api/openapi.yaml`**（`RetryPlan` / `TaskRetryAccepted` /
+ * `/admin/profiles|clusters|secrets|audit`）。下面这些类型按 schema 名逐字对齐：
+ * 注意 `reuse[]` **没有 status**（只有复用依据 `reason`）、失败信息在 `rerun[].failure`（`Failure`），
+ * 以及"想复用但不可复用"的 `blocked_items[]`。
  */
 
 /** `GET /runs/{id}/retry-plan`：重试预览。 */
 export interface RetryPlan {
   run_id: string
-  /** 整个 Run 是否可重试（false 时 UI 禁用按钮并显示 `reason`） */
+  /** 现在是否可以重试（false 时看 `reason`） */
   retryable: boolean
-  reason?: string | null
-  /** 将复用（已成功）的 Task */
-  reuse: RetryTaskRef[]
-  /** 将重跑（失败 / 跳过）的 Task */
-  rerun: RetryTaskRef[]
+  reason?: RetryPlanReason | null
+  /** 将复用的 Task（`reason` 是复用依据，不是状态） */
+  reuse: RetryReuseItem[]
+  /** 将重跑的 Task（带原状态与失败结构） */
+  rerun: RetryRerunItem[]
+  /** 想复用但被拒的 Task（产物缺失 / 校验未通过） */
+  blocked_items: RetryBlockedItem[]
+  /** 原 Manifest 摘要（`sha256:…`） */
+  manifest_digest: string
+  /** 仅 `POST /runs/{id}/retry`：新 Run 的 ID */
+  new_run_id?: string
+  /** 仅 `POST /runs/{id}/retry`：新 Run 的 `retry_of`（恒等于 run_id） */
+  retry_of?: string
 }
 
-export interface RetryTaskRef {
+export type RetryPlanReason = 'run_not_terminal' | 'retry_in_progress' | 'run_canceled' | 'nothing_to_retry'
+
+/** `reuse[]` 的条目：**没有 status**，只有复用依据 `reason`。 */
+export interface RetryReuseItem {
   task_id: string
   name: string
-  status: TaskStatus
-  error_code?: string | null
+  /** `succeeded`（本 Run 自己跑成功）| `reused`（本身是从旧 Run 复用的） */
+  reason: 'succeeded' | 'reused'
 }
 
-/** `POST /runs/{id}/retry` 的应答。 */
-export interface RetryAccepted {
-  new_run_id: string
-  retry_of: string
-  /** 复用的 Task 在新 Run 里的 id（可选） */
-  reused_task_ids?: string[]
+/** `rerun[]` 的条目：原状态 + 可选失败结构。 */
+export interface RetryRerunItem {
+  task_id: string
+  name: string
+  /** 该 Task 在原 Run 里的状态（契约里是 string，不收窄成枚举） */
+  status: string
+  reason?: string | null
+  /** `Failure`：`{code, message, retryable, detail}` */
+  failure?: Failure | null
 }
 
-/** `POST /tasks/{id}/retry` 的应答：只为刷新 Attempt 列表。 */
+/** `blocked_items[]`：想复用但被拒的 Task。 */
+export interface RetryBlockedItem {
+  task_id: string
+  name: string
+  /** 为什么不能复用（例如 result.json 缺失 / 产物校验未通过） */
+  reason: string
+}
+
+/** `POST /tasks/{id}/retry` 的应答（只为刷新 Attempt 列表）。 */
 export interface TaskRetryAccepted {
   task_id: string
-  run_id?: string
-  new_attempt_idx?: number
+  /** 下一次 Attempt 序号（current_attempt + 1） */
+  attempt_no: number
+  /** 重试后的 Task 状态（MVP 恒为 queued） */
+  status?: 'queued'
 }
 
 /* ---------------------------------------------------------------- /admin/* */

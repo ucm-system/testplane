@@ -93,7 +93,8 @@ test('Deploy 日志面板：Pod 分页签 + gap 显式标记', async ({ page }) 
   await expect(page.getByText('Deploy 日志')).toBeVisible({ timeout: 20_000 })
 
   const panel = page.locator('section', { hasText: 'Deploy 日志' }).first()
-  await expect(page.getByRole('tab', { name: /全部 Pod/ })).toBeVisible()
+  // 契约收窄后没有「全部 Pod」页签：`?pod=` 必选，页签就是具体 Pod 名
+  await expect(page.locator('[data-testid="deploy-log-pod-tab"]').first()).toBeVisible()
   // 终端正文：等宽 + 有时间戳（注意别选到上面的 manifest YAML pre）
   await expect(page.getByText(/deploy accepted for/).first()).toBeVisible()
   await expect(page.locator('pre', { hasText: /Successfully pulled image/ }).first()).toBeVisible()
@@ -108,4 +109,97 @@ test('Deploy 日志面板：Pod 分页签 + gap 显式标记', async ({ page }) 
   await page.waitForTimeout(300)
   await page.screenshot({ path: join(OUT_DIR, '04-deploy-logs.png'), fullPage: true })
   console.log(`screenshots: ${OUT_DIR}`)
+})
+
+/**
+ * Deploy 日志的**单 Pod 游标**语义（评审 #4 的契约收窄）：
+ *  - `?pod=` 必选，且切 Pod 页签时请求要换 pod；
+ *  - `tail_lines` 与 `offset` 二选一（勾"先看最新"时不能带 offset）；
+ *  - `next_offset` 续读第二页（直接打 mock 的 API，验证游标语义）。
+ */
+test('Deploy 日志：pod 页签带参 + tail/offset 二选一 + next_offset 续读', async ({ page }) => {
+  test.setTimeout(120_000)
+  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+
+  // mock 模式不发 HTTP 请求，所以给 `mockApi.getDeployLogs` 装个探针，记录每次调用的入参
+  await page.goto('/runs/r-20261105-0006')
+  await expect(page.getByText('Deploy 日志')).toBeVisible({ timeout: 20_000 })
+  await page.evaluate(async () => {
+    const mod = (await import('/src/api/mock.ts')) as unknown as {
+      mockApi: { getDeployLogs: (...args: unknown[]) => Promise<unknown> }
+    }
+    const w = window as unknown as { __logCalls: unknown[] }
+    w.__logCalls = []
+    const original = mod.mockApi.getDeployLogs.bind(mod.mockApi)
+    mod.mockApi.getDeployLogs = (...args: unknown[]) => {
+      w.__logCalls.push(args[1])
+      return original(...args)
+    }
+  })
+
+  const tabs = page.locator('[data-testid="deploy-log-pod-tab"]')
+  await expect(tabs).toHaveCount(4)
+  await expect(tabs.first()).toHaveAttribute('aria-selected', 'true')
+
+  // 切到第二个 Pod：入参必须带对应 pod
+  const secondName = (await tabs.nth(1).innerText()).split('\n')[0]!.trim()
+  await tabs.nth(1).click()
+  await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'true')
+  await page.waitForTimeout(400)
+  const calls = await page.evaluate(
+    () => (window as unknown as { __logCalls: Array<Record<string, unknown>> }).__logCalls,
+  )
+  expect(calls.some((call) => call.pod === secondName)).toBe(true)
+
+  // 勾"先看最新"：tail_lines 与 offset 不能同时出现
+  await page.getByLabel(/先看最新/).check()
+  await page.waitForTimeout(400)
+  const tailCalls = await page.evaluate(
+    () => (window as unknown as { __logCalls: Array<Record<string, unknown>> }).__logCalls,
+  )
+  const tailCall = tailCalls.filter((call) => call.tail_lines).pop()
+  expect(tailCall, '勾"先看最新"后应发出带 tail_lines 的调用').toBeTruthy()
+  expect(tailCall!.offset, 'tail_lines 与 offset 二选一：要最新就不该带 offset').toBeUndefined()
+
+  // 游标续读：直接打 mock API（dev server 下模块可 import），limit=4 制造第二页
+  const paging = await page.evaluate(async () => {
+    const mod = await import('/src/api/mock.ts')
+    const first = await mod.mockApi.getDeployLogs('r-20261105-0006', { pod: 'genet-qwen3-32b-decode-0', offset: 0, limit: 4 })
+    const second = await mod.mockApi.getDeployLogs('r-20261105-0006', { pod: 'genet-qwen3-32b-decode-0', offset: first.next_offset, limit: 4 })
+    return {
+      firstOffset: first.entries[0]?.offset,
+      firstCount: first.entries[0]?.line_count,
+      truncated: first.truncated,
+      nextOffset: first.next_offset,
+      secondOffset: second.entries[0]?.offset,
+      secondText: second.entries[0]?.text?.split('\n')[0] ?? '',
+      firstText: first.entries[0]?.text?.split('\n')[0] ?? '',
+    }
+  })
+  expect(paging.firstOffset).toBe(0)
+  expect(paging.firstCount).toBe(4)
+  expect(paging.truncated).toBe(true)
+  expect(paging.nextOffset).toBe(4)
+  expect(paging.secondOffset).toBe(4)
+  expect(paging.secondText).not.toBe(paging.firstText)
+
+  // 缺 pod 必须 400、不存在的 pod 必须 404（契约）
+  const errors = await page.evaluate(async () => {
+    const mod = await import('/src/api/mock.ts')
+    const grab = async (fn: () => Promise<unknown>) => {
+      try {
+        await fn()
+        return 'no-error'
+      } catch (e) {
+        return (e as { code?: string }).code ?? 'unknown'
+      }
+    }
+    const missingPod = await grab(() => mod.mockApi.getDeployLogs('r-20261105-0006', {} as { pod: string }))
+    const unknownPod = await grab(() => mod.mockApi.getDeployLogs('r-20261105-0006', { pod: 'nope-0' }))
+    return { missingPod, unknownPod }
+  })
+  expect(errors.missingPod).toBe('VALIDATION_ERROR')
+  expect(errors.unknownPod).toBe('NOT_FOUND')
+
+  await page.screenshot({ path: join(OUT_DIR, '05-deploy-logs-multi-pod.png'), fullPage: true })
 })

@@ -98,7 +98,7 @@ func (s *Store) CreateRun(ctx context.Context, p SubmitParams) (*Run, []*Task, e
 			Action:     "submit",
 			ObjectType: "run",
 			ObjectID:   p.Run.ID,
-			Detail:     map[string]any{"kind": p.Run.Kind, "task_count": len(p.Tasks)},
+			Detail:     map[string]any{"result": "ok", "kind": p.Run.Kind, "task_count": len(p.Tasks)},
 		}); err != nil {
 			return err
 		}

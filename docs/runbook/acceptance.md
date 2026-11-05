@@ -33,7 +33,7 @@
 | 14 | 产物持久化 | ✅（artifact-persistence 28/28：Pod 删除后与控制面重启后 sha256 一致） |
 | 15 | 失败隔离 | 做过（mixed-result 11/11） |
 | 16 | Web UI | 做过（Playwright 3 passed） |
-| 17 | API 契约与错误码 | 做过（契约 59/59） |
+| 17 | API 契约与错误码 | 做过（契约 80/80：spec 17 + live 63；白名单 0） |
 
 > 快照时间：2026-11-05；镜像 `sha256:093622d5…`；环境：kind `testplane`（v1.33.1）+ 真 Genet（`genet` ns）+ fake-genet（宿主 `:18091`）+ Volcano 演示夹具。
 >

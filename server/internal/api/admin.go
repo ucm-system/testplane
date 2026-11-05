@@ -3,19 +3,22 @@ package api
 // 管理面（07 §5.4 admin）的公共零件：JSON 请求体、名字校验、审计写入。
 //
 // 每个端点都遵守同一套约定：
-//   - 成功：先落库，再写一条 audit_log（action/object_type/object_id/detail），
-//     审计写失败只记日志，不把已生效的变更报成失败；
-//   - 失败（校验 / 冲突 / 不存在 / 轮换校验不通过）：按 C-10「失败也记录尝试」
-//     写一条 result=rejected 的审计；畸形 JSON 不记（没有可归属的对象）；
+//   - 成功：业务变更与 audit_log 在**同一个事务**里提交（store.InAuditedTx），
+//     审计失败 → 整体回滚 + 5xx（PR #33 #6：不允许"改了没记"）；
+//   - 失败（校验 / 冲突 / 不存在 / 轮换校验不通过 / 中间件拦截）：按 C-10
+//     「失败也记录尝试」写一条 result=rejected 的审计，写入上下文与客户端连接解耦；
+//     畸形 JSON 不记（没有可归属的对象）；
 //   - 响应体绝不包含 Secret 值或 kubeconfig 内容（06 §4.4、C-10）。
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
@@ -90,34 +93,70 @@ func validAdminName(v string, max int) (string, bool) {
 }
 
 // ---- 审计 -----------------------------------------------------------------
+//
+// 两条路径（PR #33 #6）：
+//   1) **成功写操作**：业务变更与审计放进**同一个事务**（store.InAuditedTx），
+//      审计失败 → 整体回滚 + 5xx。绝不能"先提交再补记"。
+//   2) **拒绝 / 中间件拦截**：没有业务变更可回滚，用 detachAuditCtx 异步补记——
+//      上下文与客户端连接解耦（context.WithoutCancel + 2s 超时），
+//      客户端断连也会留下"谁被拒了"。
 
-// appendAudit 写一条审计；失败只记 warn（不阻断已生效的变更）。
-func (s *Server) appendAudit(r *http.Request, action, objectType, objectID string, detail map[string]any) {
-	if detail == nil {
-		detail = map[string]any{}
+// auditTimeout 是拒绝类审计的写入上限（不依赖请求生命周期，也不无限阻塞）。
+const auditTimeout = 2 * time.Second
+
+// detachAuditCtx 返回与客户端断连解耦的审计上下文（保留 ctx 里的身份/请求号）。
+func detachAuditCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+}
+
+// auditEntry 组装"成功写操作"的审计条目（detail 里统一带 result=ok）。
+// 由 handler 交给 store.InAuditedTx，与业务变更同事务提交。
+func (s *Server) auditEntry(r *http.Request, action, objectType, objectID string, detail map[string]any) store.AuditEntry {
+	d := map[string]any{"result": "ok"}
+	for k, v := range detail {
+		d[k] = v
 	}
-	err := s.st.AppendAudit(r.Context(), store.AuditEntry{
+	return store.AuditEntry{
 		Actor:      Actor(r.Context()),
 		Role:       Role(r.Context()),
 		Action:     action,
 		ObjectType: objectType,
 		ObjectID:   objectID,
-		Detail:     detail,
-	})
-	if err != nil {
-		s.logger.Warn("写审计失败", "err", err, "action", action,
-			"object_type", objectType, "object_id", objectID,
-			"request_id", RequestID(r.Context()))
+		Detail:     d,
 	}
 }
 
-// auditOK 记一次成功的写操作。
-func (s *Server) auditOK(r *http.Request, action, objectType, objectID string, detail map[string]any) {
-	d := map[string]any{"result": "ok"}
-	for k, v := range detail {
-		d[k] = v
+// appendAuditDetached 写一条审计并返回错误：用于"审计本身是唯一副作用"的写操作
+// （例如 rotate：没有业务状态可回滚，但审计写不进去就不能报成功）。
+func (s *Server) appendAuditDetached(ctx context.Context, e store.AuditEntry) error {
+	actx, cancel := detachAuditCtx(ctx)
+	defer cancel()
+	return s.st.AppendAudit(actx, e)
+}
+
+// auditRejected 记一条**拒绝/拦截**审计（best-effort；失败只记日志，不再影响响应）。
+func (s *Server) auditRejected(ctx context.Context, actor, role, action, objectType, objectID string, detail map[string]any) {
+	if s.st == nil {
+		return
 	}
-	s.appendAudit(r, action, objectType, objectID, d)
+	if actor == "" {
+		actor = "anonymous"
+	}
+	if role == "" {
+		role = "anonymous"
+	}
+	if detail == nil {
+		detail = map[string]any{}
+	}
+	actx, cancel := detachAuditCtx(ctx)
+	defer cancel()
+	if err := s.st.AppendAudit(actx, store.AuditEntry{
+		Actor: actor, Role: role, Action: action,
+		ObjectType: objectType, ObjectID: objectID, Detail: detail,
+	}); err != nil {
+		s.logger.Warn("写拒绝审计失败", "err", err, "action", action,
+			"object_type", objectType, "object_id", objectID, "request_id", RequestID(ctx))
+	}
 }
 
 // rejectWrite 记一次失败的写尝试（C-10），然后按统一错误模型写响应。
@@ -132,7 +171,7 @@ func (s *Server) rejectWrite(w http.ResponseWriter, r *http.Request,
 		}
 		d[k] = v
 	}
-	s.appendAudit(r, action, objectType, objectID, d)
+	s.auditRejected(r.Context(), Actor(r.Context()), Role(r.Context()), action, objectType, objectID, d)
 	fail(w, r, status, code, message, detail, retryable)
 }
 
@@ -141,6 +180,32 @@ func (s *Server) rejectValidation(w http.ResponseWriter, r *http.Request,
 	action, objectType, objectID, message string, detail map[string]any) {
 	s.rejectWrite(w, r, action, objectType, objectID,
 		http.StatusBadRequest, domain.CodeValidationError, message, detail, false)
+}
+
+// failAuditTx 把"业务或审计事务失败"映射成 5xx：变更已被回滚，调用方可以重试。
+// 审计失败和 DB 失败走同一个响应，避免把内部细节泄露给客户端。
+func (s *Server) failAuditTx(w http.ResponseWriter, r *http.Request,
+	action, objectType, objectID string, err error) {
+	// 尽力留一条 rejected（审计表本身坏掉时这里也会失败，只记日志）。
+	// 复用**被尝试的那个 action**（register/cancel/…），失败语义落在 detail.result/reason 上。
+	s.auditRejected(r.Context(), Actor(r.Context()), Role(r.Context()), action, objectType, objectID,
+		map[string]any{"result": "rejected", "reason": "tx_failed", "code": domain.CodeInternalError})
+	s.logger.Error("写操作事务失败（已回滚）", "err", err, "action", action,
+		"object_type", objectType, "object_id", objectID, "request_id", RequestID(r.Context()))
+	fail(w, r, http.StatusInternalServerError, domain.CodeInternalError,
+		"写操作未提交：审计或数据库失败，请重试",
+		map[string]any{"reason": "tx_failed"}, true)
+}
+
+// failWriteErr 记录一次"未知/DB 错误"的失败写尝试（C-10：失败也记录尝试），
+// 再按统一错误模型返回。与 rejectWrite 的区别：这里没有具体业务码，reason 固定 db_error。
+func (s *Server) failWriteErr(w http.ResponseWriter, r *http.Request,
+	action, objectType, objectID string, err error) {
+	s.auditRejected(r.Context(), Actor(r.Context()), Role(r.Context()), action, objectType, objectID,
+		map[string]any{"result": "rejected", "reason": "db_error", "code": domain.CodeInternalError})
+	s.logger.Error("写操作失败", "err", err, "action", action,
+		"object_type", objectType, "object_id", objectID, "request_id", RequestID(r.Context()))
+	s.failErr(w, r, err)
 }
 
 // ---- 小工具 ---------------------------------------------------------------

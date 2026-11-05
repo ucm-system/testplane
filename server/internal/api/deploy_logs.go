@@ -183,8 +183,15 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 		ns = k8sDefaultNamespace(s.cfg)
 	}
 
+	// ---- 参数校验（`?pod=` 必选：游标只在单个 Pod 内有意义，见下）----
 	q := r.URL.Query()
-	podFilter := strings.TrimSpace(q.Get("pod"))
+	podName := strings.TrimSpace(q.Get("pod"))
+	if podName == "" {
+		fail(w, r, http.StatusBadRequest, domain.CodeValidationError,
+			"缺少必选参数 pod：日志游标只在单个 Pod 内有意义（多 Pod 共用一个 offset 会丢短 Pod 的日志）",
+			map[string]any{"param": "pod"}, false)
+		return
+	}
 	offset := atoiDefault(q.Get("offset"), 0)
 	if offset < 0 {
 		offset = 0
@@ -235,12 +242,10 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 元信息 + gap 判定（不假装连续）。
+	// `pods[]` 永远返回**全部** Pod（前端页签要），gap 也按全部 Pod 算。
+	var target *corev1.Pod
 	for i := range pods {
 		pod := &pods[i]
-		if podFilter != "" && pod.Name != podFilter {
-			continue
-		}
 		runningSince := podStartedAt(*pod)
 		restarts := podRestarts(*pod, deployLogContainer)
 		lastSeen := podLastSeen(*pod)
@@ -251,6 +256,9 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 			StartedAt:  runningSince,
 			LastSeenAt: lastSeen,
 		})
+		if pod.Name == podName {
+			target = pod
+		}
 		if restarts > 0 {
 			from := pod.CreationTimestamp.Time.UTC()
 			to := from
@@ -271,63 +279,93 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 排队期：还没有 Pod —— 200 + 空列表 + 说明（不是 404，07 §5.1）。
+	// ---- 排队期 / Pod 已回收：显式降级，绝不静默空数组 ----
+	//
+	// MVP 直读 `pods/log`，**没有**设计要求里 `deploy/logs/<pod>.log` 的落盘副本
+	// （见 IMPLEMENTATION §15.2 偏差），所以 Pod 一旦被回收，日志就读不到了——
+	// 端点必须诚实地说明这一点，而不是返回一个看起来"没有日志"的空列表。
 	if len(resp.Pods) == 0 {
-		if deploy.State == "queued" || deploy.State == "accepted" || deploy.State == "" {
+		switch deploy.State {
+		case "queued", "accepted", "":
 			resp.Message = "尚未产生 Pod（排队中）"
-		} else {
-			resp.Message = "当前没有可读的 Deploy Pod 日志"
+		default:
+			resp.Message = "Pod 已回收，日志不可读：MVP 直读 pods/log，尚未落盘 deploy/logs/<pod>.log（IMPLEMENTATION §15.2）"
+			from := time.Now().UTC()
+			if acceptedAt != nil {
+				from = *acceptedAt
+			}
+			resp.Gaps = append(resp.Gaps, DeployLogGap{
+				Pod: podName, From: from, To: time.Now().UTC(),
+				Reason: "pod recycled: log no longer readable (reading pods/log directly)",
+			})
 		}
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	// 逐 Pod 拉日志 → 按 offset/limit 切片。
-	used := 0
-	advanced := 0
-	for _, pod := range resp.Pods {
-		if used >= limit {
-			resp.Truncated = true
-			break
-		}
-		container := deployLogContainer
-		if container == "" {
-			container = firstContainer(pod.Name, pods)
-		}
-		raw, err := client.Logs(ctx, ns, pod.Name, container, int64(tailLines))
-		if err != nil {
-			s.failDeployLogKubeErr(w, r, "logs", err)
-			return
-		}
-		lines := splitLogLines(string(raw))
-		if offset >= len(lines) {
-			continue // 这个 Pod 没有更多行
-		}
-		rest := lines[offset:]
-		take := rest
-		if remain := limit - used; len(take) > remain {
-			take = take[:remain]
-			resp.Truncated = true
-		}
-		if len(take) == 0 {
-			continue
-		}
-		resp.Entries = append(resp.Entries, DeployLogEntry{
-			Pod: pod.Name, Container: container,
-			Offset: offset, LineCount: len(take),
-			Text: strings.Join(take, "\n"),
-		})
-		used += len(take)
-		if len(take) > advanced {
-			advanced = len(take)
-		}
+	// 请求的 Pod 不在当前 Pod 列表里：明确 404（打错名字或已被回收），
+	// 明细里给出当前可选的 Pod，前端能直接纠正。
+	if target == nil {
+		fail(w, r, http.StatusNotFound, domain.CodeNotFound,
+			"没有这个 Deploy Pod（可能已回收）",
+			map[string]any{
+				"pod":            podName,
+				"reason":         "pod_not_found",
+				"available_pods": podNames(resp.Pods),
+			}, false)
+		return
 	}
 
-	// next_offset：所有 Pod 同步前进 advanced 行；没被截断就没有更多了。
-	if resp.Truncated && advanced > 0 {
-		resp.NextOffset = offset + advanced
+	// ---- 单 Pod 分页（offset 只在这个 Pod 的日志流里有意义）----
+	//
+	// 为什么 `?pod=` 必选：多 Pod 共用一个 offset 时，"每页按 Pod 顺序填充 + next_offset 取最大值"
+	// 会让短 Pod 永远轮不到（评审 #4 的 P0 反例：p1=5 行、p2=2 行、limit=2 → p2 一行都不出现）。
+	// 改成"每次只服务一个 Pod"后，offset/limit/tail_lines 的语义唯一，也与前端 Pod 页签一一对应。
+	//
+	// tail_lines 与 offset 互斥：tail_lines 是"取窗口末尾 N 行"，窗口一变 offset 就没法稳定翻页，
+	// 所以两者同时给出直接 400，而不是让人猜。
+	if tailLines > 0 && offset > 0 {
+		fail(w, r, http.StatusBadRequest, domain.CodeValidationError,
+			"tail_lines 与 offset 不能同时使用（tail_lines 是窗口末尾语义，无法稳定翻页）",
+			map[string]any{"tail_lines": tailLines, "offset": offset}, false)
+		return
+	}
+
+	container := firstContainer(target.Name, pods)
+	raw, err := client.Logs(ctx, ns, target.Name, container, int64(tailLines))
+	if err != nil {
+		s.failDeployLogKubeErr(w, r, "logs", err)
+		return
+	}
+	lines := splitLogLines(raw)
+	if offset < len(lines) {
+		rest := lines[offset:]
+		take := rest
+		if len(take) > limit {
+			take = take[:limit]
+			resp.Truncated = true
+		}
+		if len(take) > 0 {
+			resp.Entries = append(resp.Entries, DeployLogEntry{
+				Pod: target.Name, Container: container,
+				Offset: offset, LineCount: len(take),
+				Text: strings.Join(take, "\n"),
+			})
+			if resp.Truncated {
+				resp.NextOffset = offset + len(take)
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// podNames 返回 Pod 名列表（404 明细里给前端纠正用）。
+func podNames(pods []DeployLogPod) []string {
+	out := make([]string, 0, len(pods))
+	for _, p := range pods {
+		out = append(out, p.Name)
+	}
+	return out
 }
 
 // failDeployLogKubeErr 把 K8s 侧错误映射成契约错误：

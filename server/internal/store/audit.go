@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/ucm-system/testplane/server/internal/domain"
 )
 
 // AuditRecord 是 audit_log 的一行（只读投影）。
@@ -127,7 +129,9 @@ func (r *AuditRepo) List(ctx context.Context, tx pgx.Tx, f AuditFilter) ([]Audit
 // AppendAudit 是写审计的唯一入口（C-10：所有写操作都要留痕）。
 //
 // 注意：这里**不吞错**——调用方决定"审计失败是否阻断主流程"。
-// 管理面写操作的做法是记日志后继续，避免因为审计表问题把已经生效的变更报成失败。
+// **写操作的业务变更不要用本方法**：用 InAuditedTx 把"变更 + 审计"放进同一个事务，
+// 否则会出现"数据改了、审计没写"（PR #33 #6）。本方法只用于**拒绝类**审计
+// （请求已被拒、没有业务变更可回滚）。
 func (s *Store) AppendAudit(ctx context.Context, e AuditEntry) error {
 	return s.Audits.Insert(ctx, nil, e)
 }
@@ -135,4 +139,25 @@ func (s *Store) AppendAudit(ctx context.Context, e AuditEntry) error {
 // AppendAuditTx 在调用方的事务里写审计（需要"业务变更 + 审计"原子落库时用）。
 func (s *Store) AppendAuditTx(ctx context.Context, tx pgx.Tx, e AuditEntry) error {
 	return s.Audits.Insert(ctx, tx, e)
+}
+
+// InAuditedTx 在**同一个事务**里执行业务写 fn 并追加一条审计（PR #33 #6）。
+//
+// 语义：
+//   - fn 返回业务错误（如 domain.ErrConflict）→ 原样返回，事务回滚，审计不写；
+//   - fn 成功但审计 INSERT 失败 → 返回包装了 domain.ErrTx 的错误，**整体回滚**，
+//     调用方据此映射 5xx（绝不能"先提交再补记"）；
+//   - 事务提交后不再做任何审计写入。
+//
+// 客户端断连不会造成"改了没记"：审计与变更同事务提交/回滚，二者要么都在要么都不在。
+func (s *Store) InAuditedTx(ctx context.Context, e AuditEntry, fn func(tx pgx.Tx) error) error {
+	return s.InTx(ctx, func(tx pgx.Tx) error {
+		if err := fn(tx); err != nil {
+			return err
+		}
+		if err := s.Audits.Insert(ctx, tx, e); err != nil {
+			return fmt.Errorf("store: audited tx: 审计写入失败，业务变更已回滚: %w: %w", domain.ErrTx, err)
+		}
+		return nil
+	})
 }

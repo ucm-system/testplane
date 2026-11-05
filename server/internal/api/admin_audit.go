@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
@@ -122,7 +123,7 @@ func (s *Server) handleAdminCleanupArtifacts(w http.ResponseWriter, r *http.Requ
 				"Run 不存在", map[string]any{"run_id": runID}, false)
 			return
 		}
-		s.failErr(w, r, err)
+		s.failWriteErr(w, r, action, objectType, runID, err)
 		return
 	}
 	status := domain.RunStatus(run.Status)
@@ -140,32 +141,54 @@ func (s *Server) handleAdminCleanupArtifacts(w http.ResponseWriter, r *http.Requ
 		s.failErr(w, r, err)
 		return
 	}
+
+	// 先做 DB 事务（删索引行 + 审计），提交后再删目录：
+	// 审计失败时索引行回滚，目录也还没动——不会出现"清了磁盘却查不到记录"；
+	// artifacts 索引是可重建的派生数据（03 §3.2），先删它不会丢事实。
+	var (
+		entries    int64
+		freedBytes int64
+	)
+	detail := map[string]any{"deleted_entries": int64(0), "freed_bytes": int64(0)}
+	entry := s.auditEntry(r, action, objectType, runID, detail)
+	err = s.st.InAuditedTx(ctx, entry, func(tx pgx.Tx) error {
+		n, b, err := s.st.Artifacts.DeleteByRun(ctx, tx, runID)
+		if err != nil {
+			return err
+		}
+		entries, freedBytes = n, b
+		detail["deleted_entries"] = n
+		detail["freed_bytes"] = b
+		entry.Detail["deleted_entries"] = n
+		entry.Detail["freed_bytes"] = b
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, domain.ErrTx) {
+			s.failAuditTx(w, r, action, objectType, runID, err)
+			return
+		}
+		s.failWriteErr(w, r, action, objectType, runID, err)
+		return
+	}
+
 	directoryRemoved := false
 	if root := strings.TrimSpace(s.cfg.StorageRoot); root != "" {
 		dir := filepath.Join(root, component)
 		if info, statErr := os.Stat(dir); statErr == nil && info.IsDir() {
 			if err := os.RemoveAll(dir); err != nil {
+				// 索引已删（可重建），目录没删掉：按 5xx 暴露，交给运维处理。
 				s.logger.Error("删除 Run 产物目录失败", "err", err, "run_id", run.ID,
 					"request_id", RequestID(ctx))
-				s.rejectWrite(w, r, action, objectType, runID,
-					http.StatusInternalServerError, domain.CodeCleanupFailed,
-					"删除产物目录失败", map[string]any{"run_id": runID}, true)
+				fail(w, r, http.StatusInternalServerError, domain.CodeCleanupFailed,
+					"产物索引已清理，但删除产物目录失败",
+					map[string]any{"run_id": runID, "deleted_entries": entries}, true)
 				return
 			}
 			directoryRemoved = true
 		}
 	}
 
-	entries, freedBytes, err := s.st.Artifacts.DeleteByRun(ctx, nil, runID)
-	if err != nil {
-		s.failErr(w, r, err)
-		return
-	}
-	s.auditOK(r, action, objectType, runID, map[string]any{
-		"deleted_entries": entries,
-		"freed_bytes":     freedBytes,
-		"directory":       directoryRemoved,
-	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"run_id":            runID,
 		"deleted_entries":   entries,
