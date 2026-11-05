@@ -246,7 +246,30 @@ func (c *Controller) ReconcileOnce(ctx context.Context) error {
 			c.logf("orchestrator: reconcile task %s: %v", task.ID, err)
 		}
 	}
-	// 兜底：历史遗留的僵尸租约（Task 已终态/已不存在，租约还在）。
+	// 兜底 1：cancelling 但已经没有活动 Attempt 的 Run → 立即 canceled（C-6.1、C-9?）。
+	// 这条能自愈"queued 阶段取消、Job 从未创建"而卡在 cancelling 的历史遗留行。
+	cancelling, err := c.repos.ListCancellingRuns(ctx, reconcileBatchLimit)
+	if err != nil {
+		c.logf("orchestrator: list cancelling runs: %v", err)
+	} else {
+		for _, run := range cancelling {
+			stopped, serr := c.runStopped(ctx, run.ID)
+			if serr != nil {
+				c.logf("orchestrator: reconcile cancelling run %s: %v", run.ID, serr)
+				continue
+			}
+			if !stopped {
+				continue
+			}
+			if ferr := c.repos.FinishRun(ctx, run.ID, domain.RunCanceled, nil); ferr != nil {
+				c.logf("orchestrator: finish canceled run %s: %v", run.ID, ferr)
+				continue
+			}
+			c.logf("orchestrator: run %s reconciled as canceled (no active attempt)", run.ID)
+		}
+	}
+
+	// 兜底 2：历史遗留的僵尸租约（Task 已终态/已不存在，租约还在）。
 	stale, err := c.recon.ListStaleLeases(ctx, reconcileBatchLimit)
 	if err != nil {
 		c.logf("orchestrator: list stale leases: %v", err)
@@ -939,6 +962,10 @@ func (c *Controller) WatchdogOnce(ctx context.Context) error {
 }
 
 // CancelRun 取消整个 Run（C-6.1）：落库取消意图 → 删 Job → 收口。
+//
+// 关键：**没有正在跑的 Attempt 时必须同一轮直接收口 canceled**，不停在 cancelling——
+// 否则 queued 阶段取消的 Run 会永远挂在 cancelling（需要等一个永远不会到来的
+// JobObserver 回调）。这里不盲信 adapter 的 AllStopped，而是用 Task/Attempt 事实再判一次。
 func (c *Controller) CancelRun(ctx context.Context, runID, actor string) error {
 	out, err := c.repos.RequestCancelRun(ctx, runID, actor)
 	if err != nil {
@@ -947,10 +974,32 @@ func (c *Controller) CancelRun(ctx context.Context, runID, actor string) error {
 	for _, ref := range out.CancelJobs {
 		c.cancelJobAsync(ctx, ref)
 	}
-	if out.AllStopped {
-		return c.repos.FinishRun(ctx, runID, domain.RunCanceled, nil)
+	if out.AllStopped || len(out.CancelJobs) == 0 {
+		stopped, serr := c.runStopped(ctx, runID)
+		if serr != nil {
+			c.logf("orchestrator: cancel run %s: check stopped: %v", runID, serr)
+			return serr
+		}
+		if stopped {
+			return c.repos.FinishRun(ctx, runID, domain.RunCanceled, nil)
+		}
 	}
 	return nil
+}
+
+// runStopped 报告该 Run 是否已经没有任何未终态的 Task（= 没有活动 Attempt）。
+// 用 Task 状态判定即可：不变量保证"Task 终态 ⇒ 它的 Attempt 已终态"。
+func (c *Controller) runStopped(ctx context.Context, runID string) (bool, error) {
+	tasks, err := c.repos.ListTasks(ctx, runID)
+	if err != nil {
+		return false, err
+	}
+	for _, t := range tasks {
+		if !t.Status.IsTerminal() {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // CancelTask 取消单个 Task（C-6.2）。

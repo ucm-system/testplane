@@ -1298,3 +1298,162 @@ func TestTerminalRunStatusHonoursInstanceRetryable(t *testing.T) {
 		})
 	}
 }
+
+// ---- C-6.1：取消必须收口到 canceled（不能停在 cancelling）----------------
+
+// queued 阶段取消：Job/Pod 从未创建 → 同一轮直接 canceled。
+func TestCancelQueuedRunFinishesCanceled(t *testing.T) {
+	repos := NewMemoryRepos()
+	exec := &fakeExec{}
+	seedRunTesting(repos, "r-1",
+		TaskView{
+			ID: "t-0", Seq: 0, Name: "precheck", TesterName: "probe", TesterVersion: "1.0.0",
+			TesterRole: domain.RolePreCheck, Image: "i:1", Entry: "/tester/run.sh",
+			OnFailure: domain.OnFailureAbortRun, Status: domain.TaskQueued,
+			EndpointKey: "http://ep:8000", Exclusive: true, TimeoutSeconds: 900,
+		},
+		TaskView{
+			ID: "t-1", Seq: 1, Name: "load", TesterName: "load", TesterVersion: "1.0.0",
+			TesterRole: domain.RoleTest, Image: "i:1", Entry: "/tester/run.sh",
+			Status: domain.TaskPending, EndpointKey: "http://ep:8000", TimeoutSeconds: 600,
+		},
+	)
+	c := newTestController(t, repos, exec, Config{}, nil, nil)
+	ctx := context.Background()
+
+	// 一个 Job 都还没建就取消。
+	if err := c.CancelRun(ctx, "r-1", "user:1"); err != nil {
+		t.Fatalf("CancelRun: %v", err)
+	}
+	run, _ := repos.GetRun(ctx, "r-1")
+	if run.Status != domain.RunCanceled {
+		t.Fatalf("run status = %s, want canceled (must not stay cancelling)", run.Status)
+	}
+	if got := len(exec.specs()); got != 0 {
+		t.Fatalf("submitted = %d, want 0", got)
+	}
+	for _, id := range []string{"t-0", "t-1"} {
+		task, _ := repos.GetTask(ctx, id)
+		if task.Status.IsTerminal() != true {
+			t.Errorf("%s status = %s, want terminal", id, task.Status)
+		}
+	}
+}
+
+// 有 running Attempt 时取消：先 cancelling，Attempt 停止后 canceled。
+func TestCancelRunningRunGoesThroughCancellingThenCanceled(t *testing.T) {
+	repos := NewMemoryRepos()
+	exec := &fakeExec{}
+	seedRunTesting(repos, "r-1", TaskView{
+		ID: "t-0", Seq: 0, Name: "load", TesterName: "load", TesterVersion: "1.0.0",
+		TesterRole: domain.RoleTest, Image: "i:1", Entry: "/tester/run.sh",
+		Status: domain.TaskQueued, EndpointKey: "http://ep:8000", TimeoutSeconds: 600,
+	})
+	c := newTestController(t, repos, exec, Config{}, nil, nil)
+	ctx := context.Background()
+	if err := c.DispatchOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.CancelRun(ctx, "r-1", "user:1"); err != nil {
+		t.Fatalf("CancelRun: %v", err)
+	}
+	run, _ := repos.GetRun(ctx, "r-1")
+	if run.Status != domain.RunCancelling {
+		t.Fatalf("run status = %s, want cancelling while an attempt is running", run.Status)
+	}
+
+	// Attempt 停止（删 Job 后回调；这里用成功回调模拟"自然结束先到"）。
+	if err := c.JobFinished(ctx, ports.JobOutcome{
+		Handle: ports.JobHandle{Namespace: "testplane", JobName: executor.Naming("r-1", "t-0", 1)},
+		Phase:  executor.PhaseSucceeded,
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture()
+	run, _ = repos.GetRun(ctx, "r-1")
+	if run.Status != domain.RunCanceled {
+		t.Fatalf("run status = %s, want canceled after the attempt stopped", run.Status)
+	}
+}
+
+// 对账自愈：遗留的 cancelling + Task 全终态 + 无活动 Attempt → canceled。
+func TestReconcileFinishesStuckCancellingRun(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{ID: "r-legacy", Status: domain.RunCancelling, SubmittedAt: time.Now()})
+	repos.SeedTask(TaskView{
+		ID: "t-0", RunID: "r-legacy", Seq: 0, Name: "precheck", TesterRole: domain.RolePreCheck,
+		Status: domain.TaskSkipped, StatusReason: domain.SkipUpstreamAbort,
+	})
+	repos.SeedTask(TaskView{
+		ID: "t-1", RunID: "r-legacy", Seq: 1, Name: "load", TesterRole: domain.RoleTest,
+		Status: domain.TaskSkipped, StatusReason: domain.SkipUpstreamAbort,
+	})
+	// attempts 0 行、endpoint_leases 0 行——正是集群里那 4 条的形态。
+
+	cs := fake.NewSimpleClientset()
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{PollInterval: 20 * time.Millisecond})
+	c, err := New(Options{Repos: repos, Executor: ex, Prober: ex, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-legacy")
+	if run.Status != domain.RunCanceled {
+		t.Fatalf("run status = %s, want canceled (reconcile must self-heal stuck cancelling)", run.Status)
+	}
+}
+
+// 对账不能误杀：cancelling 但还有 running Task 的 Run 必须保持原状等 Attempt 停止。
+func TestReconcileKeepsCancellingRunWithActiveTask(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{ID: "r-1", Status: domain.RunCancelling, SubmittedAt: time.Now()})
+	ref := AttemptRef{AttemptID: "t-0-a1", TaskID: "t-0", RunID: "r-1", AttemptNo: 1,
+		JobName: executor.Naming("r-1", "t-0", 1)}
+	repos.SeedActiveTask(TaskView{
+		ID: "t-0", RunID: "r-1", Seq: 0, Name: "load", TesterName: "load", TesterVersion: "1.0.0",
+		TesterRole: domain.RoleTest, Image: "i:1", Entry: "/tester/run.sh",
+		EndpointKey: "http://ep:8000", TimeoutSeconds: 600,
+	}, ref, "http://ep:8000", time.Now())
+
+	cs := fake.NewSimpleClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: ref.JobName, Namespace: "testplane"},
+		Status:     batchv1.JobStatus{Active: 1},
+	})
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{PollInterval: 20 * time.Millisecond})
+	c, err := New(Options{Repos: repos, Executor: ex, Prober: ex, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunCancelling {
+		t.Fatalf("run status = %s, want cancelling (attempt still running)", run.Status)
+	}
+}
+
+// Task 侧：无活动 Attempt 时取消直接 canceled，不停在 cancel_requested。
+func TestCancelTaskWithoutActiveAttemptFinishesCanceled(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{ID: "r-1", Status: domain.RunTesting})
+	repos.SeedTask(TaskView{
+		ID: "t-0", RunID: "r-1", Seq: 0, Name: "load", TesterRole: domain.RoleTest,
+		Status: domain.TaskQueued, EndpointKey: "http://ep:8000", TimeoutSeconds: 600,
+	})
+	exec := &fakeExec{}
+	c := newTestController(t, repos, exec, Config{}, nil, nil)
+	if err := c.CancelTask(context.Background(), "t-0", "user:1"); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+	task, _ := repos.GetTask(context.Background(), "t-0")
+	if task.Status != domain.TaskSkipped || task.StatusReason != domain.SkipCanceled {
+		t.Fatalf("task = %s/%s, want skipped/canceled", task.Status, task.StatusReason)
+	}
+	if task.CancelRequested {
+		t.Fatalf("cancel_requested must not be left behind")
+	}
+}

@@ -849,7 +849,6 @@ func (m *MemoryRepos) RequestCancelRun(ctx context.Context, runID, actor string)
 		out.AllStopped = true
 		return out, nil
 	}
-	r.Status = domain.RunCancelling
 	active := 0
 	for _, t := range m.tasks {
 		if t.RunID != runID {
@@ -862,6 +861,14 @@ func (m *MemoryRepos) RequestCancelRun(ctx context.Context, runID, actor string)
 			out.Skipped = append(out.Skipped, t.ID)
 			delete(m.leases, t.ID)
 		case domain.TaskPreparing, domain.TaskRunning:
+			if !m.hasActiveAttemptLocked(t.ID) {
+				// 库里"活着"但没有活动 Attempt（事务中断/旧版本遗留）：Task 直接收口 canceled，
+				// 不给自己留一个永远等不到 Watch 的 cancel_requested（C-6.1）。
+				t.Status = domain.TaskCanceled
+				delete(m.leases, t.ID)
+				out.Skipped = append(out.Skipped, t.ID)
+				continue
+			}
 			t.CancelRequested = true
 			active++
 			for _, a := range m.attempts {
@@ -873,9 +880,12 @@ func (m *MemoryRepos) RequestCancelRun(ctx context.Context, runID, actor string)
 	}
 	sort.Strings(out.Skipped)
 	if active == 0 {
+		// C-6.1：没有正在跑的 Attempt → 取消直接收口 canceled，不停在 cancelling。
 		r.Status = domain.RunCanceled
 		out.AllStopped = true
+		return out, nil
 	}
+	r.Status = domain.RunCancelling
 	return out, nil
 }
 
@@ -894,6 +904,12 @@ func (m *MemoryRepos) RequestCancelTask(ctx context.Context, taskID, actor strin
 		out.Skipped = []string{t.ID}
 		delete(m.leases, t.ID)
 	case domain.TaskPreparing, domain.TaskRunning:
+		if !m.hasActiveAttemptLocked(t.ID) {
+			// 没有活动 Attempt：直接 canceled，不留 cancel_requested（C-6.2）。
+			t.Status = domain.TaskCanceled
+			delete(m.leases, t.ID)
+			break
+		}
 		t.CancelRequested = true
 		for _, a := range m.attempts {
 			if a.TaskID == t.ID && !a.Status.IsTerminal() {
@@ -908,6 +924,15 @@ func (m *MemoryRepos) RequestCancelTask(ctx context.Context, taskID, actor strin
 	return out, nil
 }
 
+// hasActiveAttemptLocked 报告该 Task 是否还有进行中的 Attempt（调用方已持锁）。
+func (m *MemoryRepos) hasActiveAttemptLocked(taskID string) bool {
+	for _, a := range m.attempts {
+		if a.TaskID == taskID && !a.Status.IsTerminal() {
+			return true
+		}
+	}
+	return false
+}
 // MarkCanceled 把被取消的 Attempt/Task 落成 canceled 终态（Cancel 成功回调）。
 func (m *MemoryRepos) MarkCanceled(ctx context.Context, attemptID string) error {
 	m.mu.Lock()
