@@ -1312,8 +1312,10 @@ paths:
       operationId: downloadRunFile
       summary: 产物下载（支持 HTTP Range）
       description: |
-        07 §5.1：`?path=` 下载 `<storage-root>/<run_id>/` 下的产物。`path` 必须是相对路径：
-        绝对路径、Windows 盘符、`..`、空段一律 400（路径只由 Run 目录 + 校验后的相对路径拼出）。
+        07 §5.1：`?path=` 下载 `<storage-root>/<run_id>/` 下的产物。`path` 接受两种形态：
+        run 相对（`tasks/<task>/attempts/1/result.json`）或以 `<run_id>/` 开头的
+        storage-root 相对（即 `/runs/{id}/artifacts` 返回的 `path`），后者会被剥掉前缀。
+        绝对路径、Windows 盘符、`..`、空段一律 400（**剥前缀不豁免校验**）。
         支持 `Range`（206，越界 416）；单文件超过 1 GiB 且未带 `Range` 时返回 413，请分段下载。
       tags: [files]
       parameters:
@@ -1326,7 +1328,11 @@ paths:
         - name: path
           in: query
           required: true
-          description: 相对 `<storage-root>/<run_id>/` 的文件路径（如 `tasks/t-0002/attempts/1/logs/stdout.log`）
+          description: |
+            `path` 是 **run 相对路径**（如 `tasks/<task>/attempts/1/result.json`）；
+            也接受带 `<run_id>/` 前缀的形态（与 `/runs/{id}/artifacts` 返回的 `path` 一致），
+            服务端会先剥掉该前缀。**两种形态都仍然做穿越校验**：绝对路径、Windows 盘符、
+            `..`、空段一律 400。
           schema:
             type: string
         - name: Range
@@ -3852,6 +3858,10 @@ components:
       properties:
         path:
           type: string
+          description: |
+            **storage-root 相对**路径，包含 `<run_id>/` 前缀
+            （如 `r-20261105-0001/tasks/t-0002/attempts/1/result.json`）。
+            可直接传给 `/runs/{run_id}/files?path=`（服务端会剥掉前缀再做穿越校验）。
         kind:
           type: string
           enum: [result, raw, log, report, other]

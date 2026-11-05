@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -380,3 +381,84 @@ func TestMetrics_NoAuthRequiredEvenInOIDCMode(t *testing.T) {
 		t.Fatalf("/metrics 内容异常: %s", rec.Body.String())
 	}
 }
+
+// TestRunFile_AcceptsStorageRootRelativePath 锁住"两种形态都收"：
+// /runs/{id}/artifacts 返回的 path 是 storage-root 相对（带 `<run_id>/` 前缀），
+// 直接喂给 /files 必须 200 且内容正确——不能要求客户端自己剥前缀。
+func TestRunFile_AcceptsStorageRootRelativePath(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	runID, taskID := seedRunForFiles(t, srv, st)
+
+	// 取 artifacts 接口真实返回的 path（避免测试里手写死形态）。
+	rec := doGet(t, srv, "/api/v1/runs/"+runID+"/artifacts")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("artifacts status = %d", rec.Code)
+	}
+	var body struct {
+		Items []struct {
+			Path string `json:"path"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析 artifacts: %v", err)
+	}
+	var runRel string
+	for _, it := range body.Items {
+		if strings.HasSuffix(it.Path, "logs/stdout.log") {
+			runRel = it.Path
+		}
+	}
+	if runRel == "" {
+		t.Fatalf("artifacts 里没有 stdout.log 条目: %+v", body.Items)
+	}
+	// 真实写入路径（report.writer 的 indexArtifacts）是 storage-root 相对 = 带 `<run_id>/` 前缀；
+	// 测试种子的索引行是 run 相对。两种形态都必须能被 /files 直接消费。
+	fromArtifacts := runID + "/" + runRel
+
+	rec = doGet(t, srv, "/api/v1/runs/"+runID+"/files?path="+urlQueryEscape(fromArtifacts))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("带前缀下载 status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "hello logs\n" {
+		t.Fatalf("带前缀下载内容 = %q, 期望 hello logs", rec.Body.String())
+	}
+
+	// run 相对形态仍然可用（回归，别只支持带前缀）。
+	rel := "tasks/" + taskID + "/attempts/1/logs/stdout.log"
+	if rec := doGet(t, srv, "/api/v1/runs/"+runID+"/files?path="+rel); rec.Code != http.StatusOK {
+		t.Fatalf("run 相对下载 status = %d", rec.Code)
+	}
+	// 种子里索引的 run 相对 path 也能直接下载（两种来源混存时都不挑客户端）。
+	if rec := doGet(t, srv, "/api/v1/runs/"+runID+"/files?path="+urlQueryEscape(runRel)); rec.Code != http.StatusOK {
+		t.Fatalf("索引里的 run 相对下载 status = %d", rec.Code)
+	}
+}
+
+// TestRunFile_PrefixedPathStillValidated 剥前缀不得削弱穿越校验。
+func TestRunFile_PrefixedPathStillValidated(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	runID, taskID := seedRunForFiles(t, srv, st)
+
+	cases := []string{
+		runID + "/../../etc/passwd",
+		runID + "/../" + runID + "/tasks",
+		runID + "//tasks//x",
+		runID + "/C:%5CWindows%5Cwin.ini",
+	}
+	for _, p := range cases {
+		rec := doGet(t, srv, "/api/v1/runs/"+runID+"/files?path="+urlQueryEscape(p))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("带前缀的非法路径 %q status = %d, 期望 400", p, rec.Code)
+		}
+	}
+	// 剥完是合法相对路径时仍能读到（控制组，确认不是一律拒绝）。
+	good := runID + "/tasks/" + taskID + "/attempts/1/logs/stdout.log"
+	if rec := doGet(t, srv, "/api/v1/runs/"+runID+"/files?path="+urlQueryEscape(good)); rec.Code != http.StatusOK {
+		t.Fatalf("控制组 status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// urlQueryEscape 用 QueryEscape 拼 path（与真实客户端一致）。
+func urlQueryEscape(s string) string { return url.QueryEscape(s) }

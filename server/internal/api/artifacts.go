@@ -123,6 +123,11 @@ func (s *Server) handleRunFile(w http.ResponseWriter, r *http.Request) {
 			"缺少 path 参数", map[string]any{"param": "path"}, false)
 		return
 	}
+	// 容忍两种形态（契约见 openapi `/runs/{id}/files`）：
+	//   - run 相对：   tasks/<task>/attempts/1/result.json
+	//   - storage-root 相对（= /runs/{id}/artifacts 返回的 path）：<run_id>/tasks/...
+	// 剥前缀**不豁免校验**：剥完仍走 safeJoin 的全部穿越检查（`..`/绝对路径/盘符/空段）。
+	rel = stripRunPrefix(run.ID, rel)
 	full, ok := safeJoin(s.cfg.StorageRoot, run.ID, rel)
 	if !ok {
 		fail(w, r, http.StatusBadRequest, domain.CodeValidationError,
@@ -166,6 +171,17 @@ func (s *Server) handleRunFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", "inline; filename=\""+path.Base(full)+"\"")
 	// ServeContent 负责 200/206/416 与 If-Range 等完整语义。
 	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+}
+
+// stripRunPrefix 剥掉 `<run_id>/` 前缀（`/runs/{id}/artifacts` 返回的 path 是 storage-root
+// 相对的，直接透传给 /files 会重复拼一次 run 目录）。只剥一层、只在整段匹配时剥。
+func stripRunPrefix(runID, rel string) string {
+	norm := strings.ReplaceAll(rel, "\\", "/")
+	prefix := runID + "/"
+	if runID != "" && strings.HasPrefix(norm, prefix) {
+		return strings.TrimPrefix(norm, prefix)
+	}
+	return rel
 }
 
 // safeJoin 把 <storage-root>/<run_id> 与用户给的相对路径安全拼起来。
