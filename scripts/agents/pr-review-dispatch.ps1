@@ -37,6 +37,11 @@ param(
 # 5.1 下 'Stop' 会把原生命令（git/gh）写到 stderr 的内容当成终止错误，
 # 所以用 Continue，并在需要的地方显式检查 $LASTEXITCODE。
 $ErrorActionPreference = 'Continue'
+
+# Windows PowerShell 5.1 默认用系统 ANSI 代码页解码外部命令的输出，gh 返回的 UTF-8 JSON
+# 会变成乱码、ConvertFrom-Json 直接失败（PR 描述里的中文尤其明显）。显式钉死 UTF-8。
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+try { $OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 $stateDir = Join-Path $RepoRoot '.data/pr-review'
 $statePath = Join-Path $stateDir 'state.json'
 $lockPath = Join-Path $stateDir '.lock'
