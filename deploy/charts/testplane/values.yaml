@@ -14,12 +14,13 @@
 
 # ---- 镜像 ----
 image:
-  repository: ccr.ccs.tencentyun.com/keriko/testplane-server
+  repository: ghcr.io/ucm-system/testplane-server
   # tag 与 digest 二选一；**release 环境请钉 digest**（W-8：可变 tag 会让
   # "回滚到底跑了哪份代码"无从回答）。digest 由 `deploy/docker/build-push.ps1` 打印。
-  # 由 `deploy/docker/build-push.ps1 -Push` 打印；生产请用 digest（tag 与 digest 二选一）
-  tag: "sha-37bda7d2f25d"
-  digest: "sha256:b7e793621bb5064e61d6496f4b405d430649290cae61b798f978b1b9542b0663"
+  # tag 与 digest 二选一；生产请用 digest。
+  # digest 来自 `release.yml`（打 v* tag）或 `deploy/docker/build-push.ps1 -Push` 的输出。
+  tag: "0.1.0"
+  digest: ""
   pullPolicy: IfNotPresent
   pullSecrets: []
 

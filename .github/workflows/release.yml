@@ -1,0 +1,183 @@
+# 发版：多架构镜像（server / web / 各 Tester）→ GHCR
+#
+# 触发：
+#   - push tag `v*`（例如 v0.2.0）→ 构建并推送 **linux/amd64 + linux/arm64** 两个平台
+#   - 手工 workflow_dispatch（可填 tag 与平台，用于补发/回滚验证）
+#   - PR → 只构建 **amd64**、不推送（防止 Dockerfile 腐烂）
+#
+# 镜像落点（GHCR，公开仓库用 GITHUB_TOKEN 即可，无需额外 Secret）：
+#   ghcr.io/<owner>/testplane-server:<tag>  +  :sha-<12>
+#   ghcr.io/<owner>/testplane-web:<tag>     +  :sha-<12>
+#   ghcr.io/<owner>/testplane-tester-<name>:<tag> + :sha-<12>
+#
+# 需要的权限：packages: write（本文件已声明）；repository 设置里无需任何 Secret。
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（留空则用 git describe --tags --always）'
+        required: false
+        type: string
+      platforms:
+        description: '目标平台（逗号分隔；默认双架构）'
+        required: false
+        default: 'linux/amd64,linux/arm64'
+        type: string
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: ${{ github.repository_owner }}
+
+jobs:
+  # 先枚举 testers/ 下所有 Tester，避免矩阵写死（加一个 Tester 不用改 workflow）
+  discover:
+    name: 发现 Tester
+    runs-on: ubuntu-latest
+    outputs:
+      testers: ${{ steps.list.outputs.testers }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          names="$(ls -1 testers | while read -r d; do
+            [ -f "testers/$d/build/Dockerfile" ] && printf '"%s",' "$d"
+          done)"
+          echo "testers=[${names%,}]" >> "$GITHUB_OUTPUT"
+          echo "发现 Tester：${names%,}"
+
+  # PR 上只验证 Dockerfile 还能构建（amd64，不推送）
+  build-only:
+    name: 构建验证（PR，amd64，不推送）
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: server
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/server.Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
+      - name: web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/web.Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+  publish:
+    name: 发布 ${{ matrix.image }}（${{ inputs.platforms || 'linux/amd64,linux/arm64' }}）
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: discover
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: server
+            dockerfile: deploy/docker/server.Dockerfile
+            context: .
+          - image: web
+            dockerfile: deploy/docker/web.Dockerfile
+            context: .
+          # Tester 镜像：上下文是 testers/<name>/（不是仓库根），见各 Dockerfile 头注释
+          - image: tester-endpoint-probe
+            dockerfile: testers/endpoint-probe/build/Dockerfile
+            context: testers/endpoint-probe
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # git describe 要 tag 历史
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 计算 tag
+        id: meta
+        run: |
+          raw="${{ inputs.tag }}"
+          if [ -z "$raw" ]; then raw="${GITHUB_REF_NAME}"; fi
+          # v0.2.0 → 0.2.0；保留 v 前缀的语义 tag 也给一个
+          ver="${raw#v}"
+          short="$(git rev-parse --short=12 HEAD)"
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          echo "short=${short}" >> "$GITHUB_OUTPUT"
+          echo "平台：${{ inputs.platforms || 'linux/amd64,linux/arm64' }}"
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送（多架构）
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ inputs.platforms || 'linux/amd64,linux/arm64' }}
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}:${{ steps.meta.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}:sha-${{ steps.meta.outputs.short }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: 校验双架构清单
+        run: |
+          ref="${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}:${{ steps.meta.outputs.version }}"
+          docker buildx imagetools inspect "$ref"
+          # amd64 与 arm64 都必须有，缺一个就红（不要静默降级成单架构）
+          docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' > /tmp/m.json
+          grep -q 'linux/amd64' /tmp/m.json || { echo "❌ 缺 linux/amd64"; exit 1; }
+          grep -q 'linux/arm64' /tmp/m.json || { echo "❌ 缺 linux/arm64"; exit 1; }
+          echo "✅ 双架构齐了"
+
+      - name: 写 job summary
+        run: |
+          {
+            echo "### ${{ matrix.image }}"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 镜像 | \`${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}\` |"
+            echo "| tag | \`${{ steps.meta.outputs.version }}\` / \`sha-${{ steps.meta.outputs.short }}\` / \`latest\` |"
+            echo "| 平台 | \`${{ inputs.platforms || 'linux/amd64,linux/arm64' }}\` |"
+            echo "| digest | \`${{ steps.build.outputs.digest }}\` |"
+            echo ""
+            echo '填进 Helm values：'
+            echo '```yaml'
+            echo "image:"
+            echo "  repository: ${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}"
+            echo "  digest: ${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

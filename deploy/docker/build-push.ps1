@@ -52,7 +52,8 @@
 [CmdletBinding()]
 param(
     [string]$Registry = 'ccr.ccs.tencentyun.com/keriko',
-    [string]$Image = 'testplane-server',
+    [string]$Image = '',
+    [string]$Component = 'server',
     [string]$Tag = '',
     [string]$Platforms = 'linux/amd64',
     [switch]$Push,
@@ -65,9 +66,38 @@ $ErrorActionPreference = 'Stop'
 
 # 仓库根 = 本脚本往上两级（deploy/docker/build-push.ps1）
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$Dockerfile = Join-Path $RepoRoot 'deploy/docker/server.Dockerfile'
+
+# ---- 组件解析：server / web / tester:<name> -------------------------------
+# 三者的 Dockerfile 与**构建上下文**不同，这里集中决定（tester 的上下文是 Tester 目录，
+# 不是仓库根——搞错会把整个仓库塞进镜像上下文）。
+$ComponentSpec = $Component.Trim()
+$BuildContext = $RepoRoot
+switch -Regex ($ComponentSpec) {
+    '^server$' {
+        $Dockerfile = Join-Path $RepoRoot 'deploy/docker/server.Dockerfile'
+        $DefaultImage = 'testplane-server'
+    }
+    '^web$' {
+        $Dockerfile = Join-Path $RepoRoot 'deploy/docker/web.Dockerfile'
+        $DefaultImage = 'testplane-web'
+    }
+    '^tester:(?<name>[\w.-]+)$' {
+        $testerName = $Matches['name']
+        $testerDir = Join-Path $RepoRoot "testers/$testerName"
+        if (-not (Test-Path $testerDir)) {
+            throw "找不到 Tester 目录：$testerDir"
+        }
+        $Dockerfile = Join-Path $testerDir 'build/Dockerfile'
+        $BuildContext = $testerDir          # <-- 与 server/web 不同：上下文 = Tester 根目录
+        $DefaultImage = "testplane-tester-$testerName"
+    }
+    default {
+        throw "-Component 只能是 server | web | tester:<name>（收到 '$Component'）"
+    }
+}
+if (-not $Image) { $Image = $DefaultImage }
 if (-not (Test-Path $Dockerfile)) {
-    throw "找不到 Dockerfile：$Dockerfile（构建入口只能是它）"
+    throw "找不到 Dockerfile：$Dockerfile"
 }
 
 function Write-Step([string]$msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
@@ -127,8 +157,10 @@ Write-Info "dirty  : $($gitInfo.Dirty)"
 Write-Info "describe: $($gitInfo.Describe)"
 
 Write-Step "构建目标"
+Write-Info "component  : $ComponentSpec"
+Write-Info "image      : $Image"
 Write-Info "dockerfile : $Dockerfile"
-Write-Info "context    : $RepoRoot"
+Write-Info "context    : $BuildContext"
 Write-Info "platforms  : $($platformList -join ', ')"
 Write-Info "tag        : $RefTag"
 Write-Info "sha tag    : $RefSha"
@@ -151,7 +183,7 @@ if ($multiArch) {
     Write-Step "docker buildx build（多架构 + 直接推送）"
     $args = @('buildx', 'build', '--platform', ($platformList -join ','), '--provenance=false', '--sbom=false') +
             $commonArgs +
-            @('--tag', $RefTag, '--tag', $RefSha, '--push', $RepoRoot)
+            @('--tag', $RefTag, '--tag', $RefSha, '--push', $BuildContext)
     Write-Info ("docker " + ($args -join ' '))
     & docker @args
     if ($LASTEXITCODE -ne 0) { throw "buildx build 失败（exit $LASTEXITCODE）" }
@@ -160,7 +192,7 @@ if ($multiArch) {
     # --provenance=false --sbom=false：否则 buildx 会额外塞一个 unknown/unknown 的
     # attestation manifest，`docker manifest inspect` 与部分集群的校验会看着别扭。
     $args = @('build', '--platform', $platformList[0], '--provenance=false', '--sbom=false') + $commonArgs +
-            @('--tag', $RefTag, '--tag', $RefSha, $RepoRoot)
+            @('--tag', $RefTag, '--tag', $RefSha, $BuildContext)
     Write-Info ("docker " + ($args -join ' '))
     & docker @args
     if ($LASTEXITCODE -ne 0) { throw "docker build 失败（exit $LASTEXITCODE）" }
@@ -244,6 +276,9 @@ if ($KindCluster) {
 
 # ---- 给 CI 用的机器可读输出 ---------------------------------------------
 Write-Host ''
+Write-Host "COMPONENT=$ComponentSpec"
+Write-Host "DOCKERFILE=$Dockerfile"
+Write-Host "CONTEXT=$BuildContext"
 Write-Host "TAG=$Tag"
 Write-Host "SHA_TAG=$ShaTag"
 Write-Host "REF_TAG=$RefTag"

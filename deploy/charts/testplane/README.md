@@ -17,7 +17,7 @@ kubectl -n testplane create secret generic testplane-oidc  --from-literal=client
                                                           --from-literal=session-secret="$(openssl rand -hex 32)"
 kubectl -n testplane create secret generic testplane-genet --from-literal=api-key='<Genet Open API Bearer key>'
 # 可选：镜像仓库凭据
-kubectl -n testplane create secret docker-registry ccr-pull --docker-server=ccr.ccs.tencentyun.com \
+kubectl -n testplane create secret docker-registry ghcr-pull --docker-server=ghcr.io \
   --docker-username='<user>' --docker-password='<pass>'
 
 # 2) 复制生产模板改一改
@@ -65,7 +65,7 @@ Chart 会在**渲染期**直接失败并给出中文原因，不会让你部署�
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `image.repository` | `ccr.ccs.tencentyun.com/keriko/testplane-server` | 镜像仓库 |
+| `image.repository` | `ghcr.io/ucm-system/testplane-server` | 镜像仓库 |
 | `image.digest` / `image.tag` | `""` / `0.1.0` | **生产用 digest**（`deploy/docker/build-push.ps1` 会打印）；tag 与 digest 二选一 |
 | `replicaCount` / `role` | `1` / `all` | 拆角色：`api` 管 HTTP/SSE，`controller` 管编排，`collector` 管日志 |
 | `config.env` / `config.authMode` | `prod` / `oidc` | 生产别用 dev |
@@ -149,3 +149,23 @@ helm template testplane deploy/charts/testplane -n testplane -f values-prod.yaml
 | 登录跳转 500 | `oidc.redirectURL` 与 IdP 登记的 callback 不一致（必须逐字节相同） |
 | 页面上没有静态资源 | 镜像没打前端（`server.Dockerfile` 的 web 阶段被关掉）；重新 `build-push.ps1` |
 | `ClusterRole ... exists and cannot be imported` | 同 namespace 里已有 kustomize 装的同名对象，先 `helm uninstall` 或换 release 名 |
+
+## 9. 镜像从哪来（GHCR）
+
+发版走 tag，镜像自动打到 GitHub Container Registry（公开仓库用 `GITHUB_TOKEN`，**不需要额外 Secret**）：
+
+```bash
+git tag -a v0.1.0 -m "TestPlane v0.1.0" && git push origin v0.1.0
+```
+
+| 镜像 | 说明 |
+|---|---|
+| `ghcr.io/ucm-system/testplane-server` | 控制面（前端已内嵌，单端口） |
+| `ghcr.io/ucm-system/testplane-web` | 可选：纯静态前端镜像（需要单独托管前端时用） |
+| `ghcr.io/ucm-system/testplane-tester-<name>` | 各 Tester（`testers/<name>/build/Dockerfile` 自动发现） |
+
+每个镜像都有 `:<version>` / `:sha-<12>` / `:latest` 三个 tag，**双架构** `linux/amd64` + `linux/arm64`；
+digest 在 Actions 的 job summary 里，直接填 `image.digest`。
+
+> 首次发版后去 **Packages → Package settings → Change visibility → Public**，否则匿名拉取 401。
+> 需要私有包时用 `image.pullSecrets`（`kubectl create secret docker-registry ghcr-pull ...`）。

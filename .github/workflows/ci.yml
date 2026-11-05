@@ -1,0 +1,177 @@
+# 持续集成门禁（PR 与 main 都跑）
+#
+# 设计原则：**每个门禁都必须能红**（评审反复要求），所以这里是真跑，不是"打印一下"。
+# 分支保护要求下面这些 job 全绿才能合入 main（见 .github/branch-protection.md）。
+#
+# 需要的仓库设置：
+#   - 无需额外 Secret（Postgres 用 service container）
+#   - Playwright job 会下载 chromium（约 1 分钟），故与其它 job 并行
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.25'
+  NODE_VERSION: '22'
+  # Go 集成测试用：service container 的名字就是主机名
+  TESTPLANE_TEST_DATABASE_URL: postgres://testplane:testplane@localhost:5432/testplane_test?sslmode=disable
+
+jobs:
+  go:
+    name: go build / vet / test（含真 PG）
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testplane
+          POSTGRES_PASSWORD: testplane
+          POSTGRES_DB: testplane
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U testplane"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            server/go.sum
+            tools/contract/go.sum
+            tools/fake-genet/go.sum
+      - name: 准备测试库
+        run: |
+          PGPASSWORD=testplane psql -h localhost -U testplane -d postgres -c 'CREATE DATABASE testplane_test;' || true
+      # 先建库再跑；重跑时库已存在，`|| true` 不是掩饰错误，是幂等
+      - name: build
+        working-directory: server
+        run: go build ./...
+      - name: vet
+        working-directory: server
+        run: go vet ./...
+      - name: test（真 PG）
+        working-directory: server
+        run: go test ./... -count=1
+      - name: race（api / store / orchestrator）
+        working-directory: server
+        run: go test -race ./internal/api ./internal/store ./internal/orchestrator -count=1
+
+  lint:
+    name: gofmt / 契约工具构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            server/go.sum
+            tools/contract/go.sum
+      # Linux 上 core.autocrlf 不生效，plain gofmt 就是权威判定
+      # （Windows 开发者的等价命令是 scripts/gofmt-check.ps1 —— 它按 LF 形态判，二者结论一致）
+      - name: gofmt（仓库内必须是 LF，故直接 gofmt -l）
+        run: |
+          out="$(gofmt -l server tools)"
+          if [ -n "$out" ]; then echo "以下文件未格式化："; echo "$out"; exit 1; fi
+      - name: 契约工具构建 + 单测
+        working-directory: tools/contract
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
+
+  contract:
+    name: 契约（spec 侧：openapi ↔ design 50 端点）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: tools/contract/go.sum
+      # 不需要后端：spec 侧校验 openapi 形状、设计端点基线（count + sha256）、白名单
+      - name: contract --mode spec
+        working-directory: tools/contract
+        run: go run . --mode spec
+      - name: openapi lint（redocly）
+        run: npx --yes @redocly/cli@latest lint server/api/openapi.yaml
+
+  web:
+    name: web 类型检查 / 构建 / Playwright（mock）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: install
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      - name: typecheck + build
+        working-directory: web
+        run: pnpm build
+      - name: 安装浏览器
+        working-directory: web
+        run: pnpm exec playwright install --with-deps chromium
+      # mock 模式的用例不依赖后端（真后端用例按条件 skip）
+      - name: playwright
+        working-directory: web
+        run: pnpm exec playwright test
+
+  helm:
+    name: Helm chart lint / 渲染
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: lint（生产模板）
+        run: helm lint deploy/charts/testplane -f deploy/charts/testplane/values-production.example.yaml
+      - name: 渲染生产 values（必须能出 Deployment/Job/PVC 等）
+        run: |
+          helm template testplane deploy/charts/testplane -n testplane \
+            -f deploy/charts/testplane/values-production.example.yaml > /tmp/prod.yaml
+          grep -q 'kind: Deployment' /tmp/prod.yaml
+          grep -q 'kind: Job' /tmp/prod.yaml   # 迁移 hook
+          grep -q 'kind: PersistentVolumeClaim' /tmp/prod.yaml
+      - name: 渲染本地 values
+        run: helm template tp deploy/charts/testplane -n testplane-helm -f deploy/charts/testplane/values-kind.yaml > /tmp/kind.yaml
+      - name: 必填项校验必须能红（删掉 OIDC issuer 应失败）
+        run: |
+          if helm template tp deploy/charts/testplane -n t \
+               -f deploy/charts/testplane/values-production.example.yaml \
+               --set oidc.issuer= > /dev/null 2>&1; then
+            echo "❌ 缺 OIDC issuer 居然渲染成功——渲染期校验失效了"; exit 1
+          fi
+          echo "✅ 缺必填项会渲染失败（符合预期）"
+
+  kustomize:
+    name: 本地 kind 清单可渲染
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+      - run: kubectl kustomize deploy/k8s > /tmp/k8s.yaml
+      - run: kubectl kustomize deploy/overlays/local-dev > /tmp/dev.yaml
+      - name: 本地 overlay 必须是 dev 鉴权（防误配）
+        run: grep -q 'TESTPLANE_AUTH_MODE: dev' /tmp/dev.yaml
