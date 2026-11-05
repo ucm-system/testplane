@@ -176,9 +176,14 @@ $baseCount = $baseItems.Count
 $baseTotal = [long]$baseArtifacts.total_size_bytes
 $basePaths = @($baseItems | ForEach-Object { $_.path } | Sort-Object) -join "`n"
 $baseFile = Get-FileBytes -RelativePath $fileRel
+$baseResultItem = @($baseItems | Where-Object { $_.kind -eq 'result' -and [string]$_.task_id -eq $taskId })[0]
+if ($baseResultItem) { $prefixedRel = [string]$baseResultItem.path } else { $prefixedRel = "$script:RunId/$fileRel" }
+$basePrefixedFile = Get-FileBytes -RelativePath $prefixedRel
 Add-Check 'baseline.artifact_result_exists' ($baseResultCount -gt 0) ("result=" + $baseResultCount + " / items=" + $baseCount + " / total=" + $baseTotal)
 Add-Check 'baseline.file_200' ($baseFile.status -eq 200) ("status=" + $baseFile.status + " / bytes=" + $baseFile.bytes.Length + " / sha=" + $baseFile.sha256)
 Add-Check 'baseline.file_nonempty' ($baseFile.bytes.Length -gt 0) ("bytes=" + $baseFile.bytes.Length)
+Add-Check 'baseline.prefixed_file_200' ($basePrefixedFile.status -eq 200) ("raw artifacts.path=" + $prefixedRel + " / status=" + $basePrefixedFile.status)
+Add-Check 'baseline.prefixed_sha_same' ($basePrefixedFile.sha256 -eq $baseFile.sha256) ("relative=" + $baseFile.sha256 + " prefixed=" + $basePrefixedFile.sha256)
 Write-Host ("基线：artifacts={0}, total={1}, result={2}, fileBytes={3}, sha={4}" -f $baseCount, $baseTotal, $baseResultCount, $baseFile.bytes.Length, $baseFile.sha256)
 
 # 确认 Attempt 已终态后删除 Job（不等 GC，加速；语义与 GC 删除后的读取一致）。
@@ -207,12 +212,15 @@ $afterArtifacts = Invoke-Api -Method GET -Path "/api/v1/runs/$script:RunId/artif
 $afterItems = @($afterArtifacts.items)
 $afterPaths = @($afterItems | ForEach-Object { $_.path } | Sort-Object) -join "`n"
 $afterFile = Get-FileBytes -RelativePath $fileRel
+$afterPrefixedFile = Get-FileBytes -RelativePath $prefixedRel
 Add-Check 'after.artifact_count_same' ($afterItems.Count -eq $baseCount) ("before=" + $baseCount + " after=" + $afterItems.Count)
 Add-Check 'after.artifact_total_same' ([long]$afterArtifacts.total_size_bytes -eq $baseTotal) ("before=" + $baseTotal + " after=" + $afterArtifacts.total_size_bytes)
 Add-Check 'after.result_count_same' (@($afterItems | Where-Object { $_.kind -eq 'result' }).Count -eq $baseResultCount) ("before=" + $baseResultCount + " after=" + @($afterItems | Where-Object { $_.kind -eq 'result' }).Count)
 Add-Check 'after.path_set_same' ($afterPaths -eq $basePaths) '产物路径集合一致'
 Add-Check 'after.file_200' ($afterFile.status -eq 200) ("status=" + $afterFile.status + " / bytes=" + $afterFile.bytes.Length)
 Add-Check 'after.sha256_same' ($afterFile.sha256 -eq $baseFile.sha256) ("before=" + $baseFile.sha256 + " after=" + $afterFile.sha256)
+Add-Check 'after.prefixed_file_200' ($afterPrefixedFile.status -eq 200) ("raw artifacts.path=" + $prefixedRel + " / status=" + $afterPrefixedFile.status)
+Add-Check 'after.prefixed_sha_same' ($afterPrefixedFile.sha256 -eq $baseFile.sha256) ("relative=" + $baseFile.sha256 + " prefixed=" + $afterPrefixedFile.sha256)
 
 $attemptArtifacts = Invoke-Api -Method GET -Path "/api/v1/tasks/$taskId/attempts/1/artifacts"
 $attemptItems = @($attemptArtifacts.items)
@@ -226,6 +234,9 @@ $bad404 = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Uri ("$script:
 Add-Check 'negative.missing_404' ($bad404.StatusCode -eq 404) ("status=" + $bad404.StatusCode)
 $bad400 = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Uri ("$script:ApiBase/api/v1/runs/$script:RunId/files?path=" + [uri]::EscapeDataString("../../etc/passwd")) -Headers @{ Authorization = "Bearer $User" }
 Add-Check 'negative.traversal_400' ($bad400.StatusCode -eq 400) ("status=" + $bad400.StatusCode)
+# 带 run_id 前缀的原始形态也要做穿越校验，不能因为剥前缀而绕过。
+$badPrefix400 = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Uri ("$script:ApiBase/api/v1/runs/$script:RunId/files?path=" + [uri]::EscapeDataString("$script:RunId/../../etc/passwd")) -Headers @{ Authorization = "Bearer $User" }
+Add-Check 'negative.prefixed_traversal_400' ($badPrefix400.StatusCode -eq 400) ("status=" + $badPrefix400.StatusCode + " / path=$script:RunId/../../etc/passwd")
 
 if (-not $SkipRestart) {
     Write-Host ""
@@ -237,8 +248,11 @@ if (-not $SkipRestart) {
     if (-not $SkipForward) { Restart-ApiForward }
     $null = Invoke-WebRequest -UseBasicParsing "$script:ApiBase/healthz" -TimeoutSec 10
     $restartFile = Get-FileBytes -RelativePath $fileRel
+    $restartPrefixedFile = Get-FileBytes -RelativePath $prefixedRel
     Add-Check 'restart.file_200' ($restartFile.status -eq 200) ("status=" + $restartFile.status + " / bytes=" + $restartFile.bytes.Length)
     Add-Check 'restart.sha256_same' ($restartFile.sha256 -eq $baseFile.sha256) ("before=" + $baseFile.sha256 + " after=" + $restartFile.sha256)
+    Add-Check 'restart.prefixed_200' ($restartPrefixedFile.status -eq 200) ("status=" + $restartPrefixedFile.status + " / bytes=" + $restartPrefixedFile.bytes.Length)
+    Add-Check 'restart.prefixed_sha_same' ($restartPrefixedFile.sha256 -eq $baseFile.sha256) ("before=" + $baseFile.sha256 + " after=" + $restartPrefixedFile.sha256)
 }
 
 foreach ($p in $script:ForwardProcs) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }

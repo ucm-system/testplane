@@ -18,7 +18,7 @@
 | 重启恢复演练（#9） | ✅ `restart-drill.ps1` 13/13（新镜像；Run `r-Q0VT`） |
 | Web UI Playwright 冒烟（#16） | ✅ **3 passed**（ui-smoke + viewer/operator 取消） |
 | deploy 形态（PR #18） | ✅ 正常 9/9；blocked 7/7；500 4/4（超窗仅单测） |
-| 产物持久化（#14） | ✅ `artifact-persistence-check.ps1` **21/21**（Pod/Job 消失 + 控制面重启后 sha256 一致） |
+| 产物持久化（#14） | ✅ `artifact-persistence-check.ps1` **28/28**（两种 path 形态 + Pod/Job 消失 + 控制面重启后 sha256 一致） |
 | 验收矩阵 17 项结论 | ✅ 见 [`acceptance-matrix.md`](acceptance-matrix.md) |
 
 ## 目录
@@ -219,7 +219,7 @@ pwsh scripts/e2e/artifact-persistence-check.ps1
 `tasks/<task>/attempts/1/result.json` sha256；删除 Job/Pod 后要求条目数、大小、
 result 数、路径集合、sha256 **完全一致**，再 `rollout restart testplaned` 复核；
 同时验 attempt artifacts、`Range: bytes=0-9` → 206+10B、不存在 path 404、
-`../../etc/passwd` 400。实跑 `r-20261105-ZHQS` **21/21 PASS**。
+`../../etc/passwd` 400；两种 `/files` path 形态（artifacts 原始 `r-xxx/...` 与 run 相对）都要 200 且 sha 一致；带前缀 `r-xxx/../../etc/passwd` 也要 400。实跑 `r-20261105-YZCW` **28/28 PASS**。
 
 默认**严格**：report 必现（终态后 ≤2s，30s 等待足够）、`/logs` 必非空；只有显式
 `-AllowKnownGaps` 才把当前已知的 report/logs 缺口从失败项里剔除，修复后不要带这个开关。

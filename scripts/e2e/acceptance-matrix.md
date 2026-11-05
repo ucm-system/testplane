@@ -1,7 +1,7 @@
 # 验收矩阵结论（票 #3 · QA 侧）
 
 > 对 `design/IMPLEMENTATION.md` §9 / ARCHITECTURE §14.1 的 17 项，给出「做过 / mock / 未做」与证据。
-> 环境：kind `testplane`；真 Genet（`genet` ns）；fake-genet（宿主 `:18091`）；Volcano 演示夹具；最终镜像 `sha256:0bb684c3…`。
+> 环境：kind `testplane`；真 Genet（`genet` ns）；fake-genet（宿主 `:18091`）；Volcano 演示夹具；最终镜像 `sha256:492ff780…`。
 > 本文件只提供结论，**不写** `docs/runbook/acceptance.md`（由 infra 收口）。
 > 状态随测试推进更新；最后更新：2026-11-05。
 
@@ -20,12 +20,12 @@
 | 11 | 失败策略（abort_run） | 做过 | failure-injection 中 precheck 失败后其余 Task 全部 `skipped(upstream_abort)`，5/5 场景一致 |
 | 12 | Run 编排全链路 | 做过 | succeeded `6H0Y/7RTG`、service_unavailable `B2PB/2NQR/DVNS`、completed_with_errors `ZMMG/AY4Q/PA16`、canceled `1YZW`、failed `G9D5/70V5` 均实测 |
 | 13 | 报告结构 | 做过 | `7RTG` report 662B / report.md 779B，终态后生成；混合 `PA16` counts/failures、deploy `96QQ` 报告均校验 |
-| 14 | 产物持久化 | ✅ | `artifact-persistence-check.ps1` **21/21 PASS**：Run `r-20261105-ZHQS` 基线 artifacts **14 条 / 12891 B / result 2 条**，`tasks/t-WAQFA5/attempts/1/result.json` sha256 `0a271511ae63477c05971b3fb4dec31e524f3c237d682d57230f6d094d0b4a58`；Job/Pod 消失后条目数、总大小、result 数、路径集合与 sha256 **完全一致**；控制面 rollout restart 后 sha256 仍一致；attempt artifacts 可用、Range `bytes=0-9` → **206 + 10B**；不存在 path → 404、`../../etc/passwd` → 400 |
+| 14 | 产物持久化 | ✅ | `artifact-persistence-check.ps1` **28/28 PASS**：Run `r-20261105-YZCW` 基线 artifacts **14 条 / 12884 B / result 2 条**，`tasks/t-YBKF7G/attempts/1/result.json` sha256 `5a80014d6d1432b747a45b056e49a1e3905ac2b37877e77959ba72405f05a202`；**服务端两种 path 形态均 200**（artifacts 原始 `r-xxx/...` 与 run 相对形态，sha256 一致，不再依赖客户端剥前缀）；Job/Pod 消失后条目数、总大小、result 数、路径集合与 sha256 **完全一致**；控制面 rollout restart 后 sha256 仍一致；attempt artifacts 可用、Range `bytes=0-9` → **206 + 10B**；不存在 path → 404、`../../etc/passwd` → 400、带前缀 `r-xxx/../../etc/passwd` → 400 |
 | 15 | 失败隔离 | 做过 | `r-20261105-PA16` **11/11**：A 打 mock-llm succeeded、B 打 mock-llm-500 failed；Run `completed_with_errors`；report counts `{total:2,succeeded:1,failed:1}`、failures 非空；Run.error=首个失败 Task（PRECHECK_FAILED） |
 | 16 | Web UI | 做过 | `pnpm --dir web build` 通过；Playwright **3 passed**（`ui-smoke` + 新增 viewer / operator 取消用例；frontend 已提交） |
 | 17 | API 契约与错误码 | 做过 | 规格 **15/15**、实现 **42/42**、合计 **57/57**；设计 50 / openapi 34 / 白名单 16 / openapi 多出设计 0；new endpoints 全部进 live（profiles/artifacts/files/metrics/queue-status volcano/auth 三端点/Tester version） |
 
-## PR #18 收口（2026-11-05 14:20，最终镜像 `sha256:0bb684c3…`）
+## PR #18 收口（2026-11-05 14:20，最终镜像 `sha256:492ff780…`）
 
 - **#15 一成一败**：`mixed-result-check.ps1` → **11/11 PASS**，Run `r-20261105-PA16`；A→mock-llm succeeded、B→mock-llm-500 failed；report counts 1/1、failures 非空、Run.error 取首个失败 Task。
 - **#16 Playwright**：`ui-smoke.spec.ts` + viewer/operator 取消用例 → **3 passed**，system Chrome（`channel: chrome`）。
@@ -33,7 +33,7 @@
 - **#3 Genet deploy**：正常 `96QQ` 9/9；blocked `DVNS` 7/7；500 `70V5` 4/4；超窗单测覆盖（genet 72h + 编排层 blocked），端到端不做。
 - **#17 契约**：`go test ./...` PASS；`--mode all` **57/57**（spec 15 + live 42）；设计 50 / openapi 34 / 白名单 16 / openapi 多出设计 0。
 - **#1 生命周期**：`run-local.ps1` 默认 MockURL 自动探测（namespace=default）→ `r-20261105-7RTG` **31/31**。
-- **#14 产物持久化**：`artifact-persistence-check.ps1` → **21/21 PASS**，Run `r-20261105-ZHQS`；Job/Pod 消失后 artifacts 14 条/12891B/result 2 条与 sha256 `0a2715…` 完全一致；控制面 restart 后 sha256 仍一致；Range 206+10B、404/400 负向通过。
+- **#14 产物持久化**：`artifact-persistence-check.ps1` → **28/28 PASS**，Run `r-20261105-YZCW`；artifacts 14 条/12884B/result 2 条，**原始 `r-xxx/...` 与 run 相对两种 path 形态均 200 且 sha256 一致**；Job/Pod 消失、控制面 restart 后 sha256 仍 `5a8001…`；Range 206+10B、404/400（含带前缀穿越）负向通过。
 - **环境收尾**：configmap 已还原 `TESTPLANE_GENET_BASE_URL=http://host.docker.internal:18091`、`TESTPLANE_DEPLOY_TIMEOUT=72h`；fake-genet `:18095` 已停。
 
 ## 复跑命令

@@ -103,8 +103,10 @@ stdout 一行 JSON（`checks[]` 逐项给 detail），stderr 人类摘要；`--j
 - 实现侧：**42/42 通过**，覆盖全部 34 个 operation、任务列表完整性（seq=0 precheck）、
   SSE 连通性、404/400 错误体、取消语义；`/report` 的 404 只在非终态 fixture 上放行。
 - 合计 `--mode all`：**57/57 通过**。
-- 已知 warning：`/auth/callback` 在 dev 模式返回 404，但 openapi 只声明 302/401；
-  契约按实际 dev 行为放行并提示补 404。
+- `/files` live 同时探两种 path 形态：run 相对与 artifacts 原始带 `<run_id>/` 前缀；
+  fixture 未生成 report 时两者均 404（Error 形状），产物 drill 另证 200。
+- openapi 的 `/auth/callback` 404（dev 模式）已补 `application/json` + `Error`；
+  契约不再对它做额外 warning。
 - 负向证据：`--allow-missing none` 时未登记缺失端点全部判红（不再自证）；
   单测 `TestDesignChecksCatchUnregisteredMissing` / `TestArtifactResponseTerminalSemantics`
   覆盖“改前能过、改后必须红”。

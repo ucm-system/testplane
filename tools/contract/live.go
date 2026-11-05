@@ -390,18 +390,12 @@ func (l *Live) checkAuthCallback(ctx context.Context) {
 		}
 		l.add("live.authCallback", true, "HTTP 401，Error 形状正确")
 	case http.StatusNotFound:
-		// dev 模式与 /auth/login 一致返回 404；spec 目前只声明 302/401。
-		// 这里按实际 dev 行为放行，但保留 warning，提示补齐 spec。
-		if ct := hdr.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-			l.add("live.authCallback", false, fmt.Sprintf("HTTP 404 但 Content-Type=%q", ct))
-			return
-		}
-		if issues := l.errorEnvelopeIssues(raw); len(issues) > 0 {
+		// dev 模式与 /auth/login 一致返回 404；openapi 已声明该 dev 404 + Error。
+		if issues := l.validateError("authCallback", status, hdr, raw); len(issues) > 0 {
 			l.add("live.authCallback", false, strings.Join(issues, "；"))
 			return
 		}
-		l.warn("auth/callback 在 dev 模式返回 404，但 openapi 只声明 302/401；契约放行并记录，建议补 404")
-		l.add("live.authCallback", true, "HTTP 404（dev 模式），Error 形状正确；spec 未声明 404（已 warning）")
+		l.add("live.authCallback", true, "HTTP 404（dev 模式，spec 已声明），Error 形状正确")
 	default:
 		l.add("live.authCallback", false, fmt.Sprintf("期望 302 或 401，实际 %d：%s", status, truncate(raw, 300)))
 	}
@@ -427,6 +421,38 @@ func (l *Live) checkAuthLogout(ctx context.Context) {
 		return
 	}
 	l.add("live.authLogout", true, fmt.Sprintf("HTTP 200，ok=%v", *body.OK))
+}
+
+// probeRunFileBothForms 同时探 /files 的两种 path 形态：
+//   - run 相对形态：tasks/<task>/attempts/1/result.json
+//   - 原始 artifacts 形态：<run_id>/tasks/.../result.json
+//
+// 状态 200 或 404 都按 spec 处理；两种形态必须都合法。
+func (l *Live) probeRunFileBothForms(ctx context.Context, runID string) {
+	id := url.PathEscape(runID)
+	forms := []struct {
+		name string
+		path string
+	}{
+		{"relative", "/api/v1/runs/" + id + "/files?path=report.json"},
+		{"prefixed", "/api/v1/runs/" + id + "/files?path=" + url.QueryEscape(runID+"/report.json")},
+	}
+	var details []string
+	allOK := true
+	for _, f := range forms {
+		status, hdr, raw, err := l.client.do(ctx, http.MethodGet, f.path, nil, "", nil)
+		if err != nil {
+			l.recordErr("live.downloadRunFile", err)
+			return
+		}
+		ok, detail := l.artifactResponseCheck("downloadRunFile", false, status, hdr, raw, "", "")
+		if !ok {
+			allOK = false
+		}
+		details = append(details, f.name+"=>"+fmt.Sprintf("%d", status)+"（"+detail+"）")
+	}
+	l.markOp("downloadRunFile")
+	l.add("live.downloadRunFile", allOK, strings.Join(details, "；"))
 }
 
 // probeOptional 允许"spec 声明的状态依赖错误码"（如报告未生成 404）。
@@ -667,7 +693,7 @@ func (l *Live) probeRunReads(ctx context.Context) {
 	l.probeSchema(ctx, "listRunEvents", "/api/v1/runs/"+id+"/events/history?since_seq=0&limit=100", 200, "EventList")
 	l.probeSchema(ctx, "getRunManifest", "/api/v1/runs/"+id+"/manifest", 200, "ManifestSnapshot")
 	l.probeSchema(ctx, "listRunArtifacts", "/api/v1/runs/"+id+"/artifacts", 200, "ArtifactList")
-	l.probeOptional(ctx, "downloadRunFile", "/api/v1/runs/"+id+"/files?path=report.json", 200, "", 404, "application/octet-stream")
+	l.probeRunFileBothForms(ctx, l.runA)
 	l.probeRunDeploy(ctx, l.runA)
 	l.probeRunReport(ctx, l.runA, "/report", "Report", "getRunReport")
 	l.probeRunReport(ctx, l.runA, "/report.md", "", "getRunReportMarkdown")
