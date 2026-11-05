@@ -90,6 +90,8 @@ $allScenarios = @(
     @{ Name = 'slow-ready';   Service = 'mock-llm-slow';     Expect = 'service_unavailable';                             TaskErr = 'PRECHECK_FAILED'; Retryable = 'true';  MaxSeconds = 180; Note = '窗口内不可就绪' }
 )
 $scenarios = $allScenarios
+# pwsh -File 会把 "a,b" 当单个字符串传进来；统一按逗号拆成数组。
+$Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
 if ($Only.Count -gt 0) {
     $scenarios = $allScenarios | Where-Object { $Only -contains $_.Name }
     if ($scenarios.Count -eq 0) {

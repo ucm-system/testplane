@@ -5,9 +5,15 @@
 >
 > **状态图例**：✅ 做过（有可复跑证据） / 🟡 部分或 mock（形态通、真依赖未接） / ⬜ 未做。
 >
-> **来源**：QA 侧结论见 [`scripts/e2e/acceptance-matrix.md`](../../scripts/e2e/acceptance-matrix.md)；
-> 带 🔧 的条目是 infra 在 kind 集群里本轮实跑补的证据（2026-11-05）。
-> 最后更新：**2026-11-05**。状态会变——改这里时同步改时间戳和对应行，别只改字。
+> **来源**：QA 最终验收数据见 §2.5（镜像 `b61a1a23…`，集群实例，严格模式）；
+> QA 侧过程结论见 [`scripts/e2e/acceptance-matrix.md`](../../scripts/e2e/acceptance-matrix.md)；
+> 带 🔧 的条目是 infra 在 kind 集群里实跑补的证据（2026-11-05）。
+>
+> ⚠️ **编号对齐**：本文编号 = ARCHITECTURE §14.1 的 17 行。口径里说的"**#14 日志采集**"对应本表
+> **#14 产物持久化**（日志是产物的一种：`logs/stdout.log` 落 PVC，api 直读回放）；
+> 本表没有独立的"日志采集"行，因为 §14.1 没有这一项。
+>
+> 最后更新：**2026-11-05**（QA 最终数据并入）。状态会变——改这里时同步改时间戳和对应行，别只改字。
 
 ---
 
@@ -15,26 +21,32 @@
 
 | # | 验收项（§14.1） | MVP 状态 | 证据 / 备注 | 复跑 |
 |---|---|---|---|---|
-| 1 | Run 提交与完整状态链 | 🟡 部分 | 🔧 service 形态全链路实跑通：`r-20261105-KWYE` `queued→testing→succeeded`，`state_events` 17 条（`run.submitted` / `task.state_changed` / `attempt.started/finished` / `cleanup.started` / `run.finished`），2/2 Task succeeded。缺：失败/服务不可用两条终态 | 见 §2.1 |
-| 2 | Task 独立提交（`POST /tasks`） | ⬜ 未做 | Lead 裁决不在 MVP（`IMPLEMENTATION` §15.1 第 13 行）；`/api/v1/tasks` 只有查询 | — |
-| 3 | Genet 适配三项（部署/状态/Endpoint） | 🟡 mock | 🔧 `deploy` 形态实跑通：`r-20261105-PRBV` `queued→deploying→testing→succeeded`（约 10s），`deploy.state_changed` 事件带 `deployment_id`，Endpoint 由 mock 注入（`TESTPLANE_MOCK_ENDPOINT_URL`）。真实 Genet 未接（D-14） | 见 §2.2 |
-| 4 | Pre-Check 注入与阻断 | 🟡 部分 | 🔧 注入实跑：每次提交自动生成 `seq=0` 的 `precheck` Task（`role: pre_check`），`r-20261105-KWYE` 的 `t-DXVJBD`。缺：失败 → 其余 `SKIPPED` + 终态 `SERVICE_UNAVAILABLE` 的失败注入 | `scripts/e2e/failure-injection.ps1` |
-| 5 | Registry 发现与校验 | ✅ 做过 | 🔧 启动扫描 `Tester 注册表就绪 dir=/app/testers count=1`；`GET /api/v1/testers` 返回 `endpoint-probe` 全量字段（含 `entry: /tester/run.sh`、`role: pre_check`、`parameters`）。校验 15 条由 `internal/registry` 单测覆盖（`registry_test.go`）。缺：一个非法 `tester.yaml` 的端到端拒绝样例 | `go test ./internal/registry/...` |
-| 6 | Tester 契约（入口/argv/输出/result.json） | ✅ 做过 | 🔧 真实镜像 `registry.dev.huawei.com/testplane/endpoint-probe:1.0.0` 在 kind 里跑通；`injected_argv` 见 `--url=` / `--model_name=`；`result.json` 符合附录 A（`schema_version/run_id/task_id/attempt_id/status/workload/metrics`），落在 PVC 最终路径 | 见 §2.1 |
-| 7 | Tester 独立运行（不依赖平台） | ✅ 做过 | QA `scripts/e2e/probe-check.ps1`：5/5 场景 exit code 与 `result.json` 均符合设计 | `pwsh scripts/e2e/probe-check.ps1` |
-| 8 | K8s Executor（超时/取消） | 🟡 部分 | 🔧 Job 创建/完成/观测已通：`tp-t-dxvjbd-a1`、`tp-t-f5w42q-a1` 均 `Complete 1/1`；渲染出 `subPath=<run>/tasks/<task>/attempts/<n>`、`/tmp` emptyDir、`fsGroup 10001`。缺：`TASK_TIMEOUT` 与"取消后 30s 内 Job/Pod 消失"未验证（当前有几个 `cancelling` 卡住的 Run） | `scripts/e2e/run-local.ps1` |
-| 9 | 状态机与重启恢复 | 🟡 部分 | 转移表单测全绿（`go test ./internal/domain/...`）；缺：杀 controller 后状态最终一致的对账演练 | 需手工：`kubectl delete pod` + 观察 |
-| 10 | Attempt 与重试 | ⬜ 未做 | `retry_on` 命中才重试、历史 Attempt 不被覆盖——未跑 | 需失败注入 |
-| 11 | 失败策略（`abort_run`） | 🟡 mock | QA e2e 已断言 `abort_propagation`（precheck 失败 → 其余 `skipped`）；真实失败注入未跑 | `scripts/e2e/failure-injection.ps1` |
-| 12 | Run 编排全链路 | 🟡 部分 | 🔧 两条链都贯通到 `succeeded`：service 形态（`r-20261105-KWYE`）、deploy 形态（`r-20261105-PRBV`，含 cleanup 阶段）。缺：四终态（成功/部分失败/服务不可用/取消）只覆盖"成功" | §2.1、§2.2 |
-| 13 | 报告结构（report / result / 错误码） | ✅ 做过 | 🔧 终态后异步生成齐全：`r-20261105-JW8Z` 的 `<run_id>/` 下有 `report.json`(653B) / `report.md`(770B) / `metadata.json` / `events.jsonl`；`GET /runs/{id}/report` 与 `/report.md` 均 200；`artifacts` 表 12 行（result 2 / log 2 / raw 4 / report 4）。`report.json` 含 `schema_version` / `counts` / `tasks[].duration_ms` / `failures[]`。⚠️ 之前 404 是**镜像落后于代码**（修复 11:03 落地，重灌后正常），见 §2.3 | 见 §2.3 |
-| 14 | 产物持久化 | ✅ 做过 | 🔧 删除 Job+Pod 后（`kubectl delete job tp-t-dxvjbd-a1 tp-t-f5w42q-a1`），宿主 `.data/storage/r-20261105-KWYE/.../attempts/1/` 的 `result.json`、`logs/probe.log`、`raw/*` 仍在且可读——产物直落最终路径（06 §3.3）。Run 级报告缺失见 #13 | 见 §2.4 |
-| 15 | 失败隔离（一败一成功 → `COMPLETED_WITH_ERRORS`） | ⬜ 未做 | 需要第二个可执行 Tester 构造混合结果 | 需构造 Run |
-| 16 | Web UI（列表/详情/报告/日志/提交/取消） | 🟡 部分 | `pnpm --dir web build` 通过；🔧 `GET /` 返回 `200 text/html`（控制面单端口同时服务静态资源与 API）。缺：Playwright 冒烟 | `pnpm --dir web build` |
-| 17 | API 契约与错误码 | ✅ 做过 | QA：规格侧 12/12、实现侧 32/32，合计 **44/44**；`tools/contract` 可复跑 | `cd tools/contract && go test ./... && go run . --mode spec` |
+| 1 | Run 提交与完整状态链 | ✅ 做过 | QA e2e 生命周期 **31/31 PASS**：`r-20261105-EPRN` `queued→testing→succeeded` **7.0s**，18 条事件（含 `report.written`）；三条终态均有实例——`succeeded`（EPRN）、`completed_with_errors`（fail-401 / error-in-200，各 4.1s）、`service_unavailable`（fail-500，12.1s）。🔧 另测 service 形态 `r-20261105-KWYE` 17 条事件链完整 | 见 §2.5、§2.1 |
+| 2 | Task 独立提交（`POST /tasks`） | ⬜ 未做 | Lead 裁决不在 MVP（`IMPLEMENTATION` §15.1）；`/api/v1/tasks` 只有查询，无提交 | — |
+| 3 | Genet 适配三项（部署/状态/Endpoint） | 🟡 mock | 🔧 `deploy` 形态实跑通：`r-20261105-PRBV` `queued→deploying→testing→succeeded`（~10s），`deploy.state_changed` 带 `deployment_id`，Endpoint 由 mock 注入（`TESTPLANE_MOCK_ENDPOINT_URL`）。真实 Genet 未接（D-14） | 见 §2.2 |
+| 4 | Pre-Check 注入与阻断 | ✅ 做过 | 🔧 注入：每次提交自动生成 `seq=0` 的 `precheck`（`role: pre_check`）。阻断：QA 失败注入 **5/5**——`fail-500`→`service_unavailable` 12.1s（retryable=true）、`fail-401`→`completed_with_errors` 4.1s（retryable=false）、`error-in-200`→`completed_with_errors` 4.1s；precheck 失败后其余 Task `skipped/upstream_abort` | `scripts/e2e/failure-injection.ps1` |
+| 5 | Registry 发现与校验 | ✅ 做过 | 🔧 启动扫描 `Tester 注册表就绪 dir=/app/testers count=1`；`GET /api/v1/testers` 返回 `endpoint-probe` 全量字段（`entry: /tester/run.sh`、`role: pre_check`、`parameters`）。校验 15 条由 `internal/registry` 单测覆盖 | `go test ./internal/registry/...` |
+| 6 | Tester 契约（入口/argv/输出/result.json） | ✅ 做过 | 🔧 真实镜像在 kind 里跑通；`injected_argv` 见 `--url=`/`--model_name=`；`result.json` 符合附录 A（`schema_version/run_id/task_id/attempt_id/status/workload/metrics`），落 PVC 最终路径 | 见 §2.1 |
+| 7 | Tester 独立运行（不依赖平台） | ✅ 做过 | QA `probe-check.ps1`：5/5 场景 exit code 与 `result.json` 均符合设计 | `pwsh scripts/e2e/probe-check.ps1` |
+| 8 | K8s Executor（超时/取消） | 🟡 部分 | 🔧 Job 创建/完成/观测/日志已通（`Complete 1/1`，`subPath=<run>/tasks/<task>/attempts/<n>`、`/tmp` emptyDir、`fsGroup 10001`）；Job/Pod 回收后无泄漏。缺：**queued 阶段取消**的 Run 会卡在 `cancelling`（4 条实测，Job/Pod 从未创建，也无 `attempt`，`cancelling→canceled` 终态没推进）；`TASK_TIMEOUT` 未单独构造 | `scripts/e2e/run-local.ps1` |
+| 9 | 状态机与重启恢复 | 🟡 部分 | 转移表单测全绿（`go test ./internal/domain/...`）；启动 +60s 对账兜底已加入。缺：杀 controller 后状态最终一致的演练（重启后这 4 条 `cancelling` 仍未收口，说明兜底只覆盖部分分支） | 需手工：`kubectl delete pod` + 观察 |
+| 10 | Attempt 与重试 | ⬜ 未做 | 失败注入只验证了 `retryable` 标记（true/false），**`retry_on` 命中后新建 Attempt、历史不被覆盖**未跑；属 P1（失败续跑） | 需专门用例 |
+| 11 | 失败策略（`abort_run`） | ✅ 做过 | QA 失败注入 5/5：`abort_run` 生效——precheck 失败 → 其余 Task `skipped/upstream_abort`，Run 终态按可重试性分流（`service_unavailable` / `completed_with_errors`） | `scripts/e2e/failure-injection.ps1` |
+| 12 | Run 编排全链路 | 🟡 部分 | 🔧 service 链（`r-20261105-KWYE`）与 deploy 链（`r-20261105-PRBV`，含 `cleanup.started`）都贯通到 `succeeded`；QA 生命周期 31/31 覆盖成功/部分失败/服务不可用三态。缺：四终态里的 **canceled**（见 #8） | §2.1、§2.2、§2.5 |
+| 13 | 报告结构（report / result / 错误码） | ✅ 做过 | QA 实测：`r-20261105-EPRN` 的 `report.json` **662B**、`report.md` **780B**、18 条事件含 `report.written`；**终态后 ≤2s 生成**（7.0s 的 Run 结束即 200 可达）。🔧 `r-20261105-JW8Z`：`/report` 与 `/report.md` 200，`metadata.json`/`events.jsonl` 齐全，`artifacts` 12 行（result 2 / log 2 / raw 4 / report 4），`report.json` 含 `schema_version`/`counts`/`tasks[].duration_ms`/`failures[]`。⚠️ 早前 404 是**镜像落后于代码**（见 §2.3） | 见 §2.3、§2.5 |
+| 14 | 产物持久化 | ✅ 做过 | 🔧 **日志**：`GET /api/v1/tasks/{id}/attempts/{idx}/logs` 读 PVC 的 `logs/stdout.log`，实测 200 + **363B** + `X-Log-Offset: 363`；`offset=5&limit=4`→体 4B / 头 `X-Log-Offset: 9`；`tail=2`→200（§2.6）。QA 侧 precheck/probe 日志 363B / 362B。**产物**：删掉 Job+Pod 后 `result.json`/`logs`/`raw` 仍在（§2.4）。实现方式：**executor 落盘 + api 直读**，`collector` 角色仍未拆，但"能取到日志与产物"这条验收已成立 | 见 §2.4、§2.6 |
+| 15 | 失败隔离（一败一成功 → `COMPLETED_WITH_ERRORS`） | 🟡 部分 | `completed_with_errors` 终态已出现（fail-401 / error-in-200），但那两条是 precheck 失败 → 后续 `skipped`，**不是"一个 Task 成功 + 另一个失败"**。真正的混合结果需要第二个可执行 Tester | 需构造混合 Run |
+| 16 | Web UI（列表/详情/报告/日志/提交/取消） | 🟡 部分 | `pnpm --dir web build` 通过；🔧 `GET /` 返回 `200 text/html`（单端口同时服务静态资源与 API）。缺：Playwright 冒烟（提交→详情→日志→取消） | `pnpm --dir web build` |
+| 17 | API 契约与错误码 | ✅ 做过 | QA 最终：**44/44 PASS**（spec 12 + live 32），`tools/contract` 可复跑；错误码覆盖附录 D | `cd tools/contract && go test ./... && go run . --mode spec` |
 
-**合计**：✅ 6 项（#5 #6 #7 #13 #14 #17）· 🟡 8 项（#1 #3 #4 #8 #9 #11 #12 #16）· ⬜ 3 项（#2 #10 #15）。
-其中 #2 是 Lead 裁决的 MVP 排除项，其余 2 项（重试、失败隔离）是真实缺口。
+**最终计分：✅ 9 · 🟡 6 · ⬜ 2（共 17）**
+
+- ✅ 9：**#1 #4 #5 #6 #7 #11 #13 #14 #17**
+- 🟡 6：**#3（Genet 仅 mock）· #8（取消语义）· #9（重启恢复）· #12（canceled 终态）· #15（混合结果）· #16（Playwright）**
+- ⬜ 2：**#2 Task 独立提交（Lead 裁决排除，不是缺口）· #10 Attempt 与重试（P1 失败续跑）**
+
+> 也就是说：实现侧真正没做的只有 **#10 重试**；#2 是范围裁决。其余 6 项是"做了但没做满"，
+> 差距都写在上面各自的"缺"里，不藏。
 
 ---
 
@@ -120,14 +132,58 @@ Get-ChildItem -Recurse .data\storage\r-20261105-KWYE\tasks\t-DXVJBD\attempts\1
 
 Pod 删除后产物仍可读：产物直落共享存储最终路径（06 §3.3），不依赖容器生命周期。
 
+### 2.5 QA 最终验收数据（镜像 `b61a1a23…`，集群实例，严格模式）
+
+| 套件 | 结果 | 说明 |
+|---|---|---|
+| 契约 | **44/44 PASS** | spec 12 + live 32 |
+| e2e 生命周期 | **31/31 PASS** | `r-20261105-EPRN`：`queued→testing→succeeded` **7.0s**；`report.json` **662B** / `report.md` **780B**；precheck 日志 363B / probe 日志 362B；**18 条事件**（含 `report.written`） |
+| 失败注入 | **5/5** | 见下表 |
+
+| 场景 | 终态 | 耗时 | retryable |
+|---|---|---|---|
+| success | `succeeded` | 7.1s | — |
+| fail-500 | `service_unavailable` | 12.1s | true |
+| fail-401 | `completed_with_errors` | 4.1s | false |
+| error-in-200 | `completed_with_errors` | 4.1s | false |
+| slow-ready | `service_unavailable` | 12.1s | — |
+
+> 这组数据把 #1（终态链）、#4（pre-check 阻断与可重试性分流）、#11（`abort_run` 传播）、#17（契约）从 🟡/⬜ 抬到 ✅。
+> 报告"终态后 ≤2s 生成"来自这里：7.0s 的 Run 结束时 `/report` 已 200 可达。
+
+### 2.6 日志读取（#14 的日志部分）
+
+实现方式是 **executor 把 stdout/stderr 落 PVC 的 `logs/`，api 直读回放**（`collector` 角色仍未拆，D-38 的日志采集由 executor 承担）。
+infra 在集群内实测（同一镜像，读 `t-BKH6NC` 的 attempt 1）：
+
+```powershell
+# offset=0&limit=2000
+kubectl -n testplane exec deploy/testplaned -- wget -qS -O - `
+  "http://127.0.0.1:8080/api/v1/tasks/t-BKH6NC/attempts/1/logs?offset=0&limit=2000"
+# HTTP/1.1 200 OK · Content-Length: 363 · X-Log-Offset: 363
+
+# offset=5&limit=4  → 200 · Content-Length: 4 · X-Log-Offset: 9
+# tail=2            → 200 · X-Log-Offset: 363（读到的就是本次结束处）
+```
+
+`X-Log-Offset` = 本次响应结束处的字节偏移，客户端拿它做续读游标；`offset` 越界/尾部读取语义与设计一致。
+
 ---
 
 ## 3 已知缺口（按优先级）
 
-1. **取消语义未验证**（#8）：集群里有若干 `cancelling` 卡住的 Run（Job/Pod 未在 30s 内消失）。
-2. **失败注入类验收未跑**（#4 #10 #11 #15）：需要"precheck 必失败"与"两 Task 一败一成"两类样本。
-3. **重启恢复**（#9）：杀 controller 后按 DB 对账的演练未做。
-4. **Web UI 交互验收**（#16）：Playwright 冒烟未做（构建与静态资源已验证）。
+1. **取消语义的终态收口**（#8 #12）：`queued` 阶段就被取消的 Run 会停在 `cancelling` 不前进——
+   实测 4 条（`r-20261105-3CEV/6S22` 11:24、`r-20261105-879G/F19F` 11:29），**Job/Pod 从未创建**（无资源泄漏），
+   `attempts` 0 行，`endpoint_leases` 0 行；重启 + 等过 60s 对账窗口后仍未收口。
+   缺的是"无 Attempt 分支"的 `cancelling → canceled` 推进。
+2. **重试/失败续跑**（#10）：`retry_on` 命中后新建 Attempt、历史不被覆盖——P1。
+3. **混合结果**（#15）：需要第二个可执行 Tester 构造"一 Task 成功 + 一 Task 失败"的 `completed_with_errors`。
+4. **重启恢复演练**（#9）：杀 controller 后按 DB 对账最终一致——未做正式演练。
+5. **Web UI 交互**（#16）：Playwright 冒烟未做（构建与静态资源已验证）。
+
+**不在 P0 缺口内**（范围裁决，写清免得被当成漏做）：
+Task 独立提交 `POST /tasks`（#2，Lead 裁决排除）、Volcano 队列/快照（P1）、OIDC + RBAC + CSRF（P1）、
+真实 Genet 适配（#3，MVP 用 mock，D-14）。
 
 ---
 
@@ -157,5 +213,5 @@ pwsh scripts/e2e/failure-injection.ps1
 | namespace | `testplane`（PSA `restricted`） |
 | PostgreSQL | 容器 `testplane-pg`，`16.13`，宿主 `5432`，库/用户=testplane |
 | 存储 | PV/PVC `testplane-storage`，10Gi `ReadWriteMany`（hostPath `/storage-root` ↔ 宿主 `.data\storage`） |
-| 镜像 | `testplane-server:dev`、`testplane/endpoint-probe:1.0.0`（同时打 `registry.dev.huawei.com/…` tag 供 tester.yaml 引用） |
+| 镜像 | `testplane-server:dev` —— **`b61a1a23…`**（QA 最终验收与本文数据都基于它，已 `kind load` + `rollout restart`）；`testplane/endpoint-probe:1.0.0`（同时打 `registry.dev.huawei.com/…` tag 供 `tester.yaml` 引用） |
 | RBAC | namespace 级 `Role`（jobs/pods/pods-log/pvc/events/leases）+ 只读 `ClusterRole testplane-view`；**不授 secrets** |
