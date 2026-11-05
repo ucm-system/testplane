@@ -1,0 +1,218 @@
+# TestPlane Helm values —— **生产默认值**
+#
+#   helm install testplane deploy/charts/testplane -n testplane --create-namespace \
+#     -f my-values.yaml
+#
+# 这个文件是**唯一**受支持的部署入口（deploy/k8s 的 kustomize 清单只服务本地 kind 调试）。
+# 前置条件（缺一项 chart 会渲染失败并给出明确错误，不会让你部署一个半残的 Pod）：
+#   1. 数据库：`database.existingSecret`（DSN 含口令，只能走 Secret）
+#   2. 认证：`oidc.issuer` / `clientID` / `clientSecretRef`（D-51：与 Genet **独立**的 client）
+#   3. 部署提供方：`genet.baseURL` + `genet.apiKeySecretRef`（D-44：一次部署 = 一个 Helm release）
+#   4. 产物存储：`persistence.existingClaim`（生产用 RWX，如 NFS CSI）或 `persistence.storageClass`
+#
+# 本地 kind 演示用 `values-kind.yaml`；生产用 `values-production.example.yaml` 当模板改。
+
+# ---- 镜像 ----
+image:
+  repository: ccr.ccs.tencentyun.com/keriko/testplane-server
+  # tag 与 digest 二选一；**release 环境请钉 digest**（W-8：可变 tag 会让
+  # "回滚到底跑了哪份代码"无从回答）。digest 由 `deploy/docker/build-push.ps1` 打印。
+  # 由 `deploy/docker/build-push.ps1 -Push` 打印；生产请用 digest（tag 与 digest 二选一）
+  tag: "sha-37bda7d2f25d"
+  digest: "sha256:b7e793621bb5064e61d6496f4b405d430649290cae61b798f978b1b9542b0663"
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# ---- 角色与副本（K-7：一个镜像三种角色，拆角色只改 --role 与副本数）----
+# all | api | controller | collector
+role: all
+replicaCount: 1
+revisionHistoryLimit: 5
+terminationGracePeriodSeconds: 30
+args: []
+
+nameOverride: ""
+fullnameOverride: ""
+commonLabels: {}
+podAnnotations: {}
+
+# ---- 服务账号与 RBAC ----
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+  # 集群级**只读**（Volcano Queue / PodGroup、nodes）——队列看板的数据源
+  clusterRead: true
+  # Tester Job 要落到其它命名空间时才开（权限面更大，需评审）
+  executorClusterRole: false
+
+# ---- 配置（进 ConfigMap；敏感项一律走 Secret）----
+# 键名以 server/internal/config/config.go 实际读取的为准。
+config:
+  # prod | staging | dev | local。dev 只允许与 authMode=dev pair 使用。
+  env: prod
+  authMode: oidc
+  logLevel: info
+  # 空 = 与 release 同命名空间（Tester Job 落这里）
+  executorNamespace: ""
+  clusterName: cluster-01
+  inClusterK8s: true
+  jobGCEnabled: true
+  dbMaxOpenConns: 20
+  maxGlobalConcurrency: 20
+  runMaxTasks: 200
+  taskTimeout: 4h
+  taskTimeoutMax: 24h
+  deployTimeout: 72h          # 1h..7d（K-6）
+  resultMaxBytes: 100MiB
+  storageRoot: /storage-root
+  # 空 = 用本 chart 的 PVC 名（persistence.existingClaim 或 <fullname>-storage）
+  storagePVC: ""
+  # mock | genet。生产必须 genet。
+  deployProvider: genet
+  # SSE：心跳与回放窗口（07 §7）
+  sseHeartbeat: 15s
+  sseReplayHours: 24
+  # 代码新增了环境变量、chart 还没跟上时的出口（会覆盖同名默认值）
+  extra: {}
+
+# ---- 统一认证（D-51：与 Genet 共用企业 IdP，但独立 client）----
+oidc:
+  issuer: ""
+  clientID: ""
+  redirectURL: ""
+  scopes: "openid profile email"
+  # IdP client 认证方式：client_secret_basic | client_secret_post | none（纯 PKCE）
+  clientAuth: client_secret_basic
+  # 角色来自 ID token 的哪个 claim（默认 groups），以及 groups → 角色的映射
+  roleClaim: groups
+  # 形如 "tp-admins=admin,tp-ops=operator"；未映射到的一律 viewer
+  roleMap: ""
+  clientSecretRef:
+    name: ""
+    key: client-secret
+
+# ---- 会话与 CSRF（HMAC 密钥 ≥32 字节，只走 Secret）----
+session:
+  secretRef:
+    name: ""
+    key: session-secret
+  cookie: tp_session
+  ttl: 8h
+  secure: true          # HTTPS 下必须 true；本地 http 调试设 false
+
+# ---- 部署提供方：Genet Open API（D-44/D-45/D-46）----
+genet:
+  baseURL: ""
+  insecure: false
+  # 自签 CA：把 CA 放进 ConfigMap（key 名任意），会挂到 /etc/testplane/genet-ca
+  caConfigMap: ""
+  caFile: ""
+  apiKeySecretRef:
+    name: ""
+    key: api-key
+
+# ---- 数据库 ----
+database:
+  # 推荐：预先建好 Secret，键名 dsn（`kubectl create secret generic testplane-db --from-literal=dsn=...`）
+  existingSecret: ""
+  key: dsn
+  # 仅供本地/CI 一次性试用：直接给 DSN（会进 Secret，不推荐）
+  dsn: ""
+
+# ---- 产物存储（RWX）----
+persistence:
+  enabled: true
+  # 生产推荐复用已有 RWX claim（NFS/CSI），chart 不创建 PVC
+  existingClaim: ""
+  # 或用动态供给：给 StorageClass 名（必须支持 ReadWriteMany）
+  storageClass: ""
+  accessModes:
+    - ReadWriteMany
+  size: 100Gi
+  annotations: {}
+
+# ---- 多集群 kubeconfig（可选；一集群一个 key，key 名 = <cluster-name>.kubeconfig）----
+clustersSecret:
+  name: ""
+  keyPrefix: ""
+
+# ---- 数据库迁移（pre-install/pre-upgrade hook；多副本并发迁移是错的，W-11）----
+migration:
+  enabled: true
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 3600
+  annotations: {}
+
+# ---- 服务暴露 ----
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: testplane.example.internal
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# ---- 资源与安全上下文 ----
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001          # /storage-root 的属主（06 §3.2），UID 必须对得上
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+tmpSizeLimit: 256Mi
+
+# ---- 调度与可用性 ----
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+podDisruptionBudget:
+  # 单副本别开（会挡住 drain）；多副本时开
+  enabled: false
+  minAvailable: 1
+
+networkPolicy:
+  # kind 默认 CNI 不支持；生产建议开（06 §4.2 的放行集）
+  enabled: false
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+  extraEgress: []
+
+# ---- 逃生口 ----
+extraEnv: []
+# 注意：extraEnvFrom 会追加到已有的 envFrom（ConfigMap 仍然生效）
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []

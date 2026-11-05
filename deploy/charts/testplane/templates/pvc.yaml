@@ -1,0 +1,27 @@
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+{{- /*
+产物 PVC：控制面与所有 Tester Job 共同读写（RWX）。
+生产用 NFS/CSI 的 RWX StorageClass（06 §5.5）；kind 里用 hostPath 静态 PV（见 deploy/k8s/storage.yaml）。
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "testplane.storageClaim" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "testplane.labels" . | nindent 4 }}
+    testplane.io/role: storage-root
+  {{- with .Values.persistence.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  accessModes:
+    {{- toYaml .Values.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}

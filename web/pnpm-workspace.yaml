@@ -1,0 +1,4 @@
+# pnpm 12 的构建脚本许可（esbuild 需要跑 postinstall）。
+# v12 起 package.json 里的 `pnpm.onlyBuiltDependencies` 不再被读取，改用本文件。
+allowBuilds:
+  esbuild: true

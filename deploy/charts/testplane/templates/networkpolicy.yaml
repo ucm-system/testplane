@@ -1,0 +1,49 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+默认拒绝 + 显式放行集（06 §4.2）。生产 CNI（Calico/Cilium）上才有意义；
+kind 默认 CNI 不支持 NetworkPolicy，所以 chart 默认关闭。
+放行：DNS、PostgreSQL、Genet、OIDC、NFS、K8s API（in-cluster 需要）。
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "testplane.fullname" . }}-default-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "testplane.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "testplane.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # 控制面只接受 8080（Ingress Controller / 同命名空间的 Job 回连不算入站）
+    - from:
+        {{- toYaml .Values.networkPolicy.ingressFrom | nindent 8 }}
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # K8s API（建 Job、看 Pod、Lease）
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+    {{- range .Values.networkPolicy.extraEgress }}
+    - {{- toYaml . | nindent 8 }}
+    {{- end }}
+{{- end }}
