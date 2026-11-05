@@ -134,8 +134,8 @@ jobs:
           username: ${{ secrets.GHCR_USERNAME || github.actor }}
           password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: preflight（记录推送凭据）
-        run: echo "GHCR 推送凭据：${{ secrets.GHCR_TOKEN && ''GHCR_TOKEN(PAT)'' || ''GITHUB_TOKEN'' }}"
+      - name: preflight
+        run: echo "GHCR push credential = repo secret GHCR_TOKEN if present, else GITHUB_TOKEN"
 
       - name: 构建并推送（多架构）
         id: build
