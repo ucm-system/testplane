@@ -21,6 +21,7 @@ import type {
   ProfileWrite,
   QueueStatus,
   Report,
+  Result,
   RetryPlan,
   Run,
   RunEvent,
@@ -83,6 +84,13 @@ export interface Api {
   cancelTask(id: string): Promise<TaskCancelResult>
   listAttempts(taskId: string): Promise<Attempt[]>
   getAttemptLogs(taskId: string, idx: number, opts?: LogOptions): Promise<LogChunk>
+  /**
+   * `GET /tasks/{task_id}/attempts/{idx}/result`：该 Attempt 的 `result.json` 原文。
+   *
+   * 报告页的指标表**只**从这里取（report.json 只做组织与索引，不做指标聚合，§8.4）；
+   * 文件缺失/非法时后端按 `RESULT_MISSING` / `RESULT_INVALID` 收口，此端点 404。
+   */
+  getAttemptResult(taskId: string, idx: number): Promise<Result>
 
   /* Deploy：快照（Pod 拓扑与 manifest）+ 按 Pod 分页签的日志（含 gap 标记） */
   getDeploy(runId: string): Promise<DeploySnapshot>
@@ -106,6 +114,10 @@ export interface Api {
 
   /** `GET /runs/{id}/artifacts`：Run 级产物清单（`path` 可直接拼 `/files?path=` 下载） */
   listRunArtifacts(runId: string): Promise<ArtifactList>
+  /** `GET /runs/{id}/bundle`：整包下载（`application/zip`），必须走带鉴权的 fetch → Blob */
+  downloadBundle(runId: string): Promise<Blob>
+  /** `GET /runs/{id}/files?path=`：单文件下载（带鉴权） */
+  downloadFile(runId: string, path: string): Promise<Blob>
 
   /* 报告（契约内：`/runs/{id}/report` 与 `/report.md`） */
   getReport(runId: string): Promise<Report>

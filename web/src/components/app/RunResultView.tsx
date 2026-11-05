@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { ArrowUpRight, Download, FileText } from 'lucide-react'
+import { ArrowUpRight, Check, Download, FileText } from 'lucide-react'
 import { API_BASE, api } from '@/api'
 import type { Artifact, Run } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
@@ -129,50 +129,57 @@ export function RunResultView({ run }: { run: Run }) {
         </CardBody>
       </Card>
 
-      {/* 2) 失败项：只列失败的，给错误码与原因 */}
-      <Card data-testid="run-result-failures">
-        <CardHeader tone="err" title="失败项" sub={report.data ? `${report.data.failures.length} 条` : undefined} />
-        {report.error ? (
-          <CardBody>
-            <ErrorState error={report.error} onRetry={report.reload} compact />
-          </CardBody>
-        ) : report.loading && !report.data ? (
-          <LoadingBlock label="加载失败清单…" />
-        ) : (report.data?.failures.length ?? 0) === 0 ? (
-          <CardBody>
-            <p className="text-xs text-fg-3">没有失败项 —— 这是最想看到的一行。</p>
-          </CardBody>
-        ) : (
-          <TableWrap>
-            <Table>
-              <THead>
-                <TR className="hover:bg-transparent">
-                  <TH>Task</TH>
-                  <TH>原因</TH>
-                  <TH>错误码</TH>
-                </TR>
-              </THead>
-              <TBody>
-                {report.data!.failures.map((failure) => (
-                  <TR key={`${failure.task_id}-${failure.error_code ?? 'x'}`}>
-                    <TD className="font-mono text-2xs text-fg-3">{failure.task_id}</TD>
-                    <TD className="text-fg">{failure.reason}</TD>
-                    <TD>
-                      {failure.error_code ? (
-                        <Badge tone="err" className="font-mono">
-                          {failure.error_code}
-                        </Badge>
-                      ) : (
-                        <span className="text-fg-3">—</span>
-                      )}
-                    </TD>
+      {/* 2) 失败项：只列失败的，给错误码与原因；0 失败时压成一行绿字，不再用红色大块占屏（C6） */}
+      {report.data && report.data.failures.length === 0 ? (
+        <p
+          data-testid="run-result-no-failures"
+          role="status"
+          className="flex items-center gap-2 rounded-lg border border-success/25 bg-success-weak px-4 py-2 text-xs font-medium text-success-text"
+        >
+          <Check className="size-3.5" aria-hidden />
+          无失败项
+        </p>
+      ) : (
+        <Card data-testid="run-result-failures">
+          <CardHeader tone="err" title="失败项" sub={report.data ? `${report.data.failures.length} 条` : undefined} />
+          {report.error ? (
+            <CardBody>
+              <ErrorState error={report.error} onRetry={report.reload} compact />
+            </CardBody>
+          ) : report.loading && !report.data ? (
+            <LoadingBlock label="加载失败清单…" />
+          ) : (
+            <TableWrap>
+              <Table>
+                <THead>
+                  <TR className="hover:bg-transparent">
+                    <TH>Task</TH>
+                    <TH>原因</TH>
+                    <TH>错误码</TH>
                   </TR>
-                ))}
-              </TBody>
-            </Table>
-          </TableWrap>
-        )}
-      </Card>
+                </THead>
+                <TBody>
+                  {report.data!.failures.map((failure) => (
+                    <TR key={`${failure.task_id}-${failure.error_code ?? 'x'}`}>
+                      <TD className="font-mono text-2xs text-fg-3">{failure.task_id}</TD>
+                      <TD className="text-fg">{failure.reason}</TD>
+                      <TD>
+                        {failure.error_code ? (
+                          <Badge tone="err" className="font-mono">
+                            {failure.error_code}
+                          </Badge>
+                        ) : (
+                          <span className="text-fg-3">—</span>
+                        )}
+                      </TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+            </TableWrap>
+          )}
+        </Card>
+      )}
 
       {/* 3) 产物：显式列全（report.json / report.md / metadata.json / events.jsonl / 每个 Attempt 日志 / Deploy 日志） */}
       <Card data-testid="run-result-artifacts">
@@ -257,7 +264,7 @@ export function RunResultView({ run }: { run: Run }) {
           </>
         )}
         <CardFooter>
-          <span>下载走 `GET /runs/{'{id}'}/files?path=`；打包下载（bundle）在后端就绪后接。</span>
+          <span>这些都是这次 Run 落下的文件；点一下就开始下载，不需要再回报告页翻。</span>
         </CardFooter>
       </Card>
 

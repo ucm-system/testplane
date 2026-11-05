@@ -45,6 +45,8 @@ import type {
   ReportCounts,
   ReportFailure,
   ReportTask,
+  Result,
+  ResultMetric,
   RetryBlockedItem,
   RetryPlan,
   RetryPlanReason,
@@ -425,7 +427,8 @@ function seedRun(seed: RunSeed): Run {
       current_attempt: currentAttempt,
       available_at: null,
       cancel_requested: false,
-      result_ref: null,
+      // result.json 的定位（报告页据它去拉指标）：只有跑成功的 Attempt 才有
+      result_ref: attempts.find((attempt) => attempt.result_ref)?.result_ref ?? null,
       error: taskSeed.error ?? null,
       created_at: iso(seed.submittedMinAgo),
       updated_at: iso(Math.max(0, seed.submittedMinAgo - 1)),
@@ -901,6 +904,64 @@ function isTerminal(status: RunStatus): boolean {
   return ['succeeded', 'completed_with_errors', 'service_unavailable', 'failed', 'canceled'].includes(status)
 }
 
+/**
+ * mock 的 `result.json`：形状照 `Result` schema（ARCHITECTURE 附录 A）。
+ *
+ * 只有「跑成功、且真的产出了 result」的 Attempt 才有内容 —— 探测类 Tester 的 `metrics` 就是空数组，
+ * 报告页要能据此显示「该 Tester 未上报指标」，而不是被塞一组假数值。
+ */
+function mockResultFor(task: TaskDetail, attempt: Attempt): Result {
+  const started = attempt.started_at ? new Date(attempt.started_at).getTime() : null
+  const finished = attempt.finished_at ? new Date(attempt.finished_at).getTime() : null
+  const base = {
+    schema_version: '1.0',
+    run_id: task.run_id,
+    task_id: task.id,
+    attempt_id: attempt.id,
+    tester: { name: task.tester_name, version: task.tester_version, image_ref: task.image_ref },
+    status: attempt.status === 'failed' ? ('failed' as const) : ('succeeded' as const),
+    started_at: attempt.started_at ?? undefined,
+    finished_at: attempt.finished_at ?? undefined,
+    duration_ms: started != null && finished != null ? finished - started : undefined,
+    artifacts: [{ name: 'raw_results', path: 'raw/results.json', size_bytes: 2_048 }],
+  }
+
+  if (task.tester_name === 'endpoint-probe') {
+    return { ...base, metrics: [], notes: '探活只回答服务能否出 token，不产出指标。' }
+  }
+
+  if (task.tester_name === 'aisbench-perf') {
+    const metrics: ResultMetric[] = []
+    for (const [inputLen, concurrency] of [
+      [512, 1],
+      [4096, 8],
+    ] as const) {
+      const labels = { input_len: String(inputLen), output_len: '128', concurrency: String(concurrency) }
+      metrics.push(
+        { name: 'ttft', value: inputLen === 512 ? 82.4 : 143.7, unit: 'ms', statistic: 'p95', sample_size: 64, labels },
+        { name: 'tpot', value: inputLen === 512 ? 18.6 : 21.4, unit: 'ms', statistic: 'mean', sample_size: 64, labels },
+        {
+          name: 'throughput',
+          value: inputLen === 512 ? 1482.6 : 1290.2,
+          unit: 'tokens_per_s',
+          statistic: 'mean',
+          sample_size: 64,
+          labels,
+        },
+      )
+    }
+    return { ...base, metrics, notes: '压测组合：input_len × concurrency；同一组参数靠 labels 区分。' }
+  }
+
+  const metrics: ResultMetric[] = [
+    { name: 'accuracy', value: 0.8421, unit: 'score', statistic: 'mean', sample_size: 200, labels: { dataset: 'gsm8k', limit: '200' } },
+    { name: 'accuracy', value: 0.7355, unit: 'score', statistic: 'mean', sample_size: 200, labels: { dataset: 'mmlu', limit: '200' } },
+    { name: 'latency', value: 412.8, unit: 'ms', statistic: 'p95', sample_size: 200, labels: { dataset: 'gsm8k', limit: '200' } },
+    { name: 'sample_count', value: 200, unit: 'count', statistic: 'count', sample_size: 200, labels: { dataset: 'gsm8k', limit: '200' } },
+  ]
+  return { ...base, metrics, notes: '逐数据集 accuracy；指标名不编码维度，维度在 labels 里。' }
+}
+
 const TASK_FLOW: TaskStatus[] = ['pending', 'queued', 'preparing', 'running', 'succeeded']
 const DEPLOY_FLOW: Deploy['state'][] = ['queued', 'accepted', 'deploying', 'ready']
 
@@ -1254,6 +1315,12 @@ export const mockApi: Api = {
       .filter((r) => (statuses.length === 0 ? true : statuses.includes(r.status)))
       .filter((r) => (query.kind ? r.kind === query.kind : true))
       .filter((r) => (query.submitter ? r.submitted_by === query.submitter : true))
+      // Tester 过滤：服务端按 Task 的 Tester 归属筛 Run（mock 从 Task 表反查）
+      .filter((r) =>
+        query.tester
+          ? Object.values(state.tasks).some((task) => task.run_id === r.id && task.tester_name === query.tester)
+          : true,
+      )
       .slice()
       .sort((a, b) => b.submitted_at.localeCompare(a.submitted_at))
       .map(summarizeRun)
@@ -1337,6 +1404,22 @@ export const mockApi: Api = {
     findTask(taskId)
     const text = state.logs[`${taskId}#${idx}`] ?? '（该 Attempt 还没有日志）'
     return { text, offset: text.length, coverage: null }
+  },
+
+  async getAttemptResult(taskId: string, idx: number): Promise<Result> {
+    await delay(90)
+    const task = findTask(taskId)
+    const attempt = task.attempts.find((item) => item.idx === idx)
+    if (!attempt) notFound(`Attempt #${idx}（Task ${taskId}）`)
+    if (!attempt.result_ref) {
+      throw new ApiClientError(404, {
+        code: 'RESULT_MISSING',
+        message: '该 Attempt 没有 result.json（Tester 没产出，或这次执行没跑成功）',
+        detail: { task_id: taskId, idx },
+        retryable: false,
+      })
+    }
+    return clone(mockResultFor(task, attempt))
   },
 
   async getDeploy(runId: string): Promise<DeploySnapshot> {
@@ -1537,9 +1620,11 @@ export const mockApi: Api = {
     if (issues.length > 0) {
       throw new ApiClientError(400, {
         code: 'VALIDATION_ERROR',
-        message: issues.map((i) => `${i.path}: ${i.message}`).join('；'),
+        // 与真后端一致：message 是给人看的一句话，细节在 detail.issues[]，trace_id 供排障
+        message: '提交内容未通过校验',
         detail: { issues },
         retryable: false,
+        trace_id: `mock-${Math.random().toString(16).slice(2, 10)}`,
       })
     }
 
@@ -1681,11 +1766,42 @@ export const mockApi: Api = {
     }
   },
 
+  /** 整包下载（mock）：最小 zip 字节流，够让 UI/用例验"是 application/zip 且真的触发下载" */
+  async downloadBundle(runId: string): Promise<Blob> {
+    await delay(150)
+    findRun(runId)
+    return new Blob([`PK\u0003\u0004 testplane mock bundle for ${runId}`], { type: 'application/zip' })
+  },
+
+  /** 单文件下载（mock）：按后缀给合理 content-type */
+  async downloadFile(runId: string, path: string): Promise<Blob> {
+    await delay(80)
+    findRun(runId)
+    const type = path.endsWith('.md')
+      ? 'text/markdown'
+      : path.endsWith('.jsonl')
+        ? 'application/x-ndjson'
+        : path.endsWith('.json')
+          ? 'application/json'
+          : 'text/plain'
+    return new Blob([`mock content of ${path}`], { type })
+  },
+
   /* ---------------------------------------------------------------- 报告（契约内） */
 
   async getReport(runId: string): Promise<Report> {
     await delay(120)
     const run = findRun(runId)
+    // 契约：报告在 run.finished 之后异步生成；未终态时 404 + Retry-After（C-7.2）。
+    // 这里把秒数放进 detail，页面用它做倒计时重试（不另造错误通道）。
+    if (!isTerminal(run.status)) {
+      throw new ApiClientError(404, {
+        code: 'NOT_FOUND',
+        message: `报告尚未生成：Run 当前是 ${run.status}，终态后才会写出 report.json`,
+        detail: { retry_after_seconds: 5 },
+        retryable: true,
+      })
+    }
     const tasks = run.tasks ?? []
     const rows: ReportTask[] = tasks.map((summary) => {
       const detail = state.tasks[summary.id]

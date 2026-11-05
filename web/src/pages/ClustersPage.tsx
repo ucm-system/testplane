@@ -35,6 +35,14 @@ function clusterHealth(cluster: Cluster): 'ok' | 'err' | 'muted' {
   return 'err'
 }
 
+/** 排队时长：由入队时间算（D-46 只禁「位次」，不禁「等了多久」） */
+function waitingSeconds(since: string | null | undefined): number | null {
+  if (!since) return null
+  const started = new Date(since).getTime()
+  if (Number.isNaN(started)) return null
+  return Math.max(0, Math.round((Date.now() - started) / 1000))
+}
+
 export function ClustersPage() {
   const data = useAsync(async () => {
     const [clusters, queue] = await Promise.all([api.listClusters(), api.getQueueStatus()])
@@ -51,11 +59,11 @@ export function ClustersPage() {
     <>
       <RightRail>
         <RailCard title="边界说明" tone="warn">
-          <p>平台不参与调度：这一页只回答「卡在平台槽位，还是卡在 K8s / Volcano」。</p>
-          <p className="mt-2">平台槽位是全局并发 permit；Volcano 那块只读，平台不插队、不改配额。</p>
+          <p>平台不参与调度：这一页只回答「卡在平台名额，还是卡在 K8s / Volcano」。</p>
+          <p className="mt-2">平台名额是平台自己设的并发上限：满了就排队，不会拒绝；Volcano 那块是只读的，平台不插队、也不改配额。</p>
         </RailCard>
         <RailCard title="凭据" tone="muted">
-          <p>集群概要只给 API Server 地址与最近一次连通性结论，不返回任何凭据。</p>
+          <p>这里只显示集群地址和最近一次连通性结论，不显示任何凭据，也没有可以点开看密钥的入口。</p>
         </RailCard>
       </RightRail>
 
@@ -108,7 +116,7 @@ export function ClustersPage() {
         <CardHeader
           tone="info"
           title="平台槽位"
-          sub="全局并发 permit（TESTPLANE_CONCURRENCY_MAX），超出排队但不拒绝"
+          sub="平台自己的并发名额：满了就排队，不会被拒绝"
           actions={
             <span className="text-2xs text-fg-3">
               {queue?.generated_at ? `${formatRelative(queue.generated_at)}生成` : '只读'}
@@ -124,7 +132,7 @@ export function ClustersPage() {
                 <span className="text-2xs text-fg-3">活跃 / 上限</span>
                 <UsageBar used={slots.active} total={slots.concurrency_max} />
               </div>
-              <span className="text-2xs text-fg-3">剩余 {slots.available} 个 permit</span>
+              <span className="text-2xs text-fg-3">剩余 {slots.available} 个名额</span>
               <span className="text-2xs text-fg-3">端点互斥租约 {(slots.endpoints ?? []).length} 个</span>
             </div>
           ) : (
@@ -255,7 +263,8 @@ export function ClustersPage() {
                     <TH>Run</TH>
                     <TH>状态</TH>
                     <TH>排队原因</TH>
-                    <TH>自</TH>
+                    <TH>等待时长</TH>
+                    <TH>入队时间</TH>
                   </TR>
                 </THead>
                 <TBody>
@@ -273,6 +282,9 @@ export function ClustersPage() {
                       <TD className="text-2xs">{task.status}</TD>
                       <TD>
                         <WaitingReasonTag reason={task.waiting_reason} />
+                      </TD>
+                      <TD className="whitespace-nowrap tabular-nums">
+                        {formatDuration(waitingSeconds(task.since))}
                       </TD>
                       <TD className="whitespace-nowrap text-2xs text-fg-3">{formatDateTime(task.since)}</TD>
                     </TR>
