@@ -423,7 +423,13 @@ export interface VolcanoQueue {
   allocated?: Record<string, unknown>
   pending_jobs?: number
   longest_wait_seconds?: number
-  reason?: WaitingReason
+  /**
+   * PodGroup `conditions[-1].message` 的**原文**（例如 `0/1 nodes are available: 1 insufficient nvidia.com/gpu`）。
+   * 平台不翻译，所以是自由文本而不是枚举 —— 结构化分类只在 `waiting.by_reason` 的六个键上。
+   */
+  reason?: string | null
+  /** 本次采样失败、用的是上次快照 */
+  stale?: boolean
 }
 
 /** `VolcanoSnapshot` schema：不可达时只降级本块。 */

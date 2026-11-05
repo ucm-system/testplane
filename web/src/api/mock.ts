@@ -1245,8 +1245,24 @@ export const mockApi: Api = {
         available: true,
         detail: null,
         queues: [
-          { name: 'npu-batch', state: 'Open', pending_jobs: 6, longest_wait_seconds: 1080, reason: 'queue_full' },
-          { name: 'gpu-shared', state: 'Open', pending_jobs: 4, longest_wait_seconds: 2460, reason: 'gang_pending' },
+          {
+            name: 'npu-batch',
+            state: 'Open',
+            pending_jobs: 6,
+            longest_wait_seconds: 1080,
+            // 契约：reason 是 PodGroup conditions[-1].message 原文，平台不翻译
+            reason: '0/8 nodes are available: 8 Insufficient nvidia.com/npu.',
+            stale: false,
+          },
+          {
+            name: 'gpu-shared',
+            state: 'Open',
+            pending_jobs: 4,
+            longest_wait_seconds: 2460,
+            reason:
+              'PodGroup default/gpu-batch-7g2kd is Pending: minMember 4 > running 0; 0/1 nodes are available: 1 insufficient nvidia.com/gpu.',
+            stale: true,
+          },
         ],
       },
     }

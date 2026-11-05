@@ -33,3 +33,46 @@ test('runs list -> detail task table -> submit dry-run error', async ({ page }) 
   await expect(alert).toBeVisible()
   await expect(alert).toContainText(/VALIDATION_ERROR|未通过校验/)
 })
+
+/**
+ * 角色门禁：viewer 只读。
+ * mock 模式下用 `localStorage['testplane:mock-role']='viewer'` 注入 OIDC 角色
+ * （会带假 csrf_token，前端按会话处理），再确认 Task 级取消按钮置灰且带提示。
+ */
+test('viewer：Task 取消按钮不可点', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem('testplane:mock-role', 'viewer')
+  })
+
+  // mock 里这条 Run 处于 deploying、Task 全是 pending —— 都是可取消状态
+  await page.goto('/runs/r-20261105-0005')
+  await expect(page.getByText('Task 列表')).toBeVisible()
+
+  const cancel = page.locator('[data-testid="cancel-task"]').first()
+  await expect(cancel).toBeVisible()
+  await expect(cancel).toBeDisabled()
+  await expect(cancel).toHaveAttribute('title', '需要 operator 角色')
+
+  // 顶栏能看到 viewer 身份（排障用）
+  await expect(page.getByRole('button', { name: '账号与角色' })).toContainText('viewer')
+})
+
+test('operator：Task 取消按钮可点并走二次确认', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem('testplane:mock-role', 'operator')
+  })
+
+  await page.goto('/runs/r-20261105-0005')
+  await expect(page.getByText('Task 列表')).toBeVisible()
+
+  const cancel = page.locator('[data-testid="cancel-task"]').first()
+  await expect(cancel).toBeEnabled()
+  await cancel.click()
+
+  // 二次确认弹窗：说明"已完成的 Task 不受影响"
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('已完成的 Task 不受影响')
+  await expect(page.getByRole('button', { name: '确认取消 Task' })).toBeVisible()
+  // 这里不点确认：点了会改 mock 内存状态，后续断言没必要依赖它
+})

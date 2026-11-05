@@ -185,14 +185,27 @@ export function ClustersPage() {
               <TBody>
                 {(volcano.queues ?? []).map((item) => (
                   <TR key={item.name}>
-                    <TD className="font-mono text-2xs text-fg">{item.name}</TD>
+                    <TD className="font-mono text-2xs text-fg">
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        {item.name}
+                        {/* 采样失败、用的是上次快照：别让人把旧水位当实时 */}
+                        {item.stale ? <Badge tone="warn">快照过期</Badge> : null}
+                      </span>
+                    </TD>
                     <TD>
                       <Badge tone={item.state === 'Open' ? 'ok' : 'muted'}>{item.state ?? '—'}</Badge>
                     </TD>
                     <TD className="tabular-nums">{item.pending_jobs ?? 0}</TD>
                     <TD className="whitespace-nowrap tabular-nums">{formatDuration(item.longest_wait_seconds)}</TD>
-                    <TD>
-                      {item.reason ? <WaitingReasonTag reason={item.reason} /> : <span className="text-fg-3">—</span>}
+                    <TD className="max-w-[26rem]">
+                      {/* 契约改了：reason 是 PodGroup conditions[-1].message 原文，不是枚举 —— 原样渲染，不翻译 */}
+                      {item.reason ? (
+                        <span className="block break-all font-mono text-2xs leading-relaxed text-fg-2" title={item.reason}>
+                          {item.reason}
+                        </span>
+                      ) : (
+                        <span className="text-fg-3">—</span>
+                      )}
                     </TD>
                   </TR>
                 ))}

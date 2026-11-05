@@ -138,7 +138,9 @@ func uninstallState(raw json.RawMessage) string {
 // appendCleanupFailed 写一条 cleanup.failed 事件（只用于卸载失败；载荷见 03-data-view §4.6）。
 func (c *Controller) appendCleanupFailed(ctx context.Context, runID string, cleanupErrors []string) {
 	payload := map[string]any{
+		"release_name":   "",
 		"cleanup_errors": cleanupErrors,
+		"attempt":        nil, // 清理发生在 Run 级，没有"某一次 Attempt"可指；键保留以便前端统一渲染
 		"verified_at":    nil,
 	}
 	if run, err := c.repos.GetRun(ctx, runID); err == nil {

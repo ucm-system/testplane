@@ -244,7 +244,7 @@ export function SubmitPage() {
       {error ? <ErrorState error={error} compact /> : null}
 
       {issues.length > 0 ? (
-        <Banner tone="err" title={`校验未通过（${issues.length} 个问题）`}>
+        <Banner role="alert" tone="err" title={`校验未通过（${issues.length} 个问题）`}>
           <ul className="mt-1 list-disc space-y-1 pl-4">
             {issues.slice(0, 6).map((issue, index) => (
               <li key={`${issue.path}-${index}`}>

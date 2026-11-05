@@ -34,6 +34,9 @@ export default defineConfig({
         timeout: 120_000,
         env: {
           TESTPLANE_BACKEND: process.env.TESTPLANE_BACKEND ?? 'http://127.0.0.1:8080',
+          // UI 冒烟默认跑 mock：不依赖真后端、可离线；要打真后端用
+          //   VITE_USE_MOCK=0 pnpm exec playwright test
+          VITE_USE_MOCK: process.env.VITE_USE_MOCK ?? '1',
         },
       }
     : undefined,

@@ -504,7 +504,7 @@ var (
 | `queues[].allocated` | `.status.allocated` | 控制器回写、**有滞后**；无 `/metrics` 接入时只能用它，`detail` 注明来源 |
 | `queues[].pending_jobs` | 该 queue 下 `podgroups[].status.phase == "Pending"` 的计数（PodGroup 的 namespace 范围由 `TESTPLANE_VOLCANO_NAMESPACES` 决定，默认 profile 的 namespace；`spec.queue` 为空的 PodGroup 归 `default` 队列） | **不要用** `queue.status.pending`（Volcano 自己的计数，语义可能含 Inqueue） |
 | `queues[].longest_wait_seconds` | `now - min(podgroup.metadata.creationTimestamp)`，限定同 queue 且 `phase ∈ {Pending, Inqueue}` | 无排队 → `0`，不是负数、也不回退成队列创建时间 |
-| `queues[].reason` | 同 queue 下 `phase ∈ {Pending,Inqueue}` 里**等得最久**那条的 `status.conditions[-1].message`（空则 `.reason`），**原文透传** | 归一成 `waiting_reason` 六值是 `waiting.by_reason` 的职责（需 `Task→PodGroup` 关联，见 C-4.8.4 #4），MVP 不做。⚠ `server/api/openapi.yaml` 的 `volcano.queue.reason` 仍 `$ref WaitingReason`，与原文透传不一致，待拍板后同步 |
+| `queues[].reason` | 同 queue 下 `phase ∈ {Pending,Inqueue}` 里**等得最久**那条的 `status.conditions[-1].message`（空则 `.reason`），**原文透传** | 归一成 `waiting_reason` 六值是 `waiting.by_reason` 的职责（需 `Task→PodGroup` 关联，见 C-4.8.4 #4），MVP 不做。契约已按自由文本落定：`server/api/openapi.yaml` 的 `VolcanoQueue.reason: type [string,'null']`，`design/views/07-api.md §5.3` 同步说明 |
 
 **C-4.8.2 采样方式**
 
@@ -530,6 +530,7 @@ var (
 
 \* 404/discovery 结果的 5 分钟缓存**尚未实现**：当前由 15s TTL + 60s 退避间接覆盖，且不额外引 discovery（少一次与 RBAC 无关的调用）。
 
+- **`stale` 没有时间阈值**（不是"超过 2×TTL 未刷新"）：判定条件是"**上一次刷新成功、本次刷新失败**"，与数据多旧无关；本次成功即清空。它挂在 `volcano` 块（快照）层级、**不是每个队列一份**，且置位时 `available:false` + `queues:[]` 照旧——`stale` 只表达"这个块曾经采到过"，绝不拿旧队列数字充数。
 - 队列存在但无 PodGroup：`available:true`，`pending_jobs:0`、`longest_wait_seconds:0`、`reason:null`——UI 显示 `—`，**不要**写"0 个排队"这种绝对断言。
 - CRD 里没有的队列不列（列事实，不列配置期望）。
 - **任何降级都返 `available:false` + `queues:[]`**（唯一的降级出口 `volcanoUnavailable`），且不得影响 `slots` / `waiting`，也不得让 HTTP 非 200（500 只留给真正的平台故障）。
@@ -546,8 +547,10 @@ var (
 | env | 默认 | 说明 |
 |---|---|---|
 | `TESTPLANE_VOLCANO_ENABLED` | `true` | 关闭 → `detail:"disabled"`（**不是** `crd_missing`，也不是"0 排队"） |
-| `TESTPLANE_VOLCANO_NAMESPACES` | profile 的 namespace | 逗号分隔；`*` / `all` = 全部 namespace（集群级 List） |
+| `TESTPLANE_VOLCANO_NAMESPACES` | profile 的 namespace（未配置时 = `TESTPLANE_NAMESPACE`，默认 `testplane`） | 逗号分隔；`*` / `all` = 全部 namespace（一次集群级 List）。**它决定 `pending_jobs` / `longest_wait_seconds` / `reason` 统计哪些 namespace 的 PodGroup**：不在列表里的 namespace（例如 `testplane-mock` 里的 PodGroup）**不计入**任何队列；多个 ns 会逐个 List 后合并，重复项去重 |
 | `TESTPLANE_VOLCANO_TTL` | `15s` | 快照 TTL；非法值启动即失败（fail fast） |
+
+本地演示/联调用夹具（12 个 Volcano CRD + 2 Queue + 5 PodGroup，**只装 CRD 不装 scheduler**，status 为手工假水位）见 [`deploy/k8s/volcano-fixtures/README.md`](../../deploy/k8s/volcano-fixtures/README.md)：装上后 `/queue-status` 的 `volcano` 块为 `available:true` 的真实 CRD 数据；删掉即回到 `crd_missing`。
 
 ---
 

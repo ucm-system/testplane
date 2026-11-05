@@ -289,6 +289,7 @@ $succeededPayload = @($payloads | Where-Object {
 Add-Check 'events.attempt_finished_payload' ($payloadComplete -and $succeededPayload -gt 0) `
     ("attempt.finished=" + $finished.Count + "，phase+exit_code 完整=" + $payloadComplete + "，succeeded/exit0=" + $succeededPayload +
      "，payloads=" + (($payloads | ForEach-Object { $_ | ConvertTo-Json -Compress }) -join ' | '))
+Add-Check 'events.attempt_finished_count' ($finished.Count -eq 2) ("attempt.finished=" + $finished.Count + "（2 个 test）")
 
 $ok = -not ($checks | Where-Object { -not $_.ok })
 foreach ($p in $script:ForwardProcs) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }

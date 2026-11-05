@@ -3722,6 +3722,13 @@ components:
             `scheduler_unavailable`（scheduler 不可达/无 PodGroup 状态）、`disabled`（配置关闭）。
             **红线：`available=false` 不等于「0 排队」**，UI 不得把它显示成"无排队"。
           enum: [crd_missing, rbac_forbidden, scheduler_unavailable, disabled]
+        stale:
+          type: boolean
+          default: false
+          description: |
+            上一次刷新成功、**本次刷新失败**时置 `true`（没有时间阈值，与数据多旧无关），本次成功即清空。
+            置位时仍 `available=false` + `queues=[]`——`stale` 只表达"这个块曾经采到过"，
+            **绝不回放历史数字**（D-49）。
         queues:
           type: array
           description: 已登记的 Volcano Queue 概要；不可达时为 `[]`
@@ -3765,12 +3772,6 @@ components:
             `0/1 nodes are available: 1 insufficient nvidia.com/gpu`），因此**不是**枚举。
             需要结构化分类看 `waiting.by_reason`（那里六个键才是枚举）。
           example: '0/1 nodes are available: 1 insufficient nvidia.com/gpu'
-        stale:
-          type: boolean
-          description: |
-            `available=true` 但本次采样失败、用的是上一次成功快照时置 `true`。
-            降级时**不回放历史**：`available=false` + `queues=[]`，不拿旧数据充数（D-49）。
-          default: false
 
     ExecutionProfile:
       type: object

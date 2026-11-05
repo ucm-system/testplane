@@ -95,6 +95,8 @@ export function ErrorState({ error, onRetry, className, compact = false }: Error
 
 export interface BannerProps {
   tone?: 'err' | 'warn' | 'info'
+  /** 错误类横幅传 `alert`（断言式播报）；纯提示用默认 `status` */
+  role?: 'status' | 'alert'
   title: ReactNode
   children?: ReactNode
   actions?: ReactNode
@@ -107,10 +109,10 @@ const BANNER_TONE = {
   info: 'border-primary/20 bg-primary-weak',
 } as const
 
-export function Banner({ tone = 'warn', title, children, actions, className }: BannerProps) {
+export function Banner({ tone = 'warn', role = 'status', title, children, actions, className }: BannerProps) {
   return (
     <div
-      role="status"
+      role={role}
       className={cn('flex flex-wrap items-start gap-x-3 gap-y-1 rounded-lg border px-4 py-2.5', BANNER_TONE[tone], className)}
     >
       <div className="min-w-0 flex-1">
