@@ -1243,6 +1243,8 @@ export const mockApi: Api = {
       waiting: { total: pendingTasks.length, by_reason: byReason, tasks: pendingTasks },
       volcano: {
         available: true,
+        // stale 在快照层：本次采样成功 → false（不可达时才置位，且那时 queues 恒为 []）
+        stale: false,
         detail: null,
         queues: [
           {
@@ -1252,7 +1254,6 @@ export const mockApi: Api = {
             longest_wait_seconds: 1080,
             // 契约：reason 是 PodGroup conditions[-1].message 原文，平台不翻译
             reason: '0/8 nodes are available: 8 Insufficient nvidia.com/npu.',
-            stale: false,
           },
           {
             name: 'gpu-shared',
@@ -1261,7 +1262,6 @@ export const mockApi: Api = {
             longest_wait_seconds: 2460,
             reason:
               'PodGroup default/gpu-batch-7g2kd is Pending: minMember 4 > running 0; 0/1 nodes are available: 1 insufficient nvidia.com/gpu.',
-            stale: true,
           },
         ],
       },

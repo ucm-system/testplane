@@ -428,14 +428,20 @@ export interface VolcanoQueue {
    * 平台不翻译，所以是自由文本而不是枚举 —— 结构化分类只在 `waiting.by_reason` 的六个键上。
    */
   reason?: string | null
-  /** 本次采样失败、用的是上次快照 */
-  stale?: boolean
 }
 
-/** `VolcanoSnapshot` schema：不可达时只降级本块。 */
+/** `VolcanoSnapshot` schema：不可达时只降级本块（不影响 slots / waiting）。 */
 export interface VolcanoSnapshot {
   available: boolean
+  /**
+   * 「上一次刷新成功、本次刷新失败」——语义在**快照层**，没有时间阈值。
+   * 置位时 `available` 仍是 `false`、`queues` 仍是 `[]`：平台**绝不回放历史数字**，
+   * 所以前端不能把 `available=false` 渲染成「0 排队 / 无排队」。
+   */
+  stale?: boolean
+  /** 不可达或无法判定时的说明（例如 `scheduler_unavailable`） */
   detail?: string | null
+  /** 已登记的 Volcano Queue 概要；不可达时为 `[]` */
   queues?: VolcanoQueue[]
 }
 
