@@ -134,10 +134,8 @@ jobs:
           username: ${{ secrets.GHCR_USERNAME || github.actor }}
           password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: preflight：确认能写包
-        run: |
-          if ! docker push --help >/dev/null 2>&1; then exit 1; fi
-          echo "使用凭据：${{ secrets.GHCR_TOKEN != '''' && ''GHCR_TOKEN（PAT）'' || ''GITHUB_TOKEN'' }}"
+      - name: preflight（记录推送凭据）
+        run: echo "GHCR 推送凭据：${{ secrets.GHCR_TOKEN && ''GHCR_TOKEN(PAT)'' || ''GITHUB_TOKEN'' }}"
 
       - name: 构建并推送（多架构）
         id: build
