@@ -1,0 +1,19 @@
+# 构建上下文排除（`docker build .` 时生效）
+# 目的：镜像只需要 server/、web/、testers/ 与 deploy/docker/，其它一律别进上下文。
+.git
+.github
+.data
+.tools
+.scratch
+design
+docs
+scripts
+tools
+**/node_modules
+**/dist
+!.keep
+web/.data
+web/test-results
+web/playwright-report
+**/*.log
+**/.DS_Store

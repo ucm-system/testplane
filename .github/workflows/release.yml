@@ -1,0 +1,200 @@
+# 发版：多架构镜像（server / web / 各 Tester）→ GHCR
+#
+# 触发：
+#   - push tag `v*`（例如 v0.2.0）→ 构建并推送 **linux/amd64 + linux/arm64** 两个平台
+#   - 手工 workflow_dispatch（可填 tag 与平台，用于补发/回滚验证）
+#   - PR → 只构建 **amd64**、不推送（防止 Dockerfile 腐烂）
+#
+# 镜像落点（GHCR，公开仓库用 GITHUB_TOKEN 即可，无需额外 Secret）：
+#   ghcr.io/<owner>/testplane-server:<tag>  +  :sha-<12>
+#   ghcr.io/<owner>/testplane-web:<tag>     +  :sha-<12>
+#   ghcr.io/<owner>/testplane-tester-<name>:<tag> + :sha-<12>
+#
+# 需要的权限：packages: write（本文件已声明）；repository 设置里无需任何 Secret。
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（留空则用 git describe --tags --always）'
+        required: false
+        type: string
+      platforms:
+        description: '目标平台（逗号分隔；默认双架构）'
+        required: false
+        default: 'linux/amd64,linux/arm64'
+        type: string
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: ${{ github.repository_owner }}
+
+jobs:
+  # 先枚举 testers/ 下所有 Tester，避免矩阵写死（加一个 Tester 不用改 workflow）
+  discover:
+    name: 发现 Tester
+    runs-on: ubuntu-latest
+    outputs:
+      testers: ${{ steps.list.outputs.testers }}
+      # publish 的 matrix 直接吃这一份（server + web + testers/*），job 里不再硬编码
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        name: 生成发布矩阵（server + web + 所有 Tester，加 Tester 不用改 workflow）
+        run: |
+          {
+            printf '{"image":"server","dockerfile":"deploy/docker/server.Dockerfile","context":"."},'
+            printf '{"image":"web","dockerfile":"deploy/docker/web.Dockerfile","context":"."}'
+            # Tester：上下文是 testers/<name>/（不是仓库根）
+            for d in $(ls -1 testers); do
+              if [ -f "testers/$d/build/Dockerfile" ]; then
+                printf ',{"image":"tester-%s","dockerfile":"testers/%s/build/Dockerfile","context":"testers/%s"}' "$d" "$d" "$d"
+              fi
+            done
+            echo ""
+          } > /tmp/items.txt
+          echo "matrix={\"include\":[$(cat /tmp/items.txt)]}" >> "$GITHUB_OUTPUT"
+          echo "发布矩阵："
+          cat /tmp/items.txt; echo
+          echo "Tester 数量：$(ls -1 testers | wc -l)"
+
+  # PR 上只验证 Dockerfile 还能构建（amd64，不推送）
+  build-only:
+    name: 构建验证（PR，amd64，不推送）
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: server
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/server.Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
+      - name: web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/web.Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+  publish:
+    name: 发布镜像（多架构）
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: discover
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # git describe 要 tag 历史
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 计算 tag
+        id: meta
+        run: |
+          raw="${{ inputs.tag }}"
+          if [ -z "$raw" ]; then raw="${GITHUB_REF_NAME}"; fi
+          ver="${raw#v}"
+          short="$(git rev-parse --short=12 HEAD)"
+          ref="${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}"
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          echo "short=${short}" >> "$GITHUB_OUTPUT"
+          # :latest 只允许由 tag 触发更新；workflow_dispatch 从任意 ref 触发时绝不动 latest（W-8）
+          {
+            echo "${ref}:${ver}"
+            echo "${ref}:sha-${short}"
+            if [ "${{ github.ref_type }}" = "tag" ]; then echo "${ref}:latest"; fi
+          } > /tmp/tags.txt
+          {
+            echo "tags<<EOF"
+            cat /tmp/tags.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "tags:"; cat /tmp/tags.txt
+
+      # 组织策略把默认 workflow 权限锁成 read 时，GITHUB_TOKEN 拿不到 packages:write
+      # （报 `denied: permission_denied: write_package`）。所以优先用带 write:packages 的
+      # PAT（仓库 secret GHCR_TOKEN），没有才退回 GITHUB_TOKEN。
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.GHCR_USERNAME || github.actor }}
+          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: preflight
+        run: echo "GHCR push credential = repo secret GHCR_TOKEN if present, else GITHUB_TOKEN"
+
+      - name: 构建并推送（多架构）
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ inputs.platforms || 'linux/amd64,linux/arm64' }}
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: 校验双架构清单
+        run: |
+          ref="${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}:${{ steps.meta.outputs.version }}"
+          # 用人类可读输出（含 `Platform: linux/amd64` 行）；--format {{json .Manifest}} 里没有 platform 字段
+          out="$(docker buildx imagetools inspect "$ref")"
+          echo "$out"
+          echo "$out" | grep -q "linux/amd64" || { echo "❌ 缺 linux/amd64（不许静默降级成单架构）"; exit 1; }
+          echo "$out" | grep -q "linux/arm64" || { echo "❌ 缺 linux/arm64（不许静默降级成单架构）"; exit 1; }
+          echo "✅ 双架构齐了"
+
+
+      - name: 写 job summary
+        run: |
+          {
+            echo "### ${{ matrix.image }}"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 镜像 | \`${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}\` |"
+            echo "| tag | \`${{ steps.meta.outputs.version }}\` / \`sha-${{ steps.meta.outputs.short }}\` / \`latest\` |"
+            echo "| 平台 | \`${{ inputs.platforms || 'linux/amd64,linux/arm64' }}\` |"
+            echo "| digest | \`${{ steps.build.outputs.digest }}\` |"
+            echo ""
+            echo '填进 Helm values：'
+            echo '```yaml'
+            echo "image:"
+            echo "  repository: ${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}"
+            echo "  digest: ${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

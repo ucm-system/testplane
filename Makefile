@@ -76,3 +76,28 @@ clean:
 	# 否则 clean 之后编出来的二进制里仍然带着上次的前端产物（issue #24-5）。不要用 git checkout 恢复——那会丢掉本地改动。
 	rm -rf server/internal/webui/dist/assets server/internal/webui/dist/*.js server/internal/webui/dist/*.css server/internal/webui/dist/*.map 2>/dev/null || true
 	@test -f server/internal/webui/dist/index.html || printf '<!doctype html><title>TestPlane placeholder</title>\n<p>前端未构建：跑 make web 生成。</p>\n' > server/internal/webui/dist/index.html
+
+# ---- 镜像与 Helm（生产部署路径）------------------------------------------------
+# 构建镜像并（可选）推到 registry；digest 就是 chart 里 image.digest 要填的值。
+image:
+	pwsh deploy/docker/build-push.ps1
+
+image-push:
+	pwsh deploy/docker/build-push.ps1 -Push
+
+# chart 静态校验 + 渲染（生产模板；缺必填项会直接报错，这是有意的）
+helm-lint:
+	helm lint deploy/charts/testplane -f deploy/charts/testplane/values-production.example.yaml
+
+helm-template:
+	helm template testplane deploy/charts/testplane -n testplane \
+		-f deploy/charts/testplane/values-production.example.yaml
+
+# 本地 kind：构建镜像灌进节点 + 用 values-kind.yaml 装（dev 鉴权 + mock 部署方）
+helm-install-local:
+	pwsh deploy/docker/build-push.ps1 -KindCluster testplane -Tag kind-local
+	helm upgrade --install tp deploy/charts/testplane -n testplane-helm --create-namespace \
+		-f deploy/charts/testplane/values-kind.yaml --set image.tag=kind-local --wait --timeout 10m
+
+helm-uninstall-local:
+	helm uninstall tp -n testplane-helm

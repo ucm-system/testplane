@@ -18,6 +18,39 @@
 
 ---
 
+---
+
+## 一键部署（Helm，**推荐**）
+
+生产/共享环境用 Helm chart：**[`deploy/charts/testplane/`](charts/testplane/)**。
+
+```bash
+# 1) 三个 Secret（口令/密钥不进 values）
+kubectl -n testplane create secret generic testplane-db    --from-literal=dsn='postgres://...'
+kubectl -n testplane create secret generic testplane-oidc  --from-literal=client-secret='...' \
+                                                          --from-literal=session-secret="$(openssl rand -hex 32)"
+kubectl -n testplane create secret generic testplane-genet --from-literal=api-key='...'
+
+# 2) 装
+helm upgrade --install testplane deploy/charts/testplane -n testplane \
+  -f values-prod.yaml --wait --timeout 10m
+```
+
+镜像构建与推送：
+
+```powershell
+pwsh deploy/docker/build-push.ps1 -Push                   # 打印 digest，填进 values 的 image.digest
+pwsh deploy/docker/build-push.ps1 -KindCluster testplane   # 本地 kind：构建并灌进节点
+```
+
+chart 会创建：Deployment（`--role=all`）、Service、ConfigMap、**迁移 Job（pre-install/pre-upgrade hook）**、
+ServiceAccount + 最小 RBAC、产物 PVC（可用 `existingClaim` 复用已有 RWX claim）、可选 Ingress / PDB / NetworkPolicy。
+必填项（OIDC / Genet / DB / 镜像 digest）在**渲染期**校验，缺一项直接失败并给出中文原因。
+
+> 本文件第 0–10 节是**本地 kind 调试**路径（kustomize + `testplane-server:dev` + hostPath PVC），
+> 与 chart **不要混用同一个 namespace**：两边都建同名对象时 `helm upgrade` 会报
+> "exists and cannot be imported"。生产部署只看 [`charts/testplane/README.md`](charts/testplane/README.md)。
+
 ## 0 前置条件
 
 - Docker Desktop 已启动（`docker version` 能打出 Server 段）。
