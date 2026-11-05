@@ -2375,3 +2375,90 @@ func TestPollDoesNotBlankNamespace(t *testing.T) {
 		t.Fatalf("runs.deploy.namespace = %v, want testplane-mock（空值不许覆盖已有键）", got)
 	}
 }
+
+// ---- 产物引用产生端（票 UX-2026-11）--------------------------------------
+//
+// JobFinished 时从磁盘 stat 出真实存在的产物并填进 FinishAttempt；日志由
+// finalizeAttemptAsync 异步落盘后补 log_ref（见 SetAttemptRefs）。
+
+// 一次成功 Attempt（result.json + artifacts + stdout.log 都在）→ 三个 ref 都写，
+// Task 侧 result_ref 是 run 相对路径。改回去（不填 refs）这条必红。
+func TestJobFinishedWritesAttemptRefs(t *testing.T) {
+	root := t.TempDir()
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	dir := filepath.Join(root, "r-1", "tasks", "t-1", "attempts", "1")
+	if err := os.MkdirAll(filepath.Join(dir, "artifacts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "result.json"), []byte(`{"status":"succeeded","metrics":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ex := &fakeExec{logContent: "line1\nline2\n"}
+	c := newTestController(t, repos, ex, Config{}, nil, nil)
+	c.cfg.StorageRoot = root // newTestController 会写死 /storage-root，这里覆盖成真实临时目录
+
+	if err := c.JobFinished(context.Background(), ports.JobOutcome{
+		Handle: ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+		Phase:  executor.PhaseSucceeded, ExitCode: int32Ptr(0), FinishedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture() // 等异步日志落盘 + refs 回填
+
+	repos.mu.Lock()
+	a := repos.attempts[ref.AttemptID]
+	repos.mu.Unlock()
+	if a == nil {
+		t.Fatal("attempt 不存在")
+	}
+	if a.ResultRef != "result.json" {
+		t.Errorf("attempts.result_ref = %q, want result.json", a.ResultRef)
+	}
+	if a.ArtifactRef != "artifacts" {
+		t.Errorf("attempts.artifact_ref = %q, want artifacts", a.ArtifactRef)
+	}
+	if a.LogRef != "logs/stdout.log" {
+		t.Errorf("attempts.log_ref = %q, want logs/stdout.log", a.LogRef)
+	}
+	if want := "tasks/t-1/attempts/1/result.json"; a.TaskResultRef != want {
+		t.Errorf("tasks.result_ref = %q, want %q", a.TaskResultRef, want)
+	}
+}
+
+// 没有 result.json → 不写 ResultRef（不造死链），Task 侧也保持空；LogRef 仍然写。
+func TestJobFinishedOmitsMissingResultRef(t *testing.T) {
+	root := t.TempDir()
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	dir := filepath.Join(root, "r-1", "tasks", "t-1", "attempts", "1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 只有日志目录，没有 result.json
+	ex := &fakeExec{logContent: "only logs\n"}
+	c := newTestController(t, repos, ex, Config{}, nil, nil)
+	c.cfg.StorageRoot = root
+	if err := c.JobFinished(context.Background(), ports.JobOutcome{
+		Handle: ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+		Phase:  executor.PhaseFailed, ExitCode: int32Ptr(1), FinishedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture()
+
+	repos.mu.Lock()
+	a := repos.attempts[ref.AttemptID]
+	repos.mu.Unlock()
+	if a.ResultRef != "" {
+		t.Errorf("attempts.result_ref = %q, want 空（没有 result.json 不许写引用）", a.ResultRef)
+	}
+	if a.TaskResultRef != "" {
+		t.Errorf("tasks.result_ref = %q, want 空", a.TaskResultRef)
+	}
+	if a.LogRef != "logs/stdout.log" {
+		t.Errorf("attempts.log_ref = %q, want logs/stdout.log", a.LogRef)
+	}
+}
+
+func int32Ptr(v int32) *int32 { return &v }

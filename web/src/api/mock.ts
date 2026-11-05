@@ -249,6 +249,11 @@ interface MockState {
   tasks: Record<string, TaskDetail>
   /** 日志：`${taskId}#${attemptIdx}` → 文本 */
   logs: Record<string, string>
+  /** 运行中日志的“新行”计数：模拟服务端 stdout 在两次轮询之间增长 */
+  attemptLogTicks: Record<string, number>
+  /** `${runId}#${pod}` → Deploy 日志行（持久化，轮询时按 offset 追加） */
+  deployLogLines: Record<string, string[]>
+  deployLogTicks: Record<string, number>
   /** `${runId}` → DeploySnapshot */
   deploys: Record<string, DeploySnapshot>
   events: Record<string, RunEvent[]>
@@ -267,6 +272,9 @@ const state: MockState = {
   runs: [],
   tasks: {},
   logs: {},
+  attemptLogTicks: {},
+  deployLogLines: {},
+  deployLogTicks: {},
   deploys: {},
   events: {},
   seq: {},
@@ -278,6 +286,9 @@ const state: MockState = {
   audit: [],
   timers: new Map(),
 }
+
+/** mock 的“长时间运行”Task：状态机不推进它（用来演示 / 验证日志轮询） */
+const stickyTasks = new Set<string>()
 
 /* ================================================================ 造数据 */
 
@@ -293,6 +304,10 @@ interface TaskSeed {
   startedMinAgo?: number
   durationSec?: number
   attempts?: AttemptStatus[]
+  /** 自定义日志正文（用于演示滚动 / 长日志；不给就按 Tester 生成） */
+  logSeed?: string[]
+  /** 状态机不推进这个 Task（“长时间运行”演示 Run 用） */
+  sticky?: boolean
 }
 
 interface RunSeed {
@@ -314,6 +329,7 @@ interface RunSeed {
 }
 
 function attemptLog(taskSeed: TaskSeed, attempt: Attempt): string {
+  if (taskSeed.logSeed) return taskSeed.logSeed.join('\n')
   const t = attempt.started_at
     ? new Date(attempt.started_at).toLocaleTimeString('zh-CN', { hour12: false })
     : '--:--:--'
@@ -435,6 +451,7 @@ function seedRun(seed: RunSeed): Run {
       attempts,
     }
     state.tasks[taskId] = task
+    if (taskSeed.sticky) stickyTasks.add(taskId)
     for (const attempt of attempts) {
       state.logs[`${taskId}#${attempt.idx}`] = attemptLog(taskSeed, attempt)
     }
@@ -720,6 +737,36 @@ function seedAll(): void {
     ],
   })
 
+  // 3b) 运行中 + 长日志：Task 与 Deploy 日志都会在轮询时“长出新行”（日志面板回归用）
+  seedRun({
+    id: 'r-20261105-0007',
+    name: 'live-log-stream',
+    status: 'testing',
+    submittedBy: '林知微',
+    submittedMinAgo: 1,
+    endpoint: endpointOf('http://10.0.0.40:8000/v1', model, 'genet', 'd-1004'),
+    deploy: { ...depReady, deployment_id: 'd-1004', queued_at: iso(90) },
+    deployManifest: { model, replicas: 1 },
+    pods: PODS_SINGLE,
+    tasks: [
+      { seq: 0, name: 'precheck', tester: 'endpoint-probe', status: 'succeeded', startedMinAgo: 2, durationSec: 20 },
+      {
+        seq: 1,
+        name: 'stream-watch',
+        tester: 'aisbench-acc',
+        status: 'running',
+        startedMinAgo: 1,
+        // 状态机不推进这个 Task：Run 保持 testing，日志轮询能一直演示下去
+        sticky: true,
+        logSeed: Array.from(
+          { length: 40 },
+          (_, i) =>
+            `[00:00:${String(i % 60).padStart(2, '0')}] [stream] 第 ${i + 1} 行：input_len=${256 + i * 32} tokens/s=${1200 + i * 7}`,
+        ),
+      },
+    ],
+  })
+
   // 4) 部分失败（1 个 FAILED）
   seedRun({
     id: 'r-20261105-0003',
@@ -998,6 +1045,14 @@ function step(runId: string): void {
     return
   }
   const snapshot = state.deploys[runId]
+
+  // “长时间运行”的演示 Task：状态机不推进它；Run 因此保持非终态，日志轮询才有增量可拉
+  const runTasks = Object.values(state.tasks).filter((task) => task.run_id === runId)
+  const hasStickyRunning = runTasks.some(
+    (task) =>
+      stickyTasks.has(task.id) && !['succeeded', 'failed', 'skipped', 'canceled'].includes(task.status),
+  )
+  if (hasStickyRunning) return
 
   // Deploy 阶段优先推进
   if (run.status === 'deploying' && run.deploy && snapshot) {
@@ -1399,11 +1454,30 @@ export const mockApi: Api = {
     return clone(findTask(taskId).attempts.sort((a, b) => a.idx - b.idx))
   },
 
-  async getAttemptLogs(taskId: string, idx: number, _opts: LogOptions = {}): Promise<LogChunk> {
+  /**
+   * Attempt 日志：支持 `offset` 游标（与真接口一致：只回游标之后的内容）。
+   *
+   * 运行中的 Attempt 在**带游标的轮询**里会多出一行：模拟服务端 stdout 在两次轮询之间持续增长，
+   * 让「追加而不是整块替换」「跟随最新」在 mock 下也能真实验收。
+   */
+  async getAttemptLogs(taskId: string, idx: number, opts: LogOptions = {}): Promise<LogChunk> {
     await delay(90)
-    findTask(taskId)
-    const text = state.logs[`${taskId}#${idx}`] ?? '（该 Attempt 还没有日志）'
-    return { text, offset: text.length, coverage: null }
+    const task = findTask(taskId)
+    const attempt = task.attempts.find((item) => item.idx === idx)
+    const key = `${taskId}#${idx}`
+    let text = state.logs[key] ?? '（该 Attempt 还没有日志）'
+    const offset = Math.max(0, opts.offset ?? 0)
+
+    if (attempt?.status === 'running' && offset > 0) {
+      const tick = (state.attemptLogTicks[key] ?? 0) + 1
+      state.attemptLogTicks[key] = tick
+      const clock = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+      text = `${text}\n[${clock}] [mock] stdout 新行 #${tick}（运行中，轮询追加）`
+      state.logs[key] = text
+    }
+
+    const chunk = text.slice(Math.min(offset, text.length))
+    return { text: chunk, offset: text.length, coverage: null }
   },
 
   async getAttemptResult(taskId: string, idx: number): Promise<Result> {
@@ -1496,9 +1570,18 @@ export const mockApi: Api = {
       })
     }
 
-    const lines = deployLogLines(target.name, run.name)
-    const tail = query.tail_lines && query.tail_lines > 0 ? lines.slice(-query.tail_lines) : lines
+    // 日志行按 (run, pod) 持久化：游标 offset 才有稳定的行号语义；运行中轮询时追加新行
+    const streamKey = `${runId}#${target.name}`
+    const lines = state.deployLogLines[streamKey] ?? deployLogLines(target.name, run.name)
+    state.deployLogLines[streamKey] = lines
     const offset = query.tail_lines ? 0 : (query.offset ?? 0)
+    if (!isTerminal(run.status) && !query.tail_lines && offset > 0) {
+      const tick = (state.deployLogTicks[streamKey] ?? 0) + 1
+      state.deployLogTicks[streamKey] = tick
+      const clock = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+      lines.push(`${clock} [main] [mock] 新日志行 #${tick}（运行中，轮询追加）`)
+    }
+    const tail = query.tail_lines && query.tail_lines > 0 ? lines.slice(-query.tail_lines) : lines
     const limit = query.limit ?? 200
     const slice = tail.slice(offset, offset + limit)
     const next = offset + slice.length

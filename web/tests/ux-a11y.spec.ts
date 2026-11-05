@@ -23,6 +23,8 @@ test('④ 弹窗焦点陷阱：Tab 不进背景，Esc 关闭后焦点回到触�
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('取消这个 Run？')
+  // P2：模态语义必须出现在 DOM 上（不能被透传属性盖掉）
+  await expect(dialog).toHaveAttribute('aria-modal', 'true')
 
   // 打开后焦点落在弹窗内
   expect(
@@ -59,14 +61,19 @@ test('⑤ 结果 / 执行细节：role=tabpanel 且 id 与页签互相指向', a
   await expect(resultTab).toHaveAttribute('aria-controls', panelId!)
   await expect(panel).toHaveAttribute('aria-labelledby', tabId!)
 
+  // P2：面板按需挂载，非活动页签不能留悬空的 aria-controls
+  const detailTab = page.getByRole('tab', { name: '执行细节' })
+  expect(await detailTab.getAttribute('aria-controls'), '非活动页签不应指向不存在的面板').toBeNull()
+
   // 切到「执行细节」后仍是配对的一组面板
   await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByRole('tabpanel')).toHaveCount(1)
   await expect(page.getByRole('tabpanel')).toContainText('Task 列表')
-  await expect(page.getByRole('tab', { name: '执行细节' })).toHaveAttribute(
+  await expect(detailTab).toHaveAttribute(
     'aria-controls',
     (await page.getByRole('tabpanel').getAttribute('id'))!,
   )
+  expect(await resultTab.getAttribute('aria-controls'), '切走后「结果」页签也不该悬空').toBeNull()
 })
 
 test('⑥ /runs?q= 直接生效，改筛选会写回 URL', async ({ page }) => {

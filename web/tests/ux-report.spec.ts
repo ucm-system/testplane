@@ -36,7 +36,10 @@ test('② 报告 404：只出现一个空状态 + 倒计时重试，不渲染 Ta
   const empty = page.getByTestId('report-not-generated')
   await expect(empty).toHaveCount(1)
   await expect(empty).toContainText('报告尚未生成')
-  await expect(empty).toContainText('404 + Retry-After')
+  // 说人话：空态里不能再出现 404 / Retry-After 这类实现细节（P2）
+  await expect(empty).toContainText('报告还没生成，可能是这个 Run 还没结束；我们会每隔几秒自动重试一次。')
+  expect(await empty.innerText()).not.toContain('404')
+  expect(await empty.innerText()).not.toContain('Retry-After')
 
   // 倒计时重试：按钮先禁用并显示秒数，或倒计时结束后可点
   const retry = page.getByTestId('retry-report')

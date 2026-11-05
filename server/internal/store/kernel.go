@@ -265,6 +265,10 @@ func (s *Store) applyTask(ctx context.Context, tx pgx.Tx, tr domain.Transition, 
 	if f, ok := tr.Payload["error"].(domain.Failure); ok {
 		errJSON, _ = json.Marshal(f)
 	}
+	// result_ref：Task 终态时写（03-data-view §3.1），payload 里没有就保持原值。
+	// 这条链路之前是断的：`tasks.result_ref` 从来没人写 → report.json 的 tasks[].result_ref 全空，
+	// UI 指标表因此拿不到 result.json（票 UX-2026-11）。
+	taskResultRef := payloadString(tr.Payload, "result_ref")
 	tag, err := tx.Exec(ctx, `
 		UPDATE tasks
 		   SET status          = $2,
@@ -272,10 +276,11 @@ func (s *Store) applyTask(ctx context.Context, tx pgx.Tx, tr domain.Transition, 
 		       updated_at      = $4,
 		       waiting_reason  = CASE WHEN $2 = 'queued' OR $2 = ANY($7)
 		                              THEN NULL ELSE waiting_reason END,
-		       error           = COALESCE($5, error)
+		       error           = COALESCE($5, error),
+		       result_ref      = COALESCE($8, result_ref)
 		 WHERE id = $1 AND status = ANY($6)`,
 		tr.ID, string(to), tr.Reason, at, nullableBytes(errJSON), from,
-		domain.TerminalTaskStatusStrings())
+		domain.TerminalTaskStatusStrings(), nullableText(taskResultRef))
 	if err != nil {
 		return domain.Applied{}, fmt.Errorf("store: kernel task %s: cas: %w", tr.ID, err)
 	}

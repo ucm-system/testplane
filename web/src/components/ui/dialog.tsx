@@ -69,6 +69,8 @@ export function Dialog({
       <RadixDialog.Portal>
         <RadixDialog.Overlay className="fixed inset-0 z-50 animate-fade-in bg-[rgb(15_23_42_/_0.45)]" />
         <RadixDialog.Content
+          /* 显式写出来：背景对读屏软件必须不可达（Radix 默认也会给，但别被透传的属性盖掉） */
+          aria-modal="true"
           aria-labelledby={titleId}
           /* 没有 description 时必须显式置空，否则 Radix 会告警「缺 Description」 */
           aria-describedby={description ? descId : undefined}

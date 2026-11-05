@@ -126,6 +126,9 @@ func (r *storeRepos) taskView(ctx context.Context, t *store.Task, isPrecheck boo
 	if t.StatusReason != nil {
 		v.StatusReason = *t.StatusReason
 	}
+	if t.ResultRef != nil {
+		v.ResultRef = *t.ResultRef
+	}
 	if t.WaitingReason != nil {
 		v.WaitingReason = *t.WaitingReason
 	}
@@ -416,6 +419,7 @@ func (r *storeRepos) FinishAttempt(ctx context.Context, in orchestrator.FinishIn
 		Succeeded: in.Phase == "succeeded", Phase: in.Phase,
 		ExitCode: in.ExitCode, ImageDigest: in.ImageDigest,
 		Failure: in.Failure, FinishedAt: finished,
+		LogRef: in.LogRef, ArtifactRef: in.ArtifactRef, ResultRef: in.ResultRef,
 	})
 	if err != nil {
 		return orchestrator.FinishOutcome{}, err
@@ -677,4 +681,9 @@ func mergeDeployJSON(manifest, deploy []byte) json.RawMessage {
 // AppendRunEvent 追加清理失败事件（目前只有 cleanup.failed 用）。
 func (r *storeRepos) AppendRunEvent(ctx context.Context, runID, typ string, payload map[string]any) error {
 	return r.st.AppendRunEvent(ctx, runID, typ, payload)
+}
+
+// SetAttemptRefs 回填产物引用（日志异步落盘后由编排层调用）。
+func (r *storeRepos) SetAttemptRefs(ctx context.Context, attemptID, logRef, artifactRef, resultRef string) error {
+	return r.st.SetAttemptRefs(ctx, attemptID, logRef, artifactRef, resultRef)
 }

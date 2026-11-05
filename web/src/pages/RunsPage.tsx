@@ -182,7 +182,11 @@ export function RunsPage() {
         <CardHeader
           tone="ok"
           title="全部 Run"
-          sub={loading ? '加载中…' : `已加载 ${items.length} 个 · 进行中 ${activeCount} 个`}
+          sub={
+            loading
+              ? '加载中…'
+              : `已加载 ${items.length} 个 · 进行中 ${activeCount} 个${search ? ' · 关键字只筛本页' : ''}`
+          }
           actions={
             <div className="flex flex-wrap items-center gap-2">
               <div className="relative">
@@ -190,7 +194,7 @@ export function RunsPage() {
                 <Input
                   value={search}
                   onChange={(e) => updateQuery({ q: e.target.value })}
-                  placeholder="筛选本页 Run（按名称 / ID）"
+                  placeholder="筛选本页已加载的 Run（名称 / ID）"
                   aria-label="筛选本页 Run（按名称 / ID）"
                   title="只过滤已加载的这一页，不是全局搜索"
                   className="h-9 w-56 pl-8"
@@ -250,7 +254,7 @@ export function RunsPage() {
             description={
               items.length === 0
                 ? '换个状态过滤，或去提交一个新的 Run。'
-                : '时间范围或关键字太窄，放宽一点再看。'
+                : `时间范围或关键字太窄；关键字只筛已加载的 ${items.length} 条（不是全库搜索），放宽一点或点「加载更多」再看。`
             }
             action={
               <Button

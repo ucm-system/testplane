@@ -23,6 +23,7 @@ import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
 import { DeployLogsPanel } from '@/components/app/DeployLogsPanel'
 import { useIdentity } from '@/hooks/useIdentity'
+import { useLogTail } from '@/hooks/useLogTail'
 import { useRunEvents } from '@/hooks/useRunEvents'
 import {
   attemptStatusMeta,
@@ -265,7 +266,7 @@ const RETRY_PLAN_REASON: Record<string, string> = {
               <span className="text-sm font-semibold text-fg">Deploy 日志</span>
               <span className="text-2xs text-fg-3">按 Pod 分页签，不合并；断过的地方显式标 gap</span>
             </div>
-            <DeployLogsPanel runId={run.id} deployState={deploy.state} pods={pods} />
+            <DeployLogsPanel runId={run.id} deployState={deploy.state} pods={pods} live={!isTerminalRun(run.status)} />
           </div>
         </div>
       ) : (
@@ -307,10 +308,17 @@ function TaskAttemptsPanel({
   const attempts: Attempt[] = task?.attempts ?? []
   const active = attempts.find((item) => item.idx === attemptIdx) ?? attempts[attempts.length - 1] ?? null
 
-  const logs = useAsync(async () => {
-    if (!active) return null
-    return api.getAttemptLogs(summary.id, active.idx)
-  }, [summary.id, active?.idx])
+  /**
+   * 日志按游标轮询（P0）：运行中的 Attempt 每 3s 带 `offset` 取增量并**追加**；
+   * Run / Attempt 终态后停止（`live=false`），面板改为「Run 已结束，日志不再更新」。
+   * 切 Attempt / 切页签 / 卸载时 hook 内部会清掉定时器，不会重复请求。
+   */
+  const runEnded = isTerminalRun(runStatus)
+  const logs = useLogTail({
+    streamKey: active ? `${summary.id}#${active.idx}` : '',
+    live: Boolean(active) && active!.status === 'running' && !runEnded,
+    load: (offset) => api.getAttemptLogs(summary.id, active!.idx, { offset }),
+  })
 
   const TASK_TERMINAL = ['succeeded', 'failed', 'canceled', 'skipped']
   const canRetryTask = task ? TASK_TERMINAL.includes(task.status) && runStatus !== 'canceled' : false
@@ -474,13 +482,17 @@ function TaskAttemptsPanel({
           </TableWrap>
 
           <LogViewer
-            text={logs.data?.text ?? ''}
+            text={logs.text}
             loading={logs.loading}
             error={logs.error}
-            coverage={logs.data?.coverage ?? null}
-            live={active?.status === 'running'}
+            coverage={logs.coverage}
+            live={Boolean(active) && active!.status === 'running' && !runEnded}
+            ended={runEnded}
+            lastUpdatedAt={logs.lastUpdatedAt}
+            appended={logs.appended}
             onRetry={logs.reload}
             hint={active ? `tasks/${task.id}/attempts/${active.idx}/logs` : undefined}
+            testIdPrefix="attempt-log"
           />
         </>
       )}

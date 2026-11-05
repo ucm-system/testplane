@@ -1,7 +1,9 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowUpRight, Check, Download, FileText } from 'lucide-react'
 import { API_BASE, api } from '@/api'
-import type { Artifact, Run } from '@/api/types'
+import { toApiError } from '@/api/client'
+import type { ApiErrorBody, Artifact, Run } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonClassName } from '@/components/ui/button'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
@@ -9,6 +11,7 @@ import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
 import { RunStatusBadge } from '@/components/app/StatusBadge'
 import { useAsync } from '@/hooks/useAsync'
+import { formatBytes, saveBlob } from '@/lib/download'
 import { formatDateTime, formatDuration } from '@/lib/utils'
 
 /**
@@ -46,12 +49,6 @@ function fileName(path: string): string {
   return path.split('/').pop() ?? path
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
-
 /** 一句结论：成功就是成功，失败要说清"为什么" */
 function conclusion(run: Run): { tone: 'ok' | 'warn' | 'err' | 'muted'; text: string } {
   const failed = (run.tasks ?? []).filter((task) => task.status === 'failed')
@@ -86,6 +83,29 @@ export function RunResultView({ run }: { run: Run }) {
   const runId = run.id
   const artifacts = useAsync(() => api.listRunArtifacts(runId), [runId])
   const report = useAsync(() => api.getReport(runId), [runId])
+  const [downloading, setDownloading] = useState(false)
+  const [downloadError, setDownloadError] = useState<ApiErrorBody | null>(null)
+  const [downloadNotice, setDownloadNotice] = useState<string | null>(null)
+
+  /**
+   * 打包下载：与报告页同一套逻辑（带鉴权 fetch → Blob → a[download]），
+   * 不是裸 `<a href>` 直链 —— dev/OIDC 下裸链会 401，用户只会看到一段 JSON。
+   */
+  const downloadBundle = async () => {
+    setDownloading(true)
+    setDownloadError(null)
+    setDownloadNotice(null)
+    try {
+      const blob = await api.downloadBundle(runId)
+      const name = `${runId}.zip`
+      saveBlob(blob, name)
+      setDownloadNotice(`${name} · ${formatBytes(blob.size)} 已开始下载`)
+    } catch (e) {
+      setDownloadError(toApiError(e))
+    } finally {
+      setDownloading(false)
+    }
+  }
 
   const counts = run.task_counts
   const verdict = conclusion(run)
@@ -188,16 +208,38 @@ export function RunResultView({ run }: { run: Run }) {
           title="产物下载"
           sub={artifacts.data ? `${items.length} 个文件 · 共 ${formatBytes(artifacts.data.total_size_bytes)}` : undefined}
           actions={
-            <a
-              className={buttonClassName({ size: 'sm', variant: 'ghost' })}
-              href={`${API_BASE}/runs/${encodeURIComponent(runId)}/report.md`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              report.md <ArrowUpRight className="size-3" aria-hidden />
-            </a>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <Button
+                size="sm"
+                variant="primary"
+                data-testid="download-bundle"
+                icon={<Download className="size-3" aria-hidden />}
+                loading={downloading}
+                onClick={() => void downloadBundle()}
+              >
+                {downloading ? '打包中…' : '打包下载 .zip'}
+              </Button>
+              <a
+                className={buttonClassName({ size: 'sm', variant: 'ghost' })}
+                href={`${API_BASE}/runs/${encodeURIComponent(runId)}/report.md`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                report.md <ArrowUpRight className="size-3" aria-hidden />
+              </a>
+            </div>
           }
         />
+        {downloadError ? (
+          <CardBody className="pb-0">
+            <ErrorState error={downloadError} onRetry={() => void downloadBundle()} compact />
+          </CardBody>
+        ) : null}
+        {downloadNotice ? (
+          <p className="px-5 pt-3 text-2xs text-fg-3" role="status">
+            {downloadNotice}
+          </p>
+        ) : null}
         {artifacts.error ? (
           <CardBody>
             <ErrorState error={artifacts.error} onRetry={artifacts.reload} compact />

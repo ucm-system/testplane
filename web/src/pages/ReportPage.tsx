@@ -348,12 +348,12 @@ export function ReportPage() {
       ) : null}
 
       {reportMissing ? (
-        /* 唯一空状态：404 只在这里出现一次，带 Retry-After 倒计时重试 */
+        /* 唯一空状态：说人话（不出现 404 / Retry-After 这类实现细节），保留倒计时重试 */
         <Card data-testid="report-not-generated">
           <EmptyState
             icon={<FileWarning className="size-4" />}
             title="报告尚未生成"
-            description="Run 未终态时后端返回 404 + Retry-After：等 Run 跑完，report.json 与 report.md 才会写出来。页面会按服务端给的间隔自动重试。"
+            description="报告还没生成，可能是这个 Run 还没结束；我们会每隔几秒自动重试一次。"
             action={
               <div className="flex flex-col items-center gap-2">
                 <Button

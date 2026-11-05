@@ -50,10 +50,14 @@ type memTask struct {
 
 type memAttempt struct {
 	AttemptRef
-	Status     domain.AttemptStatus
-	StartedAt  time.Time
-	FinishedAt time.Time
-	Timeout    time.Duration
+	Status        domain.AttemptStatus
+	StartedAt     time.Time
+	FinishedAt    time.Time
+	Timeout       time.Duration
+	LogRef        string
+	ArtifactRef   string
+	ResultRef     string
+	TaskResultRef string
 }
 
 // NewMemoryRepos 构造空的内存 Repos。
@@ -512,6 +516,18 @@ func (m *MemoryRepos) FinishAttempt(ctx context.Context, in FinishInput) (Finish
 	t := m.tasks[a.TaskID]
 	if t == nil {
 		return out, fmt.Errorf("memory: task %s: %w", a.TaskID, domain.ErrNotFound)
+	}
+	// 产物引用（03-data-view §3.1）：attempt 相对路径；task 侧补成 run 相对路径。
+	if in.LogRef != "" {
+		a.LogRef = in.LogRef
+	}
+	if in.ArtifactRef != "" {
+		a.ArtifactRef = in.ArtifactRef
+	}
+	if in.ResultRef != "" {
+		a.ResultRef = in.ResultRef
+		a.TaskResultRef = fmt.Sprintf("tasks/%s/attempts/%d/%s", a.TaskID, a.AttemptNo, in.ResultRef)
+		t.ResultRef = a.TaskResultRef
 	}
 
 	var taskStatus domain.TaskStatus
@@ -1076,3 +1092,27 @@ func (m *MemoryRepos) MarkCanceled(ctx context.Context, attemptID string) error 
 // 确保 encoding/json 被使用（ExecutorRef 是 JSONB 形状）。
 var _ = json.Marshal
 var _ = time.Now
+
+// SetAttemptRefs 回填产物引用（日志异步落盘后调用）；空值不覆盖已有值。
+func (m *MemoryRepos) SetAttemptRefs(ctx context.Context, attemptID, logRef, artifactRef, resultRef string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.attempts[attemptID]
+	if !ok {
+		return fmt.Errorf("memory: attempt %s: %w", attemptID, domain.ErrNotFound)
+	}
+	if logRef != "" {
+		a.LogRef = logRef
+	}
+	if artifactRef != "" {
+		a.ArtifactRef = artifactRef
+	}
+	if resultRef != "" {
+		a.ResultRef = resultRef
+		if t := m.tasks[a.TaskID]; t != nil {
+			a.TaskResultRef = fmt.Sprintf("tasks/%s/attempts/%d/%s", a.TaskID, a.AttemptNo, resultRef)
+			t.ResultRef = a.TaskResultRef
+		}
+	}
+	return nil
+}
