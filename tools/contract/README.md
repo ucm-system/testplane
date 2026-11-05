@@ -5,7 +5,7 @@
 
 - **规格侧（`--mode spec`）**：不需要控制面，离线可跑；端点集合以
   `design/views/07-api.md §5`（+ §2.4 认证表 + §5.5 运维段）为期望，与 openapi 做双向差集。
-- **实现侧（`--mode live`）**：对运行中的控制面逐个打 MVP 的 25 个 operation。
+- **实现侧（`--mode live`）**：对运行中的控制面逐个打 34 个 operation。
 
 > e2e 端到端（Run 生命周期）见 [`tools/e2e`](../e2e/README.md)；
 > 起服务、mock、Kind 的操作手册见 [`scripts/e2e/README.md`](../../scripts/e2e/README.md)。
@@ -17,9 +17,9 @@ cd tools/contract
 go test ./...
 
 go run . --mode spec              # 15 项规格检查，不需要控制面
-go run . --mode live              # 25 个 operation 逐个打，默认 http://127.0.0.1:8080
+go run . --mode live              # 34 个 operation 逐个打，默认 http://127.0.0.1:8080
 go run . --mode all --json-out ../../.data/contract.json
-go run . --mode spec --allow-missing none   # 严格比对：白名单里的 25 条也判红
+go run . --mode spec --allow-missing none   # 严格比对：白名单里的 16 条也判红
 ```
 
 `--allow-missing` 默认读 `tools/contract/allow-missing.txt`；白名单每行
@@ -60,7 +60,7 @@ go build -o ../../bin/contract .
 不是 `{error:{...}}`。工具每次都会打一条 warning 提醒；实现若返回嵌套形态，
 `live.error_envelope_*` 会判红。
 
-## 实现侧检查（25 个 operation）
+## 实现侧检查（34 个 operation）
 
 实现侧从 spec 取"成功状态码 + 响应 schema + Content-Type"，不在代码里硬编码。
 期望行为：
@@ -69,7 +69,9 @@ go build -o ../../bin/contract .
 |---|---|---|
 | 运维 | `/healthz`、`/readyz` | 200 + `text/plain` |
 | 身份/元信息 | `/meta`、`/me` | 200 + schema required |
-| 列表 | `/runs`、`/tasks`、`/testers`、`/clusters`、`/queue-status` | 200 + 分页信封 required（`items`/`has_more`） |
+| 列表 | `/runs`、`/tasks`、`/testers`、`/clusters`、`/queue-status`、`/profiles` | 200 + schema required；`/queue-status` 额外断言 `volcano` 块的 `available`/`queues` 形态 |
+| 产物 | `/runs/{id}/artifacts`、`/tasks/{id}/attempts/{idx}/artifacts`、`/runs/{id}/files?path=` | 200 `ArtifactList`；files 允许未生成 404（Error 形状） |
+| 运维/认证 | `/metrics`、`/auth/login`、`/auth/callback`、`/auth/logout` | metrics 200 `text/plain`；login/callback 302 或 dev 404；logout 200 `{ok}` |
 | Registry | `/testers`、`/testers/endpoint-probe` | `endpoint-probe` 必须在目录里（K-3：无运行时注册） |
 | 提交 | `POST /runs`、`?dry_run=true` | 202 `RunAccepted`（`run.id`/`tasks[]` 非空）；dry-run 200 `DryRunResult` |
 | Run 读 | `/runs/{id}`、`/tasks`、`/events/history`、`/manifest` | 200 + schema required |
@@ -94,14 +96,16 @@ fixture Manifest 默认是 `service` 模式 + `endpoint-probe` + `profile: k8s-n
 
 stdout 一行 JSON（`checks[]` 逐项给 detail），stderr 人类摘要；`--json-out` 另存缩进 JSON。
 
-## 当前状态（2026-11-05，PR #13 / 票 #16 修复后）
+## 当前状态（2026-11-05，PR #18）
 
-- 规格侧：**15/15 通过**（`go run . --mode spec`）；设计 50 个端点，openapi 25 个，
-  白名单登记 25 条“设计有、实现无”（每条带理由）。
-- 实现侧：**32/32 通过**，覆盖全部 25 个 operation、任务列表完整性（seq=0 precheck）、
+- 规格侧：**15/15 通过**（`go run . --mode spec`）；设计 50 个端点，openapi **34** 个，
+  白名单登记 **16** 条“设计有、实现无”（每条带理由），实现有设计无 0。
+- 实现侧：**42/42 通过**，覆盖全部 34 个 operation、任务列表完整性（seq=0 precheck）、
   SSE 连通性、404/400 错误体、取消语义；`/report` 的 404 只在非终态 fixture 上放行。
-- 合计 `--mode all`：**47/47 通过**。
-- 负向证据：`--allow-missing none` 时 25 条未登记缺失端点全部判红（不再自证）；
+- 合计 `--mode all`：**57/57 通过**。
+- 已知 warning：`/auth/callback` 在 dev 模式返回 404，但 openapi 只声明 302/401；
+  契约按实际 dev 行为放行并提示补 404。
+- 负向证据：`--allow-missing none` 时未登记缺失端点全部判红（不再自证）；
   单测 `TestDesignChecksCatchUnregisteredMissing` / `TestArtifactResponseTerminalSemantics`
   覆盖“改前能过、改后必须红”。
 
