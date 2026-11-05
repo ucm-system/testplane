@@ -942,22 +942,28 @@ func (c *Controller) beginRun(ctx context.Context, run RunView) error {
 	if run.HasDeploy {
 		if c.deployer == nil {
 			return c.repos.FinishDeployAsFailed(ctx, run.ID, &domain.Failure{
-				Code:    domain.CodeInternalError,
-				Message: "deployer is not configured",
+				Code:      domain.CodeDeployFailed,
+				Message:   "deployer is not configured",
+				Retryable: false,
 			})
 		}
+		// 顺序不能反：先 BeginDeploy 把 runs.deploy 冻结落库（含 release_name / accepted_at），
+		// 再调 Start。Genet 的 POST 超时不代表没创建，重启后只能靠库里的冻结值找回 release（§9.2）。
 		if err := c.repos.BeginDeploy(ctx, run.ID, "d-"+run.ID); err != nil {
 			return err
 		}
-		// 事务外调用 Genet（C-2.5），内部幂等键 = run_id。
+		// 事务外调用 Genet（C-2.5）；Manifest = 冻结后的 runs.deploy 原样快照。
 		if err := c.deployer.Start(ctx, ports.DeployRequest{
 			RunID:    run.ID,
 			DeployID: "d-" + run.ID,
+			Manifest: run.DeployJSON,
 			Timeout:  c.cfg.DeployTimeout,
 		}); err != nil {
+			// 平台侧调不通 Genet（网络/5xx/鉴权/请求构造）→ DEPLOY_FAILED（不可重试，Run failed，D-47）。
 			return c.repos.FinishDeployAsFailed(ctx, run.ID, &domain.Failure{
-				Code:    domain.CodeInternalError,
-				Message: err.Error(),
+				Code:      domain.CodeDeployFailed,
+				Message:   err.Error(),
+				Retryable: false,
 			})
 		}
 		return nil
@@ -972,16 +978,19 @@ func (c *Controller) pollDeploy(ctx context.Context, run RunView) error {
 	// 总窗口判定（K-6）：排队 + 部署超窗 → service_unavailable，不是 failed。
 	if !run.SubmittedAt.IsZero() && time.Since(run.SubmittedAt) > c.cfg.DeployTimeout {
 		return c.repos.DeployBlocked(ctx, run.ID, "deploy window exceeded", &domain.Failure{
-			Code:    domain.CodeInternalError,
-			Message: fmt.Sprintf("deploy did not become ready within %s", c.cfg.DeployTimeout),
+			Code:      domain.CodeDeployBlocked,
+			Message:   fmt.Sprintf("deploy did not become ready within %s", c.cfg.DeployTimeout),
+			Retryable: true,
+			Detail:    map[string]any{"reason": "timeout"},
 		})
 	}
 	st, err := c.deployer.Poll(ctx, run.ID)
 	if err != nil {
-		// 平台调不通（网络/5xx/鉴权）→ Run failed（C-5.3）。
+		// 平台调不通（网络/5xx/鉴权）→ DEPLOY_FAILED（不可重试）→ Run failed（C-5.3、D-47）。
 		return c.repos.FinishDeployAsFailed(ctx, run.ID, &domain.Failure{
-			Code:    domain.CodeInternalError,
-			Message: err.Error(),
+			Code:      domain.CodeDeployFailed,
+			Message:   err.Error(),
+			Retryable: false,
 		})
 	}
 	if err := c.repos.RecordDeployState(ctx, run.ID, st); err != nil {
@@ -990,9 +999,12 @@ func (c *Controller) pollDeploy(ctx context.Context, run RunView) error {
 	switch st.Phase {
 	case "ready":
 		if st.Endpoint.BaseURL == "" {
+			// 说 ready 却没地址：部署侧问题，不是平台调不通 → DEPLOY_BLOCKED（可重试）。
 			return c.repos.DeployBlocked(ctx, run.ID, "ready without endpoint", &domain.Failure{
-				Code:    domain.CodeInternalError,
-				Message: "Genet reported ready but returned no endpoint",
+				Code:      domain.CodeDeployBlocked,
+				Message:   "Genet reported ready but returned no endpoint",
+				Retryable: true,
+				Detail:    map[string]any{"reason": "blocked"},
 			})
 		}
 		if _, err := c.repos.DeployReady(ctx, run.ID, st.Endpoint); err != nil {
@@ -1004,7 +1016,7 @@ func (c *Controller) pollDeploy(ctx context.Context, run RunView) error {
 		if st.Failure != nil {
 			f = st.Failure
 		} else {
-			f = &domain.Failure{Code: domain.CodeInternalError, Message: st.Reason}
+			f = &domain.Failure{Code: domain.CodeDeployBlocked, Message: st.Reason, Retryable: true}
 		}
 		// blocked → service_unavailable（C-5.3），不是 failed。
 		return c.repos.DeployBlocked(ctx, run.ID, st.Reason, f)

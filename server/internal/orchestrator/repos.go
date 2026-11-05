@@ -10,6 +10,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
@@ -46,6 +47,10 @@ type RunView struct {
 	HasDeploy     bool
 	DeployID      string
 	DeployState   string
+	// DeployJSON 是 `runs.deploy` 的原样快照（adapter 读一个字段，不查第二次库）。
+	// BeginDeploy 落库后由编排层作为 ports.DeployRequest.Manifest 交给 Deployer.Start
+	// （execution §9.2：先冻结落库再 POST——POST 超时不代表没创建）。
+	DeployJSON    json.RawMessage
 	QueuePosition int
 	QueueReason   string
 	Endpoint      *domain.Endpoint

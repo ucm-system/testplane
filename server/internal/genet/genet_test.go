@@ -34,6 +34,8 @@ type fakeGenet struct {
 	queue *QueueSnapshot
 	// lastAuth 记录最近一次 Authorization 头（鉴权断言用）。
 	lastAuth string
+	// lastInstall 记录最近一次安装请求体（断言 values/set 透传）。
+	lastInstall map[string]any
 }
 
 func (f *fakeGenet) setRelease(rel *Release) {
@@ -84,6 +86,9 @@ func (f *fakeGenet) server(t *testing.T) *httptest.Server {
 		f.lastAuth = r.Header.Get("Authorization")
 		atomic.AddInt32(&f.posts, 1)
 		behavior := f.postBehavior
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.lastInstall = body
 		f.mu.Unlock()
 		if behavior == "exists" {
 			// 模拟"同名的 release 已经存在"：POST 拒绝的同时它已在 Genet 侧存在。
@@ -663,5 +668,50 @@ func TestCancelInvalidatesPollCache(t *testing.T) {
 	}
 	if st.Phase != PhaseAccepted {
 		t.Fatalf("phase = %s, want accepted (缓存作废 + 宽限重置)", st.Phase)
+	}
+}
+
+// values 缺失时用 deploy.parameters 兜底（用户参数不能被默默丢掉）。
+func TestStartFallsBackToParametersAsValues(t *testing.T) {
+	f := &fakeGenet{}
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	c, _ := newTestClient(t, f, clock)
+
+	man := DeployManifest{
+		PackageType: "stack",
+		Parameters:  map[string]any{"model_name": "mock-llm", "replicas": 1},
+	}
+	if err := c.Start(context.Background(), ports.DeployRequest{
+		RunID: "r-1", DeployID: "d-1", Manifest: manifestJSON(t, man),
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	f.mu.Lock()
+	body := f.lastInstall
+	f.mu.Unlock()
+	values, _ := body["values"].(string)
+	if !strings.Contains(values, "model_name") || !strings.Contains(values, "mock-llm") {
+		t.Fatalf("values = %q, want serialized parameters", values)
+	}
+	// noWait 必须为 true（helm --wait 的 deadline 不能当排队窗口）。
+	if nw, ok := body["noWait"].(bool); !ok || !nw {
+		t.Errorf("noWait = %v, want true", body["noWait"])
+	}
+}
+
+// 冻结的 values 优先于 parameters（Genet 不二次渲染，重放必须原样）。
+func TestStartPrefersFrozenValues(t *testing.T) {
+	f := &fakeGenet{}
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	c, _ := newTestClient(t, f, clock)
+	man := DeployManifest{PackageType: "stack", Values: "frozen: yes", Parameters: map[string]any{"other": 1}}
+	if err := c.Start(context.Background(), ports.DeployRequest{RunID: "r-1", DeployID: "d-1", Manifest: manifestJSON(t, man)}); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	body := f.lastInstall
+	f.mu.Unlock()
+	if values, _ := body["values"].(string); values != "frozen: yes" {
+		t.Fatalf("values = %q, want the frozen values untouched", values)
 	}
 }

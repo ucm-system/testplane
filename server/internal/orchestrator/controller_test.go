@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -1663,18 +1664,24 @@ func TestHasPrecheckUsesIsPrecheck(t *testing.T) {
 
 // fakeDeployer 记录 Genet 取消调用。
 type fakeDeployer struct {
-	mu      sync.Mutex
-	starts  int
-	polls   int
-	cancels int
+	mu        sync.Mutex
+	starts    int
+	polls     int
+	cancels   int
 	cancelErr error
+	startErr  error
+	recordReq bool
+	lastReq   ports.DeployRequest
 }
 
 func (f *fakeDeployer) Start(ctx context.Context, req ports.DeployRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.starts++
-	return nil
+	if f.recordReq {
+		f.lastReq = req
+	}
+	return f.startErr
 }
 
 func (f *fakeDeployer) Poll(ctx context.Context, runID string) (ports.DeployState, error) {
@@ -1712,5 +1719,85 @@ func TestCancelRunRequestsGenetUninstall(t *testing.T) {
 	run, _ := repos.GetRun(context.Background(), "r-1")
 	if run.Status != domain.RunCanceled {
 		t.Errorf("run status = %s, want canceled", run.Status)
+	}
+}
+
+// beginRun 必须把冻结的 runs.deploy 作为 Manifest 交给 Deployer.Start（§9.2）。
+func TestBeginRunPassesFrozenDeployManifest(t *testing.T) {
+	repos := NewMemoryRepos()
+	frozen := json.RawMessage(`{"provider":"genet","parameters":{"model_name":"mock-llm"},"deployment_id":"d-r-1"}`)
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunQueued, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now(), DeployJSON: frozen,
+	})
+	dep := &fakeDeployer{}
+	dep.recordReq = true
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+
+	if err := c.DeployOnce(context.Background()); err != nil {
+		t.Fatalf("DeployOnce: %v", err)
+	}
+	dep.mu.Lock()
+	req := dep.lastReq
+	dep.mu.Unlock()
+	if len(req.Manifest) == 0 {
+		t.Fatal("Deployer.Start 收到空 Manifest：编排层必须在 BeginDeploy 后传入冻结的 runs.deploy（§9.2）")
+	}
+	if !strings.Contains(string(req.Manifest), "mock-llm") {
+		t.Errorf("Manifest = %s, want frozen parameters", req.Manifest)
+	}
+	if req.DeployID != "d-r-1" {
+		t.Errorf("DeployID = %q", req.DeployID)
+	}
+}
+
+// Start 失败 = 平台侧调不通 Genet → DEPLOY_FAILED（不可重试）→ Run failed（D-47）。
+func TestDeployStartFailureUsesDeployFailedCode(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunQueued, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now(), DeployJSON: json.RawMessage(`{"package_type":"stack"}`),
+	})
+	dep := &fakeDeployer{startErr: errors.New("genet: 500 boom")}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+
+	if err := c.DeployOnce(context.Background()); err != nil {
+		t.Fatalf("DeployOnce: %v", err)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunFailed {
+		t.Fatalf("run status = %s, want failed", run.Status)
+	}
+	if run.Failure == nil || run.Failure.Code != domain.CodeDeployFailed {
+		t.Fatalf("failure = %+v, want DEPLOY_FAILED", run.Failure)
+	}
+	if run.Failure.Retryable {
+		t.Errorf("DEPLOY_FAILED must not be retryable")
+	}
+}
+
+// 超窗 = 部署侧问题 → DEPLOY_BLOCKED（可重试）→ Run service_unavailable。
+func TestDeployTimeoutUsesDeployBlockedCode(t *testing.T) {
+	repos := NewMemoryRepos()
+	// SubmittedAt 远早于窗口 → pollDeploy 第一行就判超窗。
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunDeploying, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now().Add(-100 * time.Hour), DeployJSON: json.RawMessage(`{"package_type":"stack"}`),
+	})
+	dep := &fakeDeployer{}
+	c := newTestController(t, repos, &fakeExec{}, Config{DeployTimeout: 72 * time.Hour}, dep, nil)
+
+	if err := c.DeployOnce(context.Background()); err != nil {
+		t.Fatalf("DeployOnce: %v", err)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunServiceUnavailable {
+		t.Fatalf("run status = %s, want service_unavailable", run.Status)
+	}
+	if run.Failure == nil || run.Failure.Code != domain.CodeDeployBlocked {
+		t.Fatalf("failure = %+v, want DEPLOY_BLOCKED", run.Failure)
+	}
+	if !run.Failure.Retryable {
+		t.Errorf("DEPLOY_BLOCKED must be retryable")
 	}
 }

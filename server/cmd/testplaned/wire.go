@@ -69,6 +69,10 @@ func (r *storeRepos) runView(run *store.Run) orchestrator.RunView {
 			}
 		}
 	}
+	// DeployJSON 给 Deployer.Start 用：提交时冻结在 runs.manifest.deploy 里的入参
+	// （provider / parameters / values …）+ runs.deploy 里的运行时字段（deployment_id /
+	// release_name / accepted_at …）合并成一份快照。只读这两列，不再查库（execution §9.2）。
+	v.DeployJSON = mergeDeployJSON(run.Manifest, run.Deploy)
 	if len(run.Endpoint) > 0 {
 		var ep domain.Endpoint
 		if json.Unmarshal(run.Endpoint, &ep) == nil {
@@ -586,4 +590,43 @@ func nullable(s string) *string {
 		return nil
 	}
 	return &s
+}
+// mergeDeployJSON 合成 Deployer.Start 要的冻结快照（execution §9.2）：
+//   - 提交时冻结的 deploy 入参在 runs.manifest 里（支持平级 `deploy` 与嵌套 `run.deploy` 两种形态）；
+//   - 运行时字段在 runs.deploy 里（deployment_id / state / release_name / accepted_at …），后写覆盖先写。
+//
+// 两列都已在 store.Run 上，不需要额外查询。返回 nil 表示这个 Run 没有 deploy 信息
+// （Deployer.Start 会按 §9.2 明确报错，而不是拿空 values 去装一个空服务）。
+func mergeDeployJSON(manifest, deploy []byte) json.RawMessage {
+	merged := map[string]any{}
+	if len(manifest) > 0 {
+		var m map[string]any
+		if json.Unmarshal(manifest, &m) == nil {
+			// 兼容 {"run":{"deploy":…}} 与 {"deploy":…}。
+			if nested, ok := m["run"].(map[string]any); ok {
+				m = nested
+			}
+			if d, ok := m["deploy"].(map[string]any); ok {
+				for k, val := range d {
+					merged[k] = val
+				}
+			}
+		}
+	}
+	if len(deploy) > 0 {
+		var d map[string]any
+		if json.Unmarshal(deploy, &d) == nil {
+			for k, val := range d {
+				merged[k] = val
+			}
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(merged)
+	if err != nil {
+		return nil
+	}
+	return raw
 }

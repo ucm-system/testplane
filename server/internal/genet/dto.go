@@ -248,6 +248,9 @@ type DeployManifest struct {
 	Image        string     `json:"image"`
 	ModelPath    string     `json:"model_path"`
 	ModelName    string     `json:"model_name"`
+	// Parameters 是用户提交的自由参数（`deploy.parameters`）。
+	// 它**不是**渲染结果：只在 values 缺失时序列化成 chart values 兜底（§9.2、§9.11）。
+	Parameters map[string]any `json:"parameters"`
 	Set          []SetValue `json:"set"`
 	NoWait       *bool      `json:"no_wait"`
 	TimeoutSec   int        `json:"helm_timeout_sec"`

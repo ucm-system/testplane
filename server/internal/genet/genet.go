@@ -177,9 +177,20 @@ func (c *Client) Start(ctx context.Context, req ports.DeployRequest) error {
 	}
 
 	// 2) POST 拉起（noWait=true 恒开）。
+	//
+	// values 只来自冻结的 runs.deploy.values；它为空但用户给了 deploy.parameters 时，
+	// 把 parameters 序列化成 JSON（JSON 是合法 YAML，helm -f 可直接读）当 values，
+	// 避免"用户参数被默默丢掉"（§9.11）。两者都有时以冻结的 values 为准。
+	values := man.Values
+	if strings.TrimSpace(values) == "" && len(man.Parameters) > 0 {
+		if enc, err := json.Marshal(man.Parameters); err == nil {
+			values = string(enc)
+			c.opts.Logf("genet: values 为空，用 deploy.parameters 兜底（%d 项）", len(man.Parameters))
+		}
+	}
 	install := ReleaseInstall{
 		ReleaseName:  releaseName,
-		Values:       man.Values,
+		Values:       values,
 		TemplatePath: man.TemplatePath,
 		ModelPath:    man.ModelPath,
 		Image:        man.Image,
