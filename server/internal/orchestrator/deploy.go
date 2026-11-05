@@ -60,7 +60,26 @@ func (c *Controller) cleanupDeploy(ctx context.Context, runID string) {
 	record := func(u *domain.DeployUninstall) {
 		_ = c.repos.RecordDeployState(ctx, runID, domain.DeploySnapshot{Uninstall: u})
 	}
+	// 已 verified 的不再打 Genet（对账每轮都会路过这里）。
+	if run, err := c.repos.GetRun(ctx, runID); err == nil && uninstallState(run.DeployJSON) == "verified" {
+		return
+	}
+	cleaner, canVerify := c.deployer.(ports.DeployCleaner)
+	verify := func() bool {
+		if !canVerify {
+			return true // 适配层不支持校验时退化为"DELETE 成功即干净"
+		}
+		gone, err := cleaner.VerifyUninstalled(ctx, runID)
+		return err == nil && gone
+	}
 	if err := c.deployer.Cancel(ctx, runID); err != nil {
+		// DELETE 404 = release 已经不存在（可能上一轮已删掉、或 Genet 侧 GC 掉了）：
+		// 用"删干净"判据复核，真的没了就记 verified，别让对账无限重试（§9.7）。
+		if verify() {
+			record(&domain.DeployUninstall{State: "verified", VerifiedAt: &now, Force: true, CleanupErrors: []string{}})
+			c.logf("orchestrator: deploy_cleanup already gone: run %s", runID)
+			return
+		}
 		record(&domain.DeployUninstall{
 			State: "failed", Force: true, CleanupErrors: []string{err.Error()},
 		})
@@ -68,7 +87,7 @@ func (c *Controller) cleanupDeploy(ctx context.Context, runID string) {
 		return
 	}
 	// 只有声明支持校验的适配层才做"删干净"判定；否则退化为 DELETE 成功即 verified。
-	if cleaner, ok := c.deployer.(ports.DeployCleaner); ok {
+	if canVerify {
 		gone, err := cleaner.VerifyUninstalled(ctx, runID)
 		switch {
 		case err != nil:
@@ -97,4 +116,19 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+// uninstallState 读 runs.deploy.uninstall.state（缺省为空串）。
+func uninstallState(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var doc struct {
+		Uninstall struct {
+			State string `json:"state"`
+		} `json:"uninstall"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return ""
+	}
+	return doc.Uninstall.State
 }

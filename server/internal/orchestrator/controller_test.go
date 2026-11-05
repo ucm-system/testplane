@@ -1880,7 +1880,8 @@ func TestCleanupFailureKeepsRunSucceededThenRetries(t *testing.T) {
 		SubmittedAt: time.Now().Add(-time.Minute),
 		DeployJSON:  json.RawMessage(`{"release_name":"tp-x","state":"ready"}`),
 	})
-	dep := &fakeDeployer{cancelErr: errors.New("genet: server error: DELETE 502")}
+	gone := false // DELETE 502 且 release 仍在 → 不能算删干净
+	dep := &fakeDeployer{cancelErr: errors.New("genet: server error: DELETE 502"), verifyGone: &gone}
 	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
 
 	if err := c.ReconcileOnce(context.Background()); err != nil {
@@ -1902,6 +1903,8 @@ func TestCleanupFailureKeepsRunSucceededThenRetries(t *testing.T) {
 	// 下一轮：Genet 恢复 → verified。
 	dep.mu.Lock()
 	dep.cancelErr = nil
+	okGone := true
+	dep.verifyGone = &okGone
 	dep.mu.Unlock()
 	if err := c.ReconcileOnce(context.Background()); err != nil {
 		t.Fatalf("ReconcileOnce(2): %v", err)

@@ -15,8 +15,9 @@
 | 前端冒烟（`pnpm build`、`GET /`） | ✅ build 通过、`GET /` 200 text/html |
 | 失败注入（经平台，`service_unavailable` 路径） | ✅ 5/5（success/500/401/200包错误/slow-ready） |
 | 一成一败混合结果（#15） | ✅ `mixed-result-check.ps1` 11/11 |
-| 重启恢复演练（#9） | 🟡 `restart-drill.ps1` 11/13：对账读结果路径的 backend bug 待修 |
+| 重启恢复演练（#9） | ✅ `restart-drill.ps1` 13/13（新镜像；Run `r-Q0VT`） |
 | Web UI Playwright 冒烟（#16） | ✅ `web/tests/ui-smoke.spec.ts` 1 passed |
+| deploy 形态（PR #18） | 🟡 `deploy-check.ps1` 已就绪，等卸载收口后跑 |
 | 验收矩阵 17 项结论 | ✅ 见 [`acceptance-matrix.md`](acceptance-matrix.md) |
 
 ## 目录
@@ -182,6 +183,21 @@ pnpm exec playwright test       # 自动起 dev server（5173），system Chrome
 
 也可以先起服务再跑：`$env:PLAYWRIGHT_BASE_URL='http://127.0.0.1:8098'; pnpm exec playwright test`。
 Spec 覆盖 `/runs` → 第一条 → 详情 Task 表 → `/submit` dry-run 报错可见。
+
+## 3.4 deploy 形态（PR #18）
+
+```powershell
+pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107 -DryRun
+pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107
+pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107 -FailureOnly  # 需先把 fake Genet key 改错
+```
+
+- 正常：`deploy:{provider:"genet"}` → `deploy.state` 依次 `queued → accepted/deploying → ready`，
+  `endpoint.source=genet`，precheck `succeeded`，Run `succeeded`；终态后
+  `helm list -n testplane-mock` 为空（本机无 helm CLI 时用 Helm release Secret 等价判断）。
+- 失败：`-FailureOnly` 提交同样 manifest，断言 Run `failed`、`error.code=DEPLOY_FAILED`、
+  `retryable=false`；脚本不主动改服务端 key，避免影响共享控制面。
+- 卸载收口未就绪前，正常分支会在 `helm.empty` 处 FAIL，属预期。
 
 默认**严格**：report 必现（终态后 ≤2s，30s 等待足够）、`/logs` 必非空；只有显式
 `-AllowKnownGaps` 才把当前已知的 report/logs 缺口从失败项里剔除，修复后不要带这个开关。

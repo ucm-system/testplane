@@ -7,6 +7,7 @@
  *   真 OIDC 上线后换成 Cookie + `X-CSRF-Token`（07 §2.1），页面不用动。
  */
 import type { ApiErrorBody } from './types'
+import { getAuthState, handleUnauthorized } from './auth'
 
 const rawBase = String(import.meta.env.VITE_API_BASE ?? '/api/v1')
 export const API_BASE = rawBase.replace(/\/+$/, '')
@@ -158,18 +159,27 @@ export function normalizeErrorBody(status: number, body: unknown): ApiErrorBody 
 
 /* ---------------------------------------------------------------- 请求 */
 
-function baseHeaders(extra?: HeadersInit): Headers {
+/** 这些方法算"写"，需要 CSRF（07 §2.1 双提交）；GET/HEAD/OPTIONS 不带。 */
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
+function baseHeaders(extra?: HeadersInit, method = 'GET'): Headers {
   const headers = new Headers(extra)
   if (!headers.has('Accept')) headers.set('Accept', 'application/json')
   for (const [key, value] of Object.entries(authHeaders())) {
     if (!headers.has(key)) headers.set(key, value)
+  }
+  // OIDC 会话里写操作必须带 CSRF token（token 只在内存里，来自 GET /me）
+  if (WRITE_METHODS.has(method.toUpperCase())) {
+    const csrf = getAuthState().csrfToken
+    if (csrf && !headers.has('X-CSRF-Token')) headers.set('X-CSRF-Token', csrf)
   }
   return headers
 }
 
 /** 发请求并返回 Response；非 2xx 一律抛 ApiClientError。 */
 export async function http(path: string, init: RequestInit = {}): Promise<Response> {
-  const headers = baseHeaders(init.headers)
+  const method = (init.method ?? 'GET').toUpperCase()
+  const headers = baseHeaders(init.headers, method)
   if (init.body != null && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
@@ -186,6 +196,8 @@ export async function http(path: string, init: RequestInit = {}): Promise<Respon
   }
 
   if (!res.ok) {
+    // 401：OIDC 部署跳登录（dev 部署什么都不做 —— 后端 dev 模式没有 /auth/*）；403 交给页面按 FORBIDDEN 呈现
+    if (res.status === 401) handleUnauthorized()
     const text = await res.text().catch(() => '')
     let body: unknown = null
     if (text) {

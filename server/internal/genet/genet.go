@@ -553,15 +553,18 @@ func (c *Client) VerifyUninstalled(ctx context.Context, runID string) (bool, err
 		return false, nil
 	}
 
+	// release 已经 404：Pod 必然不存在。这里再查一次 pods 只是**尽力**加证；
+	// 查询失败（某些假 Genet / 旧版本没有 /pods 路由）不能推翻"release 已不存在"这个事实，
+	// 否则卸载永远无法收敛（§9.7）。
 	var pods PodList
 	err = c.tr.getJSON(ctx, releasePath(releaseName)+"/pods", nil, &pods)
 	switch {
-	case errors.Is(err, ErrReleaseNotFound):
-		return true, nil // release 都没了，Pod 自然不存在
-	case err != nil:
-		return false, fmt.Errorf("genet: verify pods %s: %w", releaseName, err)
+	case err == nil:
+		return len(pods.Items) == 0, nil
+	default:
+		c.opts.Logf("genet: verify pods %s: best-effort failed: %v", releaseName, err)
+		return true, nil
 	}
-	return len(pods.Items) == 0, nil
 }
 
 // Queue 返回最近一次队列快照（诊断/测试用；可能为 nil）。

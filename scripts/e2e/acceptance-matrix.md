@@ -14,7 +14,7 @@
 | 6 | Tester 契约（入口/argv/输出/result.json） | 做过 | 真实 `testers/endpoint-probe/run.sh` 在容器里对 mock-llm 跑通 5 种判定；`result.json` 11 字段通过校验 |
 | 7 | Tester 独立运行 | 做过 | `scripts/e2e/probe-check.ps1`：5/5 场景 exit code 与 result.json 均符合设计 |
 | 8 | K8s Executor（超时/取消） | 做过 | 取消 8/8：`r-HX8M` 立即 cancel → `cancelling` → 49.6s 后 `canceled`（60s reconcile tick），Task 全 skipped、租约 0、Pod 0。超时 14/14：`r-04K3` `timeout_seconds=5` → Run `failed`、Task/Attempt `TASK_TIMEOUT retryable=true`、attempt 14.96s ≤ timeout+30s、Pod/Job 删除、租约 0、16.9s 终态 |
-| 9 | 状态机与重启恢复 | 部分（演练 11/13） | `scripts/e2e/restart-drill.ps1`：`r-RGWX` 在 Attempt running 时 kill controller，3.3s 恢复新 Pod；Run 到 `completed_with_errors`，`attempt.finished` 带 `reconciled=true`，租约/Job 0。但 reconcile 读结果路径错误：`RESULT_MISSING path=/storage-root/result.json`（PVC 实际有 `tasks/t-Y2RWNV/attempts/1/result.json`），根因 `cmd/testplaned/wire.go` 的 `AttemptByTask` 未填 `RunID`；另 `startup reconcile` 成功路径无日志。等 backend 修后复跑 |
+| 9 | 状态机与重启恢复 | 做过 | `scripts/e2e/restart-drill.ps1` **13/13**：`r-20261105-Q0VT` 在 Attempt running 时 kill controller，旧 Pod `testplaned-db565b6db-ckt9f` → 新 Pod `testplaned-db565b6db-44krc`，3.3s Ready；启动日志含 `startup reconcile`；Run 终态 `succeeded`，租约/Job 0；`attempt.finished` 2 条（payload 无对账标记，按实际记录） |
 | 10 | Attempt 与重试 | 未做 | 需要 `retry_on` 命中与失败注入 |
 | 11 | 失败策略（abort_run） | 做过 | 失败注入中 precheck 失败后其余 Task 全部 `skipped(upstream_abort)` ✅ |
 | 12 | Run 编排全链路 | 做过 | success / service_unavailable / completed_with_errors / canceled / failed（平台超时）五类终态均实测 |
@@ -28,7 +28,7 @@
 
 - **#15 一成一败**：`pwsh scripts/e2e/mixed-result-check.ps1 -BaseUrl ... -SkipApply` → **11/11 PASS**，Run `r-29YJ`；router 按 `ENDPOINT_API_KEY` 把 A 转到 mock-llm、B 转到 mock-llm-500；report counts 1/1、failures 非空、Run.error 取首个失败 Task。
 - **#16 Playwright**：`web/tests/ui-smoke.spec.ts` → **1 passed (2.1s)**，system Chrome（`channel: chrome`），dev server 5173 + `TESTPLANE_BACKEND=http://127.0.0.1:8103`。
-- **#9 重启演练**：`scripts/e2e/restart-drill.ps1` → **11/13**，Run `r-RGWX`，kill 后新 Pod `testplaned-6b5ff87f9b-2cvvh` 3.3s Ready；阻塞在 backend reconcile 的 `AttemptRef.RunID` 缺失（RESULT_MISSING 路径指向 `/storage-root/result.json`）与 `startup reconcile` 成功路径无日志；负向 `-RecoveryTimeoutSeconds 1` 已验证 **exit 1**（不会静默通过）。
+- **#9 重启演练**：`scripts/e2e/restart-drill.ps1` → **13/13 PASS**，Run `r-20261105-Q0VT`，旧 Pod `testplaned-db565b6db-ckt9f` → 新 Pod `testplaned-db565b6db-44krc`，3.3s Ready；`startup reconcile` 日志已出现；Run `succeeded`，租约/Job 0。负向 `-RecoveryTimeoutSeconds 1` → exit 1。
 
 ## 复跑命令
 
