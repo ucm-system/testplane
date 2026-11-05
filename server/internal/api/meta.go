@@ -257,11 +257,7 @@ func (s *Server) handleQueueStatus(w http.ResponseWriter, r *http.Request) {
 			"by_reason": reasonCounts,
 			"tasks":     tasks,
 		},
-		"volcano": map[string]any{
-			"available": false,
-			"detail":    "scheduler_unavailable",
-			"queues":    []any{},
-		},
+		"volcano": s.volcanoBlock(ctx),
 	})
 }
 

@@ -38,6 +38,8 @@ type Deps struct {
 	WebUI fs.FS
 	// Version 是二进制版本（/meta 用）。
 	Version string
+	// Volcano 可选：不设时 /queue-status 的 volcano 块降级为 scheduler_unavailable。
+	Volcano VolcanoProvider
 }
 
 // Server 持有 HTTP 层依赖。
@@ -49,6 +51,7 @@ type Server struct {
 	logger   *slog.Logger
 	submit   *Submitter
 	webui    fs.FS
+	volcano  VolcanoProvider
 	version  string
 	now      func() time.Time
 }
@@ -66,6 +69,7 @@ func New(d Deps) *Server {
 		resolver: d.Resolver,
 		logger:   lg,
 		webui:    d.WebUI,
+		volcano:  d.Volcano,
 		version:  d.Version,
 		now:      func() time.Time { return time.Now().UTC() },
 	}

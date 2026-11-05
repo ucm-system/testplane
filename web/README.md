@@ -97,6 +97,7 @@ src/
 | `GET /testers` | `Tester.parameters/env` 是 **map** | map ✓（含 `required`） | api 层归一成数组再给 UI |
 | `POST /runs` 提交体 | 顶层 `run:` 嵌套 | 目前只吃**平级**写法（backend-core 修中） | 前端按嵌套发，等后端修完即通 |
 | `tests[].execution.profile` | 必填 | — | **MVP 没有 `/profiles` 端点**：提交页给可编辑默认值 `k8s-npu`（待裁决） |
+| `Run.deploy.queue_position` | 字段保留、**恒为 null**（D-46：部署方只给水位计数，排队在 Volcano 层，没有位次） | 恒 null | **UI 不展示位次**：排队态只显示「排队中 · 已等待 <时长>」+ `queue_reason` 原文；`types.ts` 注释写明"不要读取它做展示" |
 
 ## SSE
 

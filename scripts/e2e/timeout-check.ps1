@@ -59,12 +59,11 @@ function Get-K8sObjectNames {
 
 function Get-K8sOneObject {
     param([string]$Kind, [string]$Name)
-    $out = & kubectl -n $Namespace get $Kind $Name -o name 2>&1
+    # --ignore-not-found：对象不存在时 exit 0 + 空输出；坏 context/权限/namespace 仍 exit≠0。
+    # 不能用“输出里包含 NotFound”判断，否则 namespace 不存在也会被当成“对象已删除”。
+    $out = & kubectl -n $Namespace get $Kind $Name -o name --ignore-not-found 2>&1
     if ($LASTEXITCODE -ne 0) {
-        # NotFound 是“已删除”的正常路径；其他错误（坏 context/权限）必须 throw。
-        $text = ($out -join ' ')
-        if ($text -match 'NotFound|not found') { return @() }
-        throw "kubectl get $Kind $Name 失败（exit $LASTEXITCODE）：$text"
+        throw "kubectl get $Kind $Name 失败（exit $LASTEXITCODE）：$($out -join ' ')"
     }
     return @($out | Where-Object { $_ -ne '' })
 }

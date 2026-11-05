@@ -452,7 +452,8 @@ Genet **没有"部署单"**这个概念：一次部署 = 一次 Helm release，�
   "last_polled_at": "2026-11-05T01:07:40Z",
 
   // ---- 失败 / 取消 / 卸载 ----
-  "failure": {"code": "DEPLOY_BLOCKED", "message": "该实例调用入口不可用：…", "retryable": false},
+  "failure": {"code": "DEPLOY_BLOCKED", "message": "该实例调用入口不可用：…", "retryable": true,
+              "detail": {"reason": "blocked"}},
   "cancel_requested_at": null,
   "uninstall": {"state": "pending", "verified_at": null, "force": false, "cleanup_errors": []}
 }
@@ -471,7 +472,7 @@ Genet **没有"部署单"**这个概念：一次部署 = 一次 Helm release，�
 | `queue{phase,pending,inqueue,running}` | `GET /api/open/queue/podgroups` 的 `phase` + `GET /api/open/queue` 的计数 | **没有位次**（Genet 只给计数，`<G>/backend/internal/models/volcano_views.go:13-39`）；UI 只能展示"已等待时长 + 水位"，故 `queue_position` 字段移除 |
 | `endpoint{url,model_name,model_path,protocol}` | `callInfo.endpoint`，禁止自行推导 | `runs.endpoint` 与 Task `endpoint_key` 的唯一来源（§4.3） |
 | `accepted_at` / `queued_at` / `ready_at` / `last_polled_at` | 平台在轮询中写 | 排队时长展示、`deploy_timeout_seconds` 判定、404 宽限期都以时间而非次数为准（C-5.3） |
-| `failure{code,message,retryable}` | 部署终态 blocked 时写 | 部署失败对应用户可读的原因；`error.code ∈ DEPLOY_FAILED / DEPLOY_BLOCKED / DEPLOY_TIMEOUT` |
+| `failure{code,message,retryable}` | 部署终态 blocked 时写 | 只有两个码（附录 D）：`DEPLOY_FAILED`（不可重试，平台侧调 Genet 失败）→ Run `failed`；`DEPLOY_BLOCKED`（可重试，Genet `blocked` 或超 72h 窗口）→ Run `service_unavailable`；细分靠 `detail.reason ∈ {blocked,timeout,superseded,uninstalling,uninstalled}`（D-47） |
 | `cancel_requested_at` | 用户取消时先落库 | Genet 的 DELETE 在 release 尚未出现时只回 404（`<G>/backend/internal/handlers/helm.go:2438`），取消意图必须先落库再由对账补偿 |
 | `uninstall{state,verified_at,force,cleanup_errors[]}` | 清理阶段写 | "删了"以 `GET 404 + pods.items == []` 为准（`<G>/jenkins/Helm-Start-Service-MB.Jenkinsfile:3027-3061`），`cleanup_errors` 保留 Genet 返回的失败项；卸载失败**不改 Run 终态**，只记 `CLEANUP_FAILED` |
 

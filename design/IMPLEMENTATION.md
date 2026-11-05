@@ -451,6 +451,7 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 9 | 架构表实为 **11 张**（文档曾按 12 表述） | 以 `03-data-view.md §3.2` 实际 DDL 为准 |
 | 10 | Pre-Check 判别曾有 4 处实现，其中门控（`orchestrator/controller.go`）、放行 SQL（`store/control.go`）、终态判定（`orchestrator/status.go`）误用 `TesterRole` / 单看 `seq=0` | 唯一判据 = `runs.resolved->'precheck'->>'injected' = true` **且** `tasks.seq = 0`（`03-data-view.md §4.2`）；`endpoint-probe` 本身 `role=pre_check`，用户可在 `precheck:"off"` 下把它当普通测试提交，故角色不可作判据。评审 #14 已修：`store.PrecheckTaskIDs`/`PrecheckFlags` + `orchestrator.TaskView.IsPrecheck` |
 | 11 | Job/Pod 正常结束后**没有回收路径**（只有取消才删 Job），也没有孤儿 GC goroutine；评审时集群已积压 53 个已终态 Job | 已按 `execution.md §6` 补齐（PR #14/#15）：`ports.Executor` 增 `Delete(ctx, h, DeletePolicy)`（`Background`/`Foreground`，404 幂等），Attempt 终态**落库之后**异步 `Delete(Background)`；新增 GC 循环（`Config.GCInterval` 默认 10min，`TESTPLANE_JOB_GC_ENABLED` 默认 true）回收"Job 已终态且 Attempt 已终态/无对应 Attempt"的 Job 与孤儿 Pod |
+| 12 | `testers/endpoint-probe/tester.yaml` 的 `placeholder` 是多行说明而非一行命令，`parameters.url.description` 里还写了"退出码 2"（`ARCHITECTURE §5.4` 要求一行示例、§5.8 只有 0/非 0） | **不改 Tester 内容**：内容一变就要升版本（K-3 版本钉死，注册表实测会拒绝启动——本轮试改后已回滚）。平台侧取 `placeholder` 首行作占位、退出码一律按 0 / 非 0 归类；待 `/testers/{name}/versions/{version}` 与版本升级流程就绪后，由 Tester 维护者在下一个版本里修（G-15） |
 
 ### 15.4 P1 优先项（按投入产出排序）
 

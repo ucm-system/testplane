@@ -145,9 +145,18 @@ function DeploySection({ run, version }: { run: Run; version: number }) {
 
       <CardBody className="flex flex-col gap-3">
         {deploy.state === 'queued' ? (
-          <Banner tone="warn" title={`部署方队列排队中${deploy.queue_position ? ` · 位次 ${deploy.queue_position}` : ''}`}>
-            {waited == null ? null : `已等待 ${formatDuration(waited)}。`}
-            {deploy.queue_reason ? `原因：${deploy.queue_reason}。` : '排队计入部署总窗口（默认 72h），期间可以取消。'}
+          // D-46：部署方只给水位计数，排队发生在 Volcano 层，没有位次 —— 只展示「排队中 + 已等待」与原因原文。
+          <Banner
+            tone="warn"
+            title={`排队中${waited == null ? '' : ` · 已等待 ${formatDuration(waited)}`}`}
+          >
+            {deploy.queue_reason ? (
+              <>
+                原因（原文）：<span className="break-all font-mono text-2xs">{deploy.queue_reason}</span>
+              </>
+            ) : (
+              '排队计入部署总窗口（默认 72h），期间可以取消。'
+            )}
           </Banner>
         ) : null}
         {deploy.queue_reason && deploy.state !== 'queued' ? <Banner tone="info" title={deploy.queue_reason} /> : null}
@@ -628,7 +637,7 @@ export function RunDetailPage() {
                     <FlowNode
                       name="Deploy"
                       badge={detail.deploy.state}
-                      meta={detail.deploy.queue_position ? `位次 ${detail.deploy.queue_position}` : detail.deploy.state}
+                      meta={detail.deploy.state === 'queued' ? '排队中' : detail.deploy.state}
                       tone={detail.deploy.state === 'ready' ? 'ok' : detail.deploy.state === 'failed' ? 'err' : 'info'}
                       onClick={() => {
                         document.getElementById('deploy-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })

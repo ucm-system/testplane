@@ -1781,6 +1781,8 @@ env:                          # 运行期环境变量声明（§12.4）
 | `IMAGE_PULL_FAILED` | 502 | 执行 | 是 | 镜像拉取失败 |
 | `MOUNT_UNAVAILABLE` | 502 | 执行 | 否 | Profile 未提供声明的挂载 |
 | `EXECUTOR_POD_ERROR` | 502 | 执行 | 是 | Pod 异常终止（`detail.k8s_reason` 保留原文，如 `Evicted`）；`Unschedulable` 不算失败，按 §6.9 留在排队态 |
+| `DEPLOY_FAILED` | 502 | Deploy | 否 | **平台侧**调用 Genet 失败（连接/5xx/同名冲突/安装失败）→ Run `failed`；`detail.reason` 保留 Genet 原文 |
+| `DEPLOY_BLOCKED` | 502 | Deploy | 是 | Genet 报 `blocked`（配额/资源/调度阻塞）或超部署窗口 → Run `service_unavailable`；`detail.reason ∈ {blocked,timeout,superseded,uninstalling,uninstalled}`（D-47） |
 | `ENDPOINT_UNREACHABLE` | 502 | Pre-Check | 是 | 网络不可达或连接被拒 |
 | `PRECHECK_FAILED` | 502 | Pre-Check | 是 | 探测返回非预期状态 |
 | `TASK_TIMEOUT` | 504 | 执行 | 按策略 | 超过 `timeout_seconds` |

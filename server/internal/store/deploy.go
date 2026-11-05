@@ -14,17 +14,19 @@ import (
 
 // RecordDeployState 把 Genet 的轮询结果写进 runs.deploy 并追加一条 deploy.state_changed 事件（C-5.3）。
 // state 取值：queued / accepted / deploying / ready / blocked。
+//
+// queuePosition 只为兼容调用方保留：Genet 只给队列水位计数、**没有位次**，
+// 所以 `queue_position` 键保留但值恒为 null（D-46 已把契约改成"恒 null、保留字段仅兼容"）。
+// 删键会让前端与 openapi 不一致，不要删。
 func (s *Store) RecordDeployState(ctx context.Context, runID, state, reason string, queuePosition int) error {
+	_ = queuePosition // 恒不落库，见上方 D-46
 	return s.InTx(ctx, func(tx pgx.Tx) error {
 		if _, err := s.Runs.Lock(ctx, tx, runID); err != nil {
 			return err
 		}
-		deploy := map[string]any{"state": state}
+		deploy := map[string]any{"state": state, "queue_position": nil}
 		if reason != "" {
 			deploy["queue_reason"] = reason
-		}
-		if queuePosition > 0 {
-			deploy["queue_position"] = queuePosition
 		}
 		if state == "queued" || state == "accepted" {
 			deploy["queued_at"] = time.Now().UTC().Format(time.RFC3339)

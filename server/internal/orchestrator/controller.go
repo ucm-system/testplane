@@ -203,6 +203,8 @@ func (c *Controller) Run(ctx context.Context) error {
 	defer watchdog.Stop()
 	reconcile := time.NewTicker(c.cfg.ReconcileInterval)
 	defer reconcile.Stop()
+	gcTick := time.NewTicker(c.cfg.GCInterval)
+	defer gcTick.Stop()
 
 	c.logf("orchestrator: controller started (ns=%s, concurrency=%d, storage=%s)",
 		c.cfg.Namespace, c.cfg.MaxGlobalConcurrency, c.cfg.StoragePVC)
@@ -211,6 +213,10 @@ func (c *Controller) Run(ctx context.Context) error {
 	// 否则旧 Task 会永久占着 endpoint_leases（C-3.5）。
 	if err := c.ReconcileOnce(ctx); err != nil {
 		c.logf("orchestrator: startup reconcile: %v", err)
+	}
+	// 启动也先回收一次：把停机期间累积的已终态 Job / 孤儿 Pod 收掉（execution §6.3）。
+	if err := c.GCOnce(ctx); err != nil {
+		c.logf("orchestrator: startup gc: %v", err)
 	}
 
 	for {
@@ -234,6 +240,11 @@ func (c *Controller) Run(ctx context.Context) error {
 		case <-reconcile.C:
 			if err := c.ReconcileOnce(ctx); err != nil {
 				c.logf("orchestrator: reconcile: %v", err)
+			}
+		case <-gcTick.C:
+			// execution §6.3：每 10 分钟回收已终态的 Job 与孤儿 Pod（#15）。
+			if err := c.GCOnce(ctx); err != nil {
+				c.logf("orchestrator: gc: %v", err)
 			}
 		}
 	}
@@ -417,8 +428,12 @@ func (c *Controller) finishReconciledAttempt(ctx context.Context, task TaskView,
 
 // JobGC 是可选的回收能力（*executor.Executor 满足）。
 // 单独成接口：无 K8s 的执行器实现（测试用 fake）可以没有它，回收自然跳过。
+//
+// 注意：参数必须用 `executor.AttemptStateFunc` 这个**命名类型**，不能用匿名的 func 字面量——
+// 命名类型与同名匿名类型在接口方法签名上并不相同，写成匿名 func 会导致 `*executor.Executor`
+// 不满足本接口，GC 被静默跳过（本仓库踩过一次，见 IMPLEMENTATION §15.3 #13）。
 type JobGC interface {
-	CollectGarbage(ctx context.Context, attemptState func(ctx context.Context, jobName string) (found, terminal bool, err error)) (executor.GCReport, error)
+	CollectGarbage(ctx context.Context, attemptState executor.AttemptStateFunc) (executor.GCReport, error)
 }
 
 // GCOnce 回收"已结束但没人删"的 Job 与孤儿 Pod（execution §6.3）。

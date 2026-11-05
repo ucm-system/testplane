@@ -1408,6 +1408,9 @@ components:
         - CLEANUP_FAILED
         - CANCELED
         - INTERNAL_ERROR
+        - EXECUTOR_POD_ERROR
+        - DEPLOY_FAILED
+        - DEPLOY_BLOCKED
 
     Error:
       type: object
@@ -3328,7 +3331,12 @@ components:
           type: boolean
         detail:
           type: [string, 'null']
-          description: 不可达或无法判定时的说明（例如 `scheduler_unavailable`）
+          description: |
+            不可达或无法判定时的**降级原因**，取四值之一（D-49）：
+            `crd_missing`（集群未装 Volcano CRD）、`rbac_forbidden`（无 queues/podgroups 读权限）、
+            `scheduler_unavailable`（scheduler 不可达/无 PodGroup 状态）、`disabled`（配置关闭）。
+            **红线：`available=false` 不等于「0 排队」**，UI 不得把它显示成"无排队"。
+          enum: [crd_missing, rbac_forbidden, scheduler_unavailable, disabled]
         queues:
           type: array
           description: 已登记的 Volcano Queue 概要；不可达时为 `[]`

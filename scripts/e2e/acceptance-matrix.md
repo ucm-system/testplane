@@ -22,7 +22,7 @@
 | 14 | 产物持久化 | 部分 | `result.json`、`raw/`、`logs/` 均落 PVC；`/logs` 返回 200 + X-Log-Offset；删 Pod 后下载待测 |
 | 15 | 失败隔离 | 未做 | 两 Task 一失败一成功的 Run 待构造（需要第二个可执行 Tester） |
 | 16 | Web UI | 部分 | `pnpm --dir web build` 通过；`GET /` 200 text/html；日志页接口已通；Playwright 冒烟未做 |
-| 17 | API 契约与错误码 | 做过 | 规格侧 12/12；实现侧 32/32（集群实例 8092）；合计 44/44；warning 按扁平 Error（D-39） |
+| 17 | API 契约与错误码 | 做过 | PR #13/#16 后：规格 15/15（设计端点双向差集 + 白名单）、实现 32/32、合计 **47/47**；warning 按扁平 Error（D-39） |
 
 ## 复跑命令
 

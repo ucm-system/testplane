@@ -9,12 +9,12 @@
 | 项 | 状态 |
 |---|---|
 | `tools/mock-llm`（OpenAI 兼容假服务 + 故障注入） | ✅ 完成，18 个单测通过；真实 `endpoint-probe` 五种场景验证通过 |
-| `tools/e2e`（submit / wait / assert CLI） | ✅ 完成，18 个 fake 控制面测试通过；**尚未对真控制面跑过**（等 #9/#10/#12 落地） |
+| `tools/e2e`（submit / wait / assert CLI） | ✅ 完成，22 个 fake 控制面测试通过；对真控制面 **31/31** 通过 |
 | 无后端时干净报错 | ✅ 退出码 3，提示 `make dev` 与 8080，不崩 |
-| 契约测试（`server/api/openapi.yaml` 实现侧校验） | ⏳ 第二阶段，等 Lead 通知文件就绪 |
-| 前端冒烟（`pnpm build`、`GET /`） | ⏳ 第二阶段 |
-| 失败注入（经平台，`service_unavailable` 路径） | ⏳ 后端可跑后执行 |
-| 验收矩阵 17 项结论 | ⏳ 后端可跑后逐条填，结论交 infra 写 `docs/runbook/acceptance.md` |
+| 契约测试（`tools/contract`） | ✅ 规格 15/15 + 实现 32/32 = **47/47**（设计端点差集 + 白名单） |
+| 前端冒烟（`pnpm build`、`GET /`） | ✅ build 通过、`GET /` 200 text/html |
+| 失败注入（经平台，`service_unavailable` 路径） | ✅ 5/5（success/500/401/200包错误/slow-ready） |
+| 验收矩阵 17 项结论 | ✅ 见 [`acceptance-matrix.md`](acceptance-matrix.md) |
 
 ## 目录
 
@@ -120,18 +120,26 @@ pwsh scripts/e2e/failure-injection.ps1 -AllowKnownGaps    # 仅修复期临时�
 
 ```powershell
 pwsh scripts/e2e/cancel-check.ps1 -BaseUrl http://127.0.0.1:8093
+pwsh scripts/e2e/cancel-check.ps1 -DryRun          # 只打 Manifest/阈值，不连后端
 ```
 
-`cancelling → canceled` 由 60s 对账循环收口，最坏约 60s；脚本默认超时 60s。
+票 #16 起：轮询上界 180s 与断言阈值 60s **分离**（`-AssertCancelSeconds` / `-LoopLimitSeconds`），
+`docker exec`/`kubectl` 查询失败一律 fail-fast，并拆成 `*.query` 与 `*.empty` 两条断言，
+不会再把“查询挂了”当成“无残留”。
 
 超时路径（平台 watchdog 超时）同样有独立脚本：
 
 ```powershell
 pwsh scripts/e2e/timeout-check.ps1 -BaseUrl http://127.0.0.1:8095
+pwsh scripts/e2e/timeout-check.ps1 -DryRun
 ```
 
 期望：`precheck:"off"` + 单个 test Task 超时 → Run `failed`（TASK_TIMEOUT 属平台 C 类）；
-Attempt 容差 `timeout + 30s`；事件接受 `task.state_changed + payload.error.code=TASK_TIMEOUT`。
+Attempt 容差 `timeout + 30s`（独立于轮询变量）；事件接受
+`task.state_changed + payload.error.code=TASK_TIMEOUT`；kubectl/docker 查询失败同样 fail-fast。
+
+`mock-llm-slow` 用 `-ready-after=86400s`（24h）而不是 1h：否则跑满 1h 后会真的就绪，
+超时用例会“意外成功”。
 
 默认**严格**：report 必现（终态后 ≤2s，30s 等待足够）、`/logs` 必非空；只有显式
 `-AllowKnownGaps` 才把当前已知的 report/logs 缺口从失败项里剔除，修复后不要带这个开关。
