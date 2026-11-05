@@ -32,7 +32,8 @@ if ([string]::IsNullOrWhiteSpace($OutDir)) { $OutDir = Join-Path $repo '.data\qa
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $headers = @{ Authorization = "Bearer $User"; Accept = 'application/json' }
 $script:ApiBase = $BaseUrl
-$forwardProcs = @()
+$script:ForwardProcs = @()
+$script:NextForwardPort = 8110
 
 function Start-ApiForward {
     param([int]$Port)
@@ -51,13 +52,47 @@ function Start-ApiForward {
     throw "port-forward $Port 在 20s 内不可用（见 $log）"
 }
 
+# 外部重新 rollout 会换 Pod，旧 port-forward 随之失效；API 连接被拒时自动换端口重建。
+function Restart-ApiForward {
+    foreach ($p in $script:ForwardProcs) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+    $script:ForwardProcs = @()
+    for ($i = 0; $i -lt 5; $i++) {
+        $port = $script:NextForwardPort
+        $script:NextForwardPort++
+        try {
+            $p = Start-ApiForward -Port $port
+            $script:ForwardProcs += $p
+            $script:ApiBase = "http://127.0.0.1:$port"
+            Write-Host "  API port-forward 已重建到 $port" -ForegroundColor Yellow
+            return
+        } catch {
+            Write-Host "  port $port 不可用，换一个端口…" -ForegroundColor Yellow
+        }
+    }
+    throw "无法重建 API port-forward"
+}
+
 function Invoke-Api {
     param([string]$Method, [string]$Path, [string]$Body = '')
     $uri = "$script:ApiBase$Path"
-    if ($Body -ne '') {
-        return Invoke-RestMethod -Method $Method -Uri $uri -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $Body
+    $attempt = 0
+    while ($true) {
+        try {
+            if ($Body -ne '') {
+                return Invoke-RestMethod -Method $Method -Uri $uri -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $Body
+            }
+            return Invoke-RestMethod -Method $Method -Uri $uri -Headers $headers
+        } catch {
+            $err = $_
+            # 只有“连接层”错误才重建 forward；HTTP 4xx/5xx 有 Response，直接抛出。
+            $isConnectionError = $null -eq $err.Exception.Response
+            if ($SkipForward -or -not $isConnectionError -or $attempt -ge 2) { throw }
+            Write-Host "  API 连接断开（$($err.Exception.Message)），重建 port-forward…" -ForegroundColor Yellow
+            Restart-ApiForward
+            $attempt++
+            $uri = "$script:ApiBase$Path"
+        }
     }
-    return Invoke-RestMethod -Method $Method -Uri $uri -Headers $headers
 }
 
 function Invoke-PsqlCount {
@@ -115,7 +150,7 @@ function Add-Check([string]$Name, [bool]$Ok, [string]$Detail) {
 Write-Host "重启恢复演练：$BaseUrl" -ForegroundColor Cyan
 if (-not $SkipForward) {
     # 控制器 Pod 被杀时 port-forward 会断；演练自己管理 8100（演练前）→ 8101（恢复后）。
-    $forwardProcs += Start-ApiForward -Port $ForwardPort
+    $script:ForwardProcs += Start-ApiForward -Port $ForwardPort
     $script:ApiBase = "http://127.0.0.1:$ForwardPort"
 }
 $null = Invoke-WebRequest -UseBasicParsing "$script:ApiBase/healthz" -TimeoutSec 5
@@ -165,7 +200,7 @@ Add-Check 'controller.recovered' ($null -ne $recovered) $(if ($recovered) { "new
 if (-not $recovered) {
     # 负向验证：恢复超时必须 FAIL，不继续跑后面的“静默通过”。
     $ok = $false
-    foreach ($p in $forwardProcs) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+    foreach ($p in $script:ForwardProcs) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
     $out = [pscustomobject]@{ ok = $ok; run_id = $runId; task_id = $taskId; old_pods = $oldPods; checks = $checks }
     $jsonPath = Join-Path $OutDir ("result-" + $stamp + ".json")
     $out | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 $jsonPath
@@ -176,9 +211,9 @@ $newPod = $recovered.pod
 kubectl -n $Namespace wait --for=condition=Ready "pod/$newPod" --timeout="$($RecoveryTimeoutSeconds)s" 2>&1 | Out-Null
 
 if (-not $SkipForward) {
-    foreach ($p in $forwardProcs) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-    $forwardProcs = @()
-    $forwardProcs += Start-ApiForward -Port $RecoveryPort
+    foreach ($p in $script:ForwardProcs) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+    $script:ForwardProcs = @()
+    $script:ForwardProcs += Start-ApiForward -Port $RecoveryPort
     $script:ApiBase = "http://127.0.0.1:$RecoveryPort"
     $null = Invoke-WebRequest -UseBasicParsing "$script:ApiBase/healthz" -TimeoutSec 5
 }
@@ -256,7 +291,7 @@ Add-Check 'events.attempt_finished_payload' ($payloadComplete -and $succeededPay
      "，payloads=" + (($payloads | ForEach-Object { $_ | ConvertTo-Json -Compress }) -join ' | '))
 
 $ok = -not ($checks | Where-Object { -not $_.ok })
-foreach ($p in $forwardProcs) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+foreach ($p in $script:ForwardProcs) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
 $out = [pscustomobject]@{
     ok = $ok
     run_id = $runId

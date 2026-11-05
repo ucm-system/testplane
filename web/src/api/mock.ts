@@ -1014,10 +1014,46 @@ function validateManifest(manifest: RunManifest): ValidationIssue[] {
   return issues
 }
 
+/* ================================================================ 测试钩子 */
+
+/**
+ * mock 的角色注入（只用于本地验收 / Playwright）：
+ * `localStorage['testplane:mock-role'] = 'viewer' | 'operator' | 'admin'`，或 URL 上 `?mock_role=viewer`。
+ * 注入后会带一个假的 `csrf_token`，让前端按 OIDC 会话处理（viewer 的写按钮才会置灰）。
+ */
+function mockRoleOverride(): string | null {
+  try {
+    const stored = localStorage.getItem('testplane:mock-role')
+    if (stored === 'viewer' || stored === 'operator' || stored === 'admin') return stored
+  } catch {
+    /* 隐私模式忽略 */
+  }
+  try {
+    const fromQuery = new URLSearchParams(window.location.search).get('mock_role')
+    if (fromQuery === 'viewer' || fromQuery === 'operator' || fromQuery === 'admin') return fromQuery
+  } catch {
+    /* ignore */
+  }
+  return null
+}
+
 export const mockApi: Api = {
   async getIdentity(): Promise<Identity> {
     await delay(80)
-    // mock 的 /me 没有 csrf_token → api/auth.ts 判成 dev 模式，绝不会触发登录跳转
+    // 默认 dev 模式（无 csrf_token → 不跳登录）。
+    // QA / Playwright 需要验角色时，用 `localStorage['testplane:mock-role']='viewer'`
+    // 或 URL 上的 `?mock_role=viewer` 注入 OIDC 角色（会带一个假 csrf_token）。
+    const override = mockRoleOverride()
+    if (override) {
+      const identity: Identity = {
+        user: `mock-${override}`,
+        role: override,
+        csrf_token: 'mock-csrf-token',
+        groups: [`testplane-${override}`],
+      }
+      applyIdentity(identity)
+      return identity
+    }
     const identity: Identity = { user: getCurrentUser(), role: 'operator' }
     applyIdentity(identity)
     return identity

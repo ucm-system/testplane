@@ -3758,8 +3758,19 @@ components:
           minimum: 0
           description: '`now - min(podgroup.creationTimestamp)`，即队列里最久的等待'
         reason:
-          $ref: '#/components/schemas/WaitingReason'
-          description: 该队列造成排队的主要等待原因（K8s/Volcano 侧的三个取值之一）
+          type: [string, 'null']
+          description: |
+            该队列里**等得最久**那条 PodGroup 的 `status.conditions[-1].message`（没有则取 `.reason`），
+            **原文透传、平台不翻译**（D-49）。它常是 K8s 调度器的话术（例如
+            `0/1 nodes are available: 1 insufficient nvidia.com/gpu`），因此**不是**枚举。
+            需要结构化分类看 `waiting.by_reason`（那里六个键才是枚举）。
+          example: '0/1 nodes are available: 1 insufficient nvidia.com/gpu'
+        stale:
+          type: boolean
+          description: |
+            `available=true` 但本次采样失败、用的是上一次成功快照时置 `true`。
+            降级时**不回放历史**：`available=false` + `queues=[]`，不拿旧数据充数（D-49）。
+          default: false
 
     ExecutionProfile:
       type: object
