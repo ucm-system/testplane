@@ -134,21 +134,26 @@ func TestDeployLogs_TwoPods(t *testing.T) {
 	}
 	srv.deployLogsKube = fake
 
-	rec, body := getDeployLogs(t, srv, runID, "")
+	rec, body := getDeployLogs(t, srv, runID, "?pod=tp-abc-stack-1")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	if len(body.Pods) != 2 {
 		t.Fatalf("pods = %d, want 2", len(body.Pods))
 	}
-	if len(body.Entries) != 2 {
-		t.Fatalf("entries = %d, want 2: %+v", len(body.Entries), body.Entries)
+	if len(body.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1（每次只服务一个 Pod）: %+v", len(body.Entries), body.Entries)
 	}
 	if body.Entries[0].Pod != "tp-abc-stack-1" || body.Entries[0].LineCount != 3 {
 		t.Errorf("entry[0] = %+v", body.Entries[0])
 	}
-	if !strings.Contains(body.Entries[1].Text, "m2") {
-		t.Errorf("entry[1].text = %q", body.Entries[1].Text)
+	// 另一个 Pod 的日志通过 ?pod= 取，仍然可达。
+	rec, body = getDeployLogs(t, srv, runID, "?pod=tp-abc-stack-2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pod2 status = %d", rec.Code)
+	}
+	if len(body.Entries) != 1 || !strings.Contains(body.Entries[0].Text, "m2") {
+		t.Fatalf("pod2 entries = %+v", body.Entries)
 	}
 }
 
@@ -166,7 +171,7 @@ func TestDeployLogs_Pagination(t *testing.T) {
 	}
 	srv.deployLogsKube = fake
 
-	rec, body := getDeployLogs(t, srv, runID, "?offset=0&limit=2")
+	rec, body := getDeployLogs(t, srv, runID, "?pod=tp-page-stack-1&offset=0&limit=2")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -177,7 +182,7 @@ func TestDeployLogs_Pagination(t *testing.T) {
 		t.Errorf("first page = %+v", body.Entries[0])
 	}
 
-	rec, body = getDeployLogs(t, srv, runID, "?offset=2&limit=2")
+	rec, body = getDeployLogs(t, srv, runID, "?pod=tp-page-stack-1&offset=2&limit=2")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("page2 status = %d", rec.Code)
 	}
@@ -186,7 +191,7 @@ func TestDeployLogs_Pagination(t *testing.T) {
 	}
 
 	// 最后一页：没有更多 → truncated=false、next_offset=0。
-	rec, body = getDeployLogs(t, srv, runID, "?offset=4&limit=10")
+	rec, body = getDeployLogs(t, srv, runID, "?pod=tp-page-stack-1&offset=4&limit=10")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("page3 status = %d", rec.Code)
 	}
@@ -207,7 +212,7 @@ func TestDeployLogs_QueuedHasMessage(t *testing.T) {
 	})
 	srv.deployLogsKube = &fakeDeployLogs{pods: nil}
 
-	rec, body := getDeployLogs(t, srv, runID, "")
+	rec, body := getDeployLogs(t, srv, runID, "?pod=tp-q-stack-1")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -233,7 +238,7 @@ func TestDeployLogs_RestartProducesGap(t *testing.T) {
 		logs: map[string]string{"tp-gap-stack-1": "x\n"},
 	}
 
-	rec, body := getDeployLogs(t, srv, runID, "")
+	rec, body := getDeployLogs(t, srv, runID, "?pod=tp-gap-stack-1")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -266,7 +271,7 @@ func TestDeployLogs_ForbiddenIsExecutorUnavailable(t *testing.T) {
 	srv.deployLogsKube = &fakeDeployLogs{
 		listErr: apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", fmt.Errorf("no pods/log")),
 	}
-	rec, _ := getDeployLogs(t, srv, runID, "")
+	rec, _ := getDeployLogs(t, srv, runID, "?pod=tp-f-stack-1")
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", rec.Code)
 	}
@@ -286,4 +291,160 @@ func findGap(gaps []DeployLogGap, pod, reason string) *DeployLogGap {
 		}
 	}
 	return nil
+}
+
+// 评审 #4 的核心回归：两 Pod、limit 小于单 Pod 行数时，**第二个 Pod 的行必须能被取到**。
+//
+// 修前（多 Pod 共用一个 offset + next_offset 取 max）：p1=5 行、p2=2 行、limit=2 时，
+// p2 一行都不会出现；修后（?pod= 必选、游标只在单 Pod 内）p2 用自己的 offset 直接可达。
+func TestDeployLogs_TwoPodsPaging(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	started := time.Now().Add(-10 * time.Minute).UTC().Truncate(time.Second)
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-two", "state": "ready",
+		"accepted_at": started.Add(-time.Minute).Format(time.RFC3339),
+	})
+	srv.deployLogsKube = &fakeDeployLogs{
+		pods: []corev1.Pod{
+			deployPod("tp-two-stack-1", true, 0, started),
+			deployPod("tp-two-stack-2", true, 0, started),
+		},
+		logs: map[string]string{
+			"tp-two-stack-1": "1a\n1b\n1c\n1d\n1e\n", // 5 行
+			"tp-two-stack-2": "2a\n2b\n",             // 2 行（旧实现里永远轮不到）
+		},
+	}
+
+	// p1 翻页：每次 2 行，走完自己的 5 行。
+	rec, body := getDeployLogs(t, srv, runID, "?pod=tp-two-stack-1&limit=2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("p1 page1 = %d", rec.Code)
+	}
+	if len(body.Pods) != 2 {
+		t.Fatalf("pods = %d, want 2（pods[] 永远返回全部，供页签）", len(body.Pods))
+	}
+	if body.Entries[0].Text != "1a\n1b" || body.NextOffset != 2 {
+		t.Fatalf("p1 page1 = %+v next=%d", body.Entries[0], body.NextOffset)
+	}
+	rec, body = getDeployLogs(t, srv, runID, "?pod=tp-two-stack-1&offset=2&limit=2")
+	if rec.Code != http.StatusOK || body.Entries[0].Text != "1c\n1d" || body.NextOffset != 4 {
+		t.Fatalf("p1 page2 = %+v next=%d", body.Entries, body.NextOffset)
+	}
+
+	// p2 用自己的 offset：一行都不丢（这就是评审点名的验收）。
+	rec, body = getDeployLogs(t, srv, runID, "?pod=tp-two-stack-2&limit=2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("p2 = %d, want 200", rec.Code)
+	}
+	if len(body.Entries) != 1 || body.Entries[0].Pod != "tp-two-stack-2" {
+		t.Fatalf("p2 entries = %+v", body.Entries)
+	}
+	if body.Entries[0].Text != "2a\n2b" {
+		t.Fatalf("p2 text = %q, want 两行都在", body.Entries[0].Text)
+	}
+	if body.Truncated || body.NextOffset != 0 {
+		t.Fatalf("p2 truncated=%v next=%d, want false/0", body.Truncated, body.NextOffset)
+	}
+}
+
+// tail_lines 与 offset 互斥：同时给出 → 400（不让人猜"窗口内行号"）。
+func TestDeployLogs_TailLinesConflictsWithOffset(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	started := time.Now().Add(-5 * time.Minute).UTC().Truncate(time.Second)
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-tail", "state": "ready",
+	})
+	srv.deployLogsKube = &fakeDeployLogs{
+		pods: []corev1.Pod{deployPod("tp-tail-stack-1", true, 0, started)},
+		logs: map[string]string{"tp-tail-stack-1": "a\nb\nc\n"},
+	}
+	rec, _ := getDeployLogs(t, srv, runID, "?pod=tp-tail-stack-1&tail_lines=2&offset=1")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var errBody struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &errBody)
+	if errBody.Code != domain.CodeValidationError {
+		t.Errorf("code = %q", errBody.Code)
+	}
+	// 只给 tail_lines（不带 offset）→ 正常，且确实把 tail_lines 传给了 K8s。
+	rec, body := getDeployLogs(t, srv, runID, "?pod=tp-tail-stack-1&tail_lines=2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tail-only status = %d", rec.Code)
+	}
+	if srv.deployLogsKube.(*fakeDeployLogs).lastTail != 2 {
+		t.Errorf("tail_lines 未透传给 K8s: %d", srv.deployLogsKube.(*fakeDeployLogs).lastTail)
+	}
+	if len(body.Entries) != 1 {
+		t.Errorf("entries = %+v", body.Entries)
+	}
+}
+
+// `?pod=` 必选：缺失 → 400（游标只在单 Pod 内有意义）。
+func TestDeployLogs_PodRequired(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-req", "state": "ready",
+	})
+	srv.deployLogsKube = &fakeDeployLogs{
+		pods: []corev1.Pod{deployPod("tp-req-stack-1", true, 0, time.Now())},
+		logs: map[string]string{"tp-req-stack-1": "x\n"},
+	}
+	rec, _ := getDeployLogs(t, srv, runID, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400（pod 必选）", rec.Code)
+	}
+}
+
+// 指定的 Pod 不在当前列表里（打错 / 已回收）→ 404，并给出可选 Pod。
+func TestDeployLogs_PodNotFound(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-nf", "state": "ready",
+	})
+	srv.deployLogsKube = &fakeDeployLogs{
+		pods: []corev1.Pod{deployPod("tp-nf-stack-1", true, 0, time.Now())},
+		logs: map[string]string{"tp-nf-stack-1": "x\n"},
+	}
+	rec, _ := getDeployLogs(t, srv, runID, "?pod=tp-nf-ghost")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	var errBody struct {
+		Detail map[string]any `json:"detail"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &errBody)
+	if errBody.Detail["reason"] != "pod_not_found" {
+		t.Errorf("detail = %v", errBody.Detail)
+	}
+}
+
+// Pod 已被回收（列表为空且 deploy 已 ready）→ 200 + 显式 message + gap reason，
+// 不静默返回空数组（MVP 直读 pods/log 的已知偏差，IMPLEMENTATION §15.2）。
+func TestDeployLogs_RecycledPodIsExplicit(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	accepted := time.Now().Add(-10 * time.Minute).UTC().Truncate(time.Second)
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-gone", "state": "ready",
+		"accepted_at": accepted.Format(time.RFC3339),
+	})
+	srv.deployLogsKube = &fakeDeployLogs{pods: nil}
+
+	rec, body := getDeployLogs(t, srv, runID, "?pod=tp-gone-stack-1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(body.Message, "回收") {
+		t.Fatalf("message = %q, want 明确说 Pod 已回收", body.Message)
+	}
+	if len(body.Gaps) != 1 || !strings.Contains(body.Gaps[0].Reason, "pod recycled") {
+		t.Fatalf("gaps = %+v, want reason 说明已回收", body.Gaps)
+	}
 }

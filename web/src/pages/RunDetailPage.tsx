@@ -131,7 +131,15 @@ function phaseLabel(phase: string | null | undefined): string {
   return PHASE_LABEL[phase] ?? phase
 }
 
-/** Pod / Attempt 的 phase 是 k8s 标识符：展示用中文，原文留在 title 里 */function DeploySection({ run, version }: { run: Run; version: number }) {
+/** Pod / Attempt 的 phase 是 k8s 标识符：展示用中文，原文留在 title 里 *//** `RetryPlan.reason` 是枚举：翻成人话，原始值留在括号里方便对日志 */
+const RETRY_PLAN_REASON: Record<string, string> = {
+  run_not_terminal: 'Run 还没结束（run_not_terminal）',
+  retry_in_progress: '已有重试在进行中（retry_in_progress）',
+  run_canceled: '已取消的 Run 不支持重试（run_canceled）',
+  nothing_to_retry: '没有可重跑的 Task（nothing_to_retry）',
+}
+
+/** `RetryPlan.reason` 是枚举：翻成人话，原始值留在括号里方便对日志 */function DeploySection({ run, version }: { run: Run; version: number }) {
   const deploy = run.deploy ?? null
   const snapshot = useAsync(async () => {
     if (!deploy) return null
@@ -255,22 +263,18 @@ function phaseLabel(phase: string | null | undefined): string {
               <span className="text-sm font-semibold text-fg">Deploy 日志</span>
               <span className="text-2xs text-fg-3">按 Pod 分页签，不合并；断过的地方显式标 gap</span>
             </div>
-            <DeployLogsPanel runId={run.id} />
+            <DeployLogsPanel runId={run.id} deployState={deploy.state} pods={pods} />
           </div>
         </div>
-      ) : deploy.state === 'queued' || deploy.state === 'accepted' ? (
-        <CardBody className="pt-0">
-          <p className="text-2xs text-fg-3">尚未产生 Pod —— 排队 / 部署初期没有 Pod 拓扑。</p>
-        </CardBody>
       ) : (
-        /* Pod 拓扑为空（已回收 / 假部署方不落 Pod）时日志面板仍要可达：
-           后端会返回 pods=[] + message，面板原文显示，不当作错误。 */
+        /* Pod 拓扑为空（排队中 / 已回收）：日志端点 `?pod=` 必选，没有 Pod 时**不请求**，
+           面板按 deploy.state 给"排队中 / 已回收"的文案。 */
         <div className="border-t border-line-soft">
           <div className="flex flex-wrap items-center gap-2 px-5 pb-1 pt-4">
             <span className="text-sm font-semibold text-fg">Deploy 日志</span>
-            <span className="text-2xs text-fg-3">Pod 拓扑为空时仍可从后端取说明与历史日志</span>
+            <span className="text-2xs text-fg-3">没有 Pod 时不请求日志端点（`?pod=` 必选）</span>
           </div>
-          <DeployLogsPanel runId={run.id} />
+          <DeployLogsPanel runId={run.id} deployState={deploy.state} pods={pods} />
         </div>
       )}
     </Card>
@@ -316,7 +320,7 @@ function TaskAttemptsPanel({
       const accepted = await api.retryTask(task.id)
       toast({
         title: `已提交重跑：${task.name}`,
-        description: accepted.new_attempt_idx ? `新 Attempt #${accepted.new_attempt_idx} 已入队` : 'Task 已重新排队',
+        description: accepted.attempt_no ? `新 Attempt #${accepted.attempt_no} 已入队` : 'Task 已重新排队',
         tone: 'ok',
       })
       setRetryOpen(false)
@@ -1003,7 +1007,7 @@ export function RunDetailPage() {
           <div className="flex flex-col gap-3 text-xs">
             {!retryPlan.retryable ? (
               <Banner role="alert" tone="warn" title="当前 Run 不可重试">
-                {retryPlan.reason ?? '没有可重跑的 Task'}
+                {RETRY_PLAN_REASON[retryPlan.reason ?? 'nothing_to_retry']}
               </Banner>
             ) : null}
 
@@ -1020,7 +1024,8 @@ export function RunDetailPage() {
                       <span className="min-w-0 flex-1 truncate text-fg" title={task.name}>
                         {task.name}
                       </span>
-                      <TaskStatusBadge status={task.status} />
+                      {/* 契约里 reuse[] 只有 reason（复用依据），没有 status */}
+                      <Badge tone="ok">{task.reason === 'reused' ? '复用（reused）' : '已成功（succeeded）'}</Badge>
                       <span className="font-mono text-2xs text-fg-3">{task.task_id}</span>
                     </li>
                   ))}
@@ -1037,15 +1042,21 @@ export function RunDetailPage() {
               ) : (
                 <ul className="flex flex-col divide-y divide-line-soft rounded-md border border-line-soft">
                   {retryPlan.rerun.map((task) => (
-                    <li key={task.task_id} className="flex items-center gap-2 px-3 py-2">
+                    <li key={task.task_id} className="flex flex-wrap items-center gap-2 px-3 py-2">
                       <span className="min-w-0 flex-1 truncate text-fg" title={task.name}>
                         {task.name}
                       </span>
-                      <TaskStatusBadge status={task.status} />
-                      {task.error_code ? (
-                        <Badge tone="err" className="font-mono">
-                          {task.error_code}
-                        </Badge>
+                      <TaskStatusBadge status={task.status as never} />
+                      {/* 失败信息在 failure（Failure.code / retryable），不是 error_code */}
+                      {task.failure ? (
+                        <>
+                          <Badge tone="err" className="font-mono" title={task.failure.message}>
+                            {task.failure.code}
+                          </Badge>
+                          {task.failure.retryable ? <Badge tone="warn">可重试</Badge> : <Badge tone="muted">不可重试</Badge>}
+                        </>
+                      ) : task.reason ? (
+                        <span className="text-2xs text-fg-3">{task.reason}</span>
                       ) : null}
                       <span className="font-mono text-2xs text-fg-3">{task.task_id}</span>
                     </li>
@@ -1054,8 +1065,30 @@ export function RunDetailPage() {
               )}
             </section>
 
+            {/* blocked_items：想复用但不可复用（产物缺失 / 校验未通过），要单独讲清原因 */}
+            {retryPlan.blocked_items.length > 0 ? (
+              <section>
+                <h3 className="mb-1.5 text-xs font-medium text-fg">
+                  不能复用（产物不可用）
+                  <span className="ml-1 font-mono text-2xs text-fg-3">{retryPlan.blocked_items.length}</span>
+                </h3>
+                <ul className="flex flex-col divide-y divide-line-soft rounded-md border border-warn/30 bg-warn-weak">
+                  {retryPlan.blocked_items.map((item) => (
+                    <li key={item.task_id} className="flex flex-wrap items-center gap-2 px-3 py-2">
+                      <span className="min-w-0 flex-1 truncate text-fg" title={item.name}>
+                        {item.name}
+                      </span>
+                      <span className="text-2xs text-warn-text">{item.reason}</span>
+                      <span className="font-mono text-2xs text-fg-3">{item.task_id}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+
             <p className="border-t border-line-soft pt-2 text-2xs leading-relaxed text-fg-3">
-              底部的确认会创建新 Run：`retry_of` 指向当前 Run，已成功的 Task 复用结果不重复执行。
+              底部的确认会创建新 Run：<code className="font-mono">retry_of</code> 指向当前 Run，已成功的 Task
+              复用结果不重复执行（Manifest 摘要 <code className="font-mono">{retryPlan.manifest_digest}</code>）。
             </p>
           </div>
         ) : null}

@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
@@ -489,4 +493,262 @@ func TestRetryPlan_SecondRetryRunNothingToRetry(t *testing.T) {
 		t.Fatalf("对无可重跑项的 Run 再 retry status = %d, 期望 409", rec.Code)
 	}
 	_ = succeeded
+}
+
+// seedArtifactRowsWithSHA 给旧 Run 的产物索引写两行（带真实 sha256），
+// 模拟 report writer 的索引结果——retry 复制索引时要能逐条对上 sha256。
+func seedArtifactRowsWithSHA(t *testing.T, st *store.Store, runID, taskID, attemptID string,
+	files map[string][]byte) {
+	t.Helper()
+	rows := make([]store.Artifact, 0, len(files))
+	for name, data := range files {
+		sum := sha256.Sum256(data)
+		sha := hex.EncodeToString(sum[:])
+		size := int64(len(data))
+		tid, aid := taskID, attemptID
+		rows = append(rows, store.Artifact{
+			RunID: runID, TaskID: &tid, AttemptID: &aid,
+			Path:      runID + "/tasks/" + taskID + "/attempts/1/" + name,
+			SizeBytes: size, SHA256: &sha, Kind: "raw",
+		})
+	}
+	if err := st.InTx(context.Background(), func(tx pgx.Tx) error {
+		return st.Artifacts.UpsertBatch(context.Background(), tx, runID, rows)
+	}); err != nil {
+		t.Fatalf("seed artifacts: %v", err)
+	}
+}
+
+// secondGeneration 在 retryTestEnv 基础上做一次 retry，返回 run2 与它的两个 Task
+// （name=a 的复用 Task、name=b 的重跑 Task）。
+func secondGeneration(t *testing.T, srv *Server, st *store.Store, runID string) (string, *store.Task, *store.Task) {
+	t.Helper()
+	rec := doPost(t, srv, "/api/v1/runs/"+runID+"/retry", "")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("retry run1 status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var first struct {
+		NewRunID string `json:"new_run_id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &first)
+	tasks, _, err := st.Tasks.ListByRun(context.Background(), nil, first.NewRunID, "", 100)
+	if err != nil {
+		t.Fatalf("列 run2 Task: %v", err)
+	}
+	var a, b *store.Task
+	for i := range tasks {
+		switch tasks[i].Name {
+		case "a":
+			a = &tasks[i]
+		case "b":
+			b = &tasks[i]
+		}
+	}
+	if a == nil || b == nil {
+		t.Fatalf("run2 Task 不齐: %+v", tasks)
+	}
+	return first.NewRunID, a, b
+}
+
+// finishTaskWithResult 给某 Task 写一份合法的 result.json 并推成给定终态。
+func finishTaskWithResult(t *testing.T, srv *Server, st *store.Store, runID, taskID, status string) {
+	t.Helper()
+	dir := filepath.Join(srv.cfg.StorageRoot, runID, "tasks", taskID, "attempts", "1")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := map[string]any{
+		"schema_version": "1.0", "run_id": runID, "task_id": taskID, "attempt_id": taskID + "-a1",
+		"tester":     map[string]any{"name": "probe", "version": "1.0.0"},
+		"status":     "succeeded",
+		"started_at": "2026-11-05T03:00:00Z", "finished_at": "2026-11-05T03:00:10Z",
+		"metrics": []any{},
+	}
+	raw, _ := json.Marshal(body)
+	if err := os.WriteFile(filepath.Join(dir, "result.json"), raw, 0o640); err != nil {
+		t.Fatalf("write result.json: %v", err)
+	}
+	ref := filepath.ToSlash(filepath.Join(runID, "tasks", taskID, "attempts", "1", "result.json"))
+	if _, err := st.Pool().Exec(context.Background(), `
+		UPDATE tasks SET status=$2, current_attempt=1, result_ref=$3,
+		       error = CASE WHEN $2='failed'
+		                    THEN '{"code":"TESTER_NONZERO_EXIT","message":"exit 1","retryable":true}'::jsonb
+		                    ELSE NULL END
+		 WHERE id=$1`, taskID, status, ref); err != nil {
+		t.Fatalf("置 %s: %v", status, err)
+	}
+}
+
+// runArtifacts 取某 Run 的产物清单并按 task_id 过滤。
+func runArtifacts(t *testing.T, srv *Server, runID, taskID string) []struct {
+	Path   string  `json:"path"`
+	SHA256 *string `json:"sha256"`
+	Size   int64   `json:"size_bytes"`
+} {
+	t.Helper()
+	rec := doGet(t, srv, "/api/v1/runs/"+runID+"/artifacts")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("artifacts(%s) status = %d", runID, rec.Code)
+	}
+	var body struct {
+		Items []struct {
+			Path      string  `json:"path"`
+			SHA256    *string `json:"sha256"`
+			SizeBytes int64   `json:"size_bytes"`
+			TaskID    *string `json:"task_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析 artifacts: %v", err)
+	}
+	var out []struct {
+		Path   string  `json:"path"`
+		SHA256 *string `json:"sha256"`
+		Size   int64   `json:"size_bytes"`
+	}
+	for _, it := range body.Items {
+		if it.TaskID != nil && *it.TaskID == taskID {
+			out = append(out, struct {
+				Path   string  `json:"path"`
+				SHA256 *string `json:"sha256"`
+				Size   int64   `json:"size_bytes"`
+			}{Path: it.Path, SHA256: it.SHA256, Size: it.SizeBytes})
+		}
+	}
+	return out
+}
+
+// TestRetryPlan_SourceRetryableAfterCompletedWithErrors 是评审 #3 的验收：
+// run2 以 completed_with_errors 结束时，run1 的 plan 必须 retryable=true
+// （改前：busy 判定的 SQL 列表不含 completed_with_errors → 永久 retry_in_progress）。
+func TestRetryPlan_SourceRetryableAfterCompletedWithErrors(t *testing.T) {
+	srv, st, runID, _, _, cleanup := retryTestEnv(t)
+	defer cleanup()
+
+	run2, a, b := secondGeneration(t, srv, st, runID)
+	finishTaskWithResult(t, srv, st, run2, b.ID, "failed")
+	if _, err := st.Pool().Exec(context.Background(),
+		`UPDATE runs SET status='completed_with_errors', finished_at=now() WHERE id=$1`, run2); err != nil {
+		t.Fatalf("置 run2 终态: %v", err)
+	}
+	_ = a
+
+	rec := doGet(t, srv, "/api/v1/runs/"+runID+"/retry-plan")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("plan status = %d", rec.Code)
+	}
+	var plan struct {
+		Retryable bool   `json:"retryable"`
+		Reason    string `json:"reason"`
+		Rerun     []struct {
+			TaskID string `json:"task_id"`
+		} `json:"rerun"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &plan); err != nil {
+		t.Fatalf("解析: %v", err)
+	}
+	if !plan.Retryable {
+		t.Fatalf("run2 已是 completed_with_errors（终态），run1 应可再重试；实际 retryable=false reason=%q", plan.Reason)
+	}
+	if plan.Reason != "" {
+		t.Fatalf("retryable=true 时不应带 reason，实际 %q", plan.Reason)
+	}
+	// 而且真的能再点一次（会创建 run3 的兄弟）。
+	if rec := doPost(t, srv, "/api/v1/runs/"+runID+"/retry", ""); rec.Code != http.StatusAccepted {
+		t.Fatalf("对 completed_with_errors 的源 Run 再 retry status = %d，期望 202（body=%s）",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestRetryRun_ThirdGenerationKeepsArtifacts 是评审 #2 的验收：
+// 连续 retry 两次后，第三代（run3）复用 Task 的产物条目数与 sha256 必须与第二代一致
+// （改前：复用 Task 的 CurrentAttempt=0 被兜底成 attempts/1 → 产物全被 pathUnder 拒掉 → 零产物）。
+func TestRetryRun_ThirdGenerationKeepsArtifacts(t *testing.T) {
+	srv, st, runID, succeeded, _, cleanup := retryTestEnv(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// run1 的产物索引（带真实 sha256），模拟 report writer 已索引。
+	seedArtifactRowsWithSHA(t, st, runID, succeeded.ID, succeeded.ID+"-a1", map[string][]byte{
+		"result.json": []byte(`{"schema_version":"1.0","status":"succeeded"}`),
+		"stdout.log":  []byte("hello artifacts\n"),
+	})
+
+	// 第一次 retry → run2（a 复用，b 重跑）。
+	run2, a2, b2 := secondGeneration(t, srv, st, runID)
+	finishTaskWithResult(t, srv, st, run2, b2.ID, "failed")
+	if _, err := st.Pool().Exec(ctx,
+		`UPDATE runs SET status='completed_with_errors', finished_at=now() WHERE id=$1`, run2); err != nil {
+		t.Fatalf("置 run2 终态: %v", err)
+	}
+
+	gen2 := runArtifacts(t, srv, run2, a2.ID)
+	if len(gen2) != 2 {
+		t.Fatalf("第二代复用 Task 应有 2 条产物，实际 %d: %+v", len(gen2), gen2)
+	}
+	for _, it := range gen2 {
+		if it.SHA256 == nil || *it.SHA256 == "" {
+			t.Fatalf("第二代产物缺 sha256: %+v", it)
+		}
+	}
+
+	// 第二次 retry → run3：a2（本身是复用的）必须能被第三代再复用。
+	rec := doPost(t, srv, "/api/v1/runs/"+run2+"/retry", "")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("retry run2 status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var second struct {
+		NewRunID string `json:"new_run_id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &second)
+	if second.NewRunID == "" || second.NewRunID == run2 {
+		t.Fatalf("new_run_id = %q", second.NewRunID)
+	}
+	run3Tasks, _, err := st.Tasks.ListByRun(ctx, nil, second.NewRunID, "", 100)
+	if err != nil {
+		t.Fatalf("列 run3 Task: %v", err)
+	}
+	var a3 *store.Task
+	for i := range run3Tasks {
+		if run3Tasks[i].ReusedFromTaskID != nil && *run3Tasks[i].ReusedFromTaskID == a2.ID {
+			a3 = &run3Tasks[i]
+		}
+	}
+	if a3 == nil {
+		t.Fatalf("run3 里没有复用自 %s 的 Task: %+v", a2.ID, run3Tasks)
+	}
+
+	gen3 := runArtifacts(t, srv, second.NewRunID, a3.ID)
+	if len(gen3) != len(gen2) {
+		t.Fatalf("第三代复用 Task 产物条目数 = %d，第二代 = %d（改前 bug：三代零产物）\n gen2=%+v\n gen3=%+v",
+			len(gen3), len(gen2), gen2, gen3)
+	}
+	// 逐条比对 sha256（按 path 的 basename 配对；两代目录前缀不同）。
+	type key struct{ name, sha string }
+	toSet := func(items []struct {
+		Path   string  `json:"path"`
+		SHA256 *string `json:"sha256"`
+		Size   int64   `json:"size_bytes"`
+	}) map[key]bool {
+		out := map[key]bool{}
+		for _, it := range items {
+			name := filepath.Base(filepath.FromSlash(it.Path))
+			sha := ""
+			if it.SHA256 != nil {
+				sha = *it.SHA256
+			}
+			out[key{name: name, sha: sha}] = true
+		}
+		return out
+	}
+	g2, g3 := toSet(gen2), toSet(gen3)
+	for k := range g2 {
+		if !g3[k] {
+			t.Fatalf("第三代缺少第二代同 (file, sha256) 的产物: %+v\n gen2=%v\n gen3=%v", k, g2, g3)
+		}
+	}
+	// 复用 Task 的 result_ref 也必须指向新目录（否则下次 plan 又被降级）。
+	if a3.ResultRef == nil || *a3.ResultRef == "" {
+		t.Fatalf("第三代复用 Task 缺 result_ref（下次 plan 会退化成 blocked/rerun）")
+	}
 }

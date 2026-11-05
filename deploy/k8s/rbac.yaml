@@ -10,6 +10,9 @@
 #
 # 刻意**不授予**（06 §4.4，任何一条都不要"顺手补上"）：
 #   secrets get/list/watch     日志明文不脱敏（K-5），凭据只由 kubelet 注入
+#                              —— 唯一例外是 D-55 的 rotate 窄授权，不写在本文件：
+#                              用 deploy/k8s/gen-secret-rotate-role.ps1 按登记项生成
+#                              （resourceNames 限定到那一条 Secret，只授 get，见 rbac-secret-rotate.yaml）
 #   pods/exec、attach、portforward  平台不代执行命令
 #   deployments/services/ingresses  部署归 Genet，平台只建 Job
 #   nodes 写 / drain / evict    只读可见性，不替运维做节点决策

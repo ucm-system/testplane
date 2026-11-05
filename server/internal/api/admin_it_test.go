@@ -43,7 +43,14 @@ func uniqueAdminName(prefix string) string {
 
 func newAdminTestEnv(t *testing.T) *adminTestEnv {
 	t.Helper()
-	dsn, err := dbtest.URL("api")
+	return newAdminTestEnvFor(t, "api")
+}
+
+// newAdminTestEnvFor 建在独立测试库上（purpose 派生库名）。
+// 需要做 DDL 破坏注入的用例用独立库（如 "api_audit"），避免影响同包其它用例。
+func newAdminTestEnvFor(t *testing.T, purpose string) *adminTestEnv {
+	t.Helper()
+	dsn, err := dbtest.URL(purpose)
 	if err != nil {
 		t.Fatalf("准备测试库: %v", err)
 	}

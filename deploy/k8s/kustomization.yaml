@@ -10,8 +10,11 @@
 #   kubectl apply -k deploy/overlays/with-control-plane
 # 对应文件：deploy/components/control-plane/{deployment,migrate-job}.yaml
 #
-# 另外两份「有前提条件」的清单仍然单独 apply（各自文件头写了原因）：
+# 另外几份「有前提条件」的清单仍然单独 apply（各自文件头写了原因）：
 #   k8s/rbac-cluster-executor.yaml  Job 要落到 testplane 以外的 namespace 时（扩权，需评审）
+#   k8s/rbac-secret-rotate.yaml     D-55 窄授权（rotate 用），按登记项生成后再 apply：
+#                                   pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace ... -SecretName ... -Out ...
+#                                   **不要**把 secrets 权限并进 rbac.yaml（那会变成通配授权）
 #   k8s/networkpolicy.yaml          有真 CNI 时；kindnet 不实现 NetworkPolicy
 #   k8s/pdb.yaml                    单副本 + minAvailable:1 会阻塞 drain，dev 不需要
 resources:

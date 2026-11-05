@@ -148,28 +148,45 @@ func (s *Server) buildRetryPlan(ctx context.Context, src *store.RetrySource) *re
 	return plan
 }
 
+// taskArtifactDir 是"某 Task 产物根目录"的**唯一真源**（绝对路径；storage_root 未配置
+// 或该 Task 既没跑过也不是复用时返回空串）。
+//
+// 约定（唯一，禁止在别处再推一遍路径）：
+//   - 复用来源（`reused_from_task_id` 非空，attempts=0）→ `<root>/<run>/tasks/<task>/reused`
+//     ——复用不伪造 Attempt 目录（见 materializeReusedArtifacts）；
+//   - 正常执行过的 Task → `<root>/<run>/tasks/<task>/attempts/<current_attempt>`。
+//
+// 注意：**没有** `attempt<=0 → 1` 的兜底。评审 #2 的 bug 就出在这里：复用 Task 的
+// CurrentAttempt 是 0，被兜底成 attempts/1，于是第三代复用时 `pathUnder` 把所有文件拒掉，
+// 新 Run 的复用 Task 落成 succeeded 但零产物。调用方拿到空串就是"没有产物"。
+func (s *Server) taskArtifactDir(runID string, t *store.Task) string {
+	if s.cfg == nil || strings.TrimSpace(s.cfg.StorageRoot) == "" || t == nil {
+		return ""
+	}
+	if t.ReusedFromTaskID != nil && *t.ReusedFromTaskID != "" {
+		return filepath.Join(s.cfg.StorageRoot, runID, "tasks", t.ID, "reused")
+	}
+	if t.CurrentAttempt <= 0 {
+		return ""
+	}
+	return filepath.Join(s.cfg.StorageRoot, runID, "tasks", t.ID, "attempts", fmt.Sprint(t.CurrentAttempt))
+}
+
 // reuseBlockedReason 返回非空字符串表示"不能复用，原因如下"。
-//
-// 产物目录按 Task 的来源判定（顺序很重要）：
-//  1. **本 Task 自己就是复用的**（`reused_from_task_id` 非空，attempts=0）→
-//     `<storage-root>/<run>/tasks/<task>/reused/result.json`。这是 retry 落复用产物时的
-//     固定约定（见 materializeReusedArtifacts：复用不伪造 Attempt 目录）。
-//  2. 否则（正常执行过的 Task）→ `<storage-root>/<run>/tasks/<task>/attempts/<n>/result.json`。
-//
-// 两条路径都要过 `report.ValidateResult`；不通过的原因按"来源"区分措辞，
-// 避免把"复用的产物丢了"误报成"没跑过"（QA retry-check 抓到的那个 bug）。
+// 产物目录来自 taskArtifactDir（唯一真源），两条来源都要过 `report.ValidateResult`；
+// 不通过的原因按来源区分措辞，避免把"复用的产物丢了"误报成"没跑过"。
 func (s *Server) reuseBlockedReason(ctx context.Context, runID string, t *store.Task) string {
 	reused := t.ReusedFromTaskID != nil && *t.ReusedFromTaskID != ""
 	label := "result.json"
-	var dir string
 	if reused {
-		dir = s.taskReusedDir(runID, t.ID)
 		label = "复用的 result.json"
-	} else {
-		dir = s.taskOutputDir(runID, t.ID, t.CurrentAttempt)
 	}
+	dir := s.taskArtifactDir(runID, t)
 	if dir == "" {
-		return "storage_root 未配置"
+		if s.cfg == nil || strings.TrimSpace(s.cfg.StorageRoot) == "" {
+			return "storage_root 未配置"
+		}
+		return label + " 不存在（该 Task 既没有 Attempt 也不是复用来源）"
 	}
 	if _, err := os.Stat(filepath.Join(dir, "result.json")); err != nil {
 		if os.IsNotExist(err) {
@@ -181,27 +198,6 @@ func (s *Server) reuseBlockedReason(ctx context.Context, runID string, t *store.
 		return fmt.Sprintf("%s 校验未通过（%s: %s）", label, f.Code, f.Message)
 	}
 	return ""
-}
-
-// taskReusedDir 是"复用产物"的固定目录（与 materializeReusedArtifacts 写入位置一致）：
-// `<storage-root>/<run>/tasks/<task>/reused`。
-func (s *Server) taskReusedDir(runID, taskID string) string {
-	if s.cfg == nil || strings.TrimSpace(s.cfg.StorageRoot) == "" {
-		return ""
-	}
-	return filepath.Join(s.cfg.StorageRoot, runID, "tasks", taskID, "reused")
-}
-
-// taskOutputDir 拼出某个 Attempt 的产物目录（storage-root 相对 → 绝对）；
-// storage_root 未配置时返回空串。
-func (s *Server) taskOutputDir(runID, taskID string, attemptNo int) string {
-	if s.cfg == nil || strings.TrimSpace(s.cfg.StorageRoot) == "" {
-		return ""
-	}
-	if attemptNo <= 0 {
-		attemptNo = 1
-	}
-	return filepath.Join(s.cfg.StorageRoot, runID, "tasks", taskID, "attempts", fmt.Sprint(attemptNo))
 }
 
 func (s *Server) resultMaxBytes() int64 {
@@ -363,7 +359,8 @@ func (s *Server) materializeReusedArtifacts(ctx context.Context, oldRunID, newRu
 	rows := make([]store.Artifact, 0, len(reuse))
 	for _, old := range reuse {
 		newTaskID := newIDs[old.ID]
-		oldDir := s.taskOutputDir(oldRunID, old.ID, old.CurrentAttempt)
+		// 唯一真源：复用来源指向 tasks/<task>/reused，而不是 attempts/<n>（评审 #2）。
+		oldDir := s.taskArtifactDir(oldRunID, old)
 		if oldDir == "" {
 			continue
 		}

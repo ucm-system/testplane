@@ -172,15 +172,20 @@ run:
 ```json
 {
   "run": { "id": "r-20261105-0001", "status": "queued", "kind": "run",
-           "submitted_at": "2026-11-05T01:00:00Z" },
-  "tasks": [ { "id": "t-0001", "name": "precheck", "status": "pending" },
-             { "id": "t-0002", "name": "accuracy-a", "status": "pending" } ]
+           "submitted_at": "2026-11-05T01:00:00Z",
+           "retry_of": null },
+  "tasks": [ { "id": "t-0001", "name": "precheck", "status": "pending",
+               "reused_from_task_id": null },
+             { "id": "t-0002", "name": "accuracy-a", "status": "pending",
+               "reused_from_task_id": null } ]
 }
 ```
 
 ### 4.3 独立 Task
 
-`POST /tasks` 接受 `task:` 形态（§10.3），**禁止 `deploy`**，`service.url` 必填，返回 `{task_id, run_id}`（合成 `kind='task'` 的占位 Run）。
+`POST /tasks` 接受 `task:` 形态（§10.3），**禁止 `deploy`**
+> 续跑形态（`02 §2.6`）：`POST /runs/{id}/retry` 返回的**新 Run** 里，`run.retry_of` 指向源 Run，
+> 复用来的 Task 带 `reused_from_task_id` 且 `status="succeeded"`、`attempt_no=0`。，`service.url` 必填，返回 `{task_id, run_id}`（合成 `kind='task'` 的占位 Run）。
 
 ### 4.4 重复提交：不做幂等（D-37）
 
@@ -211,7 +216,7 @@ run:
 | `GET` | `/runs/{id}` | 详情 + Task 摘要 | 200 |
 | `GET` | `/runs/{id}/tasks` | Task 列表（分页） | 200 |
 | `POST` | `/runs/{id}/cancel` | 取消（含 Deploy 排队） | 202 |
-| `POST` | `/runs/{id}/retry` | 同 Run 内重跑失败/跳过的 Task | 202 |
+| `POST` | `/runs/{id}/retry` | **新建 Run 续跑**（`retry_of` 指向源 Run；复用已成功 Task，其余重跑；源 Run 不变，见 `02 §2.6`） | 202 |
 | `GET` | `/runs/{id}/retry-plan` | 预览：将复用 / 将重跑 | 200 |
 | `GET` | `/runs/{id}/events` | SSE（`Last-Event-ID`） | 200 |
 | `GET` | `/runs/{id}/events/history` | 事件历史 JSON（`since_seq`、`limit`） | 200 |
@@ -219,7 +224,7 @@ run:
 | `GET` | `/runs/{id}/report.md` | `text/markdown` | 200 |
 | `GET` | `/runs/{id}/manifest` | Manifest 快照（"照上次再来一次"） | 200 |
 | `GET` | `/runs/{id}/deploy` | 部署快照（状态/排队/Endpoint/Pods） | 200 |
-| `GET` | `/runs/{id}/deploy/logs` | `?pod=&segment=&tail=` | 200 |
+| `GET` | `/runs/{id}/deploy/logs` | `?pod=`（**必选**）`&offset=&limit=&tail_lines=`；游标只在**单个 Pod** 内，`tail_lines` 与 `offset` 互斥 | 200 |
 | `GET` | `/runs/{id}/artifacts` | Run 级产物清单 | 200 |
 | `GET` | `/runs/{id}/files` | `?path=` 下载（Range） | 200/206 |
 

@@ -20,7 +20,7 @@ import { Field, Input, Select } from '@/components/ui/input'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { Banner, EmptyState, ErrorState } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
-import { Tabs } from '@/components/ui/tabs'
+import { Tabs, tabPanelProps } from '@/components/ui/tabs'
 import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
 import { useIdentity } from '@/hooks/useIdentity'
@@ -72,14 +72,23 @@ function ProfilesTab() {
     }
   }
 
-  const remove = async (profile: ExecutionProfile) => {
+  /** 删除要二次确认（评审 #14）：弹窗里写明将被删的对象名 */
+  const [pendingDelete, setPendingDelete] = useState<ExecutionProfile | null>(null)
+  const [deleting, setDeleting] = useState(false)
+
+  const remove = async () => {
+    if (!pendingDelete) return
+    setDeleting(true)
     try {
-      await api.deleteProfile(profile.name)
-      toast({ title: `已删除 Profile：${profile.name}`, tone: 'warn' })
+      await api.deleteProfile(pendingDelete.name)
+      toast({ title: `已删除 Profile：${pendingDelete.name}`, tone: 'warn' })
+      setPendingDelete(null)
       profiles.reload()
     } catch (e) {
       const err = toApiError(e)
       toast({ title: '删除失败', description: `${err.code}：${err.message}`, tone: 'err' })
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -159,7 +168,8 @@ function ProfilesTab() {
                         size="sm"
                         variant="ghost"
                         aria-label={`删除 ${profile.name}`}
-                        onClick={() => void remove(profile)}
+                        data-testid="delete-profile"
+                        onClick={() => setPendingDelete(profile)}
                       >
                         <Trash2 className="size-3.5" aria-hidden />
                       </Button>
@@ -220,11 +230,38 @@ function ProfilesTab() {
           </div>
         ) : null}
       </Dialog>
+
+      {/* 删除二次确认（评审 #14） */}
+      <Dialog
+        open={pendingDelete !== null}
+        onClose={() => setPendingDelete(null)}
+        title="删除这个 Profile？"
+        description="删除只影响之后的提交：历史 Task 冻结了 profile 名，不会因此失败。"
+        footer={
+          <>
+            <Button onClick={() => setPendingDelete(null)}>取消</Button>
+            <Button variant="danger" data-testid="confirm-delete" loading={deleting} onClick={() => void remove()}>
+              确认删除
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-2 text-xs text-fg-2">
+          <p>
+            将被删除：<span className="font-mono text-fg">{pendingDelete?.name}</span>
+          </p>
+          {pendingDelete ? (
+            <p className="text-2xs text-fg-3">
+              集群 <span className="font-mono">{pendingDelete.cluster}</span> · 命名空间{' '}
+              <span className="font-mono">{pendingDelete.namespace}</span> · 调度器{' '}
+              <span className="font-mono">{pendingDelete.scheduler}</span>
+            </p>
+          ) : null}
+        </div>
+      </Dialog>
     </Card>
   )
 }
-
-/* ---------------------------------------------------------------- Clusters */
 
 const EMPTY_CLUSTER: ClusterWrite = { name: '', api_server: '', kubeconfig_key: '', description: '' }
 
@@ -237,12 +274,19 @@ function ClustersTab() {
   const [error, setError] = useState<ApiErrorBody | null>(null)
   const [refs, setRefs] = useState<string[]>([])
 
-  const remove = async (cluster: AdminCluster) => {
+  /** 删除要二次确认（评审 #14）；被引用时把后端 409 的 `detail.profiles[]` 显示在弹窗里 */
+  const [pendingDelete, setPendingDelete] = useState<AdminCluster | null>(null)
+  const [deleting, setDeleting] = useState(false)
+
+  const remove = async () => {
+    if (!pendingDelete) return
     setRefs([])
     setError(null)
+    setDeleting(true)
     try {
-      await api.deleteAdminCluster(cluster.name)
-      toast({ title: `已删除集群：${cluster.name}`, tone: 'warn' })
+      await api.deleteAdminCluster(pendingDelete.name)
+      toast({ title: `已删除集群：${pendingDelete.name}`, tone: 'warn' })
+      setPendingDelete(null)
       clusters.reload()
     } catch (e) {
       const err = toApiError(e)
@@ -252,6 +296,8 @@ function ClustersTab() {
       setRefs(profiles)
       setError(err)
       toast({ title: '删除被拒绝', description: `${err.code}：${err.message}`, tone: 'err' })
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -356,7 +402,8 @@ function ClustersTab() {
                         size="sm"
                         variant="ghost"
                         aria-label={`删除 ${cluster.name}`}
-                        onClick={() => void remove(cluster)}
+                        data-testid="delete-cluster"
+                        onClick={() => setPendingDelete(cluster)}
                       >
                         <Trash2 className="size-3.5" aria-hidden />
                       </Button>
@@ -408,6 +455,56 @@ function ClustersTab() {
             </Field>
           </div>
         ) : null}
+      </Dialog>
+
+      {/* 删除二次确认（评审 #14）：被 Profile 引用时 409，引用者直接列在弹窗里 */}
+      <Dialog
+        open={pendingDelete !== null}
+        onClose={() => {
+          setPendingDelete(null)
+          setError(null)
+          setRefs([])
+        }}
+        title="删除这个集群？"
+        description="仍有 Profile 引用时后端会 409，不会静默级联删除。"
+        footer={
+          <>
+            <Button
+              onClick={() => {
+                setPendingDelete(null)
+                setError(null)
+                setRefs([])
+              }}
+            >
+              取消
+            </Button>
+            <Button variant="danger" data-testid="confirm-delete" loading={deleting} onClick={() => void remove()}>
+              确认删除
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-2 text-xs text-fg-2">
+          <p>
+            将被删除：<span className="font-mono text-fg">{pendingDelete?.name}</span>
+          </p>
+          {pendingDelete ? (
+            <p className="break-all text-2xs text-fg-3">
+              API Server <span className="font-mono">{pendingDelete.api_server}</span> · kubeconfig{' '}
+              <span className="font-mono">{pendingDelete.kubeconfig_key ?? '—'}</span>
+            </p>
+          ) : null}
+          {error ? (
+            <div className="mt-1 flex flex-col gap-1">
+              <ErrorState error={error} compact />
+              {refs.length > 0 ? (
+                <p className="text-2xs text-fg-2">
+                  仍被这些 Profile 引用：<span className="font-mono">{refs.join(', ')}</span>
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       </Dialog>
     </Card>
   )
@@ -646,16 +743,19 @@ export function AdminPage() {
 
       <Tabs<TabKey>
         ariaLabel="管理台分区"
+        idBase="admin"
         value={tab}
         onChange={setTab}
         items={TAB_ITEMS}
         className="rounded-lg border border-line-soft bg-surface px-3 pt-1 shadow-card"
       />
 
-      {tab === 'profiles' ? <ProfilesTab /> : null}
-      {tab === 'clusters' ? <ClustersTab /> : null}
-      {tab === 'secrets' ? <SecretsTab /> : null}
-      {tab === 'audit' ? <AuditTab /> : null}
+      <section {...tabPanelProps('admin', tab)}>
+        {tab === 'profiles' ? <ProfilesTab /> : null}
+        {tab === 'clusters' ? <ClustersTab /> : null}
+        {tab === 'secrets' ? <SecretsTab /> : null}
+        {tab === 'audit' ? <AuditTab /> : null}
+      </section>
     </>
   )
 }

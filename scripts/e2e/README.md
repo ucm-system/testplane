@@ -238,11 +238,19 @@ pwsh scripts/e2e/retry-check.ps1 -BaseUrl http://127.0.0.1:8093
 ## 3.7 管理面（P1 admin）
 
 ```powershell
+# 前置：D-55 的窄授权已 apply（否则 rotate_verified 用例按设计判红）
+pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace testplane `
+  -SecretName tp-secret-endpoint-mock -Out deploy/k8s/rbac-secret-rotate.yaml
+kubectl --context kind-testplane apply -f deploy/k8s/rbac-secret-rotate.yaml
+
 pwsh scripts/e2e/admin-check.ps1 -BaseUrl http://127.0.0.1:8093
 ```
 
-覆盖 profiles/clusters CRUD、Secret 引用登记、`GET /secrets`（operator 下界）、rotate 不存在目标 → **404 或 RBAC 未就绪时的 503 `EXECUTOR_UNAVAILABLE`**（生产需 D-55 的 `resourceNames` Role 才得到 404）、
-audit 有 `register`/`secret_rotated`（含 rejected）、删除被引用 cluster → 409、终态 Run 人工清理产物 →
+覆盖 profiles/clusters CRUD、Secret 引用登记、`GET /secrets`（operator 下界）、rotate 负向
+（目标不存在 → **404**；RBAC 未 apply 时只接受 **503 `EXECUTOR_UNAVAILABLE` + `detail.reason=forbidden|k8s_unavailable`**，
+不再接受"裸 503"）、**rotate 正向真集群用例**（控制面 Pod 的 SA 身份，不是本机 admin kubeconfig：
+`200 + rotated=true + verified=true`，RBAC 没 apply 就红）、audit 有 `register`/`secret_rotated`
+（含 rejected 与 verified=true）、删除被引用 cluster → 409、终态 Run 人工清理产物 →
 200 且 `/artifacts` 清空、非终态清理 → 409。dev 模式固定 admin，viewer 403 需 OIDC 环境，
 见 `tools/contract/README.md` 的“RBAC 已知限制”。
 

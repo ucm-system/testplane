@@ -288,8 +288,14 @@ func (s *Store) ListSecretRefs(ctx context.Context, cursor string, limit int) ([
 }
 
 // CreateSecretRef 登记一个 Secret 引用；名字冲突返回 domain.ErrConflict。
+// 需要与审计同事务时用 CreateSecretRefTx（PR #33 #6）。
 func (s *Store) CreateSecretRef(ctx context.Context, ref *SecretRef) error {
-	err := s.pool.QueryRow(ctx, `
+	return s.CreateSecretRefTx(ctx, nil, ref)
+}
+
+// CreateSecretRefTx 在调用方事务里登记 Secret 引用。
+func (s *Store) CreateSecretRefTx(ctx context.Context, tx pgx.Tx, ref *SecretRef) error {
+	err := s.db(tx).QueryRow(ctx, `
 		INSERT INTO secret_refs (name, namespace, secret_name, key, description, created_by)
 		VALUES ($1,$2,$3,$4,$5,$6)
 		RETURNING created_at`,

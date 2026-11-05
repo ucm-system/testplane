@@ -188,17 +188,32 @@ func TestAdminSecrets_Rotate(t *testing.T) {
 	}
 
 	// 4) 读集群失败 → 503 EXECUTOR_UNAVAILABLE（可重试）。
-	withSecretProbe(t, &fakeSecretProbe{err: errors.New("forbidden: secrets is forbidden")})
+	withSecretProbe(t, &fakeSecretProbe{err: errors.New("dial tcp: connection refused")})
 	rec = env.do(http.MethodPost, rotatePath, "", subject)
-	requireError(t, rec, http.StatusServiceUnavailable, domain.CodeExecutorUnavailable)
+	body = requireError(t, rec, http.StatusServiceUnavailable, domain.CodeExecutorUnavailable)
+	if detailOf(t, body)["reason"] != "k8s_unavailable" {
+		t.Fatalf("不可达时 reason 应为 k8s_unavailable: %v", body["detail"])
+	}
 
-	// 5) 成功 → 200 {rotated:true, checked_at}，并写 rotate 审计。
+	// 4b) 无权限（D-55 的 resourceNames Role 没 apply）→ 503 + detail.reason=forbidden。
+	//     评审 #5：必须让运维一眼看出是"授权没落"，而不是笼统的集群不可达。
+	withSecretProbe(t, &fakeSecretProbe{err: errSecretForbidden})
+	rec = env.do(http.MethodPost, rotatePath, "", subject)
+	body = requireError(t, rec, http.StatusServiceUnavailable, domain.CodeExecutorUnavailable)
+	if detailOf(t, body)["reason"] != "forbidden" {
+		t.Fatalf("无权限时 reason 应为 forbidden: %v", body["detail"])
+	}
+
+	// 5) 成功 → 200 {rotated:true, verified:true, checked_at}，并写 rotate 审计。
 	okProbe := &fakeSecretProbe{exists: true, keyNonEmpty: true}
 	withSecretProbe(t, okProbe)
 	rec = env.do(http.MethodPost, rotatePath, "", subject)
 	rotated := requireStatus(t, rec, http.StatusOK)
 	if rotated["rotated"] != true {
 		t.Fatalf("rotated 应为 true: %v", rotated)
+	}
+	if rotated["verified"] != true {
+		t.Fatalf("响应应带 verified=true（e2e 依赖它）：%v", rotated)
 	}
 	checkedAt, err := time.Parse(time.RFC3339, fmt.Sprint(rotated["checked_at"]))
 	if err != nil {

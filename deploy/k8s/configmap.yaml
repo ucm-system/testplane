@@ -47,8 +47,16 @@ data:
   # Pod 内跑：走 ServiceAccount 而不是 kubeconfig（client-go in-cluster）
   TESTPLANE_K8S_IN_CLUSTER: "true"
 
-  # ---- 认证：dev 用 dev；任何正式环境都必须 oidc（06 §6.1 红线）----
-  TESTPLANE_AUTH_MODE: "dev"
+  # ---- 认证（06 §6.1 红线 / 07 §2.1 / D-51）----
+  # 这份是**仓库默认清单**：默认 oidc + prod，缺 OIDC 必填项就启动失败（安全默认）。
+  # dev 鉴权（任何人=admin）只允许在本地：用 overlay `deploy/overlays/local-dev` 或
+  #   .env 里显式 TESTPLANE_ENV=dev + TESTPLANE_AUTH_MODE=dev（见 deploy/.env.example）。
+  TESTPLANE_ENV: "prod"
+  TESTPLANE_AUTH_MODE: "oidc"
+  # 统一认证（与 Genet 同一个企业 IdP，但**独立 client**，D-51）；按环境填：
+  # TESTPLANE_OIDC_ISSUER: "https://sso.example.internal/realms/ucm"
+  # TESTPLANE_OIDC_CLIENT_ID: "testplane"
+  # TESTPLANE_OIDC_REDIRECT_URL: "https://testplane.example.internal/api/v1/auth/callback"
 
   # ---- 并发与连接池 ----
   TESTPLANE_DB_MAX_OPEN_CONNS: "20"

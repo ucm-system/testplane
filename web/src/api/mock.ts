@@ -43,10 +43,12 @@ import type {
   ReportCounts,
   ReportFailure,
   ReportTask,
-  RetryAccepted,
+  RetryBlockedItem,
   RetryPlan,
+  RetryPlanReason,
+  RetryRerunItem,
+  RetryReuseItem,
   RetryPolicy,
-  RetryTaskRef,
   Run,
   RunEvent,
   RunEventType,
@@ -1342,33 +1344,15 @@ export const mockApi: Api = {
   },
 
   /**
-   * Deploy 日志：按 Pod 分页签 + **显式 gap**（Pod 重启过就插一条，不假装连续）。
-   * 排队期没有 Pod → `pods: []` + `entries: []` + `message`（契约就是这么定的，不是 404）。
+   * Deploy 日志（契约收窄后）：**`pod` 必选**，`offset` 只作用于该 Pod 的日志流，
+   * `tail_lines` 与 `offset` 二选一；`pods[]` / `gaps[]` 每次仍返回全部 Pod（页签渲染用）。
+   * 缺 `pod` → 400；`pod` 不存在 → 404（附 `available_pods[]`）。
    */
-  async getDeployLogs(runId: string, query: DeployLogQuery = {}): Promise<DeployLogs> {
+  async getDeployLogs(runId: string, query: DeployLogQuery & { pod: string }): Promise<DeployLogs> {
     await delay(110)
     const run = findRun(runId)
     const snapshot = state.deploys[runId] ?? { run_id: runId, deploy: run.deploy ?? null, manifest: null, pods: [] }
     const deployState = snapshot.deploy?.state ?? null
-
-    if (!snapshot.deploy) {
-      return {
-        run_id: runId,
-        pods: [],
-        entries: [],
-        gaps: [],
-        truncated: false,
-        next_offset: 0,
-        message: '这个 Run 没有 Deploy 阶段（service 模式直接打已有服务），因此没有部署日志。',
-      }
-    }
-    if (snapshot.pods.length === 0) {
-      const reason =
-        deployState === 'queued'
-          ? '部署还在排队（Volcano 层），Pod 尚未创建 —— 等 Pod 起来后这里会按 Pod 分页签显示日志。'
-          : '当前还没有可用的 Pod（部署中或已卸载），因此没有日志正文。'
-      return { run_id: runId, pods: [], entries: [], gaps: [], truncated: false, next_offset: 0, message: reason }
-    }
 
     const pods: DeployLogPod[] = snapshot.pods.map((pod, index) => ({
       name: pod.name,
@@ -1378,53 +1362,81 @@ export const mockApi: Api = {
       started_at: iso(30),
       last_seen_at: iso(0),
     }))
-    const target = query.pod ? pods.filter((pod) => pod.name === query.pod) : pods
+    const gaps: DeployLogGap[] = pods
+      .filter((pod) => pod.restarts > 0)
+      .map((pod) => ({ pod: pod.name, from: iso(24), to: iso(22), reason: 'pod restarted' }))
 
-    const entries: DeployLogEntry[] = []
-    const gaps: DeployLogGap[] = []
-    for (const pod of target) {
-      const lines = deployLogLines(pod.name, run.name)
-      const tail = query.tail_lines && query.tail_lines > 0 ? lines.slice(-query.tail_lines) : lines
-      const offset = query.offset ?? 0
-      const limit = query.limit ?? 200
-      const slice = tail.slice(offset, offset + limit)
-      if (slice.length > 0) {
-        entries.push({
-          pod: pod.name,
-          container: pod.name.includes('pd') ? 'prefill' : 'main',
-          offset,
-          line_count: slice.length,
-          text: slice.join('\n'),
-        })
-      }
-      if (pod.restarts > 0) {
-        gaps.push({
-          pod: pod.name,
-          from: iso(24),
-          to: iso(22),
-          reason: 'pod restarted',
-        })
-      }
-      const next = offset + slice.length
-      if (next < tail.length) {
-        return {
-          run_id: runId,
-          pods,
-          entries,
-          gaps,
-          truncated: true,
-          next_offset: next,
-        }
+    if (!query.pod) {
+      throw new ApiClientError(400, {
+        code: 'VALIDATION_ERROR',
+        message: '必须是单 Pod 游标读取：缺少 pod 参数',
+        detail: { param: 'pod' },
+        retryable: false,
+      })
+    }
+    if (query.tail_lines && query.offset) {
+      throw new ApiClientError(400, {
+        code: 'VALIDATION_ERROR',
+        message: 'tail_lines 与 offset 只能二选一',
+        detail: { param: 'tail_lines' },
+        retryable: false,
+      })
+    }
+
+    // Pod 已回收（列表空且已过排队期）：200 + message + gaps 说明，不静默空数组
+    if (pods.length === 0) {
+      const queued = deployState === 'queued' || deployState === 'accepted' || deployState === 'deploying'
+      return {
+        run_id: runId,
+        pods: [],
+        entries: [],
+        gaps: queued
+          ? []
+          : [{ pod: query.pod, from: iso(40), to: iso(10), reason: 'pod recycled: 日志随 Pod 回收，MVP 未落盘' }],
+        truncated: false,
+        next_offset: 0,
+        message: queued
+          ? '部署还在排队（Volcano 层），Pod 尚未创建 —— 等 Pod 起来后这里会按 Pod 分页签显示日志。'
+          : 'Pod 已被回收，日志随 Pod 一起消失（MVP 未落盘）。',
       }
     }
+
+    const target = pods.find((pod) => pod.name === query.pod)
+    if (!target) {
+      throw new ApiClientError(404, {
+        code: 'NOT_FOUND',
+        message: `没有名为 ${query.pod} 的 Pod`,
+        detail: { reason: 'pod_not_found', available_pods: pods.map((pod) => pod.name) },
+        retryable: false,
+      })
+    }
+
+    const lines = deployLogLines(target.name, run.name)
+    const tail = query.tail_lines && query.tail_lines > 0 ? lines.slice(-query.tail_lines) : lines
+    const offset = query.tail_lines ? 0 : (query.offset ?? 0)
+    const limit = query.limit ?? 200
+    const slice = tail.slice(offset, offset + limit)
+    const next = offset + slice.length
+    const entries: DeployLogEntry[] =
+      slice.length > 0
+        ? [
+            {
+              pod: target.name,
+              container: target.name.includes('pd') ? 'prefill' : 'main',
+              offset,
+              line_count: slice.length,
+              text: slice.join('\n'),
+            },
+          ]
+        : []
+
     return {
       run_id: runId,
       pods,
       entries,
       gaps,
-      truncated: false,
-      next_offset: 0,
-      ...(target.length === 0 ? { message: `没有名为 ${query.pod} 的 Pod。` } : {}),
+      truncated: next < tail.length,
+      next_offset: next < tail.length ? next : 0,
     }
   },
 
@@ -1694,33 +1706,52 @@ export const mockApi: Api = {
     await delay(140)
     const run = findRun(runId)
     const tasks = run.tasks ?? []
-    const reuse: RetryTaskRef[] = tasks
+    // 契约形状：reuse[] 只有 task_id/name/reason（**没有 status**）；
+    // rerun[] 带原状态 + `failure`（Failure：code/message/retryable）；
+    // blocked_items[] 是"想复用但不可复用"的说明（Task 同时仍在 rerun 里）。
+    const reuse: RetryReuseItem[] = tasks
       .filter((task) => task.status === 'succeeded')
-      .map((task) => ({ task_id: task.id, name: task.name, status: task.status, error_code: null }))
-    const rerun: RetryTaskRef[] = tasks
+      .map((task) => ({ task_id: task.id, name: task.name, reason: 'succeeded' }))
+    const rerun: RetryRerunItem[] = tasks
       .filter((task) => task.status !== 'succeeded')
       .map((task) => ({
         task_id: task.id,
         name: task.name,
         status: task.status,
-        error_code: task.error?.code ?? null,
+        failure: task.error
+          ? { code: task.error.code, message: task.error.message, retryable: task.error.retryable ?? false }
+          : null,
+      }))
+    // 被跳过的 Task 即使有目录也没有可复用产物：blocked_items 逐条说清原因
+    // （同一 Task 仍会出现在 rerun 里，契约如此）
+    const blocked_items: RetryBlockedItem[] = tasks
+      .filter((task) => task.status === 'skipped')
+      .map((task) => ({
+        task_id: task.id,
+        name: task.name,
+        reason: '复用的 result.json 不存在（Task 被跳过，没有产物）',
       }))
     const retryableStatuses = ['failed', 'completed_with_errors', 'service_unavailable']
     const retryable = retryableStatuses.includes(run.status) && rerun.length > 0
+    const reason: RetryPlanReason | null = retryable
+      ? null
+      : run.status === 'canceled'
+        ? 'run_canceled'
+        : run.status === 'succeeded' || rerun.length === 0
+          ? 'nothing_to_retry'
+          : 'run_not_terminal'
     return {
       run_id: run.id,
       retryable,
-      reason: retryable
-        ? null
-        : run.status === 'canceled'
-          ? '已取消的 Run 不支持重试'
-          : `Run 当前状态为 ${run.status}，没有可重跑的 Task`,
+      reason,
       reuse,
       rerun,
+      blocked_items,
+      manifest_digest: `sha256:${run.id.replace(/[^a-z0-9]/gi, '').padEnd(16, '0').slice(0, 16)}`,
     }
   },
 
-  async retryRun(runId: string): Promise<RetryAccepted> {
+  async retryRun(runId: string): Promise<RetryPlan> {
     await delay(260)
     const run = findRun(runId)
     const plan = await mockApi.getRetryPlan(runId)
@@ -1761,7 +1792,8 @@ export const mockApi: Api = {
     })
     created.retry_of = run.id
     auditLog('run.retry', 'run', newRunId, { retry_of: run.id })
-    return { new_run_id: created.id, retry_of: run.id }
+    // 契约：POST /runs/{id}/retry 的响应就是 RetryPlan + new_run_id / retry_of
+    return { ...plan, new_run_id: created.id, retry_of: run.id }
   },
 
   async retryTask(taskId: string): Promise<TaskRetryAccepted> {
@@ -1803,7 +1835,7 @@ export const mockApi: Api = {
       attempt_id: `${task.id}-a${task.current_attempt}`,
     })
     auditLog('task.retry', 'task', task.id, { attempt: task.current_attempt })
-    return { task_id: task.id, run_id: task.run_id, new_attempt_idx: task.current_attempt }
+    return { task_id: task.id, attempt_no: task.current_attempt, status: 'queued' }
   },
 
   /* ---------------------------------------------------------------- /admin/*（P1） */

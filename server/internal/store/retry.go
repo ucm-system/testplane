@@ -62,12 +62,15 @@ func (s *Store) LoadRetrySource(ctx context.Context, runID string) (*RetrySource
 		}
 		out.Tasks = tasks
 		var active string
+		// 终态集合是 domain.TerminalRunStatuses（唯一真源），SQL 用 ANY 传入；
+		// "进行中" = 非终态。历史上这里手写过一份不含 completed_with_errors 的列表，
+		// 导致源 Run 永久 409（评审 #3）。
 		err = tx.QueryRow(ctx, `
 			SELECT id FROM runs
 			 WHERE retry_of = $1
-			   AND status NOT IN ('succeeded','failed','canceled','service_unavailable')
+			   AND NOT (status = ANY($2))
 			 ORDER BY submitted_at DESC
-			 LIMIT 1`, runID).Scan(&active)
+			 LIMIT 1`, runID, domain.TerminalRunStatusStrings()).Scan(&active)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("store: retry: active retry lookup: %w", err)
 		}
@@ -125,15 +128,15 @@ func (s *Store) CreateRetryRun(ctx context.Context, p RetryCreateParams) (*Run, 
 		if err != nil {
 			return err
 		}
-		if !isTerminalRun(status) {
+		if !domain.TerminalRunStatus(status) {
 			return retryConflict("run_not_terminal", "Run 尚未结束，不能重试")
 		}
 		var active string
 		err = tx.QueryRow(ctx, `
 			SELECT id FROM runs
 			 WHERE retry_of = $1
-			   AND status NOT IN ('succeeded','failed','canceled','service_unavailable')
-			 LIMIT 1`, p.Source.ID).Scan(&active)
+			   AND NOT (status = ANY($2))
+			 LIMIT 1`, p.Source.ID, domain.TerminalRunStatusStrings()).Scan(&active)
 		if err == nil {
 			return retryConflict("retry_in_progress", "已有一次重试在执行（"+active+"）")
 		}
@@ -176,7 +179,7 @@ func (s *Store) CreateRetryRun(ctx context.Context, p RetryCreateParams) (*Run, 
 		return s.Audits.Insert(ctx, tx, AuditEntry{
 			Actor: actorOf(p.Actor), Role: defaultString(p.Role, "operator"),
 			Action: "retry", ObjectType: "run", ObjectID: run.ID,
-			Detail: map[string]any{
+			Detail: map[string]any{"result": "ok",
 				"retry_of": p.Source.ID, "reused": reused, "rerun": rerun,
 			},
 		})
@@ -268,7 +271,7 @@ func (s *Store) RetryTask(ctx context.Context, taskID, actor, role string) (int,
 		return s.Audits.Insert(ctx, tx, AuditEntry{
 			Actor: actorOf(actor), Role: defaultString(role, "operator"),
 			Action: "retry", ObjectType: "task", ObjectID: taskID,
-			Detail: map[string]any{"run_id": runID, "attempt_no": attemptNo},
+			Detail: map[string]any{"result": "ok", "run_id": runID, "attempt_no": attemptNo},
 		})
 	})
 	if err != nil {
@@ -277,16 +280,6 @@ func (s *Store) RetryTask(ctx context.Context, taskID, actor, role string) (int,
 	return attemptNo, nil
 }
 
-// isTerminalRun 报告 Run 状态是否终态（可重试的前提）。
-func isTerminalRun(st domain.RunStatus) bool {
-	switch st {
-	case domain.RunSucceeded, domain.RunFailed, domain.RunCanceled,
-		domain.RunServiceUnavailable, domain.RunCompletedWithErrors:
-		return true
-	default:
-		return false
-	}
-}
-
-// TerminalRunStatus 供 API 层判定（复用同一张表，避免两处判断漂移）。
-func TerminalRunStatus(st domain.RunStatus) bool { return isTerminalRun(st) }
+// TerminalRunStatus 供 API 层判定——直接转调 domain 的唯一真源，
+// 不再在 store/api 里各留一份终态表（评审 #3）。
+func TerminalRunStatus(st domain.RunStatus) bool { return domain.TerminalRunStatus(st) }

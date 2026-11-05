@@ -263,12 +263,17 @@ Helm release 存量和它自己的 OpenAPI 控制态冲突（启动 FATAL），�
 | 依据 | `--url` 不限制地址，**可达性由策略决定**（§12.2）；平台不做地址白名单 |
 
 ### 4.4 平台不授予的权限
-> **窄例外（D-55）**：POST /admin/secrets/{name}/rotate 需要对**已登记的那一个** Secret 做 get（只判存在 + key 非空）。RBAC 必须用 esourceNames 限定，不得授予通配 secrets get/list/watch；值不进日志/不落库/不回显，失败即 503 EXECUTABLE_…→EXECUTOR_UNAVAILABLE（可重试），不得降级成成功。
+> **窄例外（D-55）**：`POST /admin/secrets/{name}/rotate` 需要对**已登记的那一条** Secret 做 `get`
+> （只判存在 + key 非空）。RBAC **必须用 `resourceNames` 限定**到该条 `secret_refs`（由
+> `deploy/k8s/gen-secret-rotate-role.ps1` 按登记项生成 Role/RoleBinding：Role 在目标 Secret 所在
+> namespace、只授 `get`），不得授予通配 `secrets get/list/watch`；值不进日志 / 不落库 / 不回显，
+> 校验结果只记 `verified` + `checked_at`；无权限或不可达返回 `503 EXECUTOR_UNAVAILABLE`（可重试，
+> `detail.reason=forbidden|k8s_unavailable`），**不得降级成成功**。
 
 
 | 不授予 | 原因 | 依据 |
 |---|---|---|
-| `secrets get/list/watch` | 日志明文不脱敏，平台无需读明文；凭据由 kubelet 在创建 Pod 时注入 | K-5、W-9 |
+| `secrets get/list/watch`（**除 D-55 的窄例外**：`resourceNames` 限定的 `get`，仅限已登记项，见上方注记） | 日志明文不脱敏，平台无需读明文；凭据由 kubelet 在创建 Pod 时注入 | K-5、W-9、D-55 |
 | `pods/exec`、`pods/attach`、`pods/portforward` | 平台不代执行命令，Tester 只走 Job | §5.10、§6.4 |
 | 创建/修改 Deployment / Service / Ingress | 部署归 Genet，平台只建 Job | §9.1 |
 | `nodes` 写、`nodes/drain`、`nodes/evict` | 只读可见性，不替运维做节点决策 | §6.9 |

@@ -239,8 +239,11 @@ func (l *Live) Run() ([]check, []string, error) {
 	}
 	l.runB, l.taskB = l.submitFixture(ctx, "B")
 	if l.runB != "" {
-		l.probeDeployLogs(ctx, l.runB, "live.getRunDeployLogs.queued")
 		l.probeCancels(ctx)
+	}
+	deployRun := l.submitDeployFixture(ctx)
+	if deployRun != "" {
+		l.probeDeployLogsDeploy(ctx, deployRun)
 	}
 	l.runF, l.taskF = l.submitFailureFixture(ctx)
 	if l.runF != "" {
@@ -711,6 +714,119 @@ func (l *Live) opIDFor(method, path string) string {
 	return ""
 }
 
+// submitDeployFixture 提交一个 deploy 形态 Run（用于验证 ?pod= 必选；成功时不额外计入检查数）。
+func (l *Live) submitDeployFixture(ctx context.Context) string {
+	profile := l.profile()
+	name := "contract-deploy-" + time.Now().Format("20060102-150405")
+	manifest := fmt.Sprintf(`{"run":{"name":%q,"deploy":{"provider":"genet","parameters":{"model_name":"mock-llm"}},"precheck":"off","cleanup":{"policy":"never"},"tests":[{"name":"probe","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":%q},"args":"--wait_timeout_seconds=60"}]}}`, name, profile)
+	status, _, raw, err := l.client.do(ctx, http.MethodPost, "/api/v1/runs", []byte(manifest), "application/json", nil)
+	if err != nil {
+		l.recordErr("live.submitRun.deploy", err)
+		return ""
+	}
+	l.markOp("submitRun")
+	if status != http.StatusAccepted {
+		l.add("live.submitRun.deploy", false, fmt.Sprintf("期望 202，实际 %d：%s", status, truncate(raw, 300)))
+		return ""
+	}
+	var accepted struct {
+		Run map[string]any `json:"run"`
+	}
+	_ = json.Unmarshal(raw, &accepted)
+	runID := asString(accepted.Run["id"])
+	if runID == "" {
+		l.add("live.submitRun.deploy", false, "202 缺 run.id")
+	}
+	return runID
+}
+
+// probeDeployLogsDeploy 验证 ?pod= 必选（缺失 400）与带 pod 的 200 形状。
+func (l *Live) probeDeployLogsDeploy(ctx context.Context, runID string) {
+	opID := l.opIDFor(http.MethodGet, "/api/v1/runs/{run_id}/deploy/logs")
+	if opID == "" {
+		l.add("live.getRunDeployLogs", false, "openapi 缺少 GET /runs/{run_id}/deploy/logs")
+		return
+	}
+	base := "/api/v1/runs/" + url.PathEscape(runID) + "/deploy/logs"
+	// 等 deploy 快照出现（accepted/deploying/ready 均可；不要等 Pod 真正 ready）。
+	deadline := time.Now().Add(90 * time.Second)
+	var deployRun map[string]any
+	for {
+		status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID), nil, "", nil)
+		if err == nil && status == http.StatusOK {
+			var body struct {
+				Deploy json.RawMessage `json:"deploy"`
+			}
+			_ = json.Unmarshal(raw, &body)
+			var m map[string]any
+			_ = json.Unmarshal(body.Deploy, &m)
+			if len(m) > 0 {
+				deployRun = m
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			l.add("live.getRunDeployLogs", false, "deploy fixture 90s 内没有进入 deploy 阶段")
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	_ = deployRun
+
+	// 1) 缺 pod → 400。
+	st, hdr, raw, err := l.client.do(ctx, http.MethodGet, base, nil, "", nil)
+	l.markOp(opID)
+	if err != nil {
+		l.recordErr("live.getRunDeployLogs.no_pod", err)
+	} else if st != http.StatusBadRequest {
+		l.add("live.getRunDeployLogs.no_pod", false, fmt.Sprintf("期望 400，实际 %d：%s", st, truncate(raw, 300)))
+	} else if issues := l.validateError(opID, st, hdr, raw); len(issues) > 0 {
+		l.add("live.getRunDeployLogs.no_pod", false, strings.Join(issues, "；"))
+	} else {
+		l.add("live.getRunDeployLogs.no_pod", true, "HTTP 400，缺 pod 被拒")
+	}
+
+	// 2) 带实际 Pod → 200 + pods/entries 数组。
+	podName := "contract-no-pod"
+	dst, _, draw, derr := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID)+"/deploy", nil, "", nil)
+	if derr == nil && dst == http.StatusOK {
+		var d struct {
+			Pods []struct {
+				Name string `json:"name"`
+			} `json:"pods"`
+		}
+		_ = json.Unmarshal(draw, &d)
+		if len(d.Pods) > 0 && d.Pods[0].Name != "" {
+			podName = d.Pods[0].Name
+		}
+	}
+	path := base + "?pod=" + url.QueryEscape(podName)
+	st, hdr, raw, err = l.client.do(ctx, http.MethodGet, path, nil, "", nil)
+	if err != nil {
+		l.recordErr("live.getRunDeployLogs", err)
+		return
+	}
+	if st == http.StatusOK {
+		if issues := l.validateSuccess(opID, st, hdr, raw, "DeployLogs"); len(issues) > 0 {
+			l.add("live.getRunDeployLogs", false, strings.Join(issues, "；"))
+			return
+		}
+		var body map[string]json.RawMessage
+		_ = json.Unmarshal(raw, &body)
+		var pods, entries []any
+		_ = json.Unmarshal(body["pods"], &pods)
+		_ = json.Unmarshal(body["entries"], &entries)
+		l.add("live.getRunDeployLogs", true, fmt.Sprintf("HTTP 200，pod=%s pods=%d entries=%d", podName, len(pods), len(entries)))
+		return
+	}
+	if st == http.StatusBadGateway {
+		// 没有 pods/log 权限是可解释的环境错误；仍证明请求形状正确。
+		l.add("live.getRunDeployLogs", true, "HTTP 502 EXECUTOR_UNAVAILABLE（缺 pods/log，端点本身可达）")
+		return
+	}
+	l.add("live.getRunDeployLogs", false, fmt.Sprintf("pod=%s 期望 200，实际 %d：%s", podName, st, truncate(raw, 300)))
+}
+
 // probeDeployLogs 断言 deploy 日志端点 200 + pods/entries 数组（无 Deploy 阶段也允许空数组）。
 func (l *Live) probeDeployLogs(ctx context.Context, runID, checkName string) {
 	path := "/api/v1/runs/" + url.PathEscape(runID) + "/deploy/logs?limit=10"
@@ -1120,7 +1236,6 @@ func (l *Live) probeRunReads(ctx context.Context) {
 	l.probeRunDeploy(ctx, l.runA)
 	l.probeRunReport(ctx, l.runA, "/report", "Report", "getRunReport")
 	l.probeRunReport(ctx, l.runA, "/report.md", "", "getRunReportMarkdown")
-	l.probeDeployLogs(ctx, l.runA, "live.getRunDeployLogs")
 
 	if l.taskA == "" {
 		l.add("live.getTask", false, "fixture Run 没有 Task，无法校验 getTask/attempts")

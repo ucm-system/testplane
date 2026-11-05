@@ -210,6 +210,21 @@ stateDiagram-v2
 
 ---
 
+### 2.6 失败续跑（retry）与状态机的边界
+
+`retry` **不新增状态、不改既有迁移**——这是它和"同 Run 内重跑"最大的区别：
+
+| 问题 | 结论 | 依据 |
+|---|---|---|
+| 重试会不会改源 Run？ | **不会**。终态 Run 不可变（T11）：状态、`state_events`、报告全部冻结。 | §2.1、§5.1 |
+| 那重试做了什么？ | **创建一个新 Run**：`runs.retry_of` 指向源 Run，manifest / `cleanup_policy` 原样，`resolved.precheck` **重新解析**（服务可能已变）。 | `03 §4.2` |
+| 已成功的 Task 会重跑吗？ | **不会**。复用判据：源 Task `succeeded` **且** `result.json` 通过 `report.ValidateResult`。复用的 Task 直接落 `succeeded`、`attempt_no = 0`（**不产生 Attempt**），`tasks.reused_from_task_id` 指向源 Task。 | `03 §4.2` |
+| 复用 Task 的产物在哪？ | 复制/硬链接到新 Run 自己的 `tasks/<task>/reused/`，路径前缀属于新 Run——这样 `/runs/{id}/files?path=` 与产物清单不需要为复用开特例。 | `03 §4.2` |
+| 什么时候拒绝？ | 源 Run 非终态、源 Run `canceled`、同 `retry_of` 下已有非终态子 Run（`409 CONFLICT` + `detail.reason`）、没有可复用/可重跑项（`retryable=false` + `nothing_to_retry`）。 | `07 §8` |
+| "终态"以哪份列表为准？ | **一份**：`domain` 导出的终态集合（含 `completed_with_errors`），SQL 与 Go 判定共用，不得各写一遍。 | 票 #33-3 |
+
+`POST /tasks/{id}/retry` 是**另一条路径**：只给单个 Task 追加一次 Attempt（T11 `failed → queued`），不建新 Run、不涉及复用。
+
 ## 3. 状态机接口设计（Go）
 
 ### 3.1 原则

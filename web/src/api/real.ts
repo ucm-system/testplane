@@ -27,7 +27,6 @@ import type {
   ProfileWrite,
   QueueStatus,
   Report,
-  RetryAccepted,
   RetryPlan,
   Run,
   RunEvent,
@@ -198,16 +197,22 @@ export const realApi: Api = {
     })
   },
 
-  getDeployLogs(runId: string, query: DeployLogQuery = {}): Promise<DeployLogs> {
+  /**
+   * Deploy 日志：**`?pod=` 必选**（缺了服务端 400，指定不存在的 pod 404）。
+   * `tail_lines` 与 `offset` 二选一 —— 同时传会 400，所以"要看最新"时干脆不带 offset。
+   */
+  getDeployLogs(runId: string, query: DeployLogQuery & { pod: string }): Promise<DeployLogs> {
+    const useTail = Boolean(query.tail_lines && query.tail_lines > 0)
     return request<DeployLogs>(
       `/runs/${encodeURIComponent(runId)}/deploy/logs${qs({
         pod: query.pod,
-        offset: query.offset,
+        offset: useTail ? undefined : (query.offset ?? 0),
         limit: query.limit,
-        tail_lines: query.tail_lines,
+        tail_lines: useTail ? query.tail_lines : undefined,
       })}`,
     )
   },
+
   /* 报告（契约内） */
   getReport(runId: string): Promise<Report> {
     return request<Report>(`/runs/${encodeURIComponent(runId)}/report`)
@@ -231,8 +236,8 @@ export const realApi: Api = {
     return request<RetryPlan>(`/runs/${encodeURIComponent(runId)}/retry-plan`)
   },
 
-  retryRun(runId: string): Promise<RetryAccepted> {
-    return request<RetryAccepted>(`/runs/${encodeURIComponent(runId)}/retry`, { method: 'POST' })
+  retryRun(runId: string): Promise<RetryPlan> {
+    return request<RetryPlan>(`/runs/${encodeURIComponent(runId)}/retry`, { method: 'POST' })
   },
 
   retryTask(taskId: string): Promise<TaskRetryAccepted> {
@@ -249,30 +254,37 @@ export const realApi: Api = {
     return request<AdminCluster>('/admin/clusters', { method: 'POST', body: JSON.stringify(body) })
   },
 
+  /**
+   * 更新集群登记：服务端注册的是 `PUT /admin/clusters`（**名字在 body 里，不是路径参数**），
+   * 契约见 openapi `/api/v1/admin/clusters` 的 put。带 `?name=` 是兼容写法（服务端忽略）。
+   */
   updateAdminCluster(name: string, body: ClusterWrite): Promise<AdminCluster> {
-    return request<AdminCluster>(`/admin/clusters/${encodeURIComponent(name)}`, {
+    return request<AdminCluster>(`/admin/clusters${qs({ name })}`, {
       method: 'PUT',
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, name: body.name || name }),
     })
   },
 
+  /** 删除集群：`DELETE /admin/clusters?name=<name>`（openapi `NameQuery`）。 */
   async deleteAdminCluster(name: string): Promise<void> {
-    await request<unknown>(`/admin/clusters/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    await request<unknown>(`/admin/clusters${qs({ name })}`, { method: 'DELETE' })
   },
 
   createProfile(body: ProfileWrite): Promise<ExecutionProfile> {
     return request<ExecutionProfile>('/admin/profiles', { method: 'POST', body: JSON.stringify(body) })
   },
 
+  /** 更新 Profile：同 cluster，`PUT /admin/profiles` + body 里的 name。 */
   updateProfile(name: string, body: ProfileWrite): Promise<ExecutionProfile> {
-    return request<ExecutionProfile>(`/admin/profiles/${encodeURIComponent(name)}`, {
+    return request<ExecutionProfile>(`/admin/profiles${qs({ name })}`, {
       method: 'PUT',
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, name: body.name || name }),
     })
   },
 
+  /** 删除 Profile：`DELETE /admin/profiles?name=<name>`。 */
   async deleteProfile(name: string): Promise<void> {
-    await request<unknown>(`/admin/profiles/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    await request<unknown>(`/admin/profiles${qs({ name })}`, { method: 'DELETE' })
   },
 
   async listAdminSecrets(): Promise<AdminSecret[]> {

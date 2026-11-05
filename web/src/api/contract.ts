@@ -20,7 +20,6 @@ import type {
   ProfileWrite,
   QueueStatus,
   Report,
-  RetryAccepted,
   RetryPlan,
   Run,
   RunEvent,
@@ -113,7 +112,7 @@ export interface Api {
 
   /* 重试（P1，openapi 尚未收录，按 Lead 约定路径） */
   getRetryPlan(runId: string): Promise<RetryPlan>
-  retryRun(runId: string): Promise<RetryAccepted>
+  retryRun(runId: string): Promise<RetryPlan>
   retryTask(taskId: string): Promise<TaskRetryAccepted>
 
   /* 管理（P1，仅 admin；openapi 尚未收录） */
