@@ -112,7 +112,12 @@ go build -o ..\..\bin\e2e .
 pwsh scripts/e2e/failure-injection.ps1
 pwsh scripts/e2e/failure-injection.ps1 -Only fail-401,success
 pwsh scripts/e2e/failure-injection.ps1 -SkipApply -Cleanup
+pwsh scripts/e2e/failure-injection.ps1 -DryRun            # 只生成 Manifest/打表，不连后端
+pwsh scripts/e2e/failure-injection.ps1 -AllowKnownGaps    # 仅修复期临时豁免 report/logs
 ```
+
+默认**严格**：report 必现（终态后 ≤2s，30s 等待足够）、`/logs` 必非空；只有显式
+`-AllowKnownGaps` 才把当前已知的 report/logs 缺口从失败项里剔除，修复后不要带这个开关。
 
 期望终态以 **C-5.8 终态判定优先级**为准（Lead 2026-11-05 已拍板）：
 

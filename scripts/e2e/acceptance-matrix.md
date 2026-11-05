@@ -6,23 +6,23 @@
 
 | # | 验收项 | 结论 | 证据 / 备注 |
 |---|---|---|---|
-| 1 | Run 提交与完整状态链 | mock（提交/状态推进已验证；终态链待失败注入） | e2e `submit` 成功 202 + run_id；事件历史 events/history 可读；当前单 controller 在修 watch/secure 问题 |
-| 2 | Task 独立提交 | 未做（MVP 排除） | Lead 裁决 `POST /tasks` 不在 MVP；e2e 只覆盖 Run |
+| 1 | Run 提交与完整状态链 | 做过 | e2e `r-20261105-PPHF`：`queued→testing→succeeded` 7.0s（集群实例 8090，真 K8s Job）；事件 seq/转移/终态全绿 |
+| 2 | Task 独立提交 | 未做（MVP 排除） | Lead 裁决 `POST /tasks` 不在 MVP |
 | 3 | Genet 适配三项 | 未做 | 依赖 backend 的 Fake Genet 与 deploy 编排 |
-| 4 | Pre-Check 注入与阻断 | mock（注入已见；阻断待失败注入） | `GET /testers` 有 endpoint-probe；提交后 seq=0 自动注入；失败注入脚本已就绪 |
-| 5 | Registry 发现与校验 | 做过（发现）/ 未做（非法 tester.yaml 单测） | `GET /testers` 返回 endpoint-probe（K-3 无运行时注册）；`tools/contract` 校验 required 字段 |
-| 6 | Tester 契约（入口/argv/输出/result.json） | mock | 真实 `testers/endpoint-probe/run.sh` 在容器里对 mock-llm 跑通 5 种判定；e2e 校验 attempt logs/result.json |
+| 4 | Pre-Check 注入与阻断 | 部分 | seq=0 自动注入、失败 → 其余 Task skipped(upstream_abort) 已验证；**非零退出读 result.json 的 C-7.1 bug 修复中**（当前 500 被判 completed_with_errors） |
+| 5 | Registry 发现与校验 | 做过（发现）/ 未做（非法 tester.yaml 单测） | `GET /testers` 返回 endpoint-probe；`tools/contract` 校验 required 字段 |
+| 6 | Tester 契约（入口/argv/输出/result.json） | 做过 | 真实 `testers/endpoint-probe/run.sh` 在容器里对 mock-llm 跑通 5 种判定；`result.json` 11 字段通过校验 |
 | 7 | Tester 独立运行 | 做过 | `scripts/e2e/probe-check.ps1`：5/5 场景 exit code 与 result.json 均符合设计 |
-| 8 | K8s Executor（超时/取消） | 未做 | 待 Job watch/reconcile 修好后执行；取消语义脚本已备 |
-| 9 | 状态机与重启恢复 | 未做 | 需要杀 controller/Job 对账场景 |
+| 8 | K8s Executor（超时/取消） | 部分 | 真 Job 创建/完成/产物已通；取消与超时待失败注入窗口 |
+| 9 | 状态机与重启恢复 | 部分 | 已见僵尸租约被启动对账收口（Lead 实测 8QGE）；脚本化杀 Job 对账待补 |
 | 10 | Attempt 与重试 | 未做 | 需要 `retry_on` 命中与失败注入 |
-| 11 | 失败策略（abort_run） | mock | e2e 已断言 `run.abort_propagation`（precheck 失败→其余 skipped）；待真实失败注入验证 |
-| 12 | Run 编排全链路 | 未做 | 四终态用例待执行 |
-| 13 | 报告结构 | mock | e2e 断言 report 非空 + JSON 合法；真实 report 生成待 Run 终态 |
-| 14 | 产物持久化 | 未做 | 需要删除 Pod/Job 后仍可下载 result.json 与 raw/ |
+| 11 | 失败策略（abort_run） | 做过 | e2e 已断言 `run.abort_propagation`；500 场景其余 Task 全 skipped |
+| 12 | Run 编排全链路 | 部分 | success 全链路 done；四终态待失败注入窗口 |
+| 13 | 报告结构 | 阻塞 | report.writer 存在、日志有“报告已生成”，但 PPHF 终态后 30s 仍 404；等 backend 修 hook 后复测（SLA ≤2s） |
+| 14 | 产物持久化 | 部分 | PVC 里已有 `result.json`、`raw/last-response.txt`、`logs/probe.log`；删 Pod 后下载待测；`/logs` API 恒 404（collector 未实现），backend 正改为读 PVC `logs/` |
 | 15 | 失败隔离 | 未做 | 两 Task 一失败一成功的 Run 待构造（需要第二个可执行 Tester） |
-| 16 | Web UI | 部分 | `pnpm --dir web build` 通过；`GET /` 返回 200 text/html；Playwright 冒烟未做 |
-| 17 | API 契约与错误码 | 做过（工具与结果） | 规格侧 12/12；实现侧 32/32（对最新源码旁路实例，含 `/runs/{id}/tasks` seq=0 完整性）；合计 44/44。`tools/contract` 可复跑 |
+| 16 | Web UI | 部分 | `pnpm --dir web build` 通过；`GET /` 200 text/html；日志页依赖 #14 的 `/logs` 修复；Playwright 冒烟未做 |
+| 17 | API 契约与错误码 | 做过 | 规格侧 12/12；实现侧 32/32（集群实例 8090）；合计 44/44；warning 按扁平 Error（D-39） |
 
 ## 复跑命令
 
@@ -34,8 +34,10 @@ pwsh scripts/e2e/run-local.ps1                  # 需要控制面
 pwsh scripts/e2e/failure-injection.ps1          # 需要控制面 + kind executor
 ```
 
-## 已知阻塞（2026-11-05 10:55 时点）
+## 已知阻塞 / 待办（2026-11-05 11:13 时点）
 
-1. 控制面 8080 正在按 Lead 的节奏重建/重启；单 controller（宿主 `role=all`）。
-2. 后端的 Job watch/reconcile 查询（`attempts` 的 `created_at`）与 `seq > 0` 分页问题在修。
-3. 失败注入依赖 Tester Pod 能跑起来（PVC / secret env 已修/在修）。
+1. **等稳定窗口**：backend 的集成测试曾把 dev 库 `testplane` drop 重灌（11:04/11:05 两次，`relation "runs" does not exist`）；已定位为 `TESTPLANE_TEST_DATABASE_URL` 指向 dev 库，要求改用 `testplane_test`。
+2. **backend-exec 修复中**：非零退出不读 `result.json`（违反 C-7.1 / 07 §3）。修好前 500/慢就绪会误判 `completed_with_errors`（应为 `service_unavailable`）。
+3. **backend-core 修复中**：report hook（SLA ≤2s，当前 PPHF 终态后 30s 仍 404）；`/logs` 改为读 PVC `logs/`（当前恒 404）。
+4. 修复后要**恢复严格断言**：report 必现、logs 必非空，不带 `-AllowKnownGaps`。
+5. 窗口开始后复跑：`contract --mode all`、`e2e run`（success）、`failure-injection.ps1`（5 场景），结果写回 ticket #3。

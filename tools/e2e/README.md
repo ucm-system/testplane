@@ -35,6 +35,7 @@ go build -o ../../bin/e2e .          # 产物不入库（bin/ 已忽略）
 | `--timeout` | `5m` | 等终态总时长 |
 | `--poll` | `2s` | 轮询间隔 |
 | `--sse-timeout` | `10s` | SSE 冒烟/回退抓取窗口 |
+| `--report-wait` | `30s` | 报告异步生成的等待窗口（C-7.2 SLA：终态后 ≤2s；超时即判 hook 未触发） |
 | `--expect-error-code` | 空 | 断言 `run.error.code` |
 | `--expect-task-error-code` | 空 | 断言某个失败 Task 的 `error.code` |
 | `--expect-retryable` | 空 | 断言失败对象的 `retryable=true\|false` |

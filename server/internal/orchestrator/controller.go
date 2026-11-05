@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,6 +79,10 @@ func (c Config) withDefaults() Config {
 	if c.WatchdogInterval <= 0 {
 		c.WatchdogInterval = DefaultWatchdogInterval
 	}
+	if c.ReconcileInterval <= 0 {
+		// 漏配会让 time.NewTicker panic（非正周期），这里兜住并回落到默认 60s（C-3.5）。
+		c.ReconcileInterval = DefaultReconcileInterval
+	}
 	if c.MaxCandidates <= 0 {
 		c.MaxCandidates = DefaultMaxCandidates
 	}
@@ -125,6 +130,8 @@ type Controller struct {
 	mu      sync.Mutex
 	watches map[string]context.CancelFunc // attemptID -> cancel
 	wg      sync.WaitGroup
+	// logWG 跟踪后台日志落盘，供关闭/测试等待（不阻塞状态推进）。
+	logWG sync.WaitGroup
 }
 
 // New 构造 Controller。Repos / Executor 必填。
@@ -328,30 +335,14 @@ func (c *Controller) finishLostTask(ctx context.Context, task TaskView, attempt 
 	return c.recon.DeleteLeaseByTask(ctx, task.ID)
 }
 
-// finishReconciledAttempt 用 K8s 的终态事实收口 Attempt（成功也要过结果校验）。
+// finishReconciledAttempt 用 K8s 的终态事实收口 Attempt（与 Watch 回调共用 resolveAttemptResult）。
 func (c *Controller) finishReconciledAttempt(ctx context.Context, task TaskView, attempt AttemptRef, o ports.JobOutcome) error {
-	phase := o.Phase
-	var failure *domain.Failure
-	switch o.Phase {
-	case executor.PhaseSucceeded:
-		if f := c.validateResult(ctx, attempt); f != nil {
-			phase = "failed"
-			failure = f
-		}
-	default:
-		code := executor.OutcomeCode(o)
-		if code == "" {
-			code = domain.CodeInternalError
-		}
-		failure = &domain.Failure{
-			Code:      code,
-			Message:   o.Message,
-			Retryable: domain.Retryable(code),
-			Detail:    map[string]any{"phase": o.Phase, "reconciled": true},
-		}
-		if o.ExitCode != nil {
-			failure.Detail["exit_code"] = *o.ExitCode
-		}
+	phase, failure := c.resolveAttemptResult(ctx, attempt, o)
+	if failure != nil && failure.Detail == nil {
+		failure.Detail = map[string]any{}
+	}
+	if failure != nil {
+		failure.Detail["reconciled"] = true
 	}
 
 	out, err := c.repos.FinishAttempt(ctx, FinishInput{
@@ -377,6 +368,7 @@ func (c *Controller) finishReconciledAttempt(ctx context.Context, task TaskView,
 		}
 	}
 	c.logf("orchestrator: reconciled attempt %s (job %s) -> %s", attempt.AttemptID, attempt.Job(), phase)
+	c.captureLogsAsync(attempt)
 	return c.recon.DeleteLeaseByTask(ctx, task.ID)
 }
 
@@ -563,30 +555,9 @@ func (c *Controller) JobFinished(ctx context.Context, o ports.JobOutcome) error 
 		return err
 	}
 
-	phase := o.Phase
-	var failure *domain.Failure
-	switch o.Phase {
-	case executor.PhaseSucceeded:
-		// 退出码 0 之后才读 result.json（execution §8.1）。
-		if f := c.validateResult(ctx, attempt); f != nil {
-			phase = "failed"
-			failure = f
-		}
-	default:
-		code := executor.OutcomeCode(o)
-		if code == "" {
-			code = domain.CodeInternalError
-		}
-		failure = &domain.Failure{
-			Code:      code,
-			Message:   o.Message,
-			Retryable: domain.Retryable(code),
-			Detail:    map[string]any{"phase": o.Phase},
-		}
-		if o.ExitCode != nil {
-			failure.Detail["exit_code"] = *o.ExitCode
-		}
-	}
+	// 与对账共用同一个入口：无论退出码是否为 0，只要产物目录可读就先读 result.json
+	// （C-7.1 第 4 条：非零退出用 error.code + 实例级 retryable 归类）。
+	phase, failure := c.resolveAttemptResult(ctx, attempt, o)
 
 	out, err := c.repos.FinishAttempt(ctx, FinishInput{
 		AttemptID:   attempt.AttemptID,
@@ -616,34 +587,186 @@ func (c *Controller) JobFinished(ctx context.Context, o ports.JobOutcome) error 
 	if out.RunAllTerminal {
 		c.logf("orchestrator: run %s reached terminal state", attempt.RunID)
 	}
+	// Attempt 收口后把 Pod 日志落盘（best effort，失败只 WARN）。
+	c.captureLogsAsync(attempt)
 	_ = task
 	return nil
 }
 
-// validateResult 在"成功"路径上校验产物目录（execution §8.1、C-7.1），并区分两种"读不到"：
-//
-//   - **存储没挂/目录不可见**（StorageRoot 为空，或 controller 里 `os.Stat` 失败）：
-//     这是平台部署问题，不能判 Tester 的 `RESULT_MISSING`；保留"按退出码成功" + WARN
-//     `result_dir_missing`，把问题交给运维而不是冤枉这次测试。
-//   - **存储可用但产物缺失/非法**：原样交给 ResultValidator → `RESULT_MISSING` / `RESULT_INVALID`。
-//
-// 两者在事件与日志里可区分，报告侧也能据此判断"是没跑对还是没挂好"。
-func (c *Controller) validateResult(ctx context.Context, attempt AttemptRef) *domain.Failure {
-	if c.validator == nil {
-		return nil
-	}
+// ExitResultValidator 是 ports.ResultValidator 的**可选扩展**：带退出码的校验。
+// report.Validator 已经实现了 ValidateExit（C-7.1 第 4 条：非零退出时读 result.error.code），
+// 编排层用类型断言接上；老实现只有 Validate 时退化为"只判成功路径"。
+type ExitResultValidator interface {
+	ValidateExit(ctx context.Context, runID, taskID, attemptID, outputDir string, exitCode *int32) *domain.Failure
+}
+
+// attemptDir 返回 controller 侧可见的 Attempt 产物目录（PVC 的 <run>/tasks/<task>/attempts/<n>）。
+// 不可见时返回 ok=false。这是"平台没挂存储"与"Tester 真没写产物"的分界线：
+// 前者只 WARN（result_dir_missing），绝不判 RESULT_MISSING 冤枉测试。
+func (c *Controller) attemptDir(attempt AttemptRef, warn bool) (string, bool) {
 	if c.cfg.StorageRoot == "" {
-		c.logf("orchestrator: WARN result_dir_missing: storage root is not configured; "+
-			"attempt %s kept as exit-code success (no result validation)", attempt.AttemptID)
-		return nil
+		if warn {
+			c.logf("orchestrator: WARN result_dir_missing: storage root is not configured; attempt %s", attempt.AttemptID)
+		}
+		return "", false
 	}
 	dir := filepath.Join(c.cfg.StorageRoot, filepath.FromSlash(mustSubPath(attempt)))
 	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
-		c.logf("orchestrator: WARN result_dir_missing: attempt dir %q is not visible from the controller; "+
-			"attempt %s kept as exit-code success (no result validation)", dir, attempt.AttemptID)
+		if warn {
+			c.logf("orchestrator: WARN result_dir_missing: attempt dir %q is not visible from the controller; attempt %s",
+				dir, attempt.AttemptID)
+		}
+		return "", false
+	}
+	return dir, true
+}
+
+// resolveAttemptResult 把 Job 终态翻译成 Attempt 结论（Watch 回调与对账**共用**这一入口）。
+//
+// 规则（execution §8.1、control-plane §C-7.1 第 4 条）：
+//   - 退出码 0：跑产物校验，不过 → failed(该码)；
+//   - 退出码非 0：**先读 result.json**，用 error.code + 实例级 retryable + detail 归类
+//     （Pre-Check 靠它区分"没就绪（可重试）"与"认证/4xx（不可重试）"）；
+//     读不到/不合法才回退 TESTER_NONZERO_EXIT（retryable=false）；
+//   - 超时：平台权威判 TASK_TIMEOUT（§5.1），不拿 result.json 改判；
+//   - 存储不可见：不猜产物，保留执行器给出的码（成功路径保留 succeeded）。
+func (c *Controller) resolveAttemptResult(ctx context.Context, attempt AttemptRef, o ports.JobOutcome) (string, *domain.Failure) {
+	switch o.Phase {
+	case executor.PhaseSucceeded:
+		dir, ok := c.attemptDir(attempt, true)
+		if !ok || c.validator == nil {
+			return executor.PhaseSucceeded, nil
+		}
+		if f := c.validateResult(ctx, attempt, dir, o.ExitCode); f != nil {
+			return executor.PhaseFailed, f
+		}
+		return executor.PhaseSucceeded, nil
+	case executor.PhaseTimeout:
+		return executor.PhaseTimeout, &domain.Failure{
+			Code:      domain.CodeTaskTimeout,
+			Message:   o.Message,
+			Retryable: domain.Retryable(domain.CodeTaskTimeout),
+			Detail:    map[string]any{"phase": o.Phase, "task_id": attempt.TaskID, "attempt_id": attempt.AttemptID},
+		}
+	}
+
+	// 失败路径：先尝试从 result.json 归类（C-7.1 第 4 条 / execution §8.1）。
+	// 只有"读不到或不合法"才回退——校验器返回 RESULT_MISSING/RESULT_INVALID 属于
+	// "没有可用的归类依据"，不是最终结论，因此不在这里采信。
+	if o.ExitCode != nil && *o.ExitCode != 0 {
+		if dir, ok := c.attemptDir(attempt, false); ok && c.validator != nil {
+			if f := c.validateResult(ctx, attempt, dir, o.ExitCode); f != nil && !unclassifiable(f) {
+				return executor.PhaseFailed, f
+			}
+		}
+	}
+	code := executor.OutcomeCode(o)
+	if code == "" {
+		code = domain.CodeInternalError
+	}
+	failure := &domain.Failure{
+		Code:      code,
+		Message:   o.Message,
+		Retryable: domain.Retryable(code),
+		Detail:    map[string]any{"phase": o.Phase},
+	}
+	if o.ExitCode != nil {
+		failure.Detail["exit_code"] = *o.ExitCode
+	}
+	return executor.PhaseFailed, failure
+}
+
+// unclassifiable 报告"校验器没有给出可用的失败归类"：非零退出时这两种码只说明
+// result.json 缺失或不可解析，按 execution §8.1 应回退 TESTER_NONZERO_EXIT。
+func unclassifiable(f *domain.Failure) bool {
+	if f == nil {
+		return true
+	}
+	return f.Code == domain.CodeResultMissing || f.Code == domain.CodeResultInvalid
+}
+// validateResult 调校验器：优先带退出码的 ValidateExit，老实现退化为 Validate。
+func (c *Controller) validateResult(ctx context.Context, attempt AttemptRef, dir string, exitCode *int32) *domain.Failure {
+	if v, ok := c.validator.(ExitResultValidator); ok {
+		return v.ValidateExit(ctx, attempt.RunID, attempt.TaskID, attempt.AttemptID, dir, exitCode)
+	}
+	if exitCode != nil && *exitCode != 0 {
+		// 老实现读不了失败归类，交给调用方回退（不让它冒充成功/失败结论）。
 		return nil
 	}
 	return c.validator.Validate(ctx, attempt.RunID, attempt.TaskID, attempt.AttemptID, dir)
+}
+
+// 日志落盘参数：设计 §7.1 的分段/游标由 collector 负责；MVP 只做"结束时把 Pod 日志
+// 整体落到 <attempt>/logs/stdout.log"，供 API 的 /tasks/{id}/attempts/{idx}/logs 直接读文件。
+const (
+	// AttemptLogFileName 是落盘的目标文件（API 侧直接读它）。
+	AttemptLogFileName = "stdout.log"
+	// attemptLogTimeout 是日志落盘的硬上限：不阻塞状态推进，超时就放弃并 WARN。
+	attemptLogTimeout = 2 * time.Minute
+)
+
+// WaitLogCapture 等所有后台日志落盘结束（测试与优雅关闭用，不参与主循环）。
+func (c *Controller) WaitLogCapture() { c.logWG.Wait() }
+
+// captureLogsAsync 在 Attempt 收口后异步拉取 Pod 日志并落盘（best effort）。
+// 用 context.WithoutCancel：状态推进已经完成，这里不应因为请求 ctx 结束而丢日志。
+func (c *Controller) captureLogsAsync(attempt AttemptRef) {
+	if c.cfg.StorageRoot == "" {
+		return
+	}
+	c.logWG.Add(1)
+	go func() {
+		defer c.logWG.Done()
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), attemptLogTimeout)
+		defer cancel()
+		if err := c.writeAttemptLogs(ctx, attempt); err != nil {
+			// 写失败只 WARN，不影响状态（execution §7 的"允许丢日志，不允许伪造连续"）。
+			c.logf("orchestrator: WARN attempt_logs_failed: attempt %s: %v", attempt.AttemptID, err)
+			return
+		}
+	}()
+}
+
+// writeAttemptLogs 把容器 stdout/stderr 流写到 <attempt>/logs/stdout.log（temp + rename 原子落盘）。
+// 从 controller 侧看，Attempt 目录就是 StorageRoot 下 PVC 的 subPath。
+func (c *Controller) writeAttemptLogs(ctx context.Context, attempt AttemptRef) error {
+	// 目录可能还没建（对账场景）：先 mkdir，再复用同一个路径。
+	dir := filepath.Join(c.cfg.StorageRoot, filepath.FromSlash(mustSubPath(attempt)))
+	logsDir := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logsDir, 0o770); err != nil {
+		return fmt.Errorf("create logs dir: %w", err)
+	}
+
+	h := ports.JobHandle{Namespace: c.cfg.Namespace, JobName: attempt.Job()}
+	rc, err := c.exec.Logs(ctx, h)
+	if err != nil {
+		return fmt.Errorf("open pod logs: %w", err)
+	}
+	if rc == nil {
+		return fmt.Errorf("open pod logs: executor returned a nil stream")
+	}
+	defer rc.Close()
+
+	tmpPath := filepath.Join(logsDir, AttemptLogFileName+".tmp")
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", tmpPath, err)
+	}
+	if _, err := io.Copy(f, rc); err != nil {
+		f.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("copy pod logs: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close %s: %w", tmpPath, err)
+	}
+	finalPath := filepath.Join(logsDir, AttemptLogFileName)
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename logs: %w", err)
+	}
+	return nil
 }
 
 func mustSubPath(a AttemptRef) string {

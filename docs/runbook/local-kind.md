@@ -35,7 +35,15 @@ kubectl --context kind-testplane -n testplane exec deploy/testplaned -- wget -qO
 1. `get pods` → `testplaned-xxxx 1/1 Running`；
 2. `logs deploy/testplaned` 里有 `orchestrator: controller started (ns=testplane, concurrency=20, storage=testplane-storage)`；
 3. `/healthz` 与 `/readyz` 都返回 `ok`（`readyz` 含 DB ping + 存储可写 + 迁移版本）；
-4. 节点里镜像是最新的：`docker exec testplane-control-plane crictl images | Select-String testplane-server`。
+4. 节点里镜像是最新的：`docker exec testplane-control-plane crictl images | Select-String testplane-server`，
+   且**运行中的 Pod 用的就是它**：
+
+   ```powershell
+   kubectl --context kind-testplane -n testplane get pod -l app.kubernetes.io/name=testplaned `
+     -o jsonpath='{.items[0].status.containerStatuses[0].imageID}{"\n"}'
+   docker images testplane-server:dev --format '{{.ID}}{{"\n"}}'
+   # 两个 digest 要一致；不一致 = Pod 还跑着旧镜像（这就是"改了代码但功能没变"的头号原因）
+   ```
 
 > 第 4 步不能漏。`kubectl apply`/`rollout` 只保证"新 Pod 用新镜像"，但若之前有人把副本缩到 0，
 > apply 一个 `replicas:1` 的 Deployment 也会拉起来——两条路径都要确认**只有一个** controller，

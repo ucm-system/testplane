@@ -11,43 +11,44 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ucm-system/testplane/server/internal/dbtest"
 	"github.com/ucm-system/testplane/server/internal/domain"
 )
 
 // 集成测试：自起 PG（`TESTPLANE_TEST_DATABASE_URL`），没设就 skip。
-// 每个测试用独立 id，互不影响；TestMain 里重建 schema，保证从零迁移。
+//
+// **安全约束（Lead 报的 P0）**：测试只允许跑在 `*_test*` 库上。dbtest.URL 会把环境变量
+// 指向的库派生成本包独占的 `<name>_test_store`（不存在自动建），并拒绝在非测试库上
+// 执行 DROP/DDL —— 绝不允许把 dev 库 `testplane` 的数据清掉。
+// 每个测试用独立 id，互不影响；TestMain 重建该测试库的 schema，保证从零迁移。
 
 var (
 	testStoreOnce sync.Once
 	testStoreVal  *Store
 	testStoreErr  error
+	testDSNVal    string
 )
 
-func testDSN() string { return os.Getenv("TESTPLANE_TEST_DATABASE_URL") }
+func testDSN() string { return testDSNVal }
 
 func TestMain(m *testing.M) {
-	dsn := testDSN()
+	dsn, err := dbtest.URL("store")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "准备测试库失败: %v\n", err)
+		os.Exit(1)
+	}
 	if dsn != "" {
-		if err := resetSchema(dsn); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		name, err := dbtest.ResetSchema(ctx, dsn)
+		cancel()
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "重置测试库失败: %v\n", err)
 			os.Exit(1)
 		}
+		fmt.Fprintf(os.Stderr, "store 集成测试库: %s\n", name)
 	}
+	testDSNVal = dsn
 	os.Exit(m.Run())
-}
-
-func resetSchema(dsn string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	conn, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = conn.Close(context.Background()) }()
-	if _, err := conn.Exec(ctx, `DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;`); err != nil {
-		return err
-	}
-	return nil
 }
 
 // requireStore 返回共享的 Store（迁移已在首次调用时跑完）；无 DSN 时 skip。

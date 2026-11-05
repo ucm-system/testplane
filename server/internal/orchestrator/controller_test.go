@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,11 +20,14 @@ import (
 	"github.com/ucm-system/testplane/server/internal/executor"
 	"github.com/ucm-system/testplane/server/internal/genet/mocks"
 	"github.com/ucm-system/testplane/server/internal/ports"
+	"github.com/ucm-system/testplane/server/internal/report"
 )
 
 // fakeExec 记录 Submit 并允许测试直接驱动终态回调。
 type fakeExec struct {
 	mu        sync.Mutex
+	logContent string
+	logErr     error
 	submitted []ports.JobSpec
 	handles   []ports.JobHandle
 	canceled  []ports.JobHandle
@@ -57,7 +61,18 @@ func (f *fakeExec) Cancel(ctx context.Context, h ports.JobHandle) error {
 	return nil
 }
 
-func (f *fakeExec) Logs(ctx context.Context, h ports.JobHandle) (io.ReadCloser, error) { return nil, nil }
+func (f *fakeExec) Logs(ctx context.Context, h ports.JobHandle) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.logErr != nil {
+		return nil, f.logErr
+	}
+	content := f.logContent
+	if content == "" {
+		content = "tester says hello\n"
+	}
+	return io.NopCloser(strings.NewReader(content)), nil
+}
 
 func (f *fakeExec) specs() []ports.JobSpec {
 	f.mu.Lock()
@@ -820,6 +835,7 @@ func TestReconcileKeepsExitCodeSuccessWhenStorageNotConfigured(t *testing.T) {
 	if !warned {
 		t.Errorf("expected a result_dir_missing warning")
 	}
+	c.WaitLogCapture()
 	_ = ref
 }
 
@@ -853,6 +869,7 @@ func TestReconcileKeepsExitCodeSuccessWhenDirMissing(t *testing.T) {
 	if !warned {
 		t.Errorf("expected a result_dir_missing warning")
 	}
+	c.WaitLogCapture()
 }
 
 // 存储可见但 Tester 没写产物：必须照常判 RESULT_MISSING（产物即事实）。
@@ -877,10 +894,304 @@ func TestReconcileEnforcesResultValidatorWhenDirPresent(t *testing.T) {
 		t.Fatalf("ReconcileOnce: %v", err)
 	}
 	assertTaskAndLease(t, repos, "t-1", domain.TaskFailed, domain.CodeResultMissing)
+	c.WaitLogCapture()
 	if val.calls != 1 {
 		t.Errorf("validator calls = %d, want 1", val.calls)
 	}
 	if ref.JobName == "" {
 		t.Errorf("job name should be set")
+	}
+}
+
+// ---- 镜像拉取失败：对账必须立即收口（execution §4.3/§4.5）----------------
+
+// ImagePullBackOff 的 Pod 不会让 Job 进入终态，只能等 activeDeadlineSeconds 或对账；
+// 对账必须能识别 Pod waiting.reason 并收口成 IMAGE_PULL_FAILED（可重试码）。
+func TestReconcileFailsImagePullBackOff(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: ref.JobName, Namespace: "testplane"},
+		Status:     batchv1.JobStatus{Active: 1}, // Job 本身还没终态
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-1", Namespace: "testplane", Labels: map[string]string{
+			executor.LabelManaged: "true", "job-name": ref.JobName,
+		}},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason:  "ImagePullBackOff",
+					Message: `Back-off pulling image "img:1"`,
+				}},
+			}},
+		},
+	}
+	cs := fake.NewSimpleClientset(job, pod)
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{PollInterval: 20 * time.Millisecond})
+	c, err := New(Options{Repos: repos, Executor: ex, Prober: ex, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	assertTaskAndLease(t, repos, "t-1", domain.TaskFailed, domain.CodeImagePullFailed)
+}
+
+// initContainer 卡在 ErrImagePull 时同样要收口（假镜像 QA 场景常见形态）。
+func TestReconcileFailsImagePullOnInitContainer(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: ref.JobName, Namespace: "testplane"},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod-1", Namespace: "testplane", Labels: map[string]string{
+			executor.LabelManaged: "true", "job-name": ref.JobName,
+		}},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			InitContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason:  "ErrImagePull",
+					Message: `Failed to pull image "img:1"`,
+				}},
+			}},
+		},
+	}
+	cs := fake.NewSimpleClientset(job, pod)
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{PollInterval: 20 * time.Millisecond})
+	c, err := New(Options{Repos: repos, Executor: ex, Prober: ex, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	assertTaskAndLease(t, repos, "t-1", domain.TaskFailed, domain.CodeImagePullFailed)
+}
+
+// ---- New 的默认值兜底：所有 ticker 周期都必须 > 0（漏配 = 启动即 panic）----
+
+func TestNewFillsAllIntervals(t *testing.T) {
+	repos := NewMemoryRepos()
+	c, err := New(Options{Repos: repos, Executor: &fakeExec{}}) // Config 全零
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cfg := c.Config()
+	for name, d := range map[string]time.Duration{
+		"DispatchInterval":  cfg.DispatchInterval,
+		"DeployInterval":    cfg.DeployInterval,
+		"WatchdogInterval":  cfg.WatchdogInterval,
+		"ReconcileInterval": cfg.ReconcileInterval,
+	} {
+		if d <= 0 {
+			t.Errorf("%s = %v, must be > 0 (time.NewTicker panics on non-positive interval)", name, d)
+		}
+	}
+	// 这些不是 ticker，但也必须有合理默认值。
+	if cfg.MaxGlobalConcurrency <= 0 || cfg.TaskTimeoutDefault <= 0 || cfg.DeployTimeout <= 0 || cfg.MaxCandidates <= 0 {
+		t.Errorf("config defaults incomplete: %+v", cfg)
+	}
+	// 启动主循环不应 panic（短周期跑一小会儿就取消）。
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	c2, err := New(Options{Repos: repos, Executor: &fakeExec{}, Config: Config{
+		DispatchInterval: 10 * time.Millisecond, DeployInterval: 10 * time.Millisecond,
+		WatchdogInterval: 10 * time.Millisecond, ReconcileInterval: 10 * time.Millisecond,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c2.Run(ctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+// ---- C-7.1 第 4 条：非零退出也要读 result.json 归类 ----------------------
+
+const failedResultJSON = `{
+  "schema_version": "1.0",
+  "run_id": "r-1",
+  "task_id": "t-1",
+  "attempt_id": "t-1-a1",
+  "tester": {"name": "endpoint-probe", "version": "1.0.0", "image_ref": "img:1"},
+  "status": "failed",
+  "started_at": "2026-11-05T02:00:00Z",
+  "finished_at": "2026-11-05T02:00:05Z",
+  "metrics": [],
+  "notes": "mock 持续 500",
+  "error": {
+    "code": "PRECHECK_FAILED",
+    "message": "服务在窗口内一直返回 500",
+    "retryable": true,
+    "detail": {"http_status": 500}
+  }
+}`
+
+// writeAttemptResult 在 storage root 下写出 attempt 目录与 result.json。
+func writeAttemptResult(t *testing.T, root, body string) {
+	t.Helper()
+	dir := filepath.Join(root, "r-1", "tasks", "t-1", "attempts", "1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if body == "" {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, "result.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNonZeroExitUsesResultJSONErrorCode(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	root := t.TempDir()
+	writeAttemptResult(t, root, failedResultJSON)
+
+	ex := &fakeExec{}
+	c, err := New(Options{
+		Repos: repos, Executor: ex, Validator: &report.Validator{},
+		Config: Config{StorageRoot: root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit := int32(1)
+	if err := c.JobFinished(context.Background(), ports.JobOutcome{
+		Handle:   ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+		Phase:    executor.PhaseFailed,
+		ExitCode: &exit,
+		Message:  "TESTER_NONZERO_EXIT: exit code 1",
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture()
+
+	task, _ := repos.GetTask(context.Background(), "t-1")
+	if task.Status != domain.TaskFailed {
+		t.Fatalf("task status = %s", task.Status)
+	}
+	if task.Failure == nil || task.Failure.Code != domain.CodePrecheckFailed {
+		t.Fatalf("failure = %+v, want PRECHECK_FAILED (from result.json, not TESTER_NONZERO_EXIT)", task.Failure)
+	}
+	if !task.Failure.Retryable {
+		t.Errorf("retryable must come from result.json (true)")
+	}
+	if got := task.Failure.Detail["http_status"]; got != float64(500) {
+		t.Errorf("detail.http_status = %v, want 500", got)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunServiceUnavailable {
+		t.Errorf("run status = %s, want service_unavailable (C-5.8 #4)", run.Status)
+	}
+	if len(repos.Leases()) != 0 {
+		t.Errorf("lease must be released")
+	}
+}
+
+func TestNonZeroExitWithoutResultJSONFallsBack(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	root := t.TempDir()
+	writeAttemptResult(t, root, "") // 目录存在但没有 result.json
+
+	ex := &fakeExec{}
+	c, err := New(Options{
+		Repos: repos, Executor: ex, Validator: &report.Validator{},
+		Config: Config{StorageRoot: root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit := int32(2)
+	if err := c.JobFinished(context.Background(), ports.JobOutcome{
+		Handle:   ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+		Phase:    executor.PhaseFailed,
+		ExitCode: &exit,
+		Message:  "TESTER_NONZERO_EXIT: exit code 2",
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture()
+
+	task, _ := repos.GetTask(context.Background(), "t-1")
+	if task.Failure == nil || task.Failure.Code != domain.CodeTesterNonzeroExit {
+		t.Fatalf("failure = %+v, want TESTER_NONZERO_EXIT fallback", task.Failure)
+	}
+	if task.Failure.Retryable {
+		t.Errorf("TESTER_NONZERO_EXIT must not be retryable")
+	}
+}
+
+// ---- 日志落盘：<attempt>/logs/stdout.log ---------------------------------
+
+func TestAttemptLogsAreFlushedToStorage(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	root := t.TempDir()
+
+	ex := &fakeExec{logContent: "probe: HTTP 200 ok\nprobe: done\n"}
+	c, err := New(Options{Repos: repos, Executor: ex, Config: Config{StorageRoot: root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.JobFinished(context.Background(), ports.JobOutcome{
+		Handle: ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+		Phase:  executor.PhaseSucceeded,
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture()
+
+	logPath := filepath.Join(root, "r-1", "tasks", "t-1", "attempts", "1", "logs", "stdout.log")
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", logPath, err)
+	}
+	if string(raw) != ex.logContent {
+		t.Errorf("stdout.log = %q, want %q", string(raw), ex.logContent)
+	}
+	if _, err := os.Stat(logPath + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("temp file must be renamed away")
+	}
+}
+
+// 日志拉取失败只 WARN，不影响 Task 状态。
+func TestAttemptLogFailureDoesNotAffectStatus(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	root := t.TempDir()
+	ex := &fakeExec{logErr: errors.New("pod not found")}
+	var warned bool
+	c, err := New(Options{
+		Repos: repos, Executor: ex, Config: Config{StorageRoot: root},
+		Logf: func(format string, args ...any) {
+			if strings.Contains(format, "attempt_logs_failed") {
+				warned = true
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.JobFinished(context.Background(), ports.JobOutcome{
+		Handle: ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+		Phase:  executor.PhaseSucceeded,
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture()
+	task, _ := repos.GetTask(context.Background(), "t-1")
+	if task.Status != domain.TaskSucceeded {
+		t.Fatalf("task status = %s, log failure must not change it", task.Status)
+	}
+	if !warned {
+		t.Errorf("expected an attempt_logs_failed warning")
 	}
 }

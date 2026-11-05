@@ -424,7 +424,7 @@ func (s *Spec) StaticChecks() (checks []check, warnings []string) {
 	add("spec.error_schema_required", len(missingFields) == 0,
 		fmt.Sprintf("Error.required=%v；缺 %v", s.ErrorRequired, missingFields))
 	warnings = append(warnings,
-		"注意：openapi 的 Error 是**扁平** {code,message,detail,retryable,trace_id}，不是 {error:{...}}；契约/实现按 spec 断言")
+		"注意：openapi 的 Error 是扁平 {code,message,detail,retryable,trace_id}（07 §3 / D-39），不是 {error:{...}}；契约/实现按扁平断言")
 
 	// 9) path 参数都声明了
 	var paramIssues []string

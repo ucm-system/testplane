@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -142,65 +141,7 @@ func (s *Server) handleAttemptResult(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAttemptLogs 是 GET /api/v1/tasks/{id}/attempts/{idx}/logs：
-// ?stream=stdout|stderr&offset=<字节>&limit=<字节，≤64KiB>；带 X-Log-Offset 响应头。
-func (s *Server) handleAttemptLogs(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	stream := q.Get("stream")
-	if stream == "" {
-		stream = "stdout"
-	}
-	if stream != "stdout" && stream != "stderr" {
-		fail(w, r, http.StatusBadRequest, domain.CodeValidationError,
-			"stream 只能是 stdout|stderr", nil, false)
-		return
-	}
-	path, taskID, idx, ok := s.attemptFilePath(w, r, filepath.Join("logs", stream+".log"))
-	if !ok {
-		return
-	}
-
-	offset := int64(atoiDefault(q.Get("offset"), 0))
-	if offset < 0 {
-		offset = 0
-	}
-	limit := atoiDefault(q.Get("limit"), maxLogChunk)
-	if limit <= 0 || limit > maxLogChunk {
-		limit = maxLogChunk
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			fail(w, r, http.StatusNotFound, domain.CodeNotFound, "日志尚未产出",
-				map[string]any{"task_id": taskID, "attempt_idx": idx, "stream": stream}, true)
-			return
-		}
-		s.failErr(w, r, err)
-		return
-	}
-	defer func() { _ = f.Close() }()
-
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		s.failErr(w, r, err)
-		return
-	}
-	buf := make([]byte, limit)
-	n, err := io.ReadFull(f, buf)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		s.failErr(w, r, err)
-		return
-	}
-	buf = buf[:n]
-
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("X-Log-Offset", strconv.FormatInt(offset+int64(n), 10))
-	// 日志区间需要 collector 提供；MVP 拿不到就留空（07 §5.2）。
-	w.Header().Set("X-Log-Coverage", "")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(buf)
-}
-
-// attemptFilePath 校验 task 存在、idx 合法并返回产物路径。
+// ?stream=stdout|stderr&offset=<字节>&limit=<字节，≤64KiB>；带 X-Log-Offset 响应头。// attemptFilePath 校验 task 存在、idx 合法并返回产物路径。
 func (s *Server) attemptFilePath(w http.ResponseWriter, r *http.Request, rel string) (string, string, int, bool) {
 	ctx := r.Context()
 	taskID, err := safePathComponent(chi.URLParam(r, "id"))

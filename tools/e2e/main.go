@@ -58,6 +58,7 @@ const usageText = `e2e 是 TestPlane 的端到端驱动脚本（不是 go test�
   --timeout        等待终态总时长（默认 5m）
   --poll           轮询间隔（默认 2s）
   --sse-timeout    SSE 冒烟/回退抓取的等待窗口（默认 10s）
+  --report-wait    报告异步生成的等待窗口（默认 30s；C-7.2 的 SLA 是终态后 ≤2s）
   --expect-error-code        期望 run.error.code（可选）
   --expect-task-error-code   期望某个失败 Task 的 error.code（可选）
   --expect-retryable         期望失败对象的 retryable=true|false（可选）
@@ -211,6 +212,7 @@ func parseArgs(argv []string) (Options, string, error) {
 		timeout        = fs.Duration("timeout", 5*time.Minute, "等待终态总时长")
 		poll           = fs.Duration("poll", 2*time.Second, "轮询间隔")
 		sseTimeout     = fs.Duration("sse-timeout", 10*time.Second, "SSE 等待窗口")
+		reportWait     = fs.Duration("report-wait", 30*time.Second, "报告异步生成的等待窗口（SLA ≤2s，默认 30s 已足够）")
 		runID          = fs.String("run-id", "", "wait/assert 的 Run ID")
 		dryRunFirst    = fs.Bool("dry-run-first", false, "提交前先 dry-run")
 		strict         = fs.Bool("strict", false, "警告即失败")
@@ -248,6 +250,7 @@ func parseArgs(argv []string) (Options, string, error) {
 		Timeout:             *timeout,
 		Poll:                *poll,
 		SSETimeout:          *sseTimeout,
+		ReportWait:          *reportWait,
 		RunID:               *runID,
 		DryRunFirst:         *dryRunFirst,
 		Strict:              *strict,
@@ -283,6 +286,9 @@ func parseArgs(argv []string) (Options, string, error) {
 	}
 	if opts.SSETimeout <= 0 {
 		return Options{}, command, &UsageError{Msg: "--sse-timeout 必须大于 0"}
+	}
+	if opts.ReportWait <= 0 {
+		return Options{}, command, &UsageError{Msg: "--report-wait 必须大于 0"}
 	}
 
 	expects, err := parseExpect(*expect)

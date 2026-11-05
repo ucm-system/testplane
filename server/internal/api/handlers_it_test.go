@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ucm-system/testplane/server/internal/config"
+	"github.com/ucm-system/testplane/server/internal/dbtest"
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
@@ -60,7 +60,10 @@ func (e *testErr) Error() string { return e.msg }
 
 func integrationServer(t *testing.T) (*Server, *store.Store, func()) {
 	t.Helper()
-	dsn := os.Getenv("TESTPLANE_TEST_DATABASE_URL")
+	dsn, err := dbtest.URL("api")
+	if err != nil {
+		t.Fatalf("准备测试库: %v", err)
+	}
 	if dsn == "" {
 		t.Skip("未设置 TESTPLANE_TEST_DATABASE_URL")
 	}

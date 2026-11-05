@@ -285,10 +285,15 @@ func (a *App) checkReport(ctx context.Context, runID string) {
 	}
 }
 
-// fetchReport 处理"报告异步生成"：未就绪时按 404 + Retry-After 重试，最多 30s。
+// fetchReport 处理"报告异步生成"：未就绪时按 404 + Retry-After 重试。
+// C-7.2 的 SLA 是终态后 ≤2s；默认 30s 窗口足够，超过就是 hook 没触发。
 func (a *App) fetchReport(ctx context.Context, runID string) ([]byte, int, error) {
 	path := "/runs/" + url.PathEscape(runID) + "/report"
-	deadline := time.Now().Add(30 * time.Second)
+	wait := a.opts.ReportWait
+	if wait <= 0 {
+		wait = 30 * time.Second
+	}
+	deadline := time.Now().Add(wait)
 	for {
 		status, header, body, err := a.client.Get(ctx, path)
 		if err != nil {

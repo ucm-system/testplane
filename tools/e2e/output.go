@@ -65,6 +65,7 @@ type Options struct {
 	Timeout    time.Duration
 	Poll       time.Duration
 	SSETimeout time.Duration
+	ReportWait time.Duration
 
 	RunID          string
 	DryRunFirst    bool

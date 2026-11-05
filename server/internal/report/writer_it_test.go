@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ucm-system/testplane/server/internal/dbtest"
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
@@ -16,7 +17,10 @@ import (
 // TestWriteRunReport_Files 生成 report.json / report.md / metadata.json / events.jsonl，
 // 并重建 artifacts 索引（C-7.2、C-7.3、C-7.4、C-7.5）。需要真 PG。
 func TestWriteRunReport_Files(t *testing.T) {
-	dsn := os.Getenv("TESTPLANE_TEST_DATABASE_URL")
+	dsn, err := dbtest.URL("report")
+	if err != nil {
+		t.Fatalf("准备测试库: %v", err)
+	}
 	if dsn == "" {
 		t.Skip("未设置 TESTPLANE_TEST_DATABASE_URL")
 	}

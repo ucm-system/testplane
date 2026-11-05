@@ -455,7 +455,11 @@ type podFactsView struct {
 
 func podFacts(pod *corev1.Pod) podFactsView {
 	var f podFactsView
-	for _, cs := range pod.Status.ContainerStatuses {
+	// init 容器也要看：镜像拉不到时最常见的形态就是 initContainer 停在 ImagePullBackOff。
+	statuses := make([]corev1.ContainerStatus, 0, len(pod.Status.InitContainerStatuses)+len(pod.Status.ContainerStatuses))
+	statuses = append(statuses, pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	for _, cs := range statuses {
 		if state := cs.State.Terminated; state != nil {
 			code := state.ExitCode
 			f.exitCode = &code

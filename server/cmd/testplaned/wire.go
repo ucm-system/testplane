@@ -208,7 +208,7 @@ func (r *storeRepos) ListExpiredAttempts(ctx context.Context, now time.Time) ([]
 	for _, e := range rows {
 		out = append(out, orchestrator.AttemptRef{
 			AttemptID: e.AttemptID, TaskID: e.TaskID, RunID: e.RunID,
-			AttemptNo: e.AttemptNo, JobID: e.JobName,
+			AttemptNo: e.AttemptNo, JobName: e.JobName,
 		})
 	}
 	return out, nil

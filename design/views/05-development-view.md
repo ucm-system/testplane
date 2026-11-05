@@ -284,6 +284,8 @@ cd server && go build -trimpath -o ../bin/testplaned ./cmd/testplaned
 
 口径见 W-13：删 Job 绝不"凭空 SUCCEEDED"；杀控制面后 `RUNNING` 必须对账恢复；NFS 抖动只产生 gap 标记。
 
+**数据库隔离（硬规则，2026-11-05 实测踩坑后补）**：集成测试必须连**独立库**（`testplane_test`），禁止把 `TESTPLANE_TEST_DATABASE_URL` 指向开发/验收库 `testplane`。测试会在库里跑 DDL 与清表，指向开发库会把正在跑的 Run 数据清空——实测表现是 `POST /runs` 突然 500 `relation "runs" does not exist`、`runs` 行数骤降、SSE 断流。测试 helper 负责建库再切库，`make test` 默认连 `testplane_test`。
+
 ### 7.2 覆盖率
 
 | 范围 | 目标 | 说明 |

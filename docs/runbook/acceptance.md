@@ -27,14 +27,14 @@
 | 10 | Attempt 与重试 | ⬜ 未做 | `retry_on` 命中才重试、历史 Attempt 不被覆盖——未跑 | 需失败注入 |
 | 11 | 失败策略（`abort_run`） | 🟡 mock | QA e2e 已断言 `abort_propagation`（precheck 失败 → 其余 `skipped`）；真实失败注入未跑 | `scripts/e2e/failure-injection.ps1` |
 | 12 | Run 编排全链路 | 🟡 部分 | 🔧 两条链都贯通到 `succeeded`：service 形态（`r-20261105-KWYE`）、deploy 形态（`r-20261105-PRBV`，含 cleanup 阶段）。缺：四终态（成功/部分失败/服务不可用/取消）只覆盖"成功" | §2.1、§2.2 |
-| 13 | 报告结构（report / result / 错误码） | ⬜ **缺口** | `result.json` 侧 OK（见 #6）。**Run 级报告没生成**：`GET /runs/{id}/report` 与 `/report.md` 返回 **404**，`<run_id>/` 根目录没有 `report.json` / `report.md` / `metadata.json` / `events.jsonl`，`artifacts` 表 0 行（两个终态 Run 都是）。见 §3.1 | 见 §2.3 |
+| 13 | 报告结构（report / result / 错误码） | ✅ 做过 | 🔧 终态后异步生成齐全：`r-20261105-JW8Z` 的 `<run_id>/` 下有 `report.json`(653B) / `report.md`(770B) / `metadata.json` / `events.jsonl`；`GET /runs/{id}/report` 与 `/report.md` 均 200；`artifacts` 表 12 行（result 2 / log 2 / raw 4 / report 4）。`report.json` 含 `schema_version` / `counts` / `tasks[].duration_ms` / `failures[]`。⚠️ 之前 404 是**镜像落后于代码**（修复 11:03 落地，重灌后正常），见 §2.3 | 见 §2.3 |
 | 14 | 产物持久化 | ✅ 做过 | 🔧 删除 Job+Pod 后（`kubectl delete job tp-t-dxvjbd-a1 tp-t-f5w42q-a1`），宿主 `.data/storage/r-20261105-KWYE/.../attempts/1/` 的 `result.json`、`logs/probe.log`、`raw/*` 仍在且可读——产物直落最终路径（06 §3.3）。Run 级报告缺失见 #13 | 见 §2.4 |
 | 15 | 失败隔离（一败一成功 → `COMPLETED_WITH_ERRORS`） | ⬜ 未做 | 需要第二个可执行 Tester 构造混合结果 | 需构造 Run |
 | 16 | Web UI（列表/详情/报告/日志/提交/取消） | 🟡 部分 | `pnpm --dir web build` 通过；🔧 `GET /` 返回 `200 text/html`（控制面单端口同时服务静态资源与 API）。缺：Playwright 冒烟 | `pnpm --dir web build` |
 | 17 | API 契约与错误码 | ✅ 做过 | QA：规格侧 12/12、实现侧 32/32，合计 **44/44**；`tools/contract` 可复跑 | `cd tools/contract && go test ./... && go run . --mode spec` |
 
-**合计**：✅ 5 项（#5 #6 #7 #14 #17）· 🟡 8 项（#1 #3 #4 #8 #9 #11 #12 #16）· ⬜ 4 项（#2 #10 #13 #15）。
-其中 #2 是 Lead 裁决的 MVP 排除项，其余 3 项是真实缺口。
+**合计**：✅ 6 项（#5 #6 #7 #13 #14 #17）· 🟡 8 项（#1 #3 #4 #8 #9 #11 #12 #16）· ⬜ 3 项（#2 #10 #15）。
+其中 #2 是 Lead 裁决的 MVP 排除项，其余 2 项（重试、失败隔离）是真实缺口。
 
 ---
 
@@ -86,17 +86,29 @@ POST /api/v1/runs   {"run":{"name":"infra-deploy-smoke","deploy":{"provider":"ge
 前提是 ConfigMap 有 `TESTPLANE_MOCK_ENDPOINT_URL` / `MODEL_NAME` / `DEPLOY_MOCK_DURATION_SECONDS`
 （见 [`local-kind.md` §3.1](local-kind.md)），否则 Endpoint 指向不存在的地址。
 
-### 2.3 Run 级报告缺失（#13 缺口）
+### 2.3 报告与产物索引（#13）
+
+终态后异步写，实测齐全（`r-20261105-JW8Z`，succeeded）：
 
 ```powershell
 kubectl --context kind-testplane -n testplane exec deploy/testplaned -- `
-  wget -qO- http://127.0.0.1:8080/api/v1/runs/r-20261105-KWYE/report
-# wget: server returned error: HTTP/1.1 404 Not Found
-Get-ChildItem .data\storage\r-20261105-KWYE          # 只有 tasks/，没有 report.json / report.md / metadata.json / events.jsonl
-docker exec testplane-pg psql -U testplane -d testplane -c "select count(*) from artifacts;"   # 0
+  wget -qO- http://127.0.0.1:8080/api/v1/runs/r-20261105-JW8Z/report      # 200，report.json
+kubectl --context kind-testplane -n testplane exec deploy/testplaned -- `
+  wget -qO- http://127.0.0.1:8080/api/v1/runs/r-20261105-JW8Z/report.md   # 200，"# Run r-… / - 状态：**SUCCEEDED**"
+Get-ChildItem .data\storage\r-20261105-JW8Z -File
+# events.jsonl 4375B / metadata.json 2507B / report.json 653B / report.md 770B
+docker exec testplane-pg psql -U testplane -d testplane -c `
+  "select kind,count(*) from artifacts where run_id='r-20261105-JW8Z' group by kind;"
+# log 2 / raw 4 / report 4 / result 2
 ```
 
-两个终态 Run（service / deploy）都一样，不是偶发。**这是目前 P0 最大的未达成项**，需 backend 侧接终态报告钩子。
+`report.json` 形状（ARCHITECTURE §8.4）：`schema_version=1.0`、`status=succeeded`、`counts{total,succeeded,failed,canceled,skipped}`、
+`tasks[]{task_id,name,status,attempts,duration_ms}`、`failures[]`。
+
+> **踩过的坑（值得记）**：同一批 Run 之前 `/report` 一直 404、`artifacts` 表 0 行、run 目录里一个报告文件都没有，
+> 当时以为是 `WriteRunReport` 的终态钩子没接。真实原因是**集群里的镜像比代码旧**（报告钩子的修复 11:03 才落地，
+> 而运行中的 Pod 是 10:57 的镜像）。重灌后立刻正常。
+> 教训：**任何"功能没生效"的结论，先确认运行中的 Pod 镜像 digest 与最新构建一致**（`local-kind.md` §0 第 4 条判据）。
 
 ### 2.4 产物持久化（#14）
 
@@ -112,12 +124,10 @@ Pod 删除后产物仍可读：产物直落共享存储最终路径（06 §3.3�
 
 ## 3 已知缺口（按优先级）
 
-1. **Run 级报告与产物索引没生成**（#13）：`report.json` / `report.md` / `metadata.json` / `events.jsonl` 缺失，
-   `/report` 404，`artifacts` 表空。影响：Run 详情页的报告区、产物下载。
-2. **取消语义未验证**（#8）：当前集群里有若干 `cancelling` 卡住的 Run（Job/Pod 未在 30s 内消失）。
-3. **失败注入类验收未跑**（#4 #10 #11 #15）：需要"precheck 必失败"与"两 Task 一败一成"两类样本。
-4. **重启恢复**（#9）：杀 controller 后按 DB 对账的演练未做。
-5. **Web UI 交互验收**（#16）：Playwright 冒烟未做（构建与静态资源已验证）。
+1. **取消语义未验证**（#8）：集群里有若干 `cancelling` 卡住的 Run（Job/Pod 未在 30s 内消失）。
+2. **失败注入类验收未跑**（#4 #10 #11 #15）：需要"precheck 必失败"与"两 Task 一败一成"两类样本。
+3. **重启恢复**（#9）：杀 controller 后按 DB 对账的演练未做。
+4. **Web UI 交互验收**（#16）：Playwright 冒烟未做（构建与静态资源已验证）。
 
 ---
 

@@ -38,7 +38,11 @@ param(
     [string]$OutDir = '',
     [string[]]$Only = @(),
     [switch]$SkipApply,
-    [switch]$Cleanup
+    [switch]$Cleanup,
+    # 只用于故障修复期的临时豁免；默认严格（report 必现、logs 必非空）。
+    [switch]$AllowKnownGaps,
+    # 不依赖后端的 sanity：只生成 Manifest / 打印场景，不部署、不提交。
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,7 +55,7 @@ $faultsYAML = Join-Path $repo 'scripts\e2e\kind\mock-llm-faults.yaml'
 $tmp = [System.IO.Path]::GetTempPath()
 
 # ---- 1. 故障 mock 变体 -----------------------------------------------------
-if (-not $SkipApply) {
+if (-not $SkipApply -and -not $DryRun) {
     Write-Host "部署 mock-llm 故障变体（ns=$Namespace）…"
     & kubectl apply -f $faultsYAML
     if ($LASTEXITCODE -ne 0) {
@@ -122,6 +126,26 @@ run:
 
 $rows = @()
 $failed = 0
+
+if ($DryRun) {
+    $rows = foreach ($s in $scenarios) {
+        $manifestPath = Join-Path $OutDir ("manifest-" + $s.Name + ".yaml")
+        Set-Content -Encoding utf8 -NoNewline -Path $manifestPath -Value (New-FixtureManifest -Scenario $s)
+        [pscustomobject]@{
+            scenario = $s.Name
+            service  = $s.Service
+            expect   = $s.Expect
+            task_err = if ($s.TaskErr) { $s.TaskErr } else { '-' }
+            retryable = if ($s.Retryable) { $s.Retryable } else { '-' }
+            max_sec  = $s.MaxSeconds
+            note     = $s.Note
+        }
+    }
+    $rows | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+    Write-Host "dry-run OK：$($rows.Count) 个 Manifest 已生成到 $OutDir（未部署、未提交、未连后端）" -ForegroundColor Green
+    exit 0
+}
+
 $serverOk = $false
 try {
     $null = Invoke-WebRequest -UseBasicParsing "$BaseURL/healthz" -TimeoutSec 3
@@ -163,9 +187,9 @@ foreach ($s in $scenarios) {
     $actual = ''
     if ($res) { $actual = [string]$res.actual }
 
-    # 失败注入只判"终态 + 归类 + 传播"；report/logs 是当前 MVP 的已知缺口
-    # （collector 未实现、报告未生成），不能让它们把终态结论搞红。
-    $knownGapPattern = '^(report\.|task\..*\.logs$)'
+    # 默认严格：report 必现（SLA ≤2s）、logs 必非空。只有显式 -AllowKnownGaps
+    # 才把当前已知的后端缺口从失败里剔除，用于修复期临时跑终态分类。
+    $knownGapPattern = if ($AllowKnownGaps) { '^(report\.|task\..*\.logs$)' } else { '^$' }
     $allFailedChecks = @()
     $criticalFailed = @()
     if ($res) {
