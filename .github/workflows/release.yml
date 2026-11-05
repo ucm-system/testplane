@@ -161,12 +161,13 @@ jobs:
       - name: 校验双架构清单
         run: |
           ref="${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}:${{ steps.meta.outputs.version }}"
-          docker buildx imagetools inspect "$ref"
-          # amd64 与 arm64 都必须有，缺一个就红（不要静默降级成单架构）
-          docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' > /tmp/m.json
-          grep -q 'linux/amd64' /tmp/m.json || { echo "❌ 缺 linux/amd64"; exit 1; }
-          grep -q 'linux/arm64' /tmp/m.json || { echo "❌ 缺 linux/arm64"; exit 1; }
+          # 用人类可读输出（含 `Platform: linux/amd64` 行）；--format {{json .Manifest}} 里没有 platform 字段
+          out="$(docker buildx imagetools inspect "$ref")"
+          echo "$out"
+          echo "$out" | grep -q "linux/amd64" || { echo "❌ 缺 linux/amd64（不许静默降级成单架构）"; exit 1; }
+          echo "$out" | grep -q "linux/arm64" || { echo "❌ 缺 linux/arm64（不许静默降级成单架构）"; exit 1; }
           echo "✅ 双架构齐了"
+
 
       - name: 写 job summary
         run: |
