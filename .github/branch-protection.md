@@ -25,11 +25,11 @@ gh api -X PUT repos/ucm-system/testplane/branches/main/protection \
     "strict": true,
     "contexts": [
       "go build / vet / test（含真 PG）",
-      "lint",
-      "contract",
-      "web",
-      "helm",
-      "kustomize"
+      "gofmt / 契约工具构建",
+      "契约（spec 侧：openapi ↔ design 50 端点）",
+      "web 类型检查 / 构建 / Playwright（mock）",
+      "Helm chart lint / 渲染",
+      "本地 kind 清单可渲染"
     ]
   },
   "enforce_admins": true,

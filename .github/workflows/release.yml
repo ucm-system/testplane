@@ -103,18 +103,7 @@ jobs:
     needs: discover
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - image: server
-            dockerfile: deploy/docker/server.Dockerfile
-            context: .
-          - image: web
-            dockerfile: deploy/docker/web.Dockerfile
-            context: .
-          # Tester 镜像：上下文是 testers/<name>/（不是仓库根），见各 Dockerfile 头注释
-          - image: tester-endpoint-probe
-            dockerfile: testers/endpoint-probe/build/Dockerfile
-            context: testers/endpoint-probe
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -128,12 +117,23 @@ jobs:
         run: |
           raw="${{ inputs.tag }}"
           if [ -z "$raw" ]; then raw="${GITHUB_REF_NAME}"; fi
-          # v0.2.0 → 0.2.0；保留 v 前缀的语义 tag 也给一个
           ver="${raw#v}"
           short="$(git rev-parse --short=12 HEAD)"
+          ref="${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}"
           echo "version=${ver}" >> "$GITHUB_OUTPUT"
           echo "short=${short}" >> "$GITHUB_OUTPUT"
-          echo "平台：${{ inputs.platforms || 'linux/amd64,linux/arm64' }}"
+          # :latest 只允许由 tag 触发更新；workflow_dispatch 从任意 ref 触发时绝不动 latest（W-8）
+          {
+            echo "${ref}:${ver}"
+            echo "${ref}:sha-${short}"
+            if [ "${{ github.ref_type }}" = "tag" ]; then echo "${ref}:latest"; fi
+          } > /tmp/tags.txt
+          {
+            echo "tags<<EOF"
+            cat /tmp/tags.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "tags:"; cat /tmp/tags.txt
 
       # 组织策略把默认 workflow 权限锁成 read 时，GITHUB_TOKEN 拿不到 packages:write
       # （报 `denied: permission_denied: write_package`）。所以优先用带 write:packages 的
@@ -158,10 +158,7 @@ jobs:
           push: true
           provenance: false
           sbom: false
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}:${{ steps.meta.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}:sha-${{ steps.meta.outputs.short }}
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
