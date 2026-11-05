@@ -131,6 +131,22 @@ func LoadSpec(path string) (*Spec, error) {
 	return spec, nil
 }
 
+// countOpenAPIOperations 从 openapi.paths 里数实际 method 数。
+// 规格测试用它作为期望值，避免 P0 端点增减时写死数字变红；真正门禁仍是
+// DesignChecks 的“设计端点 ⊆ openapi（白名单外）”。
+func countOpenAPIOperations(spec *Spec) int {
+	paths := asMap(spec.Raw["paths"])
+	n := 0
+	for _, item := range paths {
+		for method := range asMap(item) {
+			if isHTTPMethod(strings.ToLower(method)) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 func (s *Spec) parseResponse(v any) (Response, error) {
 	resolved, err := s.resolve(v)
 	if err != nil {
@@ -254,9 +270,26 @@ var excludedOperations = []string{
 	"POST /api/v1/tasks/{task_id}/retry",
 	"PUT /api/v1/admin/profiles",
 	"POST /api/v1/admin/clusters",
-	"GET /api/v1/profiles",
 	"GET /api/v1/secrets",
 	"GET /api/v1/admin/audit",
+}
+
+// isPublicEndpoint 是不要求 bearerAuth 的端点：运维探针、Prometheus 指标、OIDC 登录/回调。
+func isPublicEndpoint(path string) bool {
+	switch path {
+	case "/healthz", "/readyz", "/metrics", "/auth/login", "/auth/callback":
+		return true
+	}
+	return false
+}
+
+// isRedirectStatus 是 OIDC 跳转类端点的成功码（302/303/307/308）。
+func isRedirectStatus(status string) bool {
+	switch status {
+	case "302", "303", "307", "308":
+		return true
+	}
+	return false
 }
 
 // StaticChecks 返回规格侧的全部检查项。
@@ -310,39 +343,40 @@ func (s *Spec) StaticChecks() (checks []check, warnings []string) {
 	// 5) 鉴权覆盖
 	var securityIssues []string
 	for _, op := range s.Operations {
-		public := op.Path == "/healthz" || op.Path == "/readyz"
+		public := isPublicEndpoint(op.Path)
 		if public && op.Security {
-			securityIssues = append(securityIssues, op.Method+" "+op.Path+" 是运维探针，不应要求鉴权")
+			securityIssues = append(securityIssues, op.Method+" "+op.Path+" 是公开端点，不应要求鉴权")
 		}
 		if !public && !op.Security {
 			securityIssues = append(securityIssues, op.Method+" "+op.Path+" 缺少 security")
 		}
 	}
 	add("spec.security_coverage", len(securityIssues) == 0,
-		firstN(securityIssues, 5, "业务端点全部要求 bearerAuth，运维探针无需鉴权"))
+		firstN(securityIssues, 5, "业务端点全部要求 bearerAuth，公开端点无需鉴权"))
 
-	// 6) 成功响应有定义
+	// 6) 成功响应有定义（OIDC 跳转端点允许 302/303/307/308）
 	var successIssues []string
 	for _, op := range s.Operations {
-		var codes []string
+		hasSuccess := false
 		for status := range op.Responses {
-			if is2xx(status) {
-				codes = append(codes, status)
+			if is2xx(status) || isRedirectStatus(status) {
+				hasSuccess = true
+				break
 			}
 		}
-		if len(codes) == 0 {
-			successIssues = append(successIssues, op.Method+" "+op.Path+" 没有 2xx 响应")
+		if !hasSuccess {
+			successIssues = append(successIssues, op.Method+" "+op.Path+" 没有 2xx/3xx 响应")
 		}
 	}
 	add("spec.success_response_defined", len(successIssues) == 0,
-		firstN(successIssues, 5, "每个 operation 至少一个 2xx 响应"))
+		firstN(successIssues, 5, "每个 operation 至少一个 2xx（OIDC 端点允许 3xx）响应"))
 
-	// 7) 错误响应形状 = Error（healthz/readyz 的 text/plain 503 豁免）
+	// 7) 错误响应形状 = Error（healthz/readyz 的 text/plain 503、公开 OIDC 的 302 豁免）
 	var errorShapeIssues []string
 	for _, op := range s.Operations {
 		public := op.Path == "/healthz" || op.Path == "/readyz"
 		for status, resp := range op.Responses {
-			if is2xx(status) {
+			if is2xx(status) || isRedirectStatus(status) {
 				continue
 			}
 			if public && hasContentType(resp.ContentTypes, "text/plain") {

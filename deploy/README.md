@@ -162,6 +162,7 @@ kubectl --context kind-testplane get pv testplane-storage
 | [`k8s/rbac-cluster-executor.yaml`](k8s/rbac-cluster-executor.yaml) | **仅当执行器要跨 namespace 跑 Job 时**才启用（ClusterRole 扩权，需评审）。默认是 namespace 级 `Role`，最小权限 |
 | [`k8s/networkpolicy.yaml`](k8s/networkpolicy.yaml) | 有真 CNI 时。**kind 的默认 CNI（kindnet）不实现 NetworkPolicy**，apply 了也不生效 |
 | [`k8s/pdb.yaml`](k8s/pdb.yaml) | 单副本 + `minAvailable: 1` 会永久阻塞 drain（06 §7.1），dev 不需要 |
+| [`k8s/volcano-fixtures/README.md`](k8s/volcano-fixtures/README.md) | **仅本地演示**：给 `/queue-status` 的 `volcano` 块造 `available:true` 的真实 CRD 数据（12 个 Volcano CRD + 2 Queue + 5 PodGroup，**不装 scheduler**，status 是手工假水位）。生产环境装的是真 Volcano，不用它 |
 
 > **`get secrets: no` 是硬约束**：平台不读 Secret 明文（K-5 同源），日志不脱敏所以平台
 > 不需要、也不该能读。谁想给 RBAC "顺手补上 secrets"，先回来读 06 §4.4。

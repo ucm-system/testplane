@@ -983,6 +983,10 @@ function validateManifest(manifest: RunManifest): ValidationIssue[] {
     issues.push({ path: 'run.tests', code: 'RUN_TOO_LARGE', message: '单个 Run 最多 200 个 Task' })
   }
   body.tests?.forEach((test, index) => {
+    // TestSpec.name 契约必填：空名字必须报校验错误，否则 dry-run 会「假通过」
+    if (!test.name?.trim()) {
+      issues.push({ path: `tests[${index}].name`, code: 'VALIDATION_ERROR', message: 'Task 名称不能为空' })
+    }
     if (!test.tester) {
       issues.push({ path: `tests[${index}].tester`, code: 'VALIDATION_ERROR', message: '必须选择 Tester' })
       return
@@ -1014,10 +1018,46 @@ function validateManifest(manifest: RunManifest): ValidationIssue[] {
   return issues
 }
 
+/* ================================================================ 测试钩子 */
+
+/**
+ * mock 的角色注入（只用于本地验收 / Playwright）：
+ * `localStorage['testplane:mock-role'] = 'viewer' | 'operator' | 'admin'`，或 URL 上 `?mock_role=viewer`。
+ * 注入后会带一个假的 `csrf_token`，让前端按 OIDC 会话处理（viewer 的写按钮才会置灰）。
+ */
+function mockRoleOverride(): string | null {
+  try {
+    const stored = localStorage.getItem('testplane:mock-role')
+    if (stored === 'viewer' || stored === 'operator' || stored === 'admin') return stored
+  } catch {
+    /* 隐私模式忽略 */
+  }
+  try {
+    const fromQuery = new URLSearchParams(window.location.search).get('mock_role')
+    if (fromQuery === 'viewer' || fromQuery === 'operator' || fromQuery === 'admin') return fromQuery
+  } catch {
+    /* ignore */
+  }
+  return null
+}
+
 export const mockApi: Api = {
   async getIdentity(): Promise<Identity> {
     await delay(80)
-    // mock 的 /me 没有 csrf_token → api/auth.ts 判成 dev 模式，绝不会触发登录跳转
+    // 默认 dev 模式（无 csrf_token → 不跳登录）。
+    // QA / Playwright 需要验角色时，用 `localStorage['testplane:mock-role']='viewer'`
+    // 或 URL 上的 `?mock_role=viewer` 注入 OIDC 角色（会带一个假 csrf_token）。
+    const override = mockRoleOverride()
+    if (override) {
+      const identity: Identity = {
+        user: `mock-${override}`,
+        role: override,
+        csrf_token: 'mock-csrf-token',
+        groups: [`testplane-${override}`],
+      }
+      applyIdentity(identity)
+      return identity
+    }
     const identity: Identity = { user: getCurrentUser(), role: 'operator' }
     applyIdentity(identity)
     return identity
@@ -1207,10 +1247,26 @@ export const mockApi: Api = {
       waiting: { total: pendingTasks.length, by_reason: byReason, tasks: pendingTasks },
       volcano: {
         available: true,
+        // stale 在快照层：本次采样成功 → false（不可达时才置位，且那时 queues 恒为 []）
+        stale: false,
         detail: null,
         queues: [
-          { name: 'npu-batch', state: 'Open', pending_jobs: 6, longest_wait_seconds: 1080, reason: 'queue_full' },
-          { name: 'gpu-shared', state: 'Open', pending_jobs: 4, longest_wait_seconds: 2460, reason: 'gang_pending' },
+          {
+            name: 'npu-batch',
+            state: 'Open',
+            pending_jobs: 6,
+            longest_wait_seconds: 1080,
+            // 契约：reason 是 PodGroup conditions[-1].message 原文，平台不翻译
+            reason: '0/8 nodes are available: 8 Insufficient nvidia.com/npu.',
+          },
+          {
+            name: 'gpu-shared',
+            state: 'Open',
+            pending_jobs: 4,
+            longest_wait_seconds: 2460,
+            reason:
+              'PodGroup default/gpu-batch-7g2kd is Pending: minMember 4 > running 0; 0/1 nodes are available: 1 insufficient nvidia.com/gpu.',
+          },
         ],
       },
     }

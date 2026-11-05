@@ -126,3 +126,7 @@ deploy/**/*.secret.yml
 #   design/prototype/screenshots/*.png   —— 文档里引用的渲染截图
 #   design/prototype/assets/fonts/*.woff2 —— 自托管字体，缺了会回落系统字体
 #   testers/*/build/Dockerfile           —— 构建定义，属于源码
+
+# Playwright 运行产物
+web/test-results/
+web/playwright-report/
