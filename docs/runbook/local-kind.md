@@ -258,7 +258,7 @@ docker exec testplane-pg psql -U testplane -d testplane -c '\dt'
 
 ---
 
-## 7 E2E 时最常见的两个提交错误（都不在集群侧）
+## 7 E2E 时最常见的几个提交/判定错误（都不在集群侧）
 
 Run 提交成功但 `t-0001`（pre-check）秒失败、后续 Task 全 `skipped/upstream_abort` 时，
 先查库里的错误，不要在 kind 上转圈：
@@ -293,6 +293,26 @@ kubectl --context kind-testplane -n testplane create secret generic tp-secret-en
 ```
 
 （dev 已建好这一份 `tp-secret-endpoint-mock`，E2E 直接用。）
+
+### 7.3 判断「这是不是 Pre-Check」：唯一判据是 `resolved.precheck.injected`
+
+**别用 `seq == 0`，也别用 tester 的 `role` 字段，单独看任何一个都会判错。**
+
+| 看起来能判 | 为什么不行 |
+|---|---|
+| `tasks.seq == 0` | 独立 Task / 没开 precheck 的 Run 里，第一个真实 Task 也是 0；而且 `precheck: auto` 被配置关掉时 seq 0 就是普通 Task |
+| tester 的 `role: pre_check` | `endpoint-probe` 本身就是 `role: pre_check` 的 Tester，用户完全可以**手动**把它当普通测试提交（此时它不是平台注入的 Pre-Check，没有门控语义） |
+
+正确判据：读 Run 的冻结解析结果 `runs.resolved` 里的 **`precheck.injected`**
+（布尔，平台注入的才是 true）。API 侧看 run detail / `resolved` 字段，库里：
+
+```powershell
+docker exec testplane-pg psql -U testplane -d testplane `
+  -c "select resolved->'precheck'->>'injected' as injected from runs where id='<run_id>';"
+# t / f；再配合 tasks 里 seq=0 那条的 id 才是"平台注入的那一个"
+```
+
+同样的坑也会坑到断言：拿 `role` 写 e2e 断言，会把"手动的 probe Task"误判成"Pre-Check 门控失败"。
 
 ---
 
