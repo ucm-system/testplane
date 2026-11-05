@@ -452,6 +452,8 @@ SELECT count(*) FROM attempts WHERE status IN ('preparing','running');  -- < TES
 | Pre-Check `succeeded` | 同事务批量 `pending → queued`（后续 Task 并行入池，由端点槽位/全局 permit 决定谁先跑） |
 | Pre-Check 失败 | 按 §7.3 `abort_run` 处理：其余 `pending/queued → skipped(upstream_abort)`、`preparing/running → canceled` |
 | `precheck: off` | Run 一进 `testing` 就批量入队 |
+
+> **提交下限（D-57）**：	ests 至少 1 条，与 precheck 取值无关（Pre-Check 是平台注入的 seq=0 Task，不是用户测试）。0 条直接 400 VALIDATION_ERROR，不落库、不建 Run。
 | 有独占型 Task（性能类 / Pre-Check） | 独占该 Endpoint 期间，同 Endpoint 上其他 Task 一律排队；独占释放后共享型可并行 |
 
 调度守卫：Task 进入 `queued` 前必须 `endpoint_key IS NOT NULL`（deploy 模式在 Endpoint ready 时回填，C-5.3）；违反即拒绝调度并告警，**不得**用占位键绕过。

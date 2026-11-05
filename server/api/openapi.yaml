@@ -2778,6 +2778,7 @@ components:
         name:
           type: string
           description: 展示名，不唯一（K-11）
+          maxLength: 200   # D-58：名称上限（超长会让表格/面包屑/工单标题不可用）
         kind:
           $ref: '#/components/schemas/RunKind'
         status:
@@ -3692,6 +3693,7 @@ components:
         tests:
           type: array
           description: Task 列表；每项 = 一个 Task（上限 200，超限 `RUN_TOO_LARGE`）
+          minItems: 1     # D-57：至少 1 条用户测试（Pre-Check 由平台注入，不计入）
           maxItems: 200
           items:
             $ref: '#/components/schemas/TestSpec'

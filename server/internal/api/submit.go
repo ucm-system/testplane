@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"gopkg.in/yaml.v3"
@@ -108,6 +109,10 @@ type ServiceSpec struct {
 	ModelName string `yaml:"model_name" json:"model_name"`
 	ModelPath string `yaml:"model_path" json:"model_path"`
 }
+
+// nameMaxRunes 是名称类字段的**字符**上限（D-58：run.name / task.name / tests[].name）。
+// 按 rune 计数，不是字节——中文名 200 字符合法。
+const nameMaxRunes = 200
 
 // TestSpec 是 tests[] 里的一项。
 type TestSpec struct {
@@ -308,6 +313,13 @@ func (s *Submitter) Prepare(ctx context.Context, body []byte, submittedBy string
 		}}}
 	}
 	// 独立 Task 形态禁止 deploy，service.url 必填（C-5.9）
+	if kind == "task" && m.Task != nil {
+		// D-58：独立 Task 的 name 同一上限（按 rune）。
+		if n := utf8.RuneCountInString(strings.TrimSpace(m.Task.Name)); n > nameMaxRunes {
+			ve.Add(m.field("task.name"), domain.IssueCodeTooLong,
+				"name 超过 %d 字符（当前 %d）", nameMaxRunes, n)
+		}
+	}
 	if kind == "task" && m.Deploy != nil {
 		return nil, &domain.ValidationError{Issues: []domain.ValidationIssue{{
 			Path: "deploy", Code: domain.IssueCodeDeployService, Message: "独立 Task 不允许 deploy",
@@ -501,18 +513,27 @@ func (s *Submitter) validateStructure(m *Manifest, kind string) *domain.Validati
 	if kind == "run" {
 		if m.Run == nil || strings.TrimSpace(m.Run.Name) == "" {
 			ve.Add(m.field("run.name"), domain.IssueCodeRequired, "name 必填")
+		} else if n := utf8.RuneCountInString(strings.TrimSpace(m.Run.Name)); n > nameMaxRunes {
+			// D-58：名称 ≤ 200 字符，**按 rune 计数**（中文名不能按字节算）。
+			ve.Add(m.field("run.name"), domain.IssueCodeTooLong,
+				"name 超过 %d 字符（当前 %d）", nameMaxRunes, n)
 		}
-		// tests 为空只在 precheck:auto（平台注入 Pre-Check）时可接受；
-		// precheck:off 且没有 tests 等于什么都不跑，按 C-5.1 拒绝。
-		if len(m.Tests) == 0 && precheckModeOf(m) == "off" {
+		// D-57 提交下限：tests **至少 1 条**，与 precheck 取值无关。
+		// Pre-Check 是平台注入的 seq=0 Task，**不计入用户测试**——否则用户可以"成功地什么都没测"
+		// （manifest.tests=[] + 只跑 Pre-Check → 绿色 succeeded）。07 §4.1、ARCHITECTURE D-57。
+		if len(m.Tests) == 0 {
 			ve.Add(m.field("tests"), domain.IssueCodeRequired,
-				"tests 不能为空（precheck: off 时没有可执行的 Task）")
+				"至少需要 1 个测试 Task（Pre-Check 由平台注入，不计入测试）")
 		}
 		seen := map[string]bool{}
 		for i, t := range m.Tests {
 			path := m.field("tests[%d]", i)
 			if strings.TrimSpace(t.Name) == "" {
 				ve.Add(path+".name", domain.IssueCodeRequired, "name 必填")
+			} else if n := utf8.RuneCountInString(strings.TrimSpace(t.Name)); n > nameMaxRunes {
+				// D-58：tests[].name 与 run.name 同一上限（按 rune）。
+				ve.Add(path+".name", domain.IssueCodeTooLong,
+					"name 超过 %d 字符（当前 %d）", nameMaxRunes, n)
 			} else if seen[t.Name] {
 				ve.Add(path+".name", domain.IssueCodeNameConflict, "%s", "同一 Run 内 name 重复: "+t.Name)
 			}
