@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"time"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/ports"
@@ -56,7 +55,7 @@ func (c *Controller) cleanupDeploy(ctx context.Context, runID string) {
 	if c.deployer == nil {
 		return
 	}
-	now := time.Now().UTC()
+	now := c.now()
 	record := func(u *domain.DeployUninstall) {
 		_ = c.repos.RecordDeployState(ctx, runID, domain.DeploySnapshot{Uninstall: u})
 	}

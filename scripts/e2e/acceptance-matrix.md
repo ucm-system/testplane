@@ -20,7 +20,7 @@
 | 11 | 失败策略（abort_run） | 做过 | failure-injection 中 precheck 失败后其余 Task 全部 `skipped(upstream_abort)`，5/5 场景一致 |
 | 12 | Run 编排全链路 | 做过 | succeeded `6H0Y/7RTG`、service_unavailable `B2PB/2NQR/DVNS`、completed_with_errors `ZMMG/AY4Q/PA16`、canceled `1YZW`、failed `G9D5/70V5` 均实测 |
 | 13 | 报告结构 | 做过 | `7RTG` report 662B / report.md 779B，终态后生成；混合 `PA16` counts/failures、deploy `96QQ` 报告均校验 |
-| 14 | 产物持久化 | 🟡 | `runs/{id}/files` 与 `artifacts` 端点已可用（PR #26 已合并进 main 的部分），`result.json`/`raw/`/`logs/` 均落 PVC；**剩余动作**：「删 Pod 后（跨 Attempt 重启）仍可下载」这条演练未验 |
+| 14 | 产物持久化 | ✅ | `artifact-persistence-check.ps1` **21/21 PASS**：Run `r-20261105-ZHQS` 基线 artifacts **14 条 / 12891 B / result 2 条**，`tasks/t-WAQFA5/attempts/1/result.json` sha256 `0a271511ae63477c05971b3fb4dec31e524f3c237d682d57230f6d094d0b4a58`；Job/Pod 消失后条目数、总大小、result 数、路径集合与 sha256 **完全一致**；控制面 rollout restart 后 sha256 仍一致；attempt artifacts 可用、Range `bytes=0-9` → **206 + 10B**；不存在 path → 404、`../../etc/passwd` → 400 |
 | 15 | 失败隔离 | 做过 | `r-20261105-PA16` **11/11**：A 打 mock-llm succeeded、B 打 mock-llm-500 failed；Run `completed_with_errors`；report counts `{total:2,succeeded:1,failed:1}`、failures 非空；Run.error=首个失败 Task（PRECHECK_FAILED） |
 | 16 | Web UI | 做过 | `pnpm --dir web build` 通过；Playwright **3 passed**（`ui-smoke` + 新增 viewer / operator 取消用例；frontend 已提交） |
 | 17 | API 契约与错误码 | 做过 | 规格 **15/15**、实现 **42/42**、合计 **57/57**；设计 50 / openapi 34 / 白名单 16 / openapi 多出设计 0；new endpoints 全部进 live（profiles/artifacts/files/metrics/queue-status volcano/auth 三端点/Tester version） |
@@ -33,6 +33,7 @@
 - **#3 Genet deploy**：正常 `96QQ` 9/9；blocked `DVNS` 7/7；500 `70V5` 4/4；超窗单测覆盖（genet 72h + 编排层 blocked），端到端不做。
 - **#17 契约**：`go test ./...` PASS；`--mode all` **57/57**（spec 15 + live 42）；设计 50 / openapi 34 / 白名单 16 / openapi 多出设计 0。
 - **#1 生命周期**：`run-local.ps1` 默认 MockURL 自动探测（namespace=default）→ `r-20261105-7RTG` **31/31**。
+- **#14 产物持久化**：`artifact-persistence-check.ps1` → **21/21 PASS**，Run `r-20261105-ZHQS`；Job/Pod 消失后 artifacts 14 条/12891B/result 2 条与 sha256 `0a2715…` 完全一致；控制面 restart 后 sha256 仍一致；Range 206+10B、404/400 负向通过。
 - **环境收尾**：configmap 已还原 `TESTPLANE_GENET_BASE_URL=http://host.docker.internal:18091`、`TESTPLANE_DEPLOY_TIMEOUT=72h`；fake-genet `:18095` 已停。
 
 ## 复跑命令

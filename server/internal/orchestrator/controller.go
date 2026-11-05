@@ -116,6 +116,9 @@ type Options struct {
 	Prober JobProber
 	Config Config
 	Logf   func(format string, args ...any)
+	// Clock 是业务时间来源（05 §6.5）：超窗判定、退避、写库时间戳都走它。
+	// 为空时用 domain.SystemClock；单测注入可拨时钟。
+	Clock domain.Clock
 }
 
 // JobProber 是编排层对执行器的"拉"语义观测能力（executor.Executor.Probe）。
@@ -137,6 +140,8 @@ type Controller struct {
 	jobGC     bool
 	cfg       Config
 	logf      func(format string, args ...any)
+	// clock 是业务时间来源（05 §6.5），默认 SystemClock。
+	clock domain.Clock
 
 	mu      sync.Mutex
 	watches map[string]context.CancelFunc // attemptID -> cancel
@@ -186,8 +191,25 @@ func New(opts Options) (*Controller, error) {
 		jobGC:     jobGC,
 		cfg:       opts.Config.withDefaults(),
 		logf:      logf,
+		clock:     clockOrDefault(opts.Clock),
 		watches:   make(map[string]context.CancelFunc),
 	}, nil
+}
+
+// clockOrDefault 归一业务时钟：未注入时用 SystemClock。
+func clockOrDefault(c domain.Clock) domain.Clock {
+	if c != nil {
+		return c
+	}
+	return domain.SystemClock
+}
+
+// now 返回业务时间（UTC）。**不要**在编排层直调 time.Now()。
+func (c *Controller) now() time.Time {
+	if c.clock != nil {
+		return c.clock.Now()
+	}
+	return domain.SystemClock.Now()
 }
 
 // Config 返回生效配置（健康检查与测试用）。
@@ -391,7 +413,7 @@ func (c *Controller) finishLostTask(ctx context.Context, task TaskView, attempt 
 		Phase:      "failed",
 		Message:    failure.Message,
 		Failure:    failure,
-		FinishedAt: time.Now().UTC(),
+		FinishedAt: c.now(),
 	})
 	if err != nil {
 		return err
@@ -627,7 +649,7 @@ func (c *Controller) failAttempt(ctx context.Context, attempt AttemptRef, f *dom
 		Phase:      "failed",
 		Message:    f.Message,
 		Failure:    f,
-		FinishedAt: time.Now().UTC(),
+		FinishedAt: c.now(),
 	})
 	return err
 }
@@ -963,7 +985,7 @@ func (c *Controller) beginRun(ctx context.Context, run RunView) error {
 			return err
 		}
 		// 冻结信息落库：这些键之后每次轮询都只做增量合并，不会被冲掉（§4.4）。
-		now := time.Now().UTC()
+		now := c.now()
 		base := DeployManifestFields(run.DeployJSON)
 		snap := domain.DeploySnapshot{
 			DeployID:     "d-" + run.ID,
@@ -1004,9 +1026,9 @@ func (c *Controller) beginRun(ctx context.Context, run RunView) error {
 }
 
 func (c *Controller) pollDeploy(ctx context.Context, run RunView) error {
-	now := time.Now().UTC()
+	now := c.now()
 	// 总窗口判定（K-6）：排队 + 部署超窗 → service_unavailable，不是 failed。
-	if !run.SubmittedAt.IsZero() && time.Since(run.SubmittedAt) > c.cfg.DeployTimeout {
+	if !run.SubmittedAt.IsZero() && now.Sub(run.SubmittedAt) > c.cfg.DeployTimeout {
 		f := &domain.Failure{
 			Code:      domain.CodeDeployBlocked,
 			Message:   fmt.Sprintf("deploy did not become ready within %s", c.cfg.DeployTimeout),
@@ -1092,7 +1114,7 @@ func (c *Controller) queueAfterTesting(ctx context.Context, runID string) error 
 
 // WatchdogOnce 扫描超时 Attempt（C-6.3）：先落库终态，再删 Job（execution §5.1 的顺序）。
 func (c *Controller) WatchdogOnce(ctx context.Context) error {
-	expired, err := c.repos.ListExpiredAttempts(ctx, time.Now())
+	expired, err := c.repos.ListExpiredAttempts(ctx, c.now())
 	if err != nil {
 		return err
 	}
@@ -1109,7 +1131,7 @@ func (c *Controller) WatchdogOnce(ctx context.Context) error {
 			Phase:      "timeout",
 			Message:    f.Message,
 			Failure:    f,
-			FinishedAt: time.Now().UTC(),
+			FinishedAt: c.now(),
 		}); err != nil {
 			c.logf("orchestrator: timeout attempt %s: %v", ref.AttemptID, err)
 			continue
@@ -1132,7 +1154,7 @@ func (c *Controller) CancelRun(ctx context.Context, runID, actor string) error {
 	// deploying 阶段取消：先落取消意图，再请求 Genet 卸载（C-6.1 第 2 条、§9.6）。
 	// 404/409 = release 尚未出现或正忙 → 只 WARN；取消意图已在库，由对账补偿。
 	if c.deployer != nil {
-		now := time.Now().UTC()
+		now := c.now()
 		_ = c.repos.RecordDeployState(ctx, runID, domain.DeploySnapshot{CancelRequestedAt: &now})
 		c.cleanupDeploy(ctx, runID)
 	}
