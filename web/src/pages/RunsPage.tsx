@@ -218,7 +218,7 @@ export function RunsPage() {
                     <TD>
                       <RunStatusBadge status={run.status} />
                     </TD>
-                    <TD className="tabular-nums">{progress(run)}</TD>
+                    <TD className="whitespace-nowrap tabular-nums">{progress(run)}</TD>
                     <TD className="whitespace-nowrap tabular-nums">{formatDuration(runDuration(run))}</TD>
                     <TD className="whitespace-nowrap">{run.submitted_by}</TD>
                     <TD className="whitespace-nowrap text-2xs text-fg-3" title={formatRelative(run.submitted_at)}>

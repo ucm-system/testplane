@@ -47,6 +47,8 @@ var wantTaskEdges = []struct {
 	{TaskRunning, TaskFailed, "Fail"},
 	{TaskRunning, TaskCanceled, "Cancel"},
 	{TaskFailed, TaskQueued, "Retry"},
+	// T12 重试：skipped → queued（issue #40-1 / UC-12 / §C-5.8）
+	{TaskSkipped, TaskQueued, "Retry"},
 }
 
 var wantAttemptEdges = []struct {
@@ -132,8 +134,7 @@ func TestTransitionTable_IllegalEdgesRejected(t *testing.T) {
 		{TaskPending, TaskCanceled},  // 同上
 		{TaskSucceeded, TaskFailed},  // 终态不可逆
 		{TaskSucceeded, TaskQueued},  // 终态不可逆
-		{TaskCanceled, TaskQueued},   // 终态不可逆
-		{TaskSkipped, TaskQueued},    // 终态不可逆
+		{TaskCanceled, TaskQueued},   // 终态不可逆（skipped→queued 是 T12 重试，合法）
 		{TaskRunning, TaskPreparing}, // 回退
 		{TaskPreparing, TaskQueued},  // 回退
 	}
@@ -174,13 +175,17 @@ func TestTransitionTable_TerminalStatesAreAbsorbing(t *testing.T) {
 	taskStates := []TaskStatus{TaskPending, TaskQueued, TaskPreparing, TaskRunning,
 		TaskSucceeded, TaskFailed, TaskCanceled, TaskSkipped}
 	for _, from := range taskStates {
-		// failed 不是终态（可 retry），其余三个是终态。
-		if from == TaskFailed || !from.IsTerminal() {
+		// Task 的"终态"允许**唯一的**回边：failed|skipped → queued（T11/T12 重试，
+		// 见 01 UC-12 / impl/control-plane §C-5.8 / 07 §8）。其余状态不得有出边。
+		if !from.IsTerminal() {
 			continue
 		}
 		for _, to := range taskStates {
 			if _, ok := TaskTransition(from, to); ok {
-				t.Errorf("Task 终态 %s 存在出边 -> %s", from, to)
+				retryEdge := to == TaskQueued && (from == TaskFailed || from == TaskSkipped)
+				if !retryEdge {
+					t.Errorf("Task 终态 %s 存在出边 -> %s", from, to)
+				}
 			}
 		}
 	}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { stringify as toYaml } from 'yaml'
@@ -8,6 +8,7 @@ import type { ApiErrorBody, Attempt, Deploy, DeploySnapshot, RetryPlan, Run, Tas
 import { EventTimeline } from '@/components/app/EventTimeline'
 import { LogViewer } from '@/components/app/LogViewer'
 import { RightRail, RailCard } from '@/components/app/RightRail'
+import { RunResultView } from '@/components/app/RunResultView'
 import { DeployStateBadge, RunStatusBadge, TaskStatusBadge, WaitingReasonTag } from '@/components/app/StatusBadge'
 import { Badge, Tag } from '@/components/ui/badge'
 import { Button, buttonClassName } from '@/components/ui/button'
@@ -17,6 +18,7 @@ import { KV } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Banner, EmptyState, ErrorState, LoadingBlock } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
+import { Tabs } from '@/components/ui/tabs'
 import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
 import { DeployLogsPanel } from '@/components/app/DeployLogsPanel'
@@ -642,10 +644,12 @@ export function RunDetailPage() {
   const [live, setLive] = useState(true)
   const { events, status, version, resyncToken } = useRunEvents(runId, { live })
   const toast = useToast()
+  // 终态默认看「结果」（用户：跑完了只想拿结果），运行中只有「执行细节」
+  const [view, setView] = useState<'result' | 'detail'>('detail')
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [actionError, setActionError] = useState<ApiErrorBody | null>(null)
-  // 重试（P1）：先拉 retry-plan 预览，再确认创建新 Run
+  // 重试：先拉 retry-plan 预览，再确认创建新 Run
   const [retryOpen, setRetryOpen] = useState(false)
   const [retryPlan, setRetryPlan] = useState<RetryPlan | null>(null)
   const [retrying, setRetrying] = useState(false)
@@ -662,9 +666,19 @@ export function RunDetailPage() {
     if (plan.data) setRetryPlan(plan.data)
   }, [plan.data])
 
+  // 只在"首屏"与"刚跑完"这两个时刻决定默认视图；
+  // 数据刷新（SSE 推 version）不能把用户手选的页签顶回去
+  const lastStatusRef = useRef<string | null>(null)
   useEffect(() => {
     if (!run.data) return
-    setLive(!isTerminalRun(run.data.status))
+    const status = run.data.status
+    const done = isTerminalRun(status)
+    setLive(!done)
+    const prev = lastStatusRef.current
+    const firstLoad = prev === null
+    const justFinished = prev !== null && !isTerminalRun(prev as typeof status) && done
+    if (firstLoad || justFinished) setView(done ? 'result' : 'detail')
+    lastStatusRef.current = status
   }, [run.data])
 
   const cancel = async () => {
@@ -808,7 +822,22 @@ export function RunDetailPage() {
         </Card>
       ) : null}
 
-      {detail ? (
+      {detail && terminal ? (
+        <Tabs<string>
+          ariaLabel="Run 详情视图"
+          value={view}
+          onChange={(next: string) => setView(next as 'result' | 'detail')}
+          items={[
+            { value: 'result', label: '结果' },
+            { value: 'detail', label: '执行细节' },
+          ]}
+          className="rounded-lg border border-line-soft bg-surface px-3 pt-1 shadow-card"
+        />
+      ) : null}
+
+      {detail && terminal && view === 'result' ? <RunResultView run={detail} /> : null}
+
+      {detail && (!terminal || view === 'detail') ? (
         <>
           <Card>
             <CardHeader

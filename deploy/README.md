@@ -343,23 +343,51 @@ docker run --rm -e PGPASSWORD=testplane postgres:16-alpine `
   psql -h host.docker.internal -U testplane -d testplane -c "select 1"
 ```
 
-### 6.1 Secret rotate 的窄 RBAC（D-55，按登记项生成）
+### 6.1 Secret rotate 的窄 RBAC（D-55，按登记项生成）——**apply 完 base 的硬步骤**
 
 `POST /admin/secrets/{name}/rotate` 需要确认"目标 Secret 存在且 key 非空"。
 `06 §4.4` 仍然**不授予**通配 `secrets get/list/watch`；唯一例外是 `resourceNames` 限定到
 `secret_refs` 里**已登记的那一条** Secret 的 `get`（D-55，评审 #5）。
 
-清单**不要手写**：`resourceNames` 必须等于 `secret_refs.secret_name`，按登记项生成：
+> ⚠️ **这一步不是可选项。** `deploy/k8s/rbac-secret-rotate.yaml` 是**按登记项生成**的，
+> 故意不进 `kustomization.yaml`（那里会写死演示 Secret 名）。所以 `kubectl apply -k deploy/k8s`
+> 之后**必须**再生成并 apply 这条 Role/RoleBinding，否则 rotate 端点会一直 **503**
+> （控制面 SA 没有那条 Secret 的 `get`，是"平台没权限"，不是 Secret 不存在）。
+
+**三条硬约束**（错一条 rotate 就 503 或越权）：
+
+| 约束 | 值 |
+|---|---|
+| `resourceNames` | 必须**等于** `secret_refs.secret_name`（生成脚本从 `-SecretName` 取，别手改 YAML） |
+| Role 所在 namespace | 目标 Secret 所在的 namespace（= `secret_refs.namespace`） |
+| RoleBinding 的 subject | 控制面**实际** SA 名：`kustomize` 装 = `testplane`；`Helm` 装 = **`<release>-testplane`** |
+
+`-ServiceAccount` **必填**（脚本不给默认值，正是为了防止 Helm 环境下猜成 `testplane`）：
+拿不准就先查一下实际名字：
 
 ```powershell
-# 1) 生成（Role 在目标 Secret 的 namespace，RoleBinding 绑控制面 SA）
+# <release> = helm install 时用的名字
+kubectl -n testplane get sa -l app.kubernetes.io/instance=<release> -o name
+```
+
+清单**不要手写**，按登记项生成（两种安装方式各给一条示例）：
+
+```powershell
+# ---- A) kustomize 安装（SA = testplane）----
 pwsh deploy/k8s/gen-secret-rotate-role.ps1 `
   -Namespace testplane -SecretName tp-secret-endpoint-mock `
+  -ServiceAccount testplane `
+  -Out deploy/k8s/rbac-secret-rotate.yaml
+
+# ---- B) Helm 安装（SA = <release>-testplane，这里 release 名是 tp）----
+pwsh deploy/k8s/gen-secret-rotate-role.ps1 `
+  -Namespace testplane -SecretName tp-secret-endpoint-mock `
+  -ServiceAccount tp-testplane `
   -Out deploy/k8s/rbac-secret-rotate.yaml
 
 # 2) apply（本地 kind）
 kubectl --context kind-testplane apply -f deploy/k8s/rbac-secret-rotate.yaml
-
+```
 # 3) 验证（真实结果必须与设计一致）
 #    精确到名字的授权：allowed=true
 kubectl --context kind-testplane create -f - -o jsonpath='{.status.allowed}{"\n"}' <<'EOF'

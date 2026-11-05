@@ -12,23 +12,30 @@
   `secret_refs.secret_name` 一致，生成脚本会做 DNS-1123 校验并在名字过长时加哈希。
 
 .EXAMPLE
-  # 本地 kind：为 mock 端点 Secret 生成并 apply
+  # 本地 kind（kustomize 安装，SA = testplane）：为 mock 端点 Secret 生成并 apply
   pwsh deploy/k8s/gen-secret-rotate-role.ps1 `
     -Namespace testplane -SecretName tp-secret-endpoint-mock `
+    -ServiceAccount testplane `
     -Out deploy/k8s/rbac-secret-rotate.yaml
   kubectl --context kind-testplane apply -f deploy/k8s/rbac-secret-rotate.yaml
 
 .EXAMPLE
-  # 只打印到 stdout（生产按登记项逐个生成、走 GitOps）
-  pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace testplane -SecretName prod-qwen-key
+  # 只打印到 stdout（生产按登记项逐个生成、走 GitOps）；注意必须显式给 -ServiceAccount
+  pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace testplane -SecretName prod-qwen-key `
+    -ServiceAccount tp-testplane
 #>
 param(
     # Secret 所在的 namespace（等于 secret_refs.namespace）。
     [Parameter(Mandatory = $true)][string]$Namespace,
     # 已登记的 Secret 名（等于 secret_refs.secret_name）；resourceNames 只放这一个。
     [Parameter(Mandatory = $true)][string]$SecretName,
-    # 控制面 ServiceAccount（deploy/k8s/serviceaccount.yaml）。
-    [string]$ServiceAccount = 'testplane',
+    # 控制面 ServiceAccount 名（**必填**，不给就报错）。
+    #
+    # 为什么不给默认值：两种安装方式的 SA 名不同——
+    #   kustomize（deploy/k8s/serviceaccount.yaml）：testplane
+    #   Helm（deploy/charts/testplane）       ：<release>-testplane（release = helm install 的名字）
+    # 默认成 testplane 会让 Helm 装的环境"生成成功、rotate 却 403/503"（评审 #40-3）。
+    [string]$ServiceAccount,
     # 控制面 ServiceAccount 所在 namespace。
     [string]$ServiceAccountNamespace = 'testplane',
     # 输出文件；省略则打印到 stdout。
@@ -43,6 +50,16 @@ function Assert-Dns1123([string]$Value, [string]$What, [int]$MaxLen) {
     if ($Value -notmatch '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$') {
         throw "$What 必须是 DNS-1123 label（小写字母/数字/'-'）：$Value"
     }
+}
+
+if ([string]::IsNullOrWhiteSpace($ServiceAccount)) {
+    throw @"
+-ServiceAccount 必填：RoleBinding 的 subject 必须与控制面实际 SA 名一致，两种安装方式不同：
+    kustomize（deploy/k8s/serviceaccount.yaml）：-ServiceAccount testplane
+    Helm（deploy/charts/testplane）          ：-ServiceAccount <release>-testplane
+  Helm 装的环境按下面这条查实际名字（<release> 换成 helm install 时用的名字）：
+    kubectl -n testplane get sa -l app.kubernetes.io/instance=<release> -o name
+"@
 }
 
 Assert-Dns1123 $Namespace 'Namespace' 63

@@ -26,6 +26,15 @@ func newMetricsRegistry() *metricsRegistry {
 	return &metricsRegistry{http: map[httpKey]*atomic.Int64{}}
 }
 
+// 拒绝审计管道的指标名（issue #40-6）。名字只在这里定义一次：
+// exposition 与测试都引用同一组常量，改名后测试会跟着变（不会"改了名测试还绿"）。
+const (
+	metricAuditRejectedWritten    = "testplane_audit_rejected_written_total"
+	metricAuditRejectedDropped    = "testplane_audit_rejected_dropped_total"
+	metricAuditRejectedFailed     = "testplane_audit_rejected_failed_total"
+	metricAuditRejectedSuppressed = "testplane_audit_rejected_suppressed_total"
+)
+
 func (m *metricsRegistry) observeHTTP(method string, code int) {
 	k := httpKey{method, code}
 	m.mu.RLock()
@@ -113,6 +122,21 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	} else {
 		b.WriteString("# testplane_db_metrics_error 1（采样失败，只影响 DB 类指标）\n")
 	}
+
+	// ---- 接入层拒绝审计管道（issue #40-6：异步有界队列 + 401 聚合）----
+	rejectedWritten, rejectedDropped, rejectedFailed, rejectedSuppressed := auditHub.stats()
+	b.WriteString("# HELP " + metricAuditRejectedWritten + " 已写入 audit_log 的拒绝审计条数（异步队列消费成功）。\n")
+	b.WriteString("# TYPE " + metricAuditRejectedWritten + " counter\n")
+	fmt.Fprintf(&b, "%s %d\n", metricAuditRejectedWritten, rejectedWritten)
+	b.WriteString("# HELP " + metricAuditRejectedDropped + " 因队列/聚合表满而被丢弃的拒绝审计条数（不阻塞请求）。\n")
+	b.WriteString("# TYPE " + metricAuditRejectedDropped + " counter\n")
+	fmt.Fprintf(&b, "%s %d\n", metricAuditRejectedDropped, rejectedDropped)
+	b.WriteString("# HELP " + metricAuditRejectedFailed + " 异步写 audit_log 失败的条数。\n")
+	b.WriteString("# TYPE " + metricAuditRejectedFailed + " counter\n")
+	fmt.Fprintf(&b, "%s %d\n", metricAuditRejectedFailed, rejectedFailed)
+	b.WriteString("# HELP " + metricAuditRejectedSuppressed + " 401 聚合压掉的重复条数（窗口内同 IP）。\n")
+	b.WriteString("# TYPE " + metricAuditRejectedSuppressed + " counter\n")
+	fmt.Fprintf(&b, "%s %d\n", metricAuditRejectedSuppressed, rejectedSuppressed)
 
 	b.WriteString("# HELP testplane_up 进程存活（恒为 1）。\n")
 	b.WriteString("# TYPE testplane_up gauge\n")

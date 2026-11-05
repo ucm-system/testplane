@@ -219,13 +219,15 @@ type TaskSummaryRow struct {
 	Status        string  `json:"status"`
 	WaitingReason *string `json:"waiting_reason,omitempty"`
 	Attempts      int     `json:"attempts"`
-	Error         []byte  `json:"error,omitempty"`
+	// ReusedFromTaskID 见 Task.ReusedFromTaskID（retry 跨 Run 续跑，03 §4.2）。
+	ReusedFromTaskID *string `json:"reused_from_task_id,omitempty"`
+	Error            []byte  `json:"error,omitempty"`
 }
 
 // TaskSummaries 取 Run 的全部 Task 摘要，按 seq 升序。
 func (r *RunRepo) TaskSummaries(ctx context.Context, tx pgx.Tx, runID string) ([]TaskSummaryRow, error) {
 	rows, err := r.s.db(tx).Query(ctx, `
-		SELECT id, seq, name, status, waiting_reason, current_attempt, error
+		SELECT id, seq, name, status, waiting_reason, current_attempt, reused_from_task_id, error
 		  FROM tasks WHERE run_id = $1 ORDER BY seq`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("store: task summaries %s: %w", runID, err)
@@ -234,7 +236,8 @@ func (r *RunRepo) TaskSummaries(ctx context.Context, tx pgx.Tx, runID string) ([
 	var out []TaskSummaryRow
 	for rows.Next() {
 		var t TaskSummaryRow
-		if err := rows.Scan(&t.ID, &t.Seq, &t.Name, &t.Status, &t.WaitingReason, &t.Attempts, &t.Error); err != nil {
+		if err := rows.Scan(&t.ID, &t.Seq, &t.Name, &t.Status, &t.WaitingReason,
+			&t.Attempts, &t.ReusedFromTaskID, &t.Error); err != nil {
 			return nil, fmt.Errorf("store: scan task summary: %w", err)
 		}
 		out = append(out, t)

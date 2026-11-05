@@ -384,20 +384,116 @@ func TestDeployLogs_TailLinesConflictsWithOffset(t *testing.T) {
 	}
 }
 
-// `?pod=` 必选：缺失 → 400（游标只在单 Pod 内有意义）。
-func TestDeployLogs_PodRequired(t *testing.T) {
+// `?pod=` 缺省 + **只有 1 个 Pod** → 直接服务它（票 #40-5：CLI/agent 不必先查 Pod 名）。
+func TestDeployLogs_PodOptionalSinglePod(t *testing.T) {
 	srv, st, cleanup := integrationServer(t)
 	defer cleanup()
 	runID := seedDeployRun(t, st, map[string]any{
-		"namespace": "testplane-mock", "release_name": "tp-req", "state": "ready",
+		"namespace": "testplane-mock", "release_name": "tp-one", "state": "ready",
 	})
 	srv.deployLogsKube = &fakeDeployLogs{
-		pods: []corev1.Pod{deployPod("tp-req-stack-1", true, 0, time.Now())},
-		logs: map[string]string{"tp-req-stack-1": "x\n"},
+		pods: []corev1.Pod{deployPod("tp-one-stack-1", true, 0, time.Now())},
+		logs: map[string]string{"tp-one-stack-1": "only1\nonly2\n"},
+	}
+	rec, body := getDeployLogs(t, srv, runID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200（单 Pod 不必指定 pod）: %s", rec.Code, rec.Body.String())
+	}
+	if len(body.Entries) != 1 || body.Entries[0].Pod != "tp-one-stack-1" {
+		t.Fatalf("entries = %+v, want 服务唯一那个 Pod", body.Entries)
+	}
+	if !strings.Contains(body.Entries[0].Text, "only2") {
+		t.Fatalf("text = %q", body.Entries[0].Text)
+	}
+}
+
+// `?pod=` 缺省 + **多个 Pod** → 409 CONFLICT（pod_ambiguous + available_pods），绝不默默取第一个。
+func TestDeployLogs_PodOptionalAmbiguousConflict(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	started := time.Now().Add(-5 * time.Minute).UTC().Truncate(time.Second)
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-many", "state": "ready",
+	})
+	srv.deployLogsKube = &fakeDeployLogs{
+		pods: []corev1.Pod{
+			deployPod("tp-many-stack-1", true, 0, started),
+			deployPod("tp-many-stack-2", true, 0, started),
+		},
+		logs: map[string]string{"tp-many-stack-1": "a\n", "tp-many-stack-2": "b\n"},
 	}
 	rec, _ := getDeployLogs(t, srv, runID, "")
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400（pod 必选）", rec.Code)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409（多 Pod 缺省必须要求指定）: %s", rec.Code, rec.Body.String())
+	}
+	var errBody struct {
+		Code   string         `json:"code"`
+		Detail map[string]any `json:"detail"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &errBody)
+	if errBody.Detail["reason"] != "pod_ambiguous" {
+		t.Fatalf("detail = %v, want reason=pod_ambiguous", errBody.Detail)
+	}
+	pods, _ := errBody.Detail["available_pods"].([]any)
+	if len(pods) != 2 {
+		t.Fatalf("available_pods = %v, want 两个可选 Pod", errBody.Detail["available_pods"])
+	}
+}
+
+// `?pod=` 缺省 + **0 个 Pod** → 200 + 排队/回收的 message（不是 409/404）。
+func TestDeployLogs_PodOptionalNoPods(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-zero", "state": "queued",
+	})
+	srv.deployLogsKube = &fakeDeployLogs{pods: nil}
+	rec, body := getDeployLogs(t, srv, runID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(body.Message, "排队") {
+		t.Fatalf("message = %q, want 排队说明", body.Message)
+	}
+	if body.Window != "full" {
+		t.Fatalf("window = %q, want full（排队期也是全文窗口）", body.Window)
+	}
+}
+
+// tail 窗口一次性：`truncated=false`、`next_offset=0`、`window=tail`（票 #40-4）。
+func TestDeployLogs_TailWindowIsOneShot(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	started := time.Now().Add(-5 * time.Minute).UTC().Truncate(time.Second)
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-tail2", "state": "ready",
+	})
+	// tail_lines=50 > limit=10：旧实现会返回 10 行 + next_offset>0（自相矛盾）。
+	lines := make([]string, 0, 50)
+	for i := 0; i < 50; i++ {
+		lines = append(lines, fmt.Sprintf("L%02d", i))
+	}
+	srv.deployLogsKube = &fakeDeployLogs{
+		pods: []corev1.Pod{deployPod("tp-tail2-stack-1", true, 0, started)},
+		logs: map[string]string{"tp-tail2-stack-1": strings.Join(lines, "\n") + "\n"},
+	}
+	rec, body := getDeployLogs(t, srv, runID, "?tail_lines=50&limit=10")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if body.Window != "tail" {
+		t.Fatalf("window = %q, want tail", body.Window)
+	}
+	if body.Truncated || body.NextOffset != 0 {
+		t.Fatalf("truncated=%v next_offset=%d，tail 窗口必须一次性（false/0）", body.Truncated, body.NextOffset)
+	}
+	if len(body.Entries) != 1 || body.Entries[0].LineCount != 50 {
+		t.Fatalf("entries = %+v, want 整个 tail 窗口 50 行", body.Entries)
+	}
+	// 全文窗口仍可续页，且 window=full。
+	rec, body = getDeployLogs(t, srv, runID, "?offset=0&limit=10")
+	if rec.Code != http.StatusOK || body.Window != "full" || !body.Truncated || body.NextOffset != 10 {
+		t.Fatalf("full 页 = window:%q truncated:%v next:%d", body.Window, body.Truncated, body.NextOffset)
 	}
 }
 

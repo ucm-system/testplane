@@ -39,6 +39,10 @@ const (
 	deployLogMaxTailLines = 5000
 	// deployLogContainer 默认容器名；空则取 Pod 的第一个容器。
 	deployLogContainer = ""
+
+	// 两种窗口（票 #40-4）：行号基准不同，响应里显式告诉客户端。
+	deployLogWindowFull = "full" // 全文窗口：offset/next_offset 是全文行号，可续页
+	deployLogWindowTail = "tail" // 末尾窗口（tail_lines）：一次性，不可续页
 )
 
 // DeployLogPod 是某个 Deploy Pod 的元信息（前端"按 Pod 分页签"）。
@@ -69,13 +73,18 @@ type DeployLogGap struct {
 
 // DeployLogsResponse 是 `GET /runs/{run_id}/deploy/logs` 的响应体。
 type DeployLogsResponse struct {
-	RunID      string           `json:"run_id"`
-	Pods       []DeployLogPod   `json:"pods"`
-	Entries    []DeployLogEntry `json:"entries"`
-	Gaps       []DeployLogGap   `json:"gaps"`
-	Truncated  bool             `json:"truncated"`
-	NextOffset int              `json:"next_offset"`
-	Message    string           `json:"message,omitempty"`
+	RunID   string           `json:"run_id"`
+	Pods    []DeployLogPod   `json:"pods"`
+	Entries []DeployLogEntry `json:"entries"`
+	Gaps    []DeployLogGap   `json:"gaps"`
+	// Window 说明这次 entries 是哪种窗口（票 #40-4）：
+	//   full —— 全文窗口，`offset`/`next_offset` 是**该 Pod 全文**的行号，可续页；
+	//   tail —— 末尾窗口（`tail_lines>0`），**不可续页**：truncated 恒 false、next_offset 恒 0。
+	// 两种窗口的行号基准不同，客户端不能拿 tail 页的 offset 去请求 full 页。
+	Window     string `json:"window"`
+	Truncated  bool   `json:"truncated"`
+	NextOffset int    `json:"next_offset"`
+	Message    string `json:"message,omitempty"`
 }
 
 // deployLogClient 是本端点需要的**最小** K8s 能力（只读）：
@@ -171,6 +180,7 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 		Pods:    []DeployLogPod{},
 		Entries: []DeployLogEntry{},
 		Gaps:    []DeployLogGap{},
+		Window:  deployLogWindowFull,
 	}
 	if deploy.Namespace == "" && deploy.ReleaseName == "" {
 		// 非 deploy 形态的 Run：没有部署日志可看，但也不是 404。
@@ -185,13 +195,12 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 参数校验（`?pod=` 必选：游标只在单个 Pod 内有意义，见下）----
 	q := r.URL.Query()
+	// `?pod=` **可选**（票 #40-5）：不知道 Pod 名的调用方（CLI/agent）不该被迫先打
+	// `GET /runs/{id}/deploy` 才能看日志。规则（写死，见下方分支）：
+	//   缺省 + 0/1 个 Pod → 直接服务那一个（0 个时给排队/回收的 message）；
+	//   缺省 + 多个 Pod   → 409 CONFLICT（pod_ambiguous + available_pods），**不默默取第一个**；
+	//   给了但不存在      → 404。
 	podName := strings.TrimSpace(q.Get("pod"))
-	if podName == "" {
-		fail(w, r, http.StatusBadRequest, domain.CodeValidationError,
-			"缺少必选参数 pod：日志游标只在单个 Pod 内有意义（多 Pod 共用一个 offset 会丢短 Pod 的日志）",
-			map[string]any{"param": "pod"}, false)
-		return
-	}
 	offset := atoiDefault(q.Get("offset"), 0)
 	if offset < 0 {
 		offset = 0
@@ -303,31 +312,49 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 请求的 Pod 不在当前 Pod 列表里：明确 404（打错名字或已被回收），
-	// 明细里给出当前可选的 Pod，前端能直接纠正。
+	// 还没定到具体 Pod（`?pod=` 缺省，或给的名字不在列表里）。
 	if target == nil {
-		fail(w, r, http.StatusNotFound, domain.CodeNotFound,
-			"没有这个 Deploy Pod（可能已回收）",
-			map[string]any{
-				"pod":            podName,
-				"reason":         "pod_not_found",
-				"available_pods": podNames(resp.Pods),
-			}, false)
-		return
+		switch {
+		// 缺省 + 只有 1 个 Pod → 直接服务它（票 #40-5）
+		case podName == "" && len(resp.Pods) == 1:
+			target = &pods[0]
+		// 缺省 + 多个 Pod → 409，**不猜第一个**：猜错会让调用方以为拿到的就是那个 Pod 的日志
+		case podName == "" && len(resp.Pods) > 1:
+			fail(w, r, http.StatusConflict, domain.CodeConflict,
+				"该 Deploy 有多个 Pod，请用 ?pod= 指定要读哪一个",
+				map[string]any{
+					"reason":         "pod_ambiguous",
+					"available_pods": podNames(resp.Pods),
+					"hint":           "GET /runs/{run_id}/deploy/logs?pod=<name>",
+				}, false)
+			return
+		// 给了名字但不在列表里 → 404（打错或已回收）
+		default:
+			fail(w, r, http.StatusNotFound, domain.CodeNotFound,
+				"没有这个 Deploy Pod（可能已回收）",
+				map[string]any{
+					"pod":            podName,
+					"reason":         "pod_not_found",
+					"available_pods": podNames(resp.Pods),
+				}, false)
+			return
+		}
 	}
 
-	// ---- 单 Pod 分页（offset 只在这个 Pod 的日志流里有意义）----
+	// ---- 单 Pod 读取（offset 只在这个 Pod 的日志流里有意义）----
 	//
-	// 为什么 `?pod=` 必选：多 Pod 共用一个 offset 时，"每页按 Pod 顺序填充 + next_offset 取最大值"
+	// 为什么游标按 Pod 走：多 Pod 共用一个 offset 时，"每页按 Pod 顺序填充 + next_offset 取最大值"
 	// 会让短 Pod 永远轮不到（评审 #4 的 P0 反例：p1=5 行、p2=2 行、limit=2 → p2 一行都不出现）。
-	// 改成"每次只服务一个 Pod"后，offset/limit/tail_lines 的语义唯一，也与前端 Pod 页签一一对应。
 	//
-	// tail_lines 与 offset 互斥：tail_lines 是"取窗口末尾 N 行"，窗口一变 offset 就没法稳定翻页，
-	// 所以两者同时给出直接 400，而不是让人猜。
+	// 两种窗口，语义互斥（票 #40-4）：
+	//   tail_lines>0 → window=tail：一次性，返回末尾窗口全部行，**truncated 恒 false、next_offset 恒 0**；
+	//                  想续页就必须换 full 窗口（从 offset=0 读全文），不能拿 tail 的 offset 续读。
+	//   tail_lines=0 → window=full：offset/limit 是全文行号，可续页。
+	// 同时给 tail_lines 与 offset 仍然是 400（两个窗口的行号基准不同，混用必然重复/漏行）。
 	if tailLines > 0 && offset > 0 {
 		fail(w, r, http.StatusBadRequest, domain.CodeValidationError,
-			"tail_lines 与 offset 不能同时使用（tail_lines 是窗口末尾语义，无法稳定翻页）",
-			map[string]any{"tail_lines": tailLines, "offset": offset}, false)
+			"tail_lines 与 offset 不能同时使用：tail 窗口不可续页，续页请改用全文窗口（不带 tail_lines）从 offset=0 读",
+			map[string]any{"tail_lines": tailLines, "offset": offset, "window": deployLogWindowTail}, false)
 		return
 	}
 
@@ -338,6 +365,23 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lines := splitLogLines(raw)
+
+	// tail 窗口：取到的就是"最后 N 行"，一次性吐完，不提供续页。
+	if tailLines > 0 {
+		resp.Window = deployLogWindowTail
+		resp.Truncated = false
+		resp.NextOffset = 0
+		if len(lines) > 0 {
+			resp.Entries = append(resp.Entries, DeployLogEntry{
+				Pod: target.Name, Container: container,
+				Offset: 0, LineCount: len(lines),
+				Text: strings.Join(lines, "\n"),
+			})
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
 	if offset < len(lines) {
 		rest := lines[offset:]
 		take := rest

@@ -60,7 +60,7 @@
 | CSRF | 双提交：`X-CSRF-Token` 必须等于 `GET /me` 返回的 `csrf_token`（由 `HMAC(secret, "csrf|sub|exp")` 派生，与会话绑定）。**只对 Cookie 会话的写操作生效**；Bearer 调用方不需要该头 |
 | 缺 CSRF | 403 `FORBIDDEN`（不是 401——身份是有效的，缺的是防伪令牌） |
 | 登出 | `POST /auth/logout` 清 `tp_session`（`Max-Age=0`）；IdP 侧会话不主动登出（无 end_session 依赖） |
-| `dev` 模式 | `TESTPLANE_AUTH_MODE=dev` 时 `/auth/*` 返回 404，`Authorization: Bearer <subject>` 直接作为身份、角色固定 `admin`；`TESTPLANE_ENV != dev` 时启动打 WARN |
+| `dev` 模式 | `TESTPLANE_AUTH_MODE=dev` 时 `/auth/*` 返回 404，`Authorization: Bearer <subject>` 直接作为身份、角色固定 `admin`；`TESTPLANE_ENV ∉ {dev, local}` 时**拒绝启动**（dev 模式等于任何人都是 admin，见 `06 §6.1`） |
 
 `/auth/login`、`/auth/callback`、`/auth/logout` 与 `/healthz`、`/readyz`、`/metrics` 一样**不带 `/api/v1` 前缀**，且 `/auth/login|callback` 匿名（登录前不可能有凭据）。
 
@@ -183,9 +183,10 @@ run:
 
 ### 4.3 独立 Task
 
-`POST /tasks` 接受 `task:` 形态（§10.3），**禁止 `deploy`**
-> 续跑形态（`02 §2.6`）：`POST /runs/{id}/retry` 返回的**新 Run** 里，`run.retry_of` 指向源 Run，
-> 复用来的 Task 带 `reused_from_task_id` 且 `status="succeeded"`、`attempt_no=0`。，`service.url` 必填，返回 `{task_id, run_id}`（合成 `kind='task'` 的占位 Run）。
+`POST /tasks` 接受 `task:` 形态（§10.3），**禁止 `deploy`**，`service.url` 必填，返回 `{task_id, run_id}`（合成 `kind='task'` 的占位 Run）。
+
+> **续跑形态**（`02 §2.6`）：`POST /runs/{id}/retry` 返回的**新 Run** 里，`run.retry_of` 指向源 Run；
+> 复用来的 Task 带 `reused_from_task_id` 且 `status="succeeded"`、`attempt_no=0`（没有 Attempt）。
 
 ### 4.4 重复提交：不做幂等（D-37）
 
@@ -224,8 +225,9 @@ run:
 | `GET` | `/runs/{id}/report.md` | `text/markdown` | 200 |
 | `GET` | `/runs/{id}/manifest` | Manifest 快照（"照上次再来一次"） | 200 |
 | `GET` | `/runs/{id}/deploy` | 部署快照（状态/排队/Endpoint/Pods） | 200 |
-| `GET` | `/runs/{id}/deploy/logs` | `?pod=`（**必选**）`&offset=&limit=&tail_lines=`；游标只在**单个 Pod** 内，`tail_lines` 与 `offset` 互斥 | 200 |
+| `GET` | `/runs/{id}/deploy/logs` | `?pod=`（**可选**）`&offset=&limit=&tail_lines=`。`pod` 缺省：0 Pod→200+`message`、1 Pod→直接服务、≥2 Pod→**409 `pod_ambiguous`**+`available_pods[]`。游标只在**单 Pod** 内；`tail_lines` 是一次性窗口（`window="tail"`、`truncated=false`、`next_offset=0`，不可续页），且与 `offset` 互斥 | 200 / 409 |
 | `GET` | `/runs/{id}/artifacts` | Run 级产物清单 | 200 |
+| `GET` | `/runs/{id}/bundle` | **一次性打包**（`application/zip`）：报告 / 元数据 / 全量事件 / 产物 / 各 Attempt 与 Deploy 日志；缺失项进 `MANIFEST.json.missing`（D-56） | 200 |
 | `GET` | `/runs/{id}/files` | `?path=` 下载（Range） | 200/206 |
 
 `GET /runs/{id}` 响应要点：

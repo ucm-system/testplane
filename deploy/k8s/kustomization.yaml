@@ -12,9 +12,18 @@
 #
 # 另外几份「有前提条件」的清单仍然单独 apply（各自文件头写了原因）：
 #   k8s/rbac-cluster-executor.yaml  Job 要落到 testplane 以外的 namespace 时（扩权，需评审）
-#   k8s/rbac-secret-rotate.yaml     D-55 窄授权（rotate 用），按登记项生成后再 apply：
-#                                   pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace ... -SecretName ... -Out ...
-#                                   **不要**把 secrets 权限并进 rbac.yaml（那会变成通配授权）
+#   k8s/rbac-secret-rotate.yaml     D-55 窄授权（rotate 用）。
+#                                   ⚠️ **apply 完 base 之后的硬步骤，不是可选项**：不 apply，
+#                                   `POST /admin/secrets/{name}/rotate` 会因缺 get 权限一直 503。
+#                                   按登记项生成（-ServiceAccount 必填，见脚本）：
+#                                     pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace testplane `
+#                                       -SecretName <secret_refs.secret_name> -ServiceAccount testplane `
+#                                       -Out deploy/k8s/rbac-secret-rotate.yaml
+#                                     kubectl -n testplane apply -f deploy/k8s/rbac-secret-rotate.yaml
+#                                   约束：resourceNames 必须等于 secret_refs.secret_name；RoleBinding 的
+#                                   subject 必须等于控制面实际 SA 名（kustomize=testplane，Helm=<release>-testplane）。
+#                                   **不要**把 secrets 权限并进 rbac.yaml（那会变成通配授权）。
+#                                   完整步骤 + 两种安装方式的示例命令见 deploy/README.md §6.1。
 #   k8s/networkpolicy.yaml          有真 CNI 时；kindnet 不实现 NetworkPolicy
 #   k8s/pdb.yaml                    单副本 + minAvailable:1 会阻塞 drain，dev 不需要
 resources:

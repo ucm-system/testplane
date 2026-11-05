@@ -45,13 +45,16 @@ type runTaskCounts struct {
 
 // taskBriefDTO 是 Run 详情里的 Task 摘要（openapi TaskSummary，一条 JOIN 取）。
 type taskBriefDTO struct {
-	ID            string          `json:"id"`
-	Seq           int             `json:"seq"`
-	Name          string          `json:"name"`
-	Status        string          `json:"status"`
-	WaitingReason *string         `json:"waiting_reason"`
-	Attempts      int             `json:"attempts"`
-	Error         json.RawMessage `json:"error"`
+	ID            string  `json:"id"`
+	Seq           int     `json:"seq"`
+	Name          string  `json:"name"`
+	Status        string  `json:"status"`
+	WaitingReason *string `json:"waiting_reason"`
+	Attempts      int     `json:"attempts"`
+	// ReusedFromTaskID 是本 Task 复用自哪个旧 Task（retry 的跨 Run 续跑，03 §4.2）；
+	// nil 表示不是复用来的。07 §4.2 要求对外可见。
+	ReusedFromTaskID *string         `json:"reused_from_task_id"`
+	Error            json.RawMessage `json:"error"`
 }
 
 // taskDTO 是 Task 详情。
@@ -78,12 +81,14 @@ type taskDTO struct {
 	EndpointKey       *string         `json:"endpoint_key,omitempty"`
 	EndpointExclusive bool            `json:"endpoint_exclusive"`
 	CurrentAttempt    int             `json:"current_attempt"`
-	AvailableAt       *time.Time      `json:"available_at,omitempty"`
-	CancelRequested   bool            `json:"cancel_requested"`
-	ResultRef         *string         `json:"result_ref,omitempty"`
-	Error             json.RawMessage `json:"error"`
-	CreatedAt         time.Time       `json:"created_at"`
-	UpdatedAt         time.Time       `json:"updated_at"`
+	// ReusedFromTaskID 见 taskBriefDTO（07 §4.2 / 03 §4.2）。
+	ReusedFromTaskID *string         `json:"reused_from_task_id"`
+	AvailableAt      *time.Time      `json:"available_at,omitempty"`
+	CancelRequested  bool            `json:"cancel_requested"`
+	ResultRef        *string         `json:"result_ref,omitempty"`
+	Error            json.RawMessage `json:"error"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
 }
 
 // attemptDTO 是 Attempt 详情（openapi Attempt：不暴露 job_id / job_namespace）。
@@ -204,13 +209,14 @@ func toRunTaskCounts(c store.RunTaskCounts) *runTaskCounts {
 
 func toTaskBriefDTO(t store.TaskSummaryRow) taskBriefDTO {
 	return taskBriefDTO{
-		ID:            t.ID,
-		Seq:           t.Seq,
-		Name:          t.Name,
-		Status:        t.Status,
-		WaitingReason: t.WaitingReason,
-		Attempts:      t.Attempts,
-		Error:         store.JSONOrNil(t.Error),
+		ID:               t.ID,
+		Seq:              t.Seq,
+		Name:             t.Name,
+		Status:           t.Status,
+		WaitingReason:    t.WaitingReason,
+		Attempts:         t.Attempts,
+		ReusedFromTaskID: t.ReusedFromTaskID,
+		Error:            store.JSONOrNil(t.Error),
 	}
 }
 
@@ -232,6 +238,7 @@ func toTaskDTO(t *store.Task) taskDTO {
 		EndpointKey:       t.EndpointKey,
 		EndpointExclusive: t.EndpointExclusive,
 		CurrentAttempt:    t.CurrentAttempt,
+		ReusedFromTaskID:  t.ReusedFromTaskID,
 		AvailableAt:       utcPtr(t.AvailableAt),
 		CancelRequested:   t.CancelRequested,
 		ResultRef:         t.ResultRef,

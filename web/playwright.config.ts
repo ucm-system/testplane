@@ -19,6 +19,8 @@ export default defineConfig({
   timeout: 45_000,
   expect: { timeout: 10_000 },
   fullyParallel: false,
+  // 单 worker：用例里有 DOM 几何断言与截图，并发会让 dev server 抢资源导致 flaky
+  workers: 1,
   reporter: [['line']],
   use: {
     baseURL,

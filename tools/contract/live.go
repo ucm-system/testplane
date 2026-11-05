@@ -11,6 +11,7 @@ package main
 //   - 会创建 2 个 fixture Run（A 用于读，B 用于取消），A 在结束时尽力取消。
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"context"
@@ -236,6 +237,7 @@ func (l *Live) Run() ([]check, []string, error) {
 	if l.runA != "" {
 		l.waitRunTerminal(ctx, l.runA, 120*time.Second)
 		l.probeRunReads(ctx)
+		l.probeRunBundle(ctx, l.runA)
 	}
 	l.runB, l.taskB = l.submitFixture(ctx, "B")
 	if l.runB != "" {
@@ -773,17 +775,29 @@ func (l *Live) probeDeployLogsDeploy(ctx context.Context, runID string) {
 	}
 	_ = deployRun
 
-	// 1) 缺 pod → 400。
+	// 1) 缺 pod：`pod` 现在**可选**（#40-5）。0 或 1 个 Pod → 200；多个 Pod → 409 `pod_ambiguous`。
 	st, hdr, raw, err := l.client.do(ctx, http.MethodGet, base, nil, "", nil)
 	l.markOp(opID)
-	if err != nil {
+	switch {
+	case err != nil:
 		l.recordErr("live.getRunDeployLogs.no_pod", err)
-	} else if st != http.StatusBadRequest {
-		l.add("live.getRunDeployLogs.no_pod", false, fmt.Sprintf("期望 400，实际 %d：%s", st, truncate(raw, 300)))
-	} else if issues := l.validateError(opID, st, hdr, raw); len(issues) > 0 {
-		l.add("live.getRunDeployLogs.no_pod", false, strings.Join(issues, "；"))
-	} else {
-		l.add("live.getRunDeployLogs.no_pod", true, "HTTP 400，缺 pod 被拒")
+	case st == http.StatusOK:
+		if issues := l.validateSuccess(opID, st, hdr, raw, "DeployLogs"); len(issues) > 0 {
+			l.add("live.getRunDeployLogs.no_pod", false, strings.Join(issues, "；"))
+		} else {
+			l.add("live.getRunDeployLogs.no_pod", true, "HTTP 200（pod 缺省 = 0/1 个 Pod 时直接服务）")
+		}
+	case st == http.StatusConflict:
+		// 多 Pod 时要求显式指定，且错误体必须是 pod_ambiguous
+		if issues := l.validateError(opID, st, hdr, raw); len(issues) > 0 {
+			l.add("live.getRunDeployLogs.no_pod", false, strings.Join(issues, "；"))
+		} else if !strings.Contains(string(raw), "pod_ambiguous") {
+			l.add("live.getRunDeployLogs.no_pod", false, "409 但 detail.reason 不是 pod_ambiguous："+truncate(raw, 200))
+		} else {
+			l.add("live.getRunDeployLogs.no_pod", true, "HTTP 409 pod_ambiguous（多 Pod 必须显式指定）")
+		}
+	default:
+		l.add("live.getRunDeployLogs.no_pod", false, fmt.Sprintf("期望 200 或 409，实际 %d：%s", st, truncate(raw, 300)))
 	}
 
 	// 2) 带实际 Pod → 200 + pods/entries 数组。
@@ -825,6 +839,81 @@ func (l *Live) probeDeployLogsDeploy(ctx context.Context, runID string) {
 		return
 	}
 	l.add("live.getRunDeployLogs", false, fmt.Sprintf("pod=%s 期望 200，实际 %d：%s", podName, st, truncate(raw, 300)))
+}
+
+// probeRunBundle 覆盖 GET /runs/{id}/bundle：zip 魔数 + MANIFEST.json + artifacts 计数与 /artifacts 同源。
+func (l *Live) probeRunBundle(ctx context.Context, runID string) {
+	const checkName = "live.getRunBundle"
+	opID := l.opIDFor(http.MethodGet, "/api/v1/runs/{run_id}/bundle")
+	if opID == "" {
+		l.add(checkName, false, "openapi 缺少 GET /runs/{run_id}/bundle")
+		return
+	}
+	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID)+"/bundle", nil, "", nil)
+	l.markOp(opID)
+	if err != nil {
+		l.recordErr(checkName, err)
+		return
+	}
+	if status != http.StatusOK {
+		l.add(checkName, false, fmt.Sprintf("期望 200，实际 %d：%s", status, truncate(raw, 300)))
+		return
+	}
+	if ct := hdr.Get("Content-Type"); !strings.HasPrefix(ct, "application/zip") {
+		l.add(checkName, false, fmt.Sprintf("Content-Type=%q，期望 application/zip", ct))
+		return
+	}
+	if len(raw) < 2 || raw[0] != 'P' || raw[1] != 'K' {
+		l.add(checkName, false, "响应前 2 字节不是 PK（不是 zip）")
+		return
+	}
+	zr, zerr := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if zerr != nil {
+		l.add(checkName, false, "zip.NewReader: "+zerr.Error())
+		return
+	}
+	var manifest *zip.File
+	for _, f := range zr.File {
+		if f.Name == "MANIFEST.json" {
+			manifest = f
+			break
+		}
+	}
+	if manifest == nil {
+		l.add(checkName, false, "包内缺 MANIFEST.json")
+		return
+	}
+	rc, oerr := manifest.Open()
+	if oerr != nil {
+		l.add(checkName, false, "打开 MANIFEST.json: "+oerr.Error())
+		return
+	}
+	mb, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	var man struct {
+		Counts struct {
+			Artifacts int `json:"artifacts"`
+		} `json:"counts"`
+	}
+	if uerr := json.Unmarshal(mb, &man); uerr != nil {
+		l.add(checkName, false, "MANIFEST.json 不是 JSON: "+uerr.Error())
+		return
+	}
+	// 与 /artifacts 条数同源（D-56：MANIFEST 的 counts 必须能和清单对上，不能各算各的）
+	ast, _, araw, aerr := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID)+"/artifacts", nil, "", nil)
+	if aerr != nil || ast != http.StatusOK {
+		l.add(checkName, false, "无法用 /artifacts 交叉校验 MANIFEST.counts.artifacts")
+		return
+	}
+	var list struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	_ = json.Unmarshal(araw, &list)
+	if man.Counts.Artifacts != len(list.Items) {
+		l.add(checkName, false, fmt.Sprintf("MANIFEST.counts.artifacts=%d 与 /artifacts items=%d 不一致", man.Counts.Artifacts, len(list.Items)))
+		return
+	}
+	l.add(checkName, true, fmt.Sprintf("HTTP 200 application/zip（%d 字节），MANIFEST.json 存在，artifacts=%d 一致", len(raw), man.Counts.Artifacts))
 }
 
 // probeDeployLogs 断言 deploy 日志端点 200 + pods/entries 数组（无 Deploy 阶段也允许空数组）。

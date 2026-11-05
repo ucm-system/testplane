@@ -66,7 +66,7 @@ src/
 |---|---|---|
 | `/` | 概览：4 个 KPI（进行中 Run / 排队 Task / 成功率 / Tester 数）+ 最近 Run + 排队 Task | `GET /runs`、`GET /testers`、`GET /queue-status` 现算 |
 | `/runs` | Run 列表：状态过滤（服务端 `?status=a,b`）、时间与关键字（本地）、游标分页 | `GET /runs?limit&cursor&status` |
-| `/runs/:id` | Run 详情：概要、执行链路、Deploy 区块（水位与原因原文 / Pod 拓扑 / 参数快照；**不展示位次**，D-46）、Task 摘要列表 + 点开的 Task 详情（Attempt + 日志）、事件流；页头：取消 / 重试（终态且失败类）/ 查看报告；Task 行有「取消 Task」、Task 详情有「重跑这个 Task」 | `GET /runs/{id}`、`GET /runs/{id}/deploy`、`GET /tasks/{id}`、`GET /tasks/{id}/attempts`、`GET /tasks/{id}/attempts/{idx}/logs`、`GET /runs/{id}/events`(SSE)、`GET /runs/{id}/events/history`、`GET /runs/{id}/retry-plan`、`POST /runs/{id}/retry`、`POST /tasks/{id}/cancel`、`POST /tasks/{id}/retry` |
+| `/runs/:id` | Run 详情（**终态默认「结果」视图**：结论 / counts / 失败项 / 产物下载 / 报告入口；「执行细节」页签里才是链路 + Task + Attempt + 日志）；概要、执行链路、Deploy 区块（水位与原因原文 / Pod 拓扑 / 参数快照；**不展示位次**，D-46）、Task 摘要列表 + 点开的 Task 详情（Attempt + 日志）、事件流；页头：取消 / 重试（终态且失败类）/ 查看报告；Task 行有「取消 Task」、Task 详情有「重跑这个 Task」 | `GET /runs/{id}`、`GET /runs/{id}/deploy`、`GET /tasks/{id}`、`GET /tasks/{id}/attempts`、`GET /tasks/{id}/attempts/{idx}/logs`、`GET /runs/{id}/events`(SSE)、`GET /runs/{id}/events/history`、`GET /runs/{id}/retry-plan`、`POST /runs/{id}/retry`、`POST /tasks/{id}/cancel`、`POST /tasks/{id}/retry` |
 | `/runs/:id/report` | Run 报告：counts / Task 明细 / 失败清单 / `report.md` 原文 | `GET /runs/{id}/report`、`GET /runs/{id}/report.md` |
 | `/submit` | 提交：部署 / 不部署两形态、env + secrets、执行环境 profile、Task 列表（Tester 下拉 + args） | `GET /testers`、`POST /runs?dry_run=true`、`POST /runs` |
 | `/testers` | Tester 目录（只读）+ 详情抽屉（参数 / env 声明） | `GET /testers`、`GET /testers/{name}` |
@@ -83,7 +83,7 @@ cd web
 pnpm exec playwright test tests/demo.spec.ts   # 走 mock，不依赖后端；产物在 web/.data/demo/（入库副本见 docs/demo/）
 ```
 
-八步截图：`01-home` / `02-submit` / `03-runs` / `04-run-detail` / `05-report` / `06-clusters` / `07-admin-audit` / `08-retry-dialog`。
+九步截图：`01-home` / `02-submit` / `03-runs` / `04-run-detail`（结果视图）/ `04b-run-detail-exec`（执行细节）/ `05-report` / `06-clusters` / `07-admin-audit` / `08-retry-dialog`。
 `.data/` 已被 `web/.gitignore` 忽略（演示产物不入库）。
 
 ## 接口约定
@@ -220,6 +220,34 @@ dev 部署与 mock 模式都没有 `/auth/*`：`/me` 无 `csrf_token` → mode=d
 
 > `web/public/fonts/*.woff2` 是 `design/prototype/assets/fonts/` 的**副本**：改字体要同步两处（原型是设计基准）。
 
+
+### 结果优先的信息架构（用户反馈）
+
+终态 Run 进入详情时默认是**结果视图**，只放 4 块：结论（结论句 + counts）、失败项、产物下载、报告入口；
+执行链路 / Deploy / Task / Attempt / 日志折到「执行细节」页签——**折叠不是隐藏**，排障时一键展开。
+运行中的 Run 没有这套页签，仍是实时执行视图。
+
+产物下载**显式列全**（不只 report.md）：`report.json` / `report.md` / `metadata.json` / `events.jsonl`
++ 每个 Attempt 的 `stdout.log` 与 `result.json` + Deploy 日志，全部走 `GET /runs/{id}/files?path=`；
+清单来自 `GET /runs/{id}/artifacts`（`API_BASE` 拼链接，不经 JS 中转）。
+
+### 角色可见性（design/views/07-api.md §2.3）
+
+| 导航项 | viewer | operator | admin |
+|---|---|---|---|
+| 概览 / 运行列表 / 提交运行（写按钮对 viewer 置灰） | ✅ | ✅ | ✅ |
+| Tester 目录 | ✅ | ✅ | ✅ |
+| 集群与队列（只读水位与原因） | ✅ | ✅ | ✅ |
+| 管理台（Profile / Cluster / Secret 引用 / 审计） | — | — | ✅ |
+
+`lib/roles.ts` 的 `hasRole()` 负责过滤；直接访问无权页面时**留在原地显示无权限页**（不跳走）。
+前端只是前置提示，权威判定仍是服务端 403。
+
+### Deploy YAML 语法高亮（`components/ui/yaml-editor.tsx`）
+
+透明 `textarea` 叠在同尺寸高亮 `<pre>` 上：key 蓝、字符串绿、注释灰斜体、数字/布尔德琥珀，行号可选。
+可编辑、可粘贴、**Tab 缩进 2 空格**（有选区时整段缩进/反缩进），滚动两层同步，`aria-label` 透传。
+不引入 CodeMirror/Monaco（体积换不来这点收益）。
 ### 圆角与染底
 
 `Card` 统一 `overflow-hidden`：语义染底的卡头（`bg-primary-weak` / `bg-warn-weak` …）、表头底色、

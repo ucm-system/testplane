@@ -6,6 +6,7 @@ import { UserMenu } from '@/components/app/UserMenu'
 import { Wordmark } from '@/components/app/Wordmark'
 import { Drawer } from '@/components/ui/drawer'
 import { useIdentity } from '@/hooks/useIdentity'
+import { hasRole, type Role } from '@/lib/roles'
 import { cn } from '@/lib/utils'
 
 interface NavItem {
@@ -13,8 +14,8 @@ interface NavItem {
   label: string
   icon: typeof List
   end?: boolean
-  /** 只有 admin 才看得见（管理台） */
-  adminOnly?: boolean
+  /** 导航项的最低角色（缺省 viewer）；不够就**不渲染**这一项 */
+  minRole?: Exclude<Role, 'viewer'>
 }
 
 const NAV_GROUPS: Array<{ title: string; items: NavItem[] }> = [
@@ -30,12 +31,13 @@ const NAV_GROUPS: Array<{ title: string; items: NavItem[] }> = [
     title: '能力',
     items: [
       { to: '/testers', label: 'Tester 目录', icon: Server },
+      // 集群与队列：**viewer 也可读**（design/views/07 §2.3：GET /clusters 与 /queue-status 是 viewer ✅）
       { to: '/clusters', label: '集群与队列', icon: Server },
     ],
   },
   {
     title: '管理',
-    items: [{ to: '/admin', label: '管理台', icon: ShieldCheck, adminOnly: true }],
+    items: [{ to: '/admin', label: '管理台', icon: ShieldCheck, minRole: 'admin' }],
   },
 ]
 
@@ -58,10 +60,9 @@ function titleFor(pathname: string): { title: string; sub: string } {
 
 function NavList({ onNavigate }: { onNavigate?: () => void }) {
   const { auth } = useIdentity()
-  const isAdmin = auth.role === 'admin'
   const groups = NAV_GROUPS.map((group) => ({
     ...group,
-    items: group.items.filter((item) => !item.adminOnly || isAdmin),
+    items: group.items.filter((item) => (item.minRole ? hasRole(auth, item.minRole) : true)),
   })).filter((group) => group.items.length > 0)
 
   return (
@@ -77,7 +78,7 @@ function NavList({ onNavigate }: { onNavigate?: () => void }) {
               onClick={onNavigate}
               className={({ isActive }) =>
                 cn(
-                  'flex h-[34px] items-center gap-2 rounded-r-md border-l-2 px-3 text-sm font-medium transition-colors duration-150',
+                  'flex h-[34px] items-center gap-2 rounded-r-md border-l-2 pl-[14px] pr-3 text-sm font-medium transition-colors duration-150',
                   isActive
                     ? 'border-primary bg-primary-weak font-semibold text-primary-text'
                     : 'border-transparent text-fg-2 hover:bg-surface-2 hover:text-fg',

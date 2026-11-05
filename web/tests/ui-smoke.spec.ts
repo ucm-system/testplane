@@ -117,3 +117,76 @@ test('admin：键盘 ←/→ 切换页签到 Audit', async ({ page }) => {
   await page.keyboard.press('End')
   await expect(page.getByRole('tab', { name: 'Audit' })).toHaveAttribute('aria-selected', 'true')
 })
+
+/** 相对亮度 + 对比度（WCAG AA：正文 ≥ 4.5:1） */
+function contrastRatio(rgb1: [number, number, number], rgb2: [number, number, number]): number {
+  const luminance = ([r, g, b]: [number, number, number]) => {
+    const channel = (value: number) => {
+      const v = value / 255
+      return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+    }
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+  }
+  const [light, dark] = [luminance(rgb1), luminance(rgb2)].sort((a, b) => b - a) as [number, number]
+  return (light + 0.05) / (dark + 0.05)
+}
+
+function parseRgb(value: string): [number, number, number] {
+  const match = /rgba?\(([^)]+)\)/.exec(value)
+  const parts = (match?.[1] ?? '0,0,0').split(',').map((part) => Number(part.trim()))
+  return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0]
+}
+
+/**
+ * 评审 #13：弱化文字色必须过 AA（4.5:1）。
+ * 原型评审就是因为 `#9ca3af`（2.5:1）把这一档换成了 `#667085`，别再退回去。
+ */
+test('对比度：--color-fg-3 在白底上 ≥ 4.5:1（AA）', async ({ page }) => {
+  await page.goto('/runs')
+  const token = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement)
+    const probe = document.createElement('span')
+    probe.style.color = 'var(--color-fg-3)'
+    document.body.appendChild(probe)
+    const resolved = getComputedStyle(probe).color
+    probe.remove()
+    return { raw: root.getPropertyValue('--color-fg-3').trim(), resolved }
+  })
+
+  const ratio = contrastRatio(parseRgb(token.resolved), [255, 255, 255])
+  // eslint-disable-next-line no-console
+  console.log(`fg-3 ${token.raw} → ratio=${ratio.toFixed(2)}:1`)
+  expect(token.raw.toLowerCase()).toBe('#667085')
+  expect(ratio, '弱化文字与白底的对比度必须 ≥ 4.5:1').toBeGreaterThanOrEqual(4.5)
+})
+
+/**
+ * 评审 #15：删除必须二次确认 —— 取消不删、确认才删。
+ */
+test('admin：删除 Profile 有二次确认（取消不删、确认才删）', async ({ page }) => {
+  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.goto('/admin')
+  await expect(page.getByText('Execution Profiles')).toBeVisible()
+
+  const rows = page.locator('tbody tr')
+  // 先等数据行出现（卡头比数据先渲染，直接 count 会拿到 0）
+  await expect(rows.first()).toBeVisible({ timeout: 15_000 })
+  const before = await rows.count()
+  expect(before).toBeGreaterThan(0)
+
+  // 1) 点删除 → 只出对话框，数据还在
+  await page.locator('[data-testid="delete-profile"]').first().click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await expect(page.getByRole('dialog')).toContainText('删除这个 Profile？')
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(page.getByRole('dialog')).toBeHidden()
+  await expect(rows).toHaveCount(before)
+
+  // 2) 再点删除 → 确认 → 少一行
+  await page.locator('[data-testid="delete-profile"]').first().click()
+  await page.locator('[data-testid="confirm-delete"]').click()
+  await expect(page.getByRole('dialog')).toBeHidden()
+  await expect
+    .poll(async () => rows.count(), { message: '确认后列表应该少一行' })
+    .toBe(before - 1)
+})
