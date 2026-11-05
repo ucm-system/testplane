@@ -1,0 +1,57 @@
+{{- include "testplane.validate" . -}}
+{{- include "testplane.validateTopology" . -}}
+{{- /*
+非敏感配置。键名以 server/internal/config/config.go 实际读取的为准
+（本文件与代码不一致时以代码为准——代码是契约）。
+敏感项（DB DSN / OIDC client secret / Genet token）一律走 Secret，不进这里。
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "testplane.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "testplane.labels" . | nindent 4 }}
+data:
+  TESTPLANE_ENV: {{ .Values.config.env | quote }}
+  TESTPLANE_AUTH_MODE: {{ .Values.config.authMode | quote }}
+  TESTPLANE_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  TESTPLANE_NAMESPACE: {{ include "testplane.executorNamespace" . | quote }}
+  TESTPLANE_CLUSTER_NAME: {{ .Values.config.clusterName | quote }}
+  TESTPLANE_K8S_IN_CLUSTER: {{ .Values.config.inClusterK8s | quote }}
+  TESTPLANE_JOB_GC_ENABLED: {{ .Values.config.jobGCEnabled | quote }}
+  TESTPLANE_DB_MAX_OPEN_CONNS: {{ .Values.config.dbMaxOpenConns | quote }}
+  TESTPLANE_MAX_GLOBAL_CONCURRENCY: {{ .Values.config.maxGlobalConcurrency | quote }}
+  TESTPLANE_RUN_MAX_TASKS: {{ .Values.config.runMaxTasks | quote }}
+  TESTPLANE_TASK_TIMEOUT: {{ .Values.config.taskTimeout | quote }}
+  TESTPLANE_TASK_TIMEOUT_MAX: {{ .Values.config.taskTimeoutMax | quote }}
+  TESTPLANE_DEPLOY_TIMEOUT: {{ .Values.config.deployTimeout | quote }}
+  TESTPLANE_RESULT_MAX_BYTES: {{ .Values.config.resultMaxBytes | quote }}
+  TESTPLANE_STORAGE_ROOT: {{ .Values.config.storageRoot | quote }}
+  TESTPLANE_STORAGE_PVC: {{ default (include "testplane.storageClaim" .) .Values.config.storagePVC | quote }}
+  TESTPLANE_DEPLOY_PROVIDER: {{ .Values.config.deployProvider | quote }}
+  TESTPLANE_SSE_HEARTBEAT: {{ .Values.config.sseHeartbeat | quote }}
+  TESTPLANE_SSE_REPLAY_HOURS: {{ .Values.config.sseReplayHours | quote }}
+  {{- if eq .Values.config.deployProvider "genet" }}
+  TESTPLANE_GENET_BASE_URL: {{ .Values.genet.baseURL | quote }}
+  TESTPLANE_GENET_INSECURE: {{ .Values.genet.insecure | quote }}
+  {{- if .Values.genet.caFile }}
+  TESTPLANE_GENET_CA_FILE: {{ .Values.genet.caFile | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if eq .Values.config.authMode "oidc" }}
+  TESTPLANE_OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
+  TESTPLANE_OIDC_CLIENT_ID: {{ .Values.oidc.clientID | quote }}
+  TESTPLANE_OIDC_REDIRECT_URL: {{ .Values.oidc.redirectURL | quote }}
+  TESTPLANE_OIDC_SCOPES: {{ .Values.oidc.scopes | quote }}
+  TESTPLANE_OIDC_ROLE_CLAIM: {{ .Values.oidc.roleClaim | quote }}
+  TESTPLANE_OIDC_CLIENT_AUTH: {{ .Values.oidc.clientAuth | quote }}
+  TESTPLANE_ROLE_MAP: {{ .Values.oidc.roleMap | quote }}
+  TESTPLANE_SESSION_COOKIE: {{ .Values.session.cookie | quote }}
+  TESTPLANE_SESSION_TTL: {{ .Values.session.ttl | quote }}
+  TESTPLANE_SESSION_SECURE: {{ .Values.session.secure | quote }}
+  {{- end }}
+  {{- /* 任意追加/覆盖键：给"代码新增了环境变量、chart 还没跟上"留出口 */}}
+  {{- range $k, $v := .Values.config.extra }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}

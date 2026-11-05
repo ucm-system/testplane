@@ -1,0 +1,47 @@
+# 本地 kind / 演示环境专用（**不要**用在任何共享环境）
+#
+#   helm install testplane deploy/charts/testplane -n testplane-helm --create-namespace \
+#     -f deploy/charts/testplane/values-kind.yaml
+#
+# 与生产默认值的差别只有三处：镜像用本地 tag、认证走 dev、部署方可以是 mock。
+# dev 鉴权 = 任何能连 :8080 的人都是 admin（06 §6.1），所以只能本地用。
+
+# 本地 kind：先 `pwsh deploy/docker/build-push.ps1 -Component server -Tag kind-local -KindCluster testplane`
+# 把镜像灌进节点，再用它装；镜像名必须与脚本打出来的**完全一致**（ghcr.io/ucm-system/testplane-server:local）。
+image:
+  repository: ghcr.io/ucm-system/testplane-server
+  tag: kind-local
+  # 本地镜像没有 registry digest，必须显式清空（否则会渲染出 repo@sha256:… 拉不到）
+  digest: ""
+  pullPolicy: IfNotPresent
+
+config:
+  env: dev
+  authMode: dev
+  logLevel: debug
+  # 本地没有 Genet 就切成 mock（进程内假 Genet，不联网）
+  deployProvider: mock
+
+# 本地直接用 hostPath 的静态 PV（deploy/k8s/storage.yaml）或让 kind 的 local-path 供一个
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClass: standard
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+
+# 本地 PG 跑在宿主 docker（host.docker.internal），DSN 现建一个 Secret：
+#   kubectl -n testplane-helm create secret generic testplane-db \
+#     --from-literal=dsn='postgres://testplane:testplane@host.docker.internal:5432/testplane_helm?sslmode=disable'
+database:
+  existingSecret: testplane-db
+  key: dsn
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi

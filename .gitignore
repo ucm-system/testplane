@@ -130,3 +130,6 @@ deploy/**/*.secret.yml
 # Playwright 运行产物
 web/test-results/
 web/playwright-report/
+
+# pnpm store（本地安装缓存，别入库）
+.pnpm-store/
