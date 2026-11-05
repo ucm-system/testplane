@@ -1491,6 +1491,11 @@ paths:
                 type: string
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: |
+            **仅 `TESTPLANE_AUTH_MODE=dev`**：dev 模式没有登录流程，`/auth/*` 一律 404
+            （前端据此判断"这是 dev 部署，不要跳登录"，见 `web/src/api/auth.ts`）。
+            `oidc` 模式只走 302/401 两条。
 
   /auth/logout:
     post:

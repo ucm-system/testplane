@@ -82,6 +82,10 @@ pwsh scripts/e2e/run-local.ps1
 pwsh scripts/e2e/run-local.ps1 -Expect succeeded -Profile k8s-npu
 ```
 
+不传 `-MockURL` 时自动探测 kind 里 `mock-llm` Service（`testplane-mock` / `default` /
+`testplane` / `testplane-svc`），探测不到才回退 `http://127.0.0.1:18080/v1`；
+避免“kind 场景必须带参数才对”的假失败。
+
 控制面没起时它**明确报错并退出 3**，不会留下 mock 进程：
 
 ```text
