@@ -6,11 +6,11 @@
 # 与生产默认值的差别只有三处：镜像用本地 tag、认证走 dev、部署方可以是 mock。
 # dev 鉴权 = 任何能连 :8080 的人都是 admin（06 §6.1），所以只能本地用。
 
-# 本地 kind：先 `pwsh deploy/docker/build-push.ps1 -Component server -Tag local -KindCluster testplane`
+# 本地 kind：先 `pwsh deploy/docker/build-push.ps1 -Component server -Tag kind-local -KindCluster testplane`
 # 把镜像灌进节点，再用它装；镜像名必须与脚本打出来的**完全一致**（ghcr.io/ucm-system/testplane-server:local）。
 image:
   repository: ghcr.io/ucm-system/testplane-server
-  tag: local
+  tag: kind-local
   # 本地镜像没有 registry digest，必须显式清空（否则会渲染出 repo@sha256:… 拉不到）
   digest: ""
   pullPolicy: IfNotPresent

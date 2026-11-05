@@ -48,6 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       testers: ${{ steps.list.outputs.testers }}
+      # publish 的 matrix 直接吃这一份（server + web + testers/*），job 里不再硬编码
+      matrix: ${{ steps.list.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
       - id: list
