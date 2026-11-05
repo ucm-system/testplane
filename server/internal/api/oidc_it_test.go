@@ -31,14 +31,14 @@ type fakeIdP struct {
 	kid    string
 	client string
 
-	mu    sync.Mutex
-	code  string
-	nonce string // 授权时记下的 nonce，token 时用来产出 id_token
-	sub   string
-	email string
-	groups []string
+	mu       sync.Mutex
+	code     string
+	nonce    string // 授权时记下的 nonce，token 时用来产出 id_token
+	sub      string
+	email    string
+	groups   []string
 	expDelta time.Duration
-	aud   string
+	aud      string
 	genNonce string // 强制写进 id_token 的 nonce（测 nonce 不匹配）
 }
 
@@ -161,20 +161,20 @@ func oidcTestServer(t *testing.T, idp *fakeIdP) (*Server, *store.Store, func()) 
 		APIPrefix: "/api/v1", StorageRoot: t.TempDir(),
 		RunMaxTasks: 200, TaskTimeoutDefault: time.Hour, TaskTimeoutMax: 24 * time.Hour,
 		MaxGlobalConcurrency: 4, DeployTimeout: 72 * time.Hour,
-		AuthMode:        "oidc",
-		Env:             "dev",
-		OIDCIssuer:      idp.base(),
-		OIDCClientID:    idp.client,
+		AuthMode:         "oidc",
+		Env:              "dev",
+		OIDCIssuer:       idp.base(),
+		OIDCClientID:     idp.client,
 		OIDCClientSecret: "secret",
-		OIDCClientAuth:  "basic",
-		OIDCRedirectURL: "http://testplane.local/auth/callback",
-		OIDCScopes:      []string{"openid", "email", "groups"},
-		OIDCRoleClaim:   "groups",
-		RoleMap:         map[string]string{"tp-admins": "admin", "tp-ops": "operator"},
-		SessionSecret:   []byte("0123456789abcdef0123456789abcdef"),
-		SessionCookie:   "tp_session",
-		SessionTTL:      time.Hour,
-		SessionSecure:   false, // httptest 用 http
+		OIDCClientAuth:   "basic",
+		OIDCRedirectURL:  "http://testplane.local/auth/callback",
+		OIDCScopes:       []string{"openid", "email", "groups"},
+		OIDCRoleClaim:    "groups",
+		RoleMap:          map[string]string{"tp-admins": "admin", "tp-ops": "operator"},
+		SessionSecret:    []byte("0123456789abcdef0123456789abcdef"),
+		SessionCookie:    "tp_session",
+		SessionTTL:       time.Hour,
+		SessionSecure:    false, // httptest 用 http
 	}
 	resolver := &fakeResolver{specs: map[string]domain.TesterSpec{
 		"probe-again@1.0.0": {

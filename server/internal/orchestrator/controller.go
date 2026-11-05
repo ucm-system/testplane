@@ -25,10 +25,12 @@ const (
 	DefaultReconcileInterval = 60 * time.Second
 	// DefaultGCInterval 是 Job/Pod 回收周期（execution §6.3：每 10 分钟）。
 	DefaultGCInterval = 10 * time.Minute
-	DefaultMaxCandidates     = 50
-	DefaultTaskTimeout       = 4 * time.Hour
-	DefaultDeployTimeout     = 72 * time.Hour
-	defaultRunner            = "controller"
+	// GCOnceTimeout 是单轮 GC 的硬超时：慢 sweep 不能拖住主循环（票 #20-4）。
+	GCOnceTimeout        = 2 * time.Minute
+	DefaultMaxCandidates = 50
+	DefaultTaskTimeout   = 4 * time.Hour
+	DefaultDeployTimeout = 72 * time.Hour
+	defaultRunner        = "controller"
 	// reconcileBatchLimit 是单轮对账处理的 Task 上限（execution §4.2 的 500 条口径的保守值）。
 	reconcileBatchLimit = 200
 )
@@ -129,7 +131,7 @@ type JobProber interface {
 
 // Controller 是编排主循环：对账 → 调度 → Submit/Watch → 终态推进 → Deploy/取消/超时。
 type Controller struct {
-	repos     Repos
+	repos Repos
 	// recon 是可选的对了能力（C-3.5）；adapter 未实现时为 nil，对账走 WARN + no-op。
 	recon     ReconcileRepos
 	exec      ports.Executor
@@ -137,9 +139,9 @@ type Controller struct {
 	validator ports.ResultValidator
 	prober    JobProber
 	// jobGC 是 Job/裸 Pod 回收开关（TESTPLANE_JOB_GC_ENABLED，默认 true）。
-	jobGC     bool
-	cfg       Config
-	logf      func(format string, args ...any)
+	jobGC bool
+	cfg   Config
+	logf  func(format string, args ...any)
 	// clock 是业务时间来源（05 §6.5），默认 SystemClock。
 	clock domain.Clock
 
@@ -148,6 +150,8 @@ type Controller struct {
 	wg      sync.WaitGroup
 	// logWG 跟踪后台日志落盘，供关闭/测试等待（不阻塞状态推进）。
 	logWG sync.WaitGroup
+	// gcSem 保证同一时刻只有一轮 GC（容量 1 的信号量，票 #20-4）。
+	gcSem chan struct{}
 }
 
 // New 构造 Controller。Repos / Executor 必填。
@@ -173,11 +177,9 @@ func New(opts Options) (*Controller, error) {
 		logf("orchestrator: WARN reconcile disabled: Repos adapter lacks ReconcileRepos (ListActiveTasks/AttemptByTask/DeleteLeaseByTask/ListStaleLeases); stale endpoint_leases will not be reclaimed")
 	}
 	recon, _ := opts.Repos.(ReconcileRepos)
-	// 回收开关：显式配置优先，其次环境变量，默认开启（TESTPLANE_JOB_GC_ENABLED）。
+	// 回收开关：只读配置（config 负责读 TESTPLANE_JOB_GC_ENABLED，默认 true；票 #24-2）。
+	// Config.JobGCEnabled 显式给出时优先，否则默认开启。
 	jobGC := true
-	if v, ok := os.LookupEnv("TESTPLANE_JOB_GC_ENABLED"); ok {
-		jobGC = !(v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "no"))
-	}
 	if opts.Config.JobGCEnabled != nil {
 		jobGC = *opts.Config.JobGCEnabled
 	}
@@ -269,10 +271,9 @@ func (c *Controller) Run(ctx context.Context) error {
 				c.logf("orchestrator: reconcile: %v", err)
 			}
 		case <-gcTick.C:
-			// execution §6.3：每 10 分钟回收已终态的 Job 与孤儿 Pod（#15）。
-			if err := c.GCOnce(ctx); err != nil {
-				c.logf("orchestrator: gc: %v", err)
-			}
+			// execution §6.3：每 10 分钟回收已终态的 Job 与孤儿 Pod。
+			// 必须**异步 + 超时**：一次慢 sweep 不能停掉 dispatch/watchdog/deploy（票 #20-4）。
+			c.gcInBackground(ctx)
 		}
 	}
 }
@@ -468,15 +469,16 @@ func (c *Controller) finishReconciledAttempt(ctx context.Context, task TaskView,
 // 命名类型与同名匿名类型在接口方法签名上并不相同，写成匿名 func 会导致 `*executor.Executor`
 // 不满足本接口，GC 被静默跳过（本仓库踩过一次，见 IMPLEMENTATION §15.3 #13）。
 type JobGC interface {
-	CollectGarbage(ctx context.Context, attemptState executor.AttemptStateFunc) (executor.GCReport, error)
+	CollectGarbage(ctx context.Context, opts executor.GCOptions) (executor.GCReport, error)
 }
+
+// 编译期断言：真实 Executor 必须实现 JobGC（票 #20-6：PR 描述声称有、实际没有，
+// 导致 GC 曾经静默地一次都没跑过）。改 CollectGarbage 签名时这里会先挂。
+var _ JobGC = (*executor.Executor)(nil)
 
 // GCOnce 回收"已结束但没人删"的 Job 与孤儿 Pod（execution §6.3）。
 //
-// 判据：
-//   - Job 已终态 + DB 无对应 Attempt → 删（孤儿）；
-//   - Job 已终态 + Attempt 已终态（对应 Task 终态）→ 删；
-//   - Job 还在跑 → 不动。
+// 判据见 executor.CollectGarbage：hold-until 守卫 / 孤儿立即删 / 终态且 >1h / 运行中 >25h。
 func (c *Controller) GCOnce(ctx context.Context) error {
 	if !c.jobGC {
 		return nil
@@ -485,7 +487,12 @@ func (c *Controller) GCOnce(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
-	report, err := gc.CollectGarbage(ctx, c.attemptStateByJobName)
+	sweepCtx, cancel := context.WithTimeout(ctx, GCOnceTimeout)
+	defer cancel()
+	report, err := gc.CollectGarbage(sweepCtx, executor.GCOptions{
+		AttemptStates:  c.attemptStatesByJobNames,
+		OnStaleRunning: c.repairStaleRunning,
+	})
 	if err != nil {
 		return err
 	}
@@ -496,24 +503,60 @@ func (c *Controller) GCOnce(ctx context.Context) error {
 	return nil
 }
 
-// attemptStateByJobName 把 K8s Job 名映射成"库里有没有对应 Attempt、它是否已终态"。
-// 用 Task 状态判定 Attempt 是否终态：不变量保证"Task 终态 ⇒ 其 Attempt 已终态"。
-func (c *Controller) attemptStateByJobName(ctx context.Context, jobName string) (found, terminal bool, err error) {
-	ref, err := c.repos.AttemptByJobName(ctx, jobName)
+// gcInBackground 把一轮 GC 放到独立 goroutine（带超时、不重叠），慢 sweep 不阻塞主循环。
+func (c *Controller) gcInBackground(ctx context.Context) {
+	select {
+	case c.gcSem <- struct{}{}:
+	default:
+		return // 上一轮还没结束：跳过本轮，避免叠加
+	}
+	go func() {
+		defer func() { <-c.gcSem }()
+		if err := c.GCOnce(ctx); err != nil && ctx.Err() == nil {
+			c.logf("orchestrator: gc: %v", err)
+		}
+	}()
+}
+
+// attemptStatesByJobNames 批量把 Job 名映射成 Attempt 状态（一次查库，票 #20-5）。
+func (c *Controller) attemptStatesByJobNames(ctx context.Context, jobNames []string) (map[string]executor.AttemptState, error) {
+	if len(jobNames) == 0 {
+		return map[string]executor.AttemptState{}, nil
+	}
+	return c.repos.AttemptStatesByJobNames(ctx, jobNames)
+}
+
+// repairStaleRunning 处理"运行中但超过 25h"的 Job：把 Attempt 收口成 FAILED(TASK_TIMEOUT)（§6.3）。
+//
+// 这里只修库里的状态；Job 的删除由 GC 在回调返回成功之后做。
+func (c *Controller) repairStaleRunning(ctx context.Context, job executor.ManagedJob) error {
+	ref, err := c.repos.AttemptByJobName(ctx, job.Name)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
-			return false, false, nil // DB 没有对应 Attempt：孤儿 Job
+			return nil // 没有 Attempt 可修：交给孤儿规则删
 		}
-		return false, false, err
+		return err
 	}
-	task, err := c.repos.GetTask(ctx, ref.TaskID)
-	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			return true, true, nil
-		}
-		return false, false, err
+	f := &domain.Failure{
+		Code:      domain.CodeTaskTimeout,
+		Message:   fmt.Sprintf("job %s exceeded %s without a terminal condition", job.Name, executor.GCStaleRunningAge),
+		Retryable: false,
+		Detail:    map[string]any{"reason": "stale_running", "job": job.Name},
 	}
-	return true, task.Status.IsTerminal(), nil
+	_, err = c.repos.FinishAttempt(ctx, FinishInput{
+		AttemptID:  ref.AttemptID,
+		TaskID:     ref.TaskID,
+		RunID:      ref.RunID,
+		Phase:      "failed",
+		Message:    f.Message,
+		Failure:    f,
+		FinishedAt: time.Now().UTC(),
+	})
+	if err != nil && !errors.Is(err, domain.ErrConflict) {
+		return fmt.Errorf("repair stale attempt %s: %w", ref.AttemptID, err)
+	}
+	c.logf("orchestrator: job gc: repaired stale running job %s as TASK_TIMEOUT", job.Name)
+	return nil
 }
 
 // DispatchOnce 是一轮调度（C-4.1）：取候选 → 取 permit → 建 Job → 起观测。
@@ -788,7 +831,7 @@ func (c *Controller) resolveAttemptResult(ctx context.Context, attempt AttemptRe
 			return executor.PhaseFailed, f
 		}
 		return executor.PhaseSucceeded, nil
-		case executor.PhaseTimeout:
+	case executor.PhaseTimeout:
 		// 实例字段显式给 true：C-5.8 第 4 条把 TASK_TIMEOUT 列为"可重试的 Pre-Check 失败"，
 		// 终态判定只认实例字段（码级默认值由这里兜底填写）。
 		return executor.PhaseTimeout, &domain.Failure{
@@ -833,6 +876,7 @@ func unclassifiable(f *domain.Failure) bool {
 	}
 	return f.Code == domain.CodeResultMissing || f.Code == domain.CodeResultInvalid
 }
+
 // validateResult 调校验器：优先带退出码的 ValidateExit，老实现退化为 Validate。
 func (c *Controller) validateResult(ctx context.Context, attempt AttemptRef, dir string, exitCode *int32) *domain.Failure {
 	if v, ok := c.validator.(ExitResultValidator); ok {
@@ -875,7 +919,10 @@ func (c *Controller) finalizeAttemptAsync(attempt AttemptRef) {
 				c.logf("orchestrator: WARN attempt_logs_failed: attempt %s: %v", attempt.AttemptID, err)
 			}
 		}
-		if err := c.exec.Delete(ctx, h, ports.DeleteBackground); err != nil {
+		// hold-until 守卫：日志 follower 还没收尾时不能删 Job（execution §6.3），留给 GC 下一轮。
+		if c.jobHeld(ctx, h) {
+			c.logf("orchestrator: job %s held by %s; skip delete (gc will retry)", h.JobName, executor.HoldUntilAnnotation)
+		} else if err := c.exec.Delete(ctx, h, ports.DeleteBackground); err != nil {
 			c.logf("orchestrator: WARN job_delete_failed: attempt %s job %s: %v", attempt.AttemptID, h.JobName, err)
 		}
 	}()
@@ -935,6 +982,11 @@ func (c *Controller) cancelJobAsync(parent context.Context, ref AttemptRef) {
 		h := ports.JobHandle{Namespace: c.cfg.Namespace, JobName: executor.Naming(ref.RunID, ref.TaskID, ref.AttemptNo)}
 		if err := c.exec.Cancel(ctx, h); err != nil {
 			c.logf("orchestrator: cancel job %s: %v", h.JobName, err)
+			// 兜底：Cancel 里的等待可能超时，这里用 Foreground 再删一次（等 Pod 真正消失，
+			// 避免"取消后仍有进程写 NFS"，execution §5.2）。
+			if derr := c.exec.Delete(ctx, h, ports.DeleteForeground); derr != nil {
+				c.logf("orchestrator: WARN cancel_job_foreground_delete %s: %v", h.JobName, derr)
+			}
 		}
 		if err := c.repos.MarkCanceled(ctx, ref.AttemptID); err != nil {
 			c.logf("orchestrator: mark canceled %s: %v", ref.AttemptID, err)
@@ -1120,7 +1172,7 @@ func (c *Controller) WatchdogOnce(ctx context.Context) error {
 	}
 	for _, ref := range expired {
 		f := &domain.Failure{
-						Code:      domain.CodeTaskTimeout,
+			Code:      domain.CodeTaskTimeout,
 			Message:   "Task exceeded its timeout and was terminated by the platform",
 			Retryable: true,
 		}
@@ -1200,6 +1252,7 @@ func (c *Controller) CancelTask(ctx context.Context, taskID, actor string) error
 	}
 	return nil
 }
+
 // cleanupDeployIfTerminal 在 Run 已终态且仍是 deploy 形态时收口 Genet 资源。
 func (c *Controller) cleanupDeployIfTerminal(ctx context.Context, runID string) {
 	if c.deployer == nil || runID == "" {
@@ -1225,4 +1278,18 @@ func (c *Controller) cleanupPendingDeploys(ctx context.Context) {
 	for _, run := range pending {
 		c.cleanupDeploy(ctx, run.ID)
 	}
+}
+
+// jobHeld 判断 Job 的 hold-until 是否还没过期（执行层可选能力：*executor.Executor 实现了）。
+func (c *Controller) jobHeld(ctx context.Context, h ports.JobHandle) bool {
+	holder, ok := c.exec.(ports.JobHolder)
+	if !ok {
+		return false
+	}
+	held, err := holder.HoldActive(ctx, h)
+	if err != nil {
+		c.logf("orchestrator: WARN hold_until_probe %s: %v", h.JobName, err)
+		return false // 读不到就按"没守卫"处理（多删一个 Job 好过卡住回收）
+	}
+	return held
 }

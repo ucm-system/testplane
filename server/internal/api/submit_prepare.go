@@ -106,10 +106,10 @@ func (s *Submitter) buildPrepared(m *Manifest, kind string, specs []domain.Teste
 
 	// resolved 快照（03 §4.2）
 	snap := map[string]any{
-		"kind":             kind,
-		"tasks":            resolved,
+		"kind":              kind,
+		"tasks":             resolved,
 		"args_snapshot_sha": argsSnapshotSHA(argv),
-		"schema_version":   "1.0",
+		"schema_version":    "1.0",
 	}
 	if precheckInjected {
 		snap["precheck"] = map[string]any{

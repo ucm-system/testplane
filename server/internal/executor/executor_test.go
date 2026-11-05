@@ -314,8 +314,12 @@ func TestClassifyOutcomeFromPods(t *testing.T) {
 			}},
 		}}
 		out, terminal := classifyOutcome(nil, pod)
-		if !terminal || OutcomeCode(*out) != CodeInternalError {
+		// Pod 异常终止统一归 EXECUTOR_POD_ERROR（票 #22），不再是笼统的 INTERNAL_ERROR。
+		if !terminal || OutcomeCode(*out) != CodeExecutorPodError {
 			t.Fatalf("out = %+v code=%q", out, OutcomeCode(*out))
+		}
+		if out.K8sReason != "OOMKilled" {
+			t.Fatalf("K8sReason = %q, 期望 OOMKilled（原样保留）", out.K8sReason)
 		}
 	})
 

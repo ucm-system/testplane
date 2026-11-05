@@ -29,14 +29,14 @@ func TestLiveAgainstFakeGenet(t *testing.T) {
 	}
 
 	client, err := New(Options{
-		BaseURL:               base,
-		APIKey:                key,
-		PollInitialInterval:   time.Second,
-		PollMaxInterval:       5 * time.Second,
-		NotFoundGrace:         180 * time.Second,
-		DeployTimeout:         10 * time.Minute,
-		RequestTimeout:        10 * time.Second,
-		Logf:                  func(format string, args ...any) { t.Logf("client: "+format, args...) },
+		BaseURL:             base,
+		APIKey:              key,
+		PollInitialInterval: time.Second,
+		PollMaxInterval:     5 * time.Second,
+		NotFoundGrace:       180 * time.Second,
+		DeployTimeout:       10 * time.Minute,
+		RequestTimeout:      10 * time.Second,
+		Logf:                func(format string, args ...any) { t.Logf("client: "+format, args...) },
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

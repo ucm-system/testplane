@@ -437,6 +437,8 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 > 这张表是评审 [PR #13](https://github.com/ucm-system/testplane/pull/13)「API 面比设计少、且没有延后说明」的补记；PR #18 已把 6 项全部实现并补测试，`openapi.yaml` 同步这 6 个 operation（`make openapi-lint` 0 error）。
 >
 > **仍未实现（明确延后，P1）**：`POST /runs/{id}/retry`、`GET /runs/{id}/retry-plan`（失败续跑，需复用判定与 Attempt 生成策略）、`GET /runs/{id}/deploy/logs`（Deploy 多 Pod 日志分段，依赖 collector 分段索引）、`/admin/profiles|clusters|secrets|audit` 与 `DELETE /admin/runs/{id}/artifacts`（admin RBAC 与 OIDC 一起做）、`GET /secrets`（Secret 引用清单，依赖 admin 面）。`GET /tasks` 的 `/tasks/{id}/retry` 同样延后。
+>
+> **未在 §15.2/§15.4 列出的端点均已实现；白名单每条的记录指针见 `tools/contract/allow-missing.txt`。**
 
 ### 15.3 与设计文档的偏差（已由 ARCHITECTURE v0.6 / D-38…D-43 裁决）
 
@@ -456,6 +458,7 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 15 | 业务时间曾直调 `time.Now()`（05 §6.5 禁止）：超窗判定、退避、`accepted_at/queued_at/ready_at/last_polled_at/finished_at/created_at` 等写库时间戳 | 引入 `domain.Clock`（`internal/domain/clock.go`，默认 `SystemClock`）；`store.Store.SetClock` 与 `orchestrator.Options.Clock` 注入，编排/存储两层的**业务时间**全部改走注入时钟；退避基准从 SQL `now()` 改为传入的事务时间 `at`（`effectScheduleRetry`），部署窗口判定从 `time.Since(...)` 改为 `now.Sub(...)`。回归：`TestDeployWindowUsesInjectedClock`、`TestWatchdogUsesInjectedClock`、`TestRetryBackoffUsesInjectedClock`。**保留 `time.Now()` 的位置与理由**见 15.3.1 |
 | 16 | 请求链路曾用 `context.Background()`（丢掉 trace 与取消） | `cmd/testplaned/wire.go` 的 `taskView` 改为接收 `ctx`，`TesterRegistry.Resolve` 用请求上下文（`GetTask`/`ListTasks`/`ListActiveTasks` 一路透传 `r.Context()`）。**保留 Background 的位置**：进程信号（`main.go` 启动/关闭/migrate）、后台 goroutine（`store.fireRunFinished` 的 2 分钟超时、`notifier` 的 `notifyEmitDeadline`、`controller.cancelJobAsync` 用 `context.WithoutCancel`）——这些没有上游请求，必须显式给超时或 `WithoutCancel` |
 | 17 | `orchestrator/memory.go`（894 行内存 Repos）混在产线代码里，`go build` 会把它编进二进制 | 改名为 `memory_test.go`（同包 `_test` 文件，`go build` 不再包含；单测仍可直接用 `NewMemoryRepos()`）。`go build ./internal/orchestrator/` 与 `go test ./internal/orchestrator/` 均通过 |
+| 18 | Job GC 与 `execution.md §6.3` 不一致：缺 `hold-until` 守卫与 1h 年龄窗（会和"先落日志再删 Job"抢）、运行中 Job 永不回收、`GCOnce` 内联主循环且无超时、`attemptStateByJobName` N+1、缺 `var _ JobGC` 断言 | 按 §6.3 补齐：`hold-until`（GC 与终态删 Job 两处都看）、`GCTerminalAge=1h`、孤儿（无 Attempt）立即删、运行中 >25h 先收口 `FAILED(TASK_TIMEOUT)` 再删、`gcInBackground` 独立 goroutine + 2min 超时、批量 `AttemptStatesByJobNames`（一次 SQL）、`var _ JobGC = (*executor.Executor)(nil)`（把签名改回匿名 func 会编译失败）。测试改造为"能失败"形态（真实 Executor + fake clientset、Delete 回调里断言库里已终态、开关关时断言 0 次 List） |
 
 | 12 | Deploy 阶段从 mock 切到**真实 Genet 客户端**（internal/genet，Helm release 语义：无部署单、无位次、oWait=true、404 宽限、取消先落意图后 DELETE） | 行为表见 impl/execution.md §9（观测 → Deploy 子状态九行映射）；kind E2E 默认仍 mock（TESTPLANE_DEPLOY_PROVIDER=mock），切真实 Genet 需 TESTPLANE_GENET_BASE_URL + TESTPLANE_GENET_API_KEY（+ 可选 _CA_FILE/_INSECURE） |
 | 13 | 卸载失败/校验未过时写 `cleanup.failed` 事件（`state_events.type`）；`Repos` 为此加了一个**最小专用**方法 `AppendRunEvent(ctx, runID, type, payload)`，未开放通用事件 API | payload = `{release_name, cleanup_errors[], attempt, verified_at}`；`uninstall.state` 的四个取值已收进 `domain` 常量。**契约侧待回写**：`03-data-view.md §4.6` 的 type 枚举补 `cleanup.failed`、`07-api.md §5` 的 SSE 事件类型表补一行（Lead 负责） |

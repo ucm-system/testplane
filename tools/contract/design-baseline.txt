@@ -1,0 +1,6 @@
+# 设计端点数量基线（反向锚点）
+#
+# 统计来源：design/views/07-api.md §5 端点表 + §2.4 认证表 + §5.5 运维段，
+# 由 tools/contract/design.go 解析。删除设计端点后本文件必须显式更新，
+# 否则 spec.design_endpoint_baseline 判红；不要把基线当“可随手调小”的数字。
+50

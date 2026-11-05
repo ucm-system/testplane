@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
+	"github.com/ucm-system/testplane/server/internal/executor"
 )
 
 // RecordDeployState 把一次 deploy 观测**增量合并**进 runs.deploy，并追加一条
@@ -95,6 +96,7 @@ func (s *Store) MarkAttemptCanceled(ctx context.Context, attemptID string) error
 		return nil
 	})
 }
+
 // ListDeployCleanupPending 返回"已终态但 deploy 还没卸载干净"的 Run，供编排层对账补偿（§9.7）。
 //
 // 判定条件：
@@ -133,6 +135,7 @@ func (s *Store) ListDeployCleanupPending(ctx context.Context, limit int) ([]Run,
 	}
 	return out, rows.Err()
 }
+
 // AppendRunEvent 追加一条 state_events 记录。**只**给 cleanup.failed 用（不开放通用事件面）：
 // 载荷 {release_name, cleanup_errors[], attempt, verified_at}（03-data-view §4.6）。
 func (s *Store) AppendRunEvent(ctx context.Context, runID, typ string, payload map[string]any) error {
@@ -156,4 +159,32 @@ func (s *Store) AppendRunEvent(ctx context.Context, runID, typ string, payload m
 		}
 		return nil
 	})
+}
+
+// AttemptStatesByJobNames 批量把 Job 名映射成 Attempt 状态（GC 用，票 #20-5：一次查库，不做 N+1）。
+//
+// SQL 侧用 `executor_ref->>'job' = ANY($1)` 一次拿全，再用 tasks.status 判终态
+// （不变量：Task 终态 ⇒ 其 Attempt 已终态）。
+func (s *Store) AttemptStatesByJobNames(ctx context.Context, jobNames []string) (map[string]executor.AttemptState, error) {
+	out := make(map[string]executor.AttemptState, len(jobNames))
+	if len(jobNames) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT a.executor_ref->>'job' AS job, t.status
+		  FROM attempts a
+		  JOIN tasks t ON t.id = a.task_id
+		 WHERE a.executor_ref->>'job' = ANY($1)`, jobNames)
+	if err != nil {
+		return nil, fmt.Errorf("store: attempt states by job: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var job, taskStatus string
+		if err := rows.Scan(&job, &taskStatus); err != nil {
+			return nil, fmt.Errorf("store: scan attempt state: %w", err)
+		}
+		out[job] = executor.AttemptState{Found: true, Terminal: domain.TaskStatus(taskStatus).IsTerminal()}
+	}
+	return out, rows.Err()
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,7 +16,9 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/executor"
@@ -36,10 +39,19 @@ type fakeExec struct {
 	deleted    []ports.JobHandle
 	deleteErr  error
 	submitErr  error
+	// onDelete 在 Delete 真正执行前被调用（票 #20-7：用来断言"删 Job 时库里 Attempt 已终态"）。
+	onDelete func() error
+	// holdActive 为 true 时 HoldActive 返回 true（hold-until 守卫用例）。
+	holdActive bool
 }
 
 // Delete 记录正常结束后的回收调用（execution §6）。
 func (f *fakeExec) Delete(ctx context.Context, h ports.JobHandle, policy ports.DeletePolicy) error {
+	if f.onDelete != nil {
+		if err := f.onDelete(); err != nil {
+			return err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.deleteErr != nil {
@@ -377,9 +389,9 @@ func TestPrecheckFailureAbortsRunAsServiceUnavailable(t *testing.T) {
 
 	// Pre-Check 以"可重试"错误失败 → 其余 skipped(upstream_abort)、Run service_unavailable（C-5.8 第 4 条）。
 	if err := c.JobFinished(ctx, ports.JobOutcome{
-		Handle: ports.JobHandle{JobName: executor.Naming("r-1", "t-0", 1)},
-		Phase:  executor.PhaseFailed,
-		Message: executor.CodeImagePullFailed + ": fake failure",
+		Handle:     ports.JobHandle{JobName: executor.Naming("r-1", "t-0", 1)},
+		Phase:      executor.PhaseFailed,
+		Message:    executor.CodeImagePullFailed + ": fake failure",
 		FinishedAt: time.Now(),
 	}); err != nil {
 		t.Fatal(err)
@@ -1503,6 +1515,22 @@ func TestFinishedAttemptDeletesJob(t *testing.T) {
 			if tc.phase == executor.PhaseFailed {
 				exit = 1
 			}
+			// 票 #20-7：在 Delete 里断言"库里 Attempt 已终态"（而不是只看 Task 状态）。
+			exec.onDelete = func() error {
+				repos.mu.Lock()
+				defer repos.mu.Unlock()
+				if len(repos.attempts) != 1 {
+					return fmt.Errorf("attempts = %d, want 1", len(repos.attempts))
+				}
+				for id, a := range repos.attempts {
+					switch a.Status {
+					case domain.AttemptSucceeded, domain.AttemptFailed, domain.AttemptCanceled:
+					default:
+						return fmt.Errorf("attempt %s 在 Delete 时还不是终态：%s", id, a.Status)
+					}
+				}
+				return nil
+			}
 			if err := c.JobFinished(context.Background(), ports.JobOutcome{
 				Handle:   ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
 				Phase:    tc.phase,
@@ -1557,10 +1585,22 @@ func TestDeleteFailureDoesNotAffectStatus(t *testing.T) {
 }
 
 // GC 开关：JobGCEnabled=false 时一次都不扫。
+// GC 开关：JobGCEnabled=false 时用**真实 Executor**，断言一次 List 都没发生（票 #20-7）。
 func TestGCOnceDisabledByConfig(t *testing.T) {
 	off := false
+	cs := fake.NewSimpleClientset()
+	listCalls := 0
+	cs.PrependReactor("list", "jobs", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		listCalls++
+		return false, nil, nil
+	})
+	cs.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		listCalls++
+		return false, nil, nil
+	})
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{})
 	c, err := New(Options{
-		Repos: NewMemoryRepos(), Executor: &fakeExec{},
+		Repos: NewMemoryRepos(), Executor: ex,
 		Config: Config{JobGCEnabled: &off},
 	})
 	if err != nil {
@@ -1572,11 +1612,15 @@ func TestGCOnceDisabledByConfig(t *testing.T) {
 	if err := c.GCOnce(context.Background()); err != nil {
 		t.Fatalf("GCOnce: %v", err)
 	}
+	if listCalls != 0 {
+		t.Fatalf("List calls = %d, want 0（开关关掉时不许扫 K8s）", listCalls)
+	}
 }
 
-// GC 默认开启，且默认周期 10min（execution §6.3）。
+// GC 默认开启，默认周期 10min，默认超时 2min（execution §6.3、票 #20-4）。
 func TestGCDefaults(t *testing.T) {
-	c, err := New(Options{Repos: NewMemoryRepos(), Executor: &fakeExec{}})
+	// 显式给 config，不依赖环境变量（票 #20-7）。
+	c, err := New(Options{Repos: NewMemoryRepos(), Executor: &fakeExec{}, Config: Config{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1586,9 +1630,62 @@ func TestGCDefaults(t *testing.T) {
 	if got := c.Config().GCInterval; got != DefaultGCInterval {
 		t.Errorf("GCInterval = %v, want %v", got, DefaultGCInterval)
 	}
+	if DefaultGCInterval != 10*time.Minute {
+		t.Errorf("DefaultGCInterval = %v, want 10m（execution §6.3）", DefaultGCInterval)
+	}
+	if GCOnceTimeout != 2*time.Minute {
+		t.Errorf("GCOnceTimeout = %v, want 2m", GCOnceTimeout)
+	}
 }
 
-// ---- #14：Pre-Check 判据只用 IsPrecheck（resolved.precheck.injected && seq==0）----
+// hold-until 未过期时，终态 Attempt 的 Job 不能被删（票 #20-1：日志 follower 未收尾）。
+func TestFinalizeSkipsHeldJob(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	exec := &fakeExec{holdActive: true}
+	c, err := New(Options{Repos: repos, Executor: exec, Config: Config{StorageRoot: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.JobFinished(context.Background(), ports.JobOutcome{
+		Handle: ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+		Phase:  executor.PhaseSucceeded,
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture()
+	if got := exec.deleteCount(); got != 0 {
+		t.Fatalf("Delete calls = %d, want 0（hold-until 未过期时不许删）", got)
+	}
+}
+
+// GCOnce 用**批量**查询拿 Attempt 状态（票 #20-5：不是 N+1）。
+func TestGCOnceUsesBatchAttemptStates(t *testing.T) {
+	repos := &batchSpyRepos{MemoryRepos: NewMemoryRepos()}
+	cs := fake.NewSimpleClientset()
+	ex := executor.NewWithNamespace(cs, "testplane", executor.Options{})
+	c, err := New(Options{Repos: repos, Executor: ex, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.GCOnce(context.Background()); err != nil {
+		t.Fatalf("GCOnce: %v", err)
+	}
+	if repos.calls > 1 {
+		t.Fatalf("AttemptStatesByJobNames calls = %d, want <=1（一次批量）", repos.calls)
+	}
+}
+
+// batchSpyRepos 统计批量查询次数。
+type batchSpyRepos struct {
+	*MemoryRepos
+	calls int
+}
+
+func (b *batchSpyRepos) AttemptStatesByJobNames(ctx context.Context, jobNames []string) (map[string]executor.AttemptState, error) {
+	b.calls++
+	return b.MemoryRepos.AttemptStatesByJobNames(ctx, jobNames)
+}
 
 // precheck: off 时门控不生效：所有 Task 直接放行。
 func TestQueueAfterTestingWithoutPrecheckQueuesAll(t *testing.T) {
@@ -2073,4 +2170,11 @@ func TestDeployReleaseNameMatchesGenet(t *testing.T) {
 			t.Errorf("DeployReleaseName(%s,%s) = %s, genet = %s", tc[0], tc[1], got, want)
 		}
 	}
+}
+
+// HoldActive 让 fakeExec 实现 ports.JobHolder（hold-until 守卫用例）。
+func (f *fakeExec) HoldActive(ctx context.Context, h ports.JobHandle) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.holdActive, nil
 }

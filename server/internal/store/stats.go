@@ -7,10 +7,10 @@ import (
 
 // MetricsSnapshot 是 /metrics 需要的库内计数（一次采样三条聚合查询）。
 type MetricsSnapshot struct {
-	RunsByStatus   map[string]int
-	TasksByStatus  map[string]int
-	AttemptsActive int
-	Leases         int
+	RunsByStatus    map[string]int
+	TasksByStatus   map[string]int
+	AttemptsActive  int
+	Leases          int
 	WaitingByReason map[string]int
 }
 

@@ -1358,6 +1358,15 @@ paths:
               schema:
                 type: string
                 format: binary
+            application/json:
+              schema:
+                type: string
+            text/plain:
+              schema:
+                type: string
+            text/markdown:
+              schema:
+                type: string
         '206':
           description: 部分内容（`Range` 命中）
           headers:
@@ -1370,6 +1379,15 @@ paths:
               schema:
                 type: string
                 format: binary
+            application/json:
+              schema:
+                type: string
+            text/plain:
+              schema:
+                type: string
+            text/markdown:
+              schema:
+                type: string
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1777,8 +1795,9 @@ components:
     ErrorCode:
       type: string
       description: |
-        **顶层**错误码，取附录 D 的全集（24 个）。新增错误码必须先改文档（ARCHITECTURE §15），
-        再改本契约。
+        **顶层**错误码，取附录 D 的全集（`ARCHITECTURE 附录 D` 为唯一权威，不在本文件重复计数；
+        `domain.AllCodes()` 导出同一集合供 `tools/contract` 做三方比对）。新增错误码必须先改文档
+        （ARCHITECTURE §15），再改本契约与 `domain/codes.go`。
 
         注意命名空间：07 §3「`code` 只用附录 D 的枚举」说的是信封顶层的 `code`；`detail.issues[].code`
         是**另一套**字段级码（07 §4.1 的 `PUBLIC_PARAM_CONFLICT`、C-8.4 的 `ARGS_LEX_ERROR` 都不在附录 D），

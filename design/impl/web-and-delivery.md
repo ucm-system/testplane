@@ -50,7 +50,7 @@ web/
 | `/runs/$runId` | 详情：概要 kv、执行链路图、节点详情（Deploy / Task） | 事件时间线（首屏 `GET /runs/{id}/events/history`，之后由 SSE 增量） | `GET /runs/{id}` + `events/history` + SSE | `run-detail.png` |
 | `/runs/$runId?tab=report` | 报告：指标表（按 labels 分组）、`report.md`、产物下载 | 报告分工说明 | `GET /tasks/{id}/attempts/{n}/result`、`GET /runs/{id}/report.md`、`GET /runs/{id}/artifacts`、`GET /runs/{id}/files?path=` | `run-detail.png` 的「结果指标」卡 |
 | `/runs/$runId?node=task:x&tab=logs` | 日志：Attempt 级定位、跟随/分页 | 日志边界说明 | `GET /tasks/{id}/attempts/{n}/logs?stream=stdout&follow=1`（fetch 流） | `run-detail.png` |
-| `/runs/$runId?node=deploy&pod=<pod>` | Deploy 日志：按 Pod 分页签 + 重启/gap 标记 | Pod 拓扑与区间；**排队中显示位次/已等待时长** | `GET /runs/{id}/deploy/logs`、`...?pod=&offset=`；排队期无 Pod 时显示"尚未产生 Pod" | `deploy-logs.png` |
+| `/runs/$runId?node=deploy&pod=<pod>` | Deploy 日志：按 Pod 分页签 + 重启/gap 标记 | Pod 拓扑与区间；**排队中显示水位/原因原文/已等待时长**（无位次，D-46） | `GET /runs/{id}/deploy/logs`、`...?pod=&offset=`；排队期无 Pod 时显示"尚未产生 Pod" | `deploy-logs.png` |
 | `/submit` | 提交 Run：一张"服务来源"卡两形态 + Run/env/secrets + Task 列表 | 参数说明（只读，来自 `tester.yaml.parameters`） | `GET /testers`、`POST /runs?dry_run=true`、`POST /runs` | `submit.png` / `submit-no-deploy.png` |
 | `/submit?mode=task` | 独立 Task 提交（无 `deploy`，强制 `service`） | 同上 | `POST /tasks?dry_run=true`、`POST /tasks` | `submit-no-deploy.png` |
 | `/testers` | Tester 目录：名称、版本、role、失败策略、独占、参数数；`?open=<name>` 打开详情抽屉（参数清单、env 声明、placeholder、镜像） | 注册规则 | `GET /testers`、`GET /testers/{name}` | `testers.png` / `tester-drawer.png` |

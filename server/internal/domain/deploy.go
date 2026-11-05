@@ -39,8 +39,8 @@ type DeploySnapshot struct {
 	ReadyAt      *time.Time `json:"ready_at,omitempty"`
 	LastPolledAt *time.Time `json:"last_polled_at,omitempty"`
 	// ---- 失败 / 取消 / 卸载 ----
-	Failure           *Failure        `json:"failure,omitempty"`
-	CancelRequestedAt *time.Time      `json:"cancel_requested_at,omitempty"`
+	Failure           *Failure         `json:"failure,omitempty"`
+	CancelRequestedAt *time.Time       `json:"cancel_requested_at,omitempty"`
 	Uninstall         *DeployUninstall `json:"uninstall,omitempty"`
 }
 
@@ -65,10 +65,10 @@ const EventCleanupFailed = "cleanup.failed"
 
 // DeployUninstall 是清理收口的记录（§9.7）。
 type DeployUninstall struct {
-	State         string   `json:"state"` // pending | running | verified | failed
+	State         string     `json:"state"` // pending | running | verified | failed
 	VerifiedAt    *time.Time `json:"verified_at,omitempty"`
-	Force         bool     `json:"force"`
-	CleanupErrors []string `json:"cleanup_errors"`
+	Force         bool       `json:"force"`
+	CleanupErrors []string   `json:"cleanup_errors"`
 }
 
 // QueueSnapshot 与 DeployQueue 的差别：QueueSnapshot 是"一次 Poll 的结果"，

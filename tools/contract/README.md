@@ -23,7 +23,8 @@ go run . --mode spec --allow-missing none   # 严格比对：白名单里的 16 
 ```
 
 `--allow-missing` 默认读 `tools/contract/allow-missing.txt`；白名单每行
-`METHOD PATH | 理由`，理由为空/重复会直接报错。**只放行“设计有、openapi 无”**；
+`METHOD PATH  # 理由 → IMPLEMENTATION.md:行号（或 issue #号）`，理由/记录指针为空或重复会直接报错。
+**只放行“设计有、openapi 无”**；
 openapi 多出来的端点永远判红。
 
 构建：
@@ -98,18 +99,19 @@ stdout 一行 JSON（`checks[]` 逐项给 detail），stderr 人类摘要；`--j
 
 ## 当前状态（2026-11-05，PR #18）
 
-- 规格侧：**15/15 通过**（`go run . --mode spec`）；设计 50 个端点，openapi **34** 个，
-  白名单登记 **16** 条“设计有、实现无”（每条带理由），实现有设计无 0。
-- 实现侧：**42/42 通过**，覆盖全部 34 个 operation、任务列表完整性（seq=0 precheck）、
-  SSE 连通性、404/400 错误体、取消语义；`/report` 的 404 只在非终态 fixture 上放行。
-- 合计 `--mode all`：**57/57 通过**。
+- 规格侧：**16/16 通过**（`go run . --mode spec`）；设计 50 个端点，openapi **34** 个，
+  白名单登记 **16** 条“设计有、实现无”（每条带理由 + `IMPLEMENTATION.md:439` 指针），实现有设计无 0；
+  `design-baseline.txt` 锁 50，设计端点减少会判红。
+- 实现侧：**43/43 通过**，覆盖全部 34 个 operation、任务列表完整性（seq=0 precheck）、
+  SSE 连通性、404/400 错误体、取消语义；fixture A **等终态**后再探 `/report`，终态 404 必红。
+- 合计 `--mode all`：**59/59 通过**。
 - `/files` live 同时探两种 path 形态：run 相对与 artifacts 原始带 `<run_id>/` 前缀；
-  fixture 未生成 report 时两者均 404（Error 形状），产物 drill 另证 200。
+  fixture 到终态后两者均 200（artifact drill 另证 shell 删除 Pod/重启后 sha256 一致）。
 - openapi 的 `/auth/callback` 404（dev 模式）已补 `application/json` + `Error`；
-  契约不再对它做额外 warning。
+  文件下载 200/206 允许多种媒体类型（json/plain/markdown/octet-stream）。
 - 负向证据：`--allow-missing none` 时未登记缺失端点全部判红（不再自证）；
-  单测 `TestDesignChecksCatchUnregisteredMissing` / `TestArtifactResponseTerminalSemantics`
-  覆盖“改前能过、改后必须红”。
+  单测 `TestProbeRunReportTerminal404Fails` / `TestLoadDesignRejectsMalformedTable` /
+  `TestDesignEndpointBaselineCatchesShrink` 覆盖门禁可失败性。
 
 ## 设计取舍
 

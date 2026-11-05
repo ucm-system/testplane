@@ -119,6 +119,7 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
 // uninstallState 读 runs.deploy.uninstall.state（缺省为空串）。
 func uninstallState(raw json.RawMessage) string {
 	if len(raw) == 0 {
@@ -134,6 +135,7 @@ func uninstallState(raw json.RawMessage) string {
 	}
 	return doc.Uninstall.State
 }
+
 // appendCleanupFailed 写一条 cleanup.failed 事件（只用于卸载失败；载荷见 03-data-view §4.6）。
 func (c *Controller) appendCleanupFailed(ctx context.Context, runID string, cleanupErrors []string) {
 	payload := map[string]any{

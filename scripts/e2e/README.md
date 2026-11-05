@@ -11,7 +11,7 @@
 | `tools/mock-llm`（OpenAI 兼容假服务 + 故障注入） | ✅ 完成，18 个单测通过；真实 `endpoint-probe` 五种场景验证通过 |
 | `tools/e2e`（submit / wait / assert CLI） | ✅ 完成，22 个 fake 控制面测试通过；对真控制面 **31/31** 通过 |
 | 无后端时干净报错 | ✅ 退出码 3，提示 `make dev` 与 8080，不崩 |
-| 契约测试（`tools/contract`） | ✅ 规格 15/15 + 实现 42/42 = **57/57**（设计 50 / openapi 34 / 白名单 16） |
+| 契约测试（`tools/contract`） | ✅ 规格 16/16 + 实现 43/43 = **59/59**（设计 50 / openapi 34 / 白名单 16） |
 | 前端冒烟（`pnpm build`、`GET /`） | ✅ build 通过、`GET /` 200 text/html |
 | 失败注入（经平台，`service_unavailable` 路径） | ✅ 5/5（success/500/401/200包错误/slow-ready） |
 | 一成一败混合结果（#15） | ✅ `mixed-result-check.ps1` 11/11 |
@@ -140,7 +140,7 @@ pwsh scripts/e2e/cancel-check.ps1 -DryRun          # 只打 Manifest/阈值，�
 超时路径（平台 watchdog 超时）同样有独立脚本：
 
 ```powershell
-pwsh scripts/e2e/timeout-check.ps1 -BaseUrl http://127.0.0.1:8095
+pwsh scripts/e2e/timeout-check.ps1 -BaseUrl http://127.0.0.1:8093
 pwsh scripts/e2e/timeout-check.ps1 -DryRun
 ```
 

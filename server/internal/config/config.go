@@ -117,13 +117,13 @@ type Config struct {
 	Env string
 
 	// ---- OIDC（07 §2.1、D-51：独立 client，不把 Genet 当 IdP） ----
-	OIDCIssuer         string   // TESTPLANE_OIDC_ISSUER
-	OIDCClientID       string   // TESTPLANE_OIDC_CLIENT_ID
-	OIDCClientSecret   string   // TESTPLANE_OIDC_CLIENT_SECRET
-	OIDCClientAuth     string   // TESTPLANE_OIDC_CLIENT_AUTH：basic | post（默认 basic）
-	OIDCRedirectURL    string   // TESTPLANE_OIDC_REDIRECT_URL，如 http://127.0.0.1:8080/auth/callback
-	OIDCScopes         []string // TESTPLANE_OIDC_SCOPES，默认 openid profile email groups
-	OIDCRoleClaim      string   // TESTPLANE_OIDC_ROLE_CLAIM，默认 groups
+	OIDCIssuer       string   // TESTPLANE_OIDC_ISSUER
+	OIDCClientID     string   // TESTPLANE_OIDC_CLIENT_ID
+	OIDCClientSecret string   // TESTPLANE_OIDC_CLIENT_SECRET
+	OIDCClientAuth   string   // TESTPLANE_OIDC_CLIENT_AUTH：basic | post（默认 basic）
+	OIDCRedirectURL  string   // TESTPLANE_OIDC_REDIRECT_URL，如 http://127.0.0.1:8080/auth/callback
+	OIDCScopes       []string // TESTPLANE_OIDC_SCOPES，默认 openid profile email groups
+	OIDCRoleClaim    string   // TESTPLANE_OIDC_ROLE_CLAIM，默认 groups
 
 	// ---- 会话与 CSRF ----
 	SessionSecret []byte        // TESTPLANE_SESSION_SECRET（HMAC 密钥，≥32 字节）
@@ -134,6 +134,10 @@ type Config struct {
 	// RoleMap 是 groups → 角色 的映射（TESTPLANE_ROLE_MAP，形如 tp-admins=admin,tp-ops=operator）。
 	RoleMap map[string]string
 
+	// JobGCEnabled 是 Job/裸 Pod 回收开关（TESTPLANE_JOB_GC_ENABLED，默认 true）。
+	// 由 config 统一读 env，编排层只读这个字段（不再自己 LookupEnv，票 #24-2）。
+	JobGCEnabled bool
+
 	// APIPrefix 是业务端点前缀，固定 /api/v1（07 §1）。
 	APIPrefix string
 }
@@ -141,44 +145,45 @@ type Config struct {
 // Load 从环境变量装载配置并校验。任何非法值都返回错误（调用方直接退出）。
 func Load() (*Config, error) {
 	c := &Config{
-		HTTPAddr:             envFirst("TESTPLANE_HTTP_ADDR", "TESTPLANE_LISTEN", ":8080"),
-		DatabaseURL:          envFirst("TESTPLANE_DATABASE_URL", "TESTPLANE_DB_DSN", ""),
-		StorageRoot:          env("TESTPLANE_STORAGE_ROOT", "/storage-root"),
-		StoragePVC:           env("TESTPLANE_STORAGE_PVC", "testplane-storage"),
-		ClusterName:          env("TESTPLANE_CLUSTER_NAME", "cluster-01"),
-		Role:                 Role(strings.ToLower(env("TESTPLANE_ROLE", string(RoleAll)))),
-		LogLevel:             strings.ToLower(env("TESTPLANE_LOG_LEVEL", "info")),
-		TestersDir:           env("TESTPLANE_TESTERS_DIR", "./testers"),
-		Kubeconfig:           env("TESTPLANE_KUBECONFIG", ""),
-		DeployProvider:       strings.ToLower(env("TESTPLANE_DEPLOY_PROVIDER", "mock")),
-		GenetBaseURL:         strings.TrimRight(env("TESTPLANE_GENET_BASE_URL", ""), "/"),
-		GenetAPIKey:          env("TESTPLANE_GENET_API_KEY", ""),
-		GenetCAFile:          env("TESTPLANE_GENET_CA_FILE", ""),
-		GenetInsecure:        envBool("TESTPLANE_GENET_INSECURE", false),
-		VolcanoEnabled:       envBool("TESTPLANE_VOLCANO_ENABLED", true),
-		VolcanoTTL:           15 * time.Second,
-		DBMaxConns:           20,
-		RunMaxTasks:          200,
-		TaskTimeoutDefault:   4 * time.Hour,
-		TaskTimeoutMax:       24 * time.Hour,
-		ResultMaxBytes:       100 << 20,
-		SSEHeartbeat:         15 * time.Second,
-		SSEReplayWindow:      24 * time.Hour,
-		AuthMode:             strings.ToLower(env("TESTPLANE_AUTH_MODE", "dev")),
-		Env:                  strings.ToLower(env("TESTPLANE_ENV", "dev")),
-		OIDCIssuer:           strings.TrimRight(env("TESTPLANE_OIDC_ISSUER", ""), "/"),
-		OIDCClientID:         env("TESTPLANE_OIDC_CLIENT_ID", ""),
-		OIDCClientSecret:     env("TESTPLANE_OIDC_CLIENT_SECRET", ""),
-		OIDCClientAuth:       strings.ToLower(env("TESTPLANE_OIDC_CLIENT_AUTH", "basic")),
-		OIDCRedirectURL:      env("TESTPLANE_OIDC_REDIRECT_URL", ""),
-		OIDCScopes:           splitList(env("TESTPLANE_OIDC_SCOPES", "openid profile email groups")),
-		OIDCRoleClaim:        env("TESTPLANE_OIDC_ROLE_CLAIM", "groups"),
-		SessionSecret:        []byte(env("TESTPLANE_SESSION_SECRET", "")),
-		SessionCookie:        env("TESTPLANE_SESSION_COOKIE", "tp_session"),
-		SessionTTL:           8 * time.Hour, // 下面按 TESTPLANE_SESSION_TTL 覆盖
-		SessionSecure:        envBool("TESTPLANE_SESSION_SECURE", true),
-		RoleMap:              parseRoleMap(env("TESTPLANE_ROLE_MAP", "")),
-		APIPrefix:            "/api/v1",
+		HTTPAddr:           envFirst("TESTPLANE_HTTP_ADDR", "TESTPLANE_LISTEN", ":8080"),
+		DatabaseURL:        envFirst("TESTPLANE_DATABASE_URL", "TESTPLANE_DB_DSN", ""),
+		StorageRoot:        env("TESTPLANE_STORAGE_ROOT", "/storage-root"),
+		StoragePVC:         env("TESTPLANE_STORAGE_PVC", "testplane-storage"),
+		ClusterName:        env("TESTPLANE_CLUSTER_NAME", "cluster-01"),
+		Role:               Role(strings.ToLower(env("TESTPLANE_ROLE", string(RoleAll)))),
+		LogLevel:           strings.ToLower(env("TESTPLANE_LOG_LEVEL", "info")),
+		TestersDir:         env("TESTPLANE_TESTERS_DIR", "./testers"),
+		Kubeconfig:         env("TESTPLANE_KUBECONFIG", ""),
+		DeployProvider:     strings.ToLower(env("TESTPLANE_DEPLOY_PROVIDER", "mock")),
+		GenetBaseURL:       strings.TrimRight(env("TESTPLANE_GENET_BASE_URL", ""), "/"),
+		GenetAPIKey:        env("TESTPLANE_GENET_API_KEY", ""),
+		GenetCAFile:        env("TESTPLANE_GENET_CA_FILE", ""),
+		GenetInsecure:      envBool("TESTPLANE_GENET_INSECURE", false),
+		VolcanoEnabled:     envBool("TESTPLANE_VOLCANO_ENABLED", true),
+		VolcanoTTL:         15 * time.Second,
+		DBMaxConns:         20,
+		RunMaxTasks:        200,
+		TaskTimeoutDefault: 4 * time.Hour,
+		TaskTimeoutMax:     24 * time.Hour,
+		ResultMaxBytes:     100 << 20,
+		SSEHeartbeat:       15 * time.Second,
+		SSEReplayWindow:    24 * time.Hour,
+		AuthMode:           strings.ToLower(env("TESTPLANE_AUTH_MODE", "dev")),
+		Env:                strings.ToLower(env("TESTPLANE_ENV", "dev")),
+		OIDCIssuer:         strings.TrimRight(env("TESTPLANE_OIDC_ISSUER", ""), "/"),
+		OIDCClientID:       env("TESTPLANE_OIDC_CLIENT_ID", ""),
+		OIDCClientSecret:   env("TESTPLANE_OIDC_CLIENT_SECRET", ""),
+		OIDCClientAuth:     strings.ToLower(env("TESTPLANE_OIDC_CLIENT_AUTH", "basic")),
+		OIDCRedirectURL:    env("TESTPLANE_OIDC_REDIRECT_URL", ""),
+		OIDCScopes:         splitList(env("TESTPLANE_OIDC_SCOPES", "openid profile email groups")),
+		OIDCRoleClaim:      env("TESTPLANE_OIDC_ROLE_CLAIM", "groups"),
+		SessionSecret:      []byte(env("TESTPLANE_SESSION_SECRET", "")),
+		SessionCookie:      env("TESTPLANE_SESSION_COOKIE", "tp_session"),
+		SessionTTL:         8 * time.Hour, // 下面按 TESTPLANE_SESSION_TTL 覆盖
+		SessionSecure:      envBool("TESTPLANE_SESSION_SECURE", true),
+		RoleMap:            parseRoleMap(env("TESTPLANE_ROLE_MAP", "")),
+		JobGCEnabled:       envBool("TESTPLANE_JOB_GC_ENABLED", true),
+		APIPrefix:          "/api/v1",
 	}
 
 	if raw := env("TESTPLANE_SESSION_TTL", ""); raw != "" {
@@ -342,7 +347,6 @@ func joinStorage(root string, parts ...string) string {
 	}
 	return out
 }
-
 
 // volcanoNamespacesFromEnv 解析 TESTPLANE_VOLCANO_NAMESPACES：
 //   - 未配置 → 默认 profile 的 namespace（与控制面 namespace 同值；这里不能调
@@ -510,6 +514,7 @@ func envBytes(primary string, def int64) (int64, error) {
 	}
 	return int64(n * float64(mult)), nil
 }
+
 // envBool 解析布尔型环境变量（1/true/yes 为真，0/false/no 为假，其余取默认）。
 func envBool(name string, def bool) bool {
 	raw, ok := os.LookupEnv(name)

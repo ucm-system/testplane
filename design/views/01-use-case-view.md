@@ -45,7 +45,7 @@
 | **admin** | OIDC 登录的人 | operator 全部 + 登记 Cluster / Profile、登记与轮换 Secret 引用、查审计、人工清产物 | 运行时上传 Tester 或改已发布版本；直接改 Secret 值（值只在 Secret Store 侧换）；判定指标是否达标 | §12.1、§13.1、K-3、C-10 |
 | **viewer** | OIDC 登录的人 | 读 Run / Task / 报告 / 日志 / Tester 目录 / 环境信息 | 任何写操作；看到 Secret 值（只看得到变量名） | §12.1、§12.4 |
 | **流水线客户端**（Jenkins / Agent） | 服务令牌 JWT | 与 operator 同权：提交、查询、下载报告、订阅事件 | 无后门、无特权路径；不再自己拼测试命令与解析结果 | §9.2、§12.1 |
-| **Genet** | 外部部署平台 | 受理部署、返回排队位次与状态、给出**权威 Endpoint**、执行卸载 | 判定测试结果；被平台改 Helm / 加 sidecar；`blocked` 是终态，不可续跑 | §9.1 |
+| **Genet** | 外部部署平台 | 受理部署（Helm release）、返回两根轴状态（helm `status` + `endpoint.status`）、给出**权威 Endpoint**、执行卸载；**不提供排队位次** | 判定测试结果；被平台改 Helm / 加 sidecar；`blocked` 是终态，不可续跑 | §9.1 |
 | **K8s / Volcano** | 执行与调度底座 | 跑 Job、拉起 Pod、暴露队列与节点只读快照、给出 `Pending` 原因 | 平台改队列权重 / 抢占 / 插队；`Unschedulable` 被平台判为失败 | §6.9、G-5 |
 | **镜像仓库** | 外部镜像服务 | 提供 CI 产出的 Tester 镜像（tag / digest 均可） | 平台 build 或 push；运行时替换镜像版本 | §6.2、K-3、D-22 |
 | **OIDC / 身份源** | 统一身份 | 签发用户令牌、组声明（映射 `viewer/operator/admin`）、JWKS | 平台自建账号体系、密码模式、token 透传给 Tester | §12.1、C-10 |
@@ -60,7 +60,7 @@
 |---|---|---|---|---|---|---|---|
 | UC-01 | 提交 Run（deploy 模式） | operator / 流水线 | Tester、Profile 已登记；`precheck: auto` 时注册表恰有一个 `pre_check` | dry-run 通过后落库，Run 进 `deploying` 并开始调 Genet | `POST /runs?dry_run` → `POST /runs` | `runs` `tasks` `state_events` `audit_log` | #1 #12 |
 | UC-02 | 提交 Run（service 模式） | operator / 流水线 | `service.url` 有值且三个公共参数无冲突 | 提交时即算出 `endpoint_key`，跳过 `DEPLOYING` 直接进 `testing` | `POST /runs` | `runs` `tasks` `state_events`（+ `tasks.endpoint_key`） | #1 #2 |
-| UC-03 | Deploy 排队等待与排队中取消 | operator | Run 在 `deploying` 且 Genet 返回 `queued` | 展示位次与已等待时长；取消则先向 Genet 撤排队再 `canceling → canceled` | `GET /runs/{id}/deploy`、`GET /runs/{id}/events`、`POST /runs/{id}/cancel` | `runs.deploy` `state_events` `audit_log` | #3 #1 |
+| UC-03 | Deploy 排队等待与排队中取消 | operator | Run 在 `deploying` 且 Genet 返回 `queued` | 展示水位/原因与已等待时长（**无位次**，D-46）；取消则先落取消意图再向 Genet 发 `DELETE`（404=尚未创建，由对账补偿） | `GET /runs/{id}/deploy`、`GET /runs/{id}/events`、`POST /runs/{id}/cancel` | `runs.deploy` `state_events` `audit_log` | #3 #1 |
 | UC-04 | Deploy `blocked` / 窗口耗尽 | operator（观察） | Genet 终态 `blocked`，或 72h 内未 `ready` | Run 直接 `service_unavailable`，全部 Task `skipped`，**不产生 Attempt** | `GET /runs/{id}`、`GET /runs/{id}/deploy` | `runs.error` `tasks.status_reason` | #3 #12 |
 | UC-05 | Pre-Check 门控通过 | 平台（controller） | Run 进 `testing` 且 `precheck ≠ off` | 只放 `seq=0` 独占执行；成功后其余 Task 同事务批量入 `queued` | `GET /runs/{id}/tasks` | `tasks.waiting_reason` `endpoint_leases` `state_events` | #4 #12 |
 | UC-06 | Pre-Check 可重试失败 | 平台 / operator | 窗口内一直 `ENDPOINT_UNREACHABLE` / 5xx / 429 | 其余 Task `skipped(upstream_abort)`，Run 归 `service_unavailable` | `GET /tasks/{id}/attempts/{n}/result` | `tasks.error` `state_events` | #4 #11 |
@@ -116,7 +116,7 @@ sequenceDiagram
     A-->>W: 202 r-20261105-0007
     C->>C: submitted → queued → deploying
     C->>G: deploy（内部幂等键=run_id）
-    G-->>C: queued（位次 3，已等 6h20m）
+    G-->>C: queued（水位 pending=3，已等 6h20m；无位次）
     loop 排队期间：1s 起指数退避至上限 15s
         C->>G: 查询部署状态
         G-->>C: queued
@@ -149,7 +149,7 @@ sequenceDiagram
 | 1 | dry-run 与提交（同一份 Manifest） | `submitted` | `pending` ×4 | `run.submitted`；`runs` + `tasks` + `audit_log` 同事务 | 202 + Run ID |
 | 2 | 无 `deploy` 的分支 | `queued → testing` | `pending` | 跳过 `deploying` | 链路图直接从 Pre-Check 起 |
 | 3 | 有 `deploy` | `queued → deploying` | `pending` | `run.state_changed` | 节点显示"部署中" |
-| 4 | Genet `queued` | 保持 `deploying` | `pending`（`precheck_gate`） | `deploy.state_changed`（位次/时长） | "排队中 · 已等待 6h20m"，**排队期可取消** |
+| 4 | Genet `queued` | 保持 `deploying` | `pending`（`precheck_gate`） | `deploy.state_changed`（水位/原因/时长） | "排队中 · 已等待 6h20m"，**排队期可取消** |
 | 5 | Genet `ready` | `deploying → testing` | `seq=0` 转 `queued` | `runs.endpoint`、`tasks.endpoint_key`、`injected_argv` | 出现 Endpoint 与 Pod 页签 |
 | 6 | Pre-Check 运行 | `testing` | `queued → preparing → running` | `attempt.started`；`endpoint_leases` 插独占行 | 节点 RUNNING，其余显示"等待探活" |
 | 7 | 门控通过 | `testing` | 其余 3 个批量 `pending → queued` | 同事务批量转移 + `task.state_changed` ×3 | 节点同时转 QUEUED |

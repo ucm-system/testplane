@@ -89,7 +89,7 @@ func TestDeploySnapshotMergesAcrossPolls(t *testing.T) {
 	// 1) BeginDeploy：deployment_id / state / queued_at。
 	// 1) 冻结字段（只写一次）。
 	if err := st.RecordDeployState(ctx, runID, domain.DeploySnapshot{
-		DeployID: "d-" + runID,
+		DeployID:    "d-" + runID,
 		ReleaseName: "tp-abc123456789", Provider: "genet", PackageType: "stack",
 		Chart: "mock-llm", ChartVersion: "0.1.0", ValuesDigest: "sha256:deadbeef",
 		AcceptedAt: &accepted, State: "accepted",
@@ -123,10 +123,10 @@ func TestDeploySnapshotMergesAcrossPolls(t *testing.T) {
 	}
 	// 冻结字段必须还在（这就是"合并而不是覆盖"的证据）。
 	for key, want := range map[string]any{
-		"release_name": "tp-abc123456789",
-		"provider":     "genet",
-		"package_type": "stack",
-		"chart":        "mock-llm",
+		"release_name":  "tp-abc123456789",
+		"provider":      "genet",
+		"package_type":  "stack",
+		"chart":         "mock-llm",
 		"chart_version": "0.1.0",
 		"values_digest": "sha256:deadbeef",
 		"deployment_id": "d-" + runID,

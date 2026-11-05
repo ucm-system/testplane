@@ -102,20 +102,20 @@ type attemptDTO struct {
 
 // testerDTO 是 Tester 目录项（tester.yaml 的对外投影）。
 type testerDTO struct {
-	Name         string                     `json:"name"`
-	Version      string                     `json:"version"`
-	DisplayName  string                     `json:"display_name,omitempty"`
-	Description  string                     `json:"description,omitempty"`
-	Role         string                     `json:"role"`
-	OnFailure    string                     `json:"on_failure"`
-	Entry        string                     `json:"entry"`
-	Image        string                     `json:"image"`
-	Resources    domain.ResourceRequest     `json:"resources"`
-	Concurrency  domain.ConcurrencyPolicy   `json:"concurrency,omitempty"`
-	Mounts       []domain.MountSpec         `json:"mounts,omitempty"`
-	Parameters   map[string]domain.Param    `json:"parameters,omitempty"`
-	Env          map[string]domain.EnvVar   `json:"env,omitempty"`
-	Placeholder  string                     `json:"placeholder,omitempty"`
+	Name        string                   `json:"name"`
+	Version     string                   `json:"version"`
+	DisplayName string                   `json:"display_name,omitempty"`
+	Description string                   `json:"description,omitempty"`
+	Role        string                   `json:"role"`
+	OnFailure   string                   `json:"on_failure"`
+	Entry       string                   `json:"entry"`
+	Image       string                   `json:"image"`
+	Resources   domain.ResourceRequest   `json:"resources"`
+	Concurrency domain.ConcurrencyPolicy `json:"concurrency,omitempty"`
+	Mounts      []domain.MountSpec       `json:"mounts,omitempty"`
+	Parameters  map[string]domain.Param  `json:"parameters,omitempty"`
+	Env         map[string]domain.EnvVar `json:"env,omitempty"`
+	Placeholder string                   `json:"placeholder,omitempty"`
 
 	// 注册表元数据（openapi Tester 的 allOf 第二支要求）。
 	ContentSHA   string     `json:"content_sha,omitempty"`
@@ -241,7 +241,7 @@ func toAttemptDTO(a *store.Attempt) attemptDTO {
 	return attemptDTO{
 		ID: a.ID, TaskID: a.TaskID, Idx: a.Idx, Status: a.Status,
 		Phase: a.Phase, ExitCode: a.ExitCode, ImageDigest: a.ImageDigest,
-		StartedAt:    utcPtr(a.StartedAt), FinishedAt: utcPtr(a.FinishedAt),
+		StartedAt: utcPtr(a.StartedAt), FinishedAt: utcPtr(a.FinishedAt),
 		LogRef: a.LogRef, ResultRef: a.ResultRef,
 		Error:       store.JSONOrNil(a.Error),
 		ExecutorRef: store.JSONOrNil(a.ExecutorRef),

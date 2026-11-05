@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -22,6 +23,7 @@ var (
 	designProseOpRe   = regexp.MustCompile(`(GET|POST|PUT|DELETE|PATCH)\s+(/[A-Za-z0-9_./{}-]+)`)
 	designPathParamRe = regexp.MustCompile(`\{[^}]+\}`)
 	designMethodRe    = regexp.MustCompile(`^[A-Z]+$`)
+	allowMissingRefRe = regexp.MustCompile(`^(IMPLEMENTATION\.md:\d+|IMPLEMENTATION §15\.[0-9]+|#[0-9]+|PR #[0-9]+)$`)
 )
 
 // DesignEndpoint 是设计文档里的一个 method+path。
@@ -32,9 +34,10 @@ type DesignEndpoint struct {
 
 // DesignCatalog 是 §5 解析结果。
 type DesignCatalog struct {
-	Path      string
-	Endpoints []DesignEndpoint
-	Set       map[string]bool // key: METHOD path
+	Path          string
+	Endpoints     []DesignEndpoint
+	Set           map[string]bool // key: METHOD path
+	BaselineCount int             // design-baseline.txt 里的基线；0 = 未配置
 }
 
 // endpointKey 生成 METHOD path 形式的比较键。
@@ -105,13 +108,15 @@ func LoadDesign(path string) (*DesignCatalog, error) {
 	}
 
 	inSection := false
+	inEndpointTable := false
+	methodCol, pathCol, tableCols := -1, -1, 0
+	lineNo := 0
 	scanner := bufio.NewScanner(strings.NewReader(string(raw)))
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {
+		lineNo++
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
-		// §5 的散文端点（`GET /healthz` 等）；表格端点则全文档扫描：
-		// §2.4 认证表也定义了 `/me`、`/auth/*`，只解析 §5 会把 `/me` 误判成 spec 多出。
 		if strings.HasPrefix(trimmed, "## 5.") {
 			inSection = true
 			continue
@@ -119,29 +124,51 @@ func LoadDesign(path string) (*DesignCatalog, error) {
 		if inSection && strings.HasPrefix(trimmed, "## 6.") {
 			inSection = false
 		}
-		if designTableRowRe.MatchString(trimmed) {
-			cols := splitMarkdownRow(trimmed)
-			if len(cols) < 2 || isTableSeparator(cols[0]) {
-				continue
-			}
-			methods := splitMethods(cols[0])
-			if len(methods) == 0 {
-				continue
-			}
-			p := strings.TrimSpace(strings.Trim(cols[1], "`"))
-			if !strings.HasPrefix(p, "/") {
-				continue
-			}
-			for _, m := range methods {
-				add(m, p)
+		// 端点表按结构解析：识别表头“方法/路径”两列，后续行必须列数一致。
+		if !strings.HasPrefix(trimmed, "|") {
+			inEndpointTable = false
+			if inSection {
+				// §5.5 是散文：`GET /healthz`、`GET /readyz`、`GET /metrics`
+				for _, m := range designProseOpRe.FindAllStringSubmatch(line, -1) {
+					add(m[1], m[2])
+				}
 			}
 			continue
 		}
-		if inSection {
-			// §5.5 是散文：`GET /healthz`、`GET /readyz`、`GET /metrics`
-			for _, m := range designProseOpRe.FindAllStringSubmatch(line, -1) {
-				add(m[1], m[2])
+		cols := splitMarkdownRow(trimmed)
+		if !inEndpointTable {
+			methodCol, pathCol = -1, -1
+			for i, c := range cols {
+				c = strings.Trim(strings.TrimSpace(c), "`")
+				switch c {
+				case "方法", "Method":
+					methodCol = i
+				case "路径", "Path":
+					pathCol = i
+				}
 			}
+			if methodCol >= 0 && pathCol >= 0 {
+				inEndpointTable = true
+				tableCols = len(cols)
+			}
+			continue
+		}
+		if isTableSeparator(cols[0]) {
+			continue
+		}
+		if len(cols) != tableCols {
+			return nil, fmt.Errorf("%s:%d 端点表列数 %d，期望 %d（表格可能换行/少列）", path, lineNo, len(cols), tableCols)
+		}
+		methods := splitMethods(cols[methodCol])
+		if len(methods) == 0 {
+			return nil, fmt.Errorf("%s:%d 端点表行没有合法 HTTP 方法：%q", path, lineNo, cols[methodCol])
+		}
+		p := strings.TrimSpace(strings.Trim(cols[pathCol], "`"))
+		if !strings.HasPrefix(p, "/") {
+			return nil, fmt.Errorf("%s:%d 端点路径不以 / 开头：%q", path, lineNo, p)
+		}
+		for _, m := range methods {
+			add(m, p)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -149,6 +176,20 @@ func LoadDesign(path string) (*DesignCatalog, error) {
 	}
 	if len(cat.Endpoints) == 0 {
 		return nil, fmt.Errorf("未从 %s §5 解析出任何端点（检查文档结构是否变了）", path)
+	}
+	// 反向锚点：设计端点总数不得低于基线；改设计文档必须显式复核基线文件。
+	baselinePath := filepath.Join(filepath.Dir(path), "..", "..", "tools", "contract", "design-baseline.txt")
+	if rawBaseline, err := os.ReadFile(baselinePath); err == nil {
+		for _, ln := range strings.Split(string(rawBaseline), "\n") {
+			ln = strings.TrimSpace(ln)
+			if ln == "" || strings.HasPrefix(ln, "#") {
+				continue
+			}
+			if n, err := strconv.Atoi(ln); err == nil && n > 0 {
+				cat.BaselineCount = n
+				break
+			}
+		}
 	}
 	sort.Slice(cat.Endpoints, func(i, j int) bool {
 		a, b := cat.Endpoints[i], cat.Endpoints[j]
@@ -164,11 +205,23 @@ func splitMarkdownRow(line string) []string {
 	line = strings.TrimSpace(line)
 	line = strings.TrimPrefix(line, "|")
 	line = strings.TrimSuffix(line, "|")
-	parts := strings.Split(line, "|")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		out = append(out, strings.TrimSpace(p))
+	var out []string
+	var b strings.Builder
+	inCode := false
+	for _, r := range line {
+		if r == '`' {
+			inCode = !inCode
+			b.WriteRune(r)
+			continue
+		}
+		if r == '|' && !inCode {
+			out = append(out, strings.TrimSpace(b.String()))
+			b.Reset()
+			continue
+		}
+		b.WriteRune(r)
 	}
+	out = append(out, strings.TrimSpace(b.String()))
 	return out
 }
 
@@ -186,7 +239,8 @@ func isTableSeparator(cell string) bool {
 }
 
 // LoadAllowMissing 读取“设计有、openapi 无”的白名单。
-// 每行格式：METHOD PATH | 理由。空行与 # 注释忽略；理由缺失/重复/格式非法直接报错。
+// 每行格式：METHOD PATH  # 理由 → 记录位置（IMPLEMENTATION.md:行号 或 issue #号）。
+// 空行与 # 注释忽略；理由/记录指针缺失、重复、格式非法直接报错。
 func LoadAllowMissing(path string) (map[string]string, error) {
 	allow := map[string]string{}
 	if path == "" || strings.EqualFold(path, "none") {
@@ -205,14 +259,21 @@ func LoadAllowMissing(path string) (map[string]string, error) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("%s:%d 缺少理由（格式 METHOD PATH | 理由）", path, lineNo)
+		// 新格式：METHOD PATH  # 理由 → 记录位置（IMPLEMENTATION.md:行号 或 issue #号）
+		hash := strings.Index(line, "#")
+		if hash < 0 {
+			return nil, fmt.Errorf("%s:%d 缺少 # 理由与记录指针（格式 METHOD PATH  # 理由 → IMPLEMENTATION.md:行号）", path, lineNo)
 		}
-		left := strings.Fields(strings.TrimSpace(parts[0]))
-		reason := strings.TrimSpace(parts[1])
+		left := strings.Fields(strings.TrimSpace(line[:hash]))
+		reasonPart := strings.TrimSpace(line[hash+1:])
+		arrow := strings.LastIndex(reasonPart, "→")
+		if arrow < 0 {
+			return nil, fmt.Errorf("%s:%d 缺少记录指针（格式 ... # 理由 → IMPLEMENTATION.md:行号）", path, lineNo)
+		}
+		reason := strings.TrimSpace(reasonPart[:arrow])
+		ref := strings.TrimSpace(reasonPart[arrow+len("→"):])
 		if len(left) != 2 {
-			return nil, fmt.Errorf("%s:%d 端点格式应为 METHOD PATH：%q", path, lineNo, parts[0])
+			return nil, fmt.Errorf("%s:%d 端点格式应为 METHOD PATH：%q", path, lineNo, line[:hash])
 		}
 		method := strings.ToUpper(left[0])
 		if !designMethodRe.MatchString(method) || !isHTTPMethod(strings.ToLower(method)) {
@@ -224,11 +285,14 @@ func LoadAllowMissing(path string) (map[string]string, error) {
 		if reason == "" {
 			return nil, fmt.Errorf("%s:%d 理由为空（白名单必须写理由）", path, lineNo)
 		}
+		if ref == "" || !allowMissingRefRe.MatchString(ref) {
+			return nil, fmt.Errorf("%s:%d 记录位置缺失或非法：%q（要求 IMPLEMENTATION.md:行号 或 issue #号）", path, lineNo, ref)
+		}
 		key := endpointKey(method, left[1])
 		if prev, ok := allow[key]; ok {
 			return nil, fmt.Errorf("%s:%d 重复登记 %s（前一条理由：%s）", path, lineNo, key, prev)
 		}
-		allow[key] = reason
+		allow[key] = reason + " → " + ref
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("读取 %s 失败：%w", path, err)
@@ -285,6 +349,11 @@ func (s *Spec) DesignChecks(design *DesignCatalog, allow map[string]string) (che
 
 	add("spec.design_endpoints_parsed", len(design.Endpoints) > 0,
 		fmt.Sprintf("从 %s（§5 端点表 + §2.4 认证表 + §5.5 运维段）解析出 %d 个端点", design.Path, len(design.Endpoints)))
+	if design.BaselineCount > 0 {
+		add("spec.design_endpoint_baseline", len(design.Endpoints) >= design.BaselineCount,
+			fmt.Sprintf("设计端点 %d 个，基线 %d 个（不得减少；改文档必须显式更新 design-baseline.txt）",
+				len(design.Endpoints), design.BaselineCount))
+	}
 
 	implementedDesign := len(design.Set) - len(designOnly)
 	add("spec.operation_count", len(s.Operations) == implementedDesign,

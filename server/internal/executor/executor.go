@@ -227,14 +227,10 @@ func (e *Executor) Cancel(ctx context.Context, h ports.JobHandle) error {
 	// patch 错误并入返回错误路径只在删除也失败时才有意义，所以仅尝试一次。
 	_ = e.markCanceled(ctx, ns, job)
 
-	policy := metav1.DeletePropagationForeground
-	grace := int64(defaultDeleteGrace)
-	delErr := e.client.BatchV1().Jobs(ns).Delete(ctx, h.JobName, metav1.DeleteOptions{
-		PropagationPolicy:  &policy,
-		GracePeriodSeconds: &grace,
-	})
-	if delErr != nil && !apierrors.IsNotFound(delErr) {
-		return fmt.Errorf("executor: delete job %s/%s: %w", ns, h.JobName, delErr)
+	// 取消/超时收口用 Foreground：确保 Pod 真正消失再返回，避免容器继续写 NFS
+	// （execution §5.2）。复用 Delete 的同一份实现，不再内联一份 propagation 逻辑。
+	if delErr := e.Delete(ctx, h, ports.DeleteForeground); delErr != nil {
+		return delErr
 	}
 
 	if err := e.waitPodsGone(ctx, ns, h, e.opts.CancelWait); err == nil {

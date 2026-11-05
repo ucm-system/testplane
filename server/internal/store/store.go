@@ -3,8 +3,8 @@ package store
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"encoding/base32"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -22,15 +22,15 @@ import (
 type Store struct {
 	pool *pgxpool.Pool
 
-	Runs     *RunRepo
-	Tasks    *TaskRepo
-	Attempts *AttemptRepo
-	Testers  *TesterRepo
-	Leases   *LeaseRepo
-	Events   *EventRepo
-	Clusters *ClusterRepo
-	Audits   *AuditRepo
-	Profiles *ProfileRepo
+	Runs      *RunRepo
+	Tasks     *TaskRepo
+	Attempts  *AttemptRepo
+	Testers   *TesterRepo
+	Leases    *LeaseRepo
+	Events    *EventRepo
+	Clusters  *ClusterRepo
+	Audits    *AuditRepo
+	Profiles  *ProfileRepo
 	Artifacts *ArtifactRepo
 
 	// notifier 可为 nil：置位后，提交与 ClaimForExecution 会在提交后 NOTIFY。

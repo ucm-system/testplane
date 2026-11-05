@@ -718,6 +718,32 @@ func (m *MemoryRepos) AppendRunEvent(ctx context.Context, runID, typ string, pay
 }
 
 // ListDeployCleanupPending 返回已终态但 deploy 还没卸载干净的 Run（收口补偿用）。
+// AttemptStatesByJobNames 批量返回 Job 名 → Attempt 状态（GC 用，票 #20-5）。
+func (m *MemoryRepos) AttemptStatesByJobNames(ctx context.Context, jobNames []string) (map[string]executor.AttemptState, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	want := make(map[string]struct{}, len(jobNames))
+	for _, n := range jobNames {
+		want[n] = struct{}{}
+	}
+	out := make(map[string]executor.AttemptState, len(jobNames))
+	for _, a := range m.attempts {
+		if _, ok := want[a.Job()]; !ok {
+			continue
+		}
+		terminal := false
+		if t, ok := m.tasks[a.TaskID]; ok {
+			terminal = t.Status.IsTerminal()
+		}
+		switch a.Status {
+		case domain.AttemptSucceeded, domain.AttemptFailed, domain.AttemptCanceled:
+			terminal = true
+		}
+		out[a.Job()] = executor.AttemptState{Found: true, Terminal: terminal}
+	}
+	return out, nil
+}
+
 func (m *MemoryRepos) ListDeployCleanupPending(ctx context.Context, limit int) ([]RunView, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1010,6 +1036,7 @@ func (m *MemoryRepos) hasActiveAttemptLocked(taskID string) bool {
 	}
 	return false
 }
+
 // MarkCanceled 把被取消的 Attempt/Task 落成 canceled 终态（Cancel 成功回调）。
 func (m *MemoryRepos) MarkCanceled(ctx context.Context, attemptID string) error {
 	m.mu.Lock()

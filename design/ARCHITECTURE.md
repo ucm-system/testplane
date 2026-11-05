@@ -52,7 +52,7 @@ TestPlane 是**对内工具**，以下事项已由团队裁决，本文按结论
 | 0.3 | 2026-11-04 | 落地实践后的修订：取消 Blocked 图里的 `PENDING/QUEUED → CANCELED` 箭头（与 §7.6 对齐）；明确 Pre-Check 门控后其余 Task 可并发（不另加串行顺序）；`SERVICE_UNAVAILABLE` 仅限可重试的 Pre-Check 失败；`cleanup.policy` 与产物保留期解耦；Deploy 增加排队状态与 72h 窗口；删除平台日志脱敏义务（团队裁决日志明文） |
 | 0.4 | 2026-11-05 | 可追溯性补充：镜像 tag 可变，执行层记录实际拉取的 digest；失败续跑复用优先比较 digest |
 | 0.5 | 2026-11-05 | **取消提交幂等**：删除 `Idempotency-Key` 与 `idempotency_keys` 表，`POST /runs` / `POST /tasks` 每次都创建新资源；平台不判断两次提交是否等价（硬件 / 驱动 / HDK 版本等环境因素对平台透明）。内部操作（建 Job、Genet 部署）的可重试安全不变 |
-| 0.6 | 2026-11-05 | **MVP 实现回写**（见 `design/IMPLEMENTATION.md §15`）：① Tester 注册只做"镜像内 `tester.yaml` + 启动/周期扫描"，不提供运行时注册 API（D-38）；② 对外错误体为**扁平** `{code,message,detail,retryable,trace_id}`（D-39）；③ 提交体以**嵌套** `run:` 为唯一形态，`03-data-view.md §4.1` 的平级示例按文档缺陷处理（D-40）；④ 产物 PVC 名统一为 `testplane-storage`（D-41）；⑤ 开发环境种子 `cluster-01` + `k8s-npu`，由进程启动时补齐（D-42）；⑥ MVP 的执行环境是宿主 Kind + `kind load docker-image`，Deploy 阶段由 mock 顶替 Genet（D-43） |
+| 0.6 | 2026-11-05 | **MVP 实现回写**（见 `design/IMPLEMENTATION.md §15`）：① Tester 注册只做"镜像内 `tester.yaml` + 启动/周期扫描"，不提供运行时注册 API（D-38）；② 对外错误体为**扁平** `{code,message,detail,retryable,trace_id}`（D-39）；③ 提交体以**嵌套** `run:` 为唯一形态，`03-data-view.md §4.1` 的示例已在 v0.6 统一为嵌套形态（D-40 已更正，见附录 E）；④ 产物 PVC 名统一为 `testplane-storage`（D-41）；⑤ 开发环境种子 `cluster-01` + `k8s-npu`，由进程启动时补齐（D-42）；⑥ MVP 的执行环境是宿主 Kind + `kind load docker-image`，Deploy 阶段由 mock 顶替 Genet（D-43） |
 | 0.7 | 2026-11-05 | **Genet 与队列的调研回写**：按 Genet 真实实现（Helm release 为部署单元、无部署单）重写 Deploy 适配（D-44～D-48），并明确 `endpoint.status=ready` **只代表地址可解析**、必须再过 Pre-Check 服务门（D-45）；排队位次不可得（D-46）；Genet 失败终态折叠为 `blocked`（D-47）；控制面用 Open API Key、Web 用 TestPlane 自己的 OIDC client，**不把 Genet 当 IdP**（D-48）；Volcano 队列直接读 CRD、不经 Genet（D-49）；取消/卸载采用"先落意图、后置删除、对账补偿"（D-50） |
 | 0.8 | 2026-11-05 | **部署形态与鉴权落定**：纯内网部署，TestPlane 与 Genet 共用**同一个企业统一身份源**，TestPlane 作为独立 OIDC client（不是 Genet 的 client），服务间用统一身份源签发的 JWT（D-51）；Genet 侧的**独占池**（exclusive pool）语义确认：进入独占池的 namespace/服务不受每日回收影响，TestPlane 通过独占自己的 namespace 获得该保证（D-52）；Genet 将开放 `openAPI`，控制面走 `/api/open/*`（D-53） |
 | 0.9 | 2026-11-05 | **Deploy 收口与可观测收口**：Run 终态后必须卸载 deploy 的 release，**只走 Genet OpenAPI**（直接 `helm uninstall` 会被其 admission webhook 拒绝），并以「`GET 404` + pods 空」作为删干净的判据（D-54）；`runs.deploy` 落 §4.4 全字段（增量合并，不覆盖已冻结键）；新增 `cleanup.failed` 事件类型；OIDC 会话/CSRF/RBAC 已实现（D-51 落地），`dev` 模式仍保留给本地 |
@@ -1086,7 +1086,7 @@ TestPlane 不负责 Helm 渲染、服务安装、镜像部署和集群资源管�
 部署失败的归属：`FAILED`（平台侧调用 Genet 失败）与 `SERVICE_UNAVAILABLE`（Genet 受理但服务未就绪）必须区分，见 §7.5。
 
 **Deploy 会排队。** 配额紧张时 Genet 可能把部署排到队列里，时长从数小时到数天不等。平台必须：
-- 表示 `queued` 状态并展示排队位次/已等待时长（Genet 提供时）；
+- 表示 `queued` 状态并展示**水位计数 + 原因原文 + 已等待时长**；**不展示位次**（D-46，Genet 不提供）；
 - 使用足够长的部署窗口（平台默认 72 小时，Profile 可覆盖），不按分钟级超时误判失败；
 - 排队期间允许取消（先向 Genet 取消排队/卸载，失败只记 `CLEANUP_FAILED`）。
 

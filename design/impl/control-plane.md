@@ -615,7 +615,7 @@ Genet 侧的真实语义（调研 `genet-lifecycle.md`）：**一次部署 = 一
 | # | Genet 观测（`GET /releases/{name}`，可选 `/queue/podgroups`） | `deploy.state` | 平台动作 |
 |---|---|---|---|
 | 1 | 404 且距 `accepted_at` **< 180s** | `accepted` | 视为"尚未 apply 出来"，继续轮询（宽限按**时间窗**，不按次数：退避后次数与时间不再线性） |
-| 2 | 404 超过 180s | `blocked` | 视为"启动失败"：`failure.code=DEPLOY_FAILED`（不可重试）→ Run `failed` |
+| 2 | 404 超过 180s | `blocked` | 视为"release 没能起来"（不是调不通）：`failure.code=DEPLOY_BLOCKED`（可重试）+ `detail.reason=blocked` → Run `service_unavailable`（D-23-C 裁决，与 `execution.md §9.3` 一致） |
 | 3 | `status` 以 `pending-` 开头，且 `pods == []` 或所有 Pod `nodeName == ""` | `queued` | 记 `queued_at`；`queue` 取 `/queue/podgroups` 的 `phase` 与 `/queue` 的计数（**无位次**）；写 `deploy.state_changed`，展示已等待时长；可取消 |
 | 4 | `status` 以 `pending-` 开头，已有 Pod 被调度（`nodeName != ""`）或已有 `ready=false` 的 Pod | `deploying` | 落 `pods[]` 快照 |
 | 5 | `status == "deployed"` 但 `endpoint.status == "pending"` | `deploying` | **不可**当 ready：`noWait` 下 `deployed` 早于地址出现 |
@@ -625,7 +625,7 @@ Genet 侧的真实语义（调研 `genet-lifecycle.md`）：**一次部署 = 一
 | 9 | 距 `accepted_at` 超 `deploy_timeout_seconds`（默认 72h）仍非终态 | `blocked` | `failure.code=DEPLOY_BLOCKED`（可重试）+ `detail.reason="timeout"` → Run `service_unavailable`（D-46/D-47） |
 
 - `queued / accepted / deploying` 的切分是**平台启发式**（Genet 没有"受理"事件、没有队列状态），`state_detail` 里写明判据，别让用户以为是 Genet 的结论。
-- 部署侧失败只折叠成**两个**错误码（附录 D，不新增 `DEPLOY_TIMEOUT`）：`DEPLOY_FAILED`（不可重试：平台侧调 Genet 失败 —— 连接/5xx/同名冲突/安装失败/404 超宽限）→ Run `failed`；`DEPLOY_BLOCKED`（可重试：Genet 报 `blocked` 或超 72h 窗口）→ Run `service_unavailable`，细分靠 `detail.reason ∈ {blocked,timeout,superseded,uninstalling,uninstalled}`（D-47 的折叠在此表达）。
+- 部署侧失败只折叠成**两个**错误码（附录 D，不新增 `DEPLOY_TIMEOUT`）：`DEPLOY_FAILED`（不可重试：平台侧调 Genet 失败 —— 连接/5xx/同名冲突/安装失败）→ Run `failed`；`DEPLOY_BLOCKED`（可重试：Genet 报 `blocked` 或超 72h 窗口）→ Run `service_unavailable`，细分靠 `detail.reason ∈ {blocked,timeout,superseded,uninstalling,uninstalled}`（D-47 的折叠在此表达）。
 - 部署失败/阻塞时所有 Task 置 `skipped`（`reason: service_unavailable`），**不产生 Attempt**（§7.1）。
 - `genet_release_status` / `endpoint_status` 两个原值必须落库：排障时要能区分"Genet 说 deployed、我们说 deploying"。
 
@@ -956,7 +956,7 @@ Run `report.json` 严格按 §8.4：只做组织与索引，不做指标聚合�
 | `run.state_changed` | from/to、reason |
 | `task.state_changed` | task_id、from/to、reason、waiting_reason |
 | `attempt.started` / `attempt.finished` | attempt_id、phase、exit_code、error |
-| `deploy.state_changed` | state（含 `queued`）、排队位次/已等待时长、pod 数、message |
+| `deploy.state_changed` | state（含 `queued`）、水位计数与原因原文（**无位次**，D-46）、已等待时长、pod 数、message |
 | `cleanup.started` / `run.finished` | 结果与计数 |
 | `report.written` | 报告路径 |
 | `resync_required` | 回放越窗，客户端整页重建（C-9.2） |
