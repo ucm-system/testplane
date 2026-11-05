@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"fmt"
 	"github.com/go-chi/chi/v5"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -188,9 +189,27 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
+	// Deploy 的 Pod 在 **Genet 的 namespace** 里（`runs.deploy.namespace`）。缺这个键时回退到
+	// 平台自己的 namespace——但这多半意味着读不到日志，所以**必须把回退写进 message**，
+	// 而不是静默降级（否则表现成"日志为空但不知道为啥"，QA 的 deploy-logs-check 就栽在这）。
 	ns := deploy.Namespace
+	namespaceFallback := ""
 	if ns == "" {
 		ns = k8sDefaultNamespace(s.cfg)
+		namespaceFallback = fmt.Sprintf(
+			"runs.deploy 里没有 namespace，已回退到 %q（Deploy 的 Pod 通常在 Genet 的 namespace，如 testplane-mock；这里可能读不到日志）", ns)
+	}
+
+	// 把"回退"这件事写进 message（有 message 就追加，没有就设成它）。
+	noteFallback := func() {
+		if namespaceFallback == "" {
+			return
+		}
+		if resp.Message == "" {
+			resp.Message = namespaceFallback
+		} else {
+			resp.Message += "；" + namespaceFallback
+		}
 	}
 
 	// ---- 参数校验（`?pod=` 必选：游标只在单个 Pod 内有意义，见下）----
@@ -308,6 +327,7 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 				Reason: "pod recycled: log no longer readable (reading pods/log directly)",
 			})
 		}
+		noteFallback()
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -378,6 +398,7 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 				Text: strings.Join(lines, "\n"),
 			})
 		}
+		noteFallback()
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -400,6 +421,7 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	noteFallback()
 	writeJSON(w, http.StatusOK, resp)
 }
 

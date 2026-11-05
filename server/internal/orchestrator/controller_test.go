@@ -2324,3 +2324,54 @@ func tempDirNoRace(t *testing.T) string {
 	})
 	return dir
 }
+
+// Poll 必须把 Genet 返回的 **namespace** 落进 runs.deploy（QA deploy-logs-check 的缺口：
+// 结构体有字段但没人写 → 日志端点回退到 TESTPLANE_NAMESPACE，Pod 在 Genet 的 ns 里读不到）。
+func TestPollPersistsGenetNamespace(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunDeploying, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now(),
+		DeployJSON:  json.RawMessage(`{"release_name":"tp-ns","provider":"genet","package_type":"stack"}`),
+	})
+	dep := &fakeDeployer{pollState: ports.DeployState{
+		Phase:       "deploying",
+		Namespace:   "testplane-mock",
+		ReleaseName: "tp-ns",
+	}}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+	if err := c.DeployOnce(context.Background()); err != nil {
+		t.Fatalf("DeployOnce: %v", err)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	doc := deployDoc(t, run)
+	if doc["namespace"] != "testplane-mock" {
+		t.Fatalf("runs.deploy.namespace = %v, want testplane-mock（Genet 的 ns 必须落库）", doc["namespace"])
+	}
+	// 合并语义：同批字段不能被冲掉。
+	if doc["release_name"] != "tp-ns" {
+		t.Fatalf("release_name 被冲掉了：%v", doc["release_name"])
+	}
+	if doc["package_type"] != "stack" {
+		t.Fatalf("package_type 被冲掉了：%v", doc["package_type"])
+	}
+}
+
+// namespace 为空时不写（omitempty + jsonb 合并），避免把已经存在的键冲成空。
+func TestPollDoesNotBlankNamespace(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunDeploying, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now(),
+		DeployJSON:  json.RawMessage(`{"release_name":"tp-ns","namespace":"testplane-mock","state":"deploying"}`),
+	})
+	dep := &fakeDeployer{pollState: ports.DeployState{Phase: "deploying"}} // 没带 namespace
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+	if err := c.DeployOnce(context.Background()); err != nil {
+		t.Fatalf("DeployOnce: %v", err)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if got := deployDoc(t, run)["namespace"]; got != "testplane-mock" {
+		t.Fatalf("runs.deploy.namespace = %v, want testplane-mock（空值不许覆盖已有键）", got)
+	}
+}

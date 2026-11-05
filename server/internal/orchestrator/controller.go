@@ -1102,11 +1102,18 @@ func (c *Controller) pollDeploy(ctx context.Context, run RunView) error {
 		return c.repos.FinishDeployAsFailed(ctx, run.ID, f)
 	}
 	// 每次 Poll 回写：状态、两根轴原值、队列水位、时间线（§4.4）。
+	//
+	// Namespace 从 Genet 的 release 回填（Deploy 的 Pod 在 Genet 的 namespace 里，
+	// 平台自己的 namespace 读不到）。空值不写（omitempty + jsonb 合并 → 不会冲掉已有键）。
 	snap := domain.DeploySnapshot{
 		State:          st.Phase,
 		QueueReason:    st.Reason,
 		ReleaseStatus:  st.ReleaseStatus,
 		EndpointStatus: st.EndpointStatus,
+		Namespace:      st.Namespace,
+		PackageType:    st.PackageType,
+		Chart:          st.Chart,
+		ChartVersion:   st.ChartVersion,
 		Queue:          st.Queue,
 		LastPolledAt:   &now,
 	}

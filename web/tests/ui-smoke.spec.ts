@@ -2,9 +2,17 @@ import { expect, test } from '@playwright/test'
 
 /**
  * 最小 UI 冒烟（PR #18 / 验收 #16）：
- *   /runs -> 点第一条 -> 详情页出现 Task 列表
+ *   /runs -> 点第一条 -> 详情页的执行视图里出现 Task 列表
+ *     （终态 Run 默认是「结果」视图，先切「执行细节」——折叠不是隐藏）
  *   /submit -> 故意把 Task 名称清空 -> dry-run 报错可见
  */
+
+/** 终态 Run 默认落在「结果」视图：有页签就先切到「执行细节」 */
+async function ensureExecutionView(page: import('@playwright/test').Page): Promise<void> {
+  const detailTab = page.getByRole('tab', { name: '执行细节' })
+  if ((await detailTab.count()) > 0) await detailTab.click()
+}
+
 test('runs list -> detail task table -> submit dry-run error', async ({ page }) => {
   await page.goto('/runs')
   await expect(page.getByText('全部 Run')).toBeVisible()
@@ -16,6 +24,7 @@ test('runs list -> detail task table -> submit dry-run error', async ({ page }) 
 
   await firstRun.click()
   await expect(page).toHaveURL(new RegExp(href!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  await ensureExecutionView(page)
   await expect(page.getByText('Task 列表')).toBeVisible()
   await expect(page.locator('table').first()).toBeVisible()
 

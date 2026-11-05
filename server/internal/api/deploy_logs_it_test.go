@@ -26,9 +26,13 @@ type fakeDeployLogs struct {
 	listErr  error
 	logsErr  error
 	lastTail int64
+	// seenNamespaces 记录客户端真正读 Pod/日志用的 namespace
+	// （断言"用的是 runs.deploy.namespace 而不是配置回退"）。
+	seenNamespaces []string
 }
 
 func (f *fakeDeployLogs) ListPods(ctx context.Context, namespace string) ([]corev1.Pod, error) {
+	f.seenNamespaces = append(f.seenNamespaces, namespace)
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -36,6 +40,7 @@ func (f *fakeDeployLogs) ListPods(ctx context.Context, namespace string) ([]core
 }
 
 func (f *fakeDeployLogs) Logs(ctx context.Context, namespace, pod, container string, tailLines int64) (string, error) {
+	f.seenNamespaces = append(f.seenNamespaces, namespace)
 	if f.logsErr != nil {
 		return "", f.logsErr
 	}
@@ -542,5 +547,91 @@ func TestDeployLogs_RecycledPodIsExplicit(t *testing.T) {
 	}
 	if len(body.Gaps) != 1 || !strings.Contains(body.Gaps[0].Reason, "pod recycled") {
 		t.Fatalf("gaps = %+v, want reason 说明已回收", body.Gaps)
+	}
+}
+
+// ---- runs.deploy.namespace 写入/读取（QA deploy-logs-check 的缺口）----------------
+//
+// Deploy 的 Pod 在 **Genet 的 namespace** 里；`runs.deploy.namespace` 一度"结构体有、没人写"，
+// 端点就回退到 TESTPLANE_NAMESPACE（testplane），结果 Pod 明明在 testplane-mock 里跑却读不到日志。
+
+// ② `deploy/logs` 必须用 runs.deploy.namespace（Genet 的 ns），而不是配置回退。
+func TestDeployLogs_UsesDeployNamespace(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	started := time.Now().Add(-5 * time.Minute).UTC().Truncate(time.Second)
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-ns", "state": "ready",
+	})
+	fake := &fakeDeployLogs{
+		pods: []corev1.Pod{deployPod("tp-ns-stack-1", true, 0, started)},
+		logs: map[string]string{"tp-ns-stack-1": "ns-line\n"},
+	}
+	srv.deployLogsKube = fake
+
+	rec, body := getDeployLogs(t, srv, runID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if len(fake.seenNamespaces) == 0 {
+		t.Fatal("fake client 没被调用")
+	}
+	for _, ns := range fake.seenNamespaces {
+		if ns != "testplane-mock" {
+			t.Fatalf("读取用的 namespace = %q，want testplane-mock（不能用配置回退）; 全部=%v", ns, fake.seenNamespaces)
+		}
+	}
+	if body.Message != "" {
+		t.Fatalf("message = %q，正常路径不该有回退提示", body.Message)
+	}
+}
+
+// ③ deploy 快照缺 namespace → 回退并**显式说明**（不静默）。
+func TestDeployLogs_NamespaceFallbackIsExplained(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	// 只有 release_name、没有 namespace：模拟旧数据 / 写入端漏写。
+	runID := seedDeployRun(t, st, map[string]any{
+		"release_name": "tp-nonso", "state": "ready",
+	})
+	fake := &fakeDeployLogs{pods: nil}
+	srv.deployLogsKube = fake
+
+	rec, body := getDeployLogs(t, srv, runID, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.Contains(body.Message, "回退") {
+		t.Fatalf("message = %q，缺 namespace 时必须在响应里说明是回退", body.Message)
+	}
+	// 回退目标是平台 namespace（integrationServer 的 Config 默认 testplane）
+	for _, ns := range fake.seenNamespaces {
+		if ns != "testplane" {
+			t.Fatalf("回退 namespace = %q，want testplane", ns)
+		}
+	}
+}
+
+// ① `GET /runs/{id}/deploy` 里 namespace 非空，且等于 Genet 返回的 ns（写入端已验证；
+// 这里验证投影端点把它原样暴露给调用方，QA 的 deploy-logs-check 靠这条链路定位 Pod）。
+func TestRunDeployExposesNamespace(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-proj", "state": "ready",
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID+"/deploy", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Deploy map[string]any `json:"deploy"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Deploy["namespace"] != "testplane-mock" {
+		t.Fatalf("deploy.namespace = %v, want testplane-mock", body.Deploy["namespace"])
 	}
 }

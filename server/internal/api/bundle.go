@@ -331,16 +331,21 @@ func (s *Server) appendDeployLogs(ctx context.Context, run *store.Run, files *[]
 	if len(run.Deploy) > 0 {
 		_ = json.Unmarshal(run.Deploy, &deploy)
 	}
-	if deploy.Namespace == "" {
-		addMissing("logs/deploy", "该 Run 没有 Deploy（或 deploy 快照缺 namespace）")
-		return
+	// Deploy 的 Pod 在 Genet 的 namespace 里（`runs.deploy.namespace`）。缺这个键时回退平台
+	// namespace，但要在 missing 里**说清这是回退**——静默回退会让 bundle 看起来"没有日志"却查不出原因。
+	ns := deploy.Namespace
+	fallbackNote := ""
+	if ns == "" {
+		ns = k8sDefaultNamespace(s.cfg)
+		fallbackNote = fmt.Sprintf("runs.deploy 缺 namespace，已回退到 %q", ns)
+		addMissing("logs/deploy", fallbackNote+"（Deploy 的 Pod 通常在 Genet 的 namespace，如 testplane-mock，这里可能读不到）")
 	}
 	client, err := s.deployLogsClient()
 	if err != nil {
 		addMissing("logs/deploy", "K8s 客户端不可用: "+err.Error())
 		return
 	}
-	pods, err := client.ListPods(ctx, deploy.Namespace)
+	pods, err := client.ListPods(ctx, ns)
 	if err != nil {
 		addMissing("logs/deploy", "列 Pod 失败: "+err.Error())
 		return
@@ -357,7 +362,7 @@ func (s *Server) appendDeployLogs(ctx context.Context, run *store.Run, files *[]
 		}
 		listed++
 		container := firstContainer(name, pods)
-		text, logErr := client.Logs(ctx, deploy.Namespace, name, container, bundleDeployTail)
+		text, logErr := client.Logs(ctx, ns, name, container, bundleDeployTail)
 		if logErr != nil {
 			addMissing("logs/deploy/"+name+".log", "拉取失败: "+logErr.Error())
 			continue

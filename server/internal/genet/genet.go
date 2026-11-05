@@ -314,7 +314,14 @@ func (c *Client) fetchState(ctx context.Context, d *deployState, releaseName str
 // endpoint status）与队列水位一并带回给编排层落库（runs.deploy §4.4）。
 func (c *Client) synthesize(rel *Release, acceptedAt time.Time, queue *QueueSnapshot) ports.DeployState {
 	st := c.synthesizePhase(rel, acceptedAt, queue)
+	// 定位信息回填：编排层要把它们落进 `runs.deploy`（namespace 尤其重要——
+	// Deploy 的 Pod 在 Genet 的 namespace 里，日志端点靠它找 Pod）。
+	st.Namespace = strings.TrimSpace(rel.Namespace)
+	st.ReleaseName = strings.TrimSpace(rel.Name)
 	st.ReleaseStatus = strings.TrimSpace(rel.Status)
+	st.PackageType = strings.TrimSpace(rel.PackageType)
+	st.Chart = strings.TrimSpace(rel.Chart)
+	st.ChartVersion = strings.TrimSpace(rel.ChartVersion)
 	if rel.CallInfo != nil && rel.CallInfo.Endpoint != nil {
 		st.EndpointStatus = strings.ToLower(strings.TrimSpace(rel.CallInfo.Endpoint.Status))
 	}
