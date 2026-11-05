@@ -86,7 +86,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=web
 
   publish:
-    name: 发布 ${{ matrix.image }}（${{ inputs.platforms || 'linux/amd64,linux/arm64' }}）
+    name: 发布镜像（多架构）
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     needs: discover

@@ -125,7 +125,9 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - name: install
         working-directory: web
-        run: pnpm install --frozen-lockfile
+        # pnpm 12 默认开 supply-chain 策略（minimumReleaseAge）：锁文件里较新的包会被判红。
+        # 锁文件就是构建输入，来源可信 —— 与 Dockerfile 里的取值保持一致。
+        run: pnpm install --frozen-lockfile --config.minimumReleaseAge=0
       - name: typecheck + build
         working-directory: web
         run: pnpm build
@@ -152,10 +154,14 @@ jobs:
           helm template testplane deploy/charts/testplane -n testplane \
             -f deploy/charts/testplane/values-production.example.yaml > /tmp/prod.yaml
           grep -q 'kind: Deployment' /tmp/prod.yaml
-          grep -q 'kind: Job' /tmp/prod.yaml   # 迁移 hook
-          grep -q 'kind: PersistentVolumeClaim' /tmp/prod.yaml
-      - name: 渲染本地 values
-        run: helm template tp deploy/charts/testplane -n testplane-helm -f deploy/charts/testplane/values-kind.yaml > /tmp/kind.yaml
+          grep -q 'kind: Job' /tmp/prod.yaml            # 迁移 hook
+          grep -q 'kind: Ingress' /tmp/prod.yaml        # 生产模板带 Ingress
+          # 生产模板用 existingClaim 复用 RWX，所以**不**创建 PVC；PVC 由 kind 模板验证
+      - name: 渲染本地 values（并验证 PVC 会被创建）
+        run: |
+          helm template tp deploy/charts/testplane -n testplane-helm \
+            -f deploy/charts/testplane/values-kind.yaml > /tmp/kind.yaml
+          grep -q 'kind: PersistentVolumeClaim' /tmp/kind.yaml
       - name: 必填项校验必须能红（删掉 OIDC issuer 应失败）
         run: |
           if helm template tp deploy/charts/testplane -n t \

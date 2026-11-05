@@ -40,7 +40,9 @@ ARG RUNTIME_BASE=alpine:3.20
 #   - `pnpm build` = `tsc -b && vite build`，类型错误会让构建失败（前端也有门禁）；
 #   - 只把 package.json/lock 先拷进来装依赖，改源码不重装（层缓存）。
 # ---------------------------------------------------------------------------
-FROM node:22-alpine AS web
+# 这个阶段产出的是 **与 CPU 架构无关** 的静态资源，所以钉在构建机平台（$BUILDPLATFORM）上跑：
+# 多架构构建时不必为 arm64 再 qemu 慢跑一遍 node/vite（实测省掉 1~2 分钟）。
+FROM --platform=$BUILDPLATFORM node:22-alpine AS web
 
 RUN corepack enable
 
@@ -59,7 +61,15 @@ RUN pnpm --config.verifyDepsBeforeRun=false --config.minimumReleaseAge=0 run bui
 
 # 构建阶段
 # ---------------------------------------------------------------------------
-FROM golang:${GO_VERSION}-alpine AS build
+# 交叉编译：构建阶段钉在构建机平台（$BUILDPLATFORM），用 GOARCH=$TARGETARCH 产出目标架构二进制。
+# 好处：多架构时 amd64/arm64 **共用同一个 build stage**，不必在 qemu 里跑 arm64 的 Go 工具链
+# （实测 361s → ~60s）。CGO_ENABLED=0，产物是静态二进制，交叉编译没有 libc 兼容问题
+# （构建末尾的 `! ldd` 与 ELF e_machine 自检会守住这一点）。
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
+
+# buildx 提供的目标平台参数；普通 `docker build` 时由 Dockerfile 前端自动填成当前平台。
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 
 # git：Go 模块走 vcs 时要它；ca-certificates：拉依赖可能走 https
 RUN apk add --no-cache git ca-certificates
@@ -89,17 +99,28 @@ ENV CGO_ENABLED=0
 # 产物名固定 testplaned（与 06 §2 的 Deployment 名、`/testplaned migrate up` 一致）
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -trimpath \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
       -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
       -o /out/testplaned ./cmd/testplaned
 
-# 构建期自检：二进制存在，且**不是**动态链接（CGO_ENABLED=0 的实证，不是"应该"）。
-# 用 ldd 而不是 file：golang:*-alpine 里没有 file，ldd 是 musl 自带的。
-# 静态二进制 `ldd` 会失败 → `! ldd` 成立；若哪天有人加了 CGO 依赖，这一步会让构建失败。
+# 构建期自检：
+#   1) 二进制存在，且**不是**动态链接（CGO_ENABLED=0 的实证，不是"应该"）；
+#      用 ldd 而不是 file：golang:*-alpine 里没有 file，ldd 是 musl 自带的。
+#      静态二进制 `ldd` 会失败 → `! ldd` 成立；若哪天有人加了 CGO 依赖，这一步会让构建失败。
+#   2) **架构 == TARGETARCH**：读 ELF 头 e_machine（偏移 18-19，0x3e=x86-64，0xb7=AArch64）。
+#      交叉编译最大的坑就是"忘了传 GOARCH"，结果 arm64 镜像里塞了 amd64 二进制；
+#      这一步把那种错误变成**构建失败**，而不是等运行期 exec format error。
 RUN test -x /out/testplaned && \
     ls -lh /out/testplaned && \
     ! ldd /out/testplaned 2>/dev/null && \
-    echo "BUILD_CHECK_OK: static binary"
+    echo "BUILD_CHECK_OK: static binary" && \
+    elf_machine=$(od -An -tx1 -j18 -N2 /out/testplaned | tr -d ' \n') && \
+    case "${TARGETARCH}:${elf_machine}" in \
+      amd64:3e00) echo "BUILD_CHECK_OK: elf x86-64 (amd64)" ;; \
+      arm64:b700) echo "BUILD_CHECK_OK: elf aarch64 (arm64)" ;; \
+      arm:2800)   echo "BUILD_CHECK_OK: elf arm32 (arm)" ;; \
+      *)          echo "BUILD_CHECK_FAIL: TARGETARCH=${TARGETARCH}, elf e_machine=${elf_machine}" >&2; exit 1 ;; \
+    esac
 
 # ---------------------------------------------------------------------------
 # 运行阶段
