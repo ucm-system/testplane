@@ -1,25 +1,37 @@
 import type {
+  AdminCluster,
+  AdminSecret,
   Attempt,
+  AuditEntry,
+  AuditQuery,
   CancelResult,
   Cluster,
+  ClusterWrite,
   DashboardStats,
   DeploySnapshot,
   DryRunResult,
+  ExecutionProfile,
   Identity,
   LogChunk,
   Meta,
   Page,
+  ProfileWrite,
   QueueStatus,
+  Report,
+  RetryAccepted,
+  RetryPlan,
   Run,
   RunEvent,
   RunListQuery,
   RunManifest,
   RunSummary,
+  SecretWrite,
   SubmitResult,
   Task,
   TaskCancelResult,
   TaskDetail,
   TaskListQuery,
+  TaskRetryAccepted,
   Tester,
   TesterListQuery,
 } from './types'
@@ -87,6 +99,30 @@ export interface Api {
   /* 提交 */
   submitRun(manifest: RunManifest): Promise<SubmitResult>
   dryRun(manifest: RunManifest): Promise<DryRunResult>
+
+  /* 报告（契约内：`/runs/{id}/report` 与 `/report.md`） */
+  getReport(runId: string): Promise<Report>
+  getReportMd(runId: string): Promise<string>
+
+  /* Execution Profile（契约内只读；写走 /admin/profiles） */
+  listProfiles(): Promise<ExecutionProfile[]>
+
+  /* 重试（P1，openapi 尚未收录，按 Lead 约定路径） */
+  getRetryPlan(runId: string): Promise<RetryPlan>
+  retryRun(runId: string): Promise<RetryAccepted>
+  retryTask(taskId: string): Promise<TaskRetryAccepted>
+
+  /* 管理（P1，仅 admin；openapi 尚未收录） */
+  listAdminClusters(): Promise<AdminCluster[]>
+  createAdminCluster(body: ClusterWrite): Promise<AdminCluster>
+  updateAdminCluster(name: string, body: ClusterWrite): Promise<AdminCluster>
+  deleteAdminCluster(name: string): Promise<void>
+  createProfile(body: ProfileWrite): Promise<ExecutionProfile>
+  updateProfile(name: string, body: ProfileWrite): Promise<ExecutionProfile>
+  deleteProfile(name: string): Promise<void>
+  listAdminSecrets(): Promise<AdminSecret[]>
+  createAdminSecret(body: SecretWrite): Promise<AdminSecret>
+  listAudit(query?: AuditQuery): Promise<Page<AuditEntry>>
 
   /* 看板 KPI（P0 无 /board：由 /runs + /testers + /queue-status 现算） */
   getDashboardStats(): Promise<DashboardStats>

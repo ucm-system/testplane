@@ -66,13 +66,25 @@ src/
 |---|---|---|
 | `/` | 概览：4 个 KPI（进行中 Run / 排队 Task / 成功率 / Tester 数）+ 最近 Run + 排队 Task | `GET /runs`、`GET /testers`、`GET /queue-status` 现算 |
 | `/runs` | Run 列表：状态过滤（服务端 `?status=a,b`）、时间与关键字（本地）、游标分页 | `GET /runs?limit&cursor&status` |
-| `/runs/:id` | Run 详情：概要、执行链路、Deploy 区块（水位与原因原文 / Pod 拓扑 / 参数快照；**不展示位次**，D-46）、Task 摘要列表 + 点开的 Task 详情（Attempt + 日志）、事件流；页头「打开报告」 | `GET /runs/{id}`、`GET /runs/{id}/deploy`、`GET /tasks/{id}`、`GET /tasks/{id}/attempts`、`GET /tasks/{id}/attempts/{idx}/logs`、`GET /runs/{id}/events`(SSE)、`GET /runs/{id}/events/history`、`GET /runs/{id}/report.md`(新窗口) |
+| `/runs/:id` | Run 详情：概要、执行链路、Deploy 区块（水位与原因原文 / Pod 拓扑 / 参数快照；**不展示位次**，D-46）、Task 摘要列表 + 点开的 Task 详情（Attempt + 日志）、事件流；页头：取消 / 重试（终态且失败类）/ 查看报告；Task 行有「取消 Task」、Task 详情有「重跑这个 Task」 | `GET /runs/{id}`、`GET /runs/{id}/deploy`、`GET /tasks/{id}`、`GET /tasks/{id}/attempts`、`GET /tasks/{id}/attempts/{idx}/logs`、`GET /runs/{id}/events`(SSE)、`GET /runs/{id}/events/history`、`GET /runs/{id}/retry-plan`、`POST /runs/{id}/retry`、`POST /tasks/{id}/cancel`、`POST /tasks/{id}/retry` |
+| `/runs/:id/report` | Run 报告：counts / Task 明细 / 失败清单 / `report.md` 原文 | `GET /runs/{id}/report`、`GET /runs/{id}/report.md` |
 | `/submit` | 提交：部署 / 不部署两形态、env + secrets、执行环境 profile、Task 列表（Tester 下拉 + args） | `GET /testers`、`POST /runs?dry_run=true`、`POST /runs` |
 | `/testers` | Tester 目录（只读）+ 详情抽屉（参数 / env 声明） | `GET /testers`、`GET /testers/{name}` |
 | `/clusters` | 集群与队列：集群连通性、平台槽位、Volcano 队列、排队 Task + 等待原因计数 | `GET /clusters`、`GET /queue-status` |
+| `/admin` | 管理台（**仅 admin**，其他人看到「无权限」页、导航里没有入口）：Profiles / Clusters / Secrets / Audit 四个 Tab | `GET /profiles`、`POST|PUT|DELETE /admin/profiles`、`/admin/clusters`、`GET|POST /admin/secrets`、`GET /admin/audit` |
 | `/endpoints` | 旧链接兼容 → 重定向 `/clusters` | — |
 
-页面级操作放在 main 顶部（详情页：返回列表 / 取消 Run / 打开报告），右上角是 dev 身份切换（Bearer subject）。
+页面级操作放在 main 顶部（详情页：返回列表 / 取消 Run / 重试 / 查看报告），右上角是身份与角色（下拉里有登出 / dev 身份切换 / groups）。
+
+## 演示脚本（截图 / 录屏）
+
+```bash
+cd web
+pnpm exec playwright test tests/demo.spec.ts   # 走 mock，不依赖后端；产物在 web/.data/demo/
+```
+
+八步截图：`01-home` / `02-submit` / `03-runs` / `04-run-detail` / `05-report` / `06-clusters` / `07-admin-audit` / `08-retry-dialog`。
+`.data/` 已被 `web/.gitignore` 忽略（演示产物不入库）。
 
 ## 接口约定
 
@@ -88,7 +100,8 @@ src/
 - `task_counts`：`failed` 含 canceled、`pending` 含 queued；契约只必填 `total/succeeded/failed`，
   缺 `pending/running/skipped` 时按 0 处理，整个字段缺失时列表显示 `—`。
 - **不调** `GET /runs/{id}/deploy/logs`：不在 MVP 契约里；Deploy 的 Pod 拓扑/参数快照来自 `GET /runs/{id}/deploy`。
-- **不做** Run 级重试（P1）、不做报告页（只用新窗口打开 `report.md`）。
+- **调了但不在 openapi 里的 P1 端点**（字段按 Lead 约定实现，后端落地后对齐）：
+  `GET /runs/{id}/retry-plan`、`POST /runs/{id}/retry`、`POST /tasks/{id}/retry`、`/admin/profiles`、`/admin/clusters`、`/admin/secrets`、`/admin/audit`。
 
 ### 与后端实测的差异（2026-11-05 首轮联调）
 
@@ -179,13 +192,14 @@ dev 部署与 mock 模式都没有 `/auth/*`：`/me` 无 `csrf_token` → mode=d
 | 数据层 | 约 50 行 `useAsync`（无缓存层） | 换成 TanStack Query，query key 按 web-and-delivery §3 |
 | 字体 | 系统字体栈（`Segoe UI` / `Microsoft YaHei`） | 自托管 Albert Sans + Noto Sans SC 子集（设计 §5） |
 | 提交页 YAML 编辑 | `textarea` + 解析校验 | CodeMirror 6（按行标错、`?from=<run>` 回填） |
-| 执行环境 | MVP 无 `/profiles` 端点，profile 是可编辑文本框（默认 `k8s-npu`） | 后端提供 `/profiles` 后改成下拉 |
-| 报告页 / 指标表 | **不做**（P0 裁决）；详情页页头新窗口打开 `report.md` | 需要时另开票 |
+| 执行环境 | 契约已有 `GET /profiles`；提交页仍是可编辑文本框（默认 `k8s-npu`），管理台可维护 | 提交页改下拉（一行改动） |
+| 报告页 / 指标表 | 报告页**已做**（`/runs/:id/report`：counts / Task 明细 / 失败清单 / `report.md` 原文）；指标表仍不做（契约明确不聚合） | 需要聚合视图时另开票 |
 | Deploy 日志 | **不接**：`/runs/{id}/deploy/logs` 不在契约内；Pod 拓扑来自 `GET /runs/{id}/deploy`，`deploy.pods` 非空才渲染那块 | 真实 Pod 日志上线后再加页签 |
-| Run 级重试 | **不做**（P1），详情页只有取消 | P1 |
+| Run / Task 级重试 | **已做**（`GET /runs/{id}/retry-plan` + `POST /runs/{id}/retry` + `POST /tasks/{id}/retry`）：**这几个端点 openapi 未收录**，字段按 Lead 约定实现 | 后端落地后把 `types.ts` 的「P1」块改成按 openapi 生成 |
+| 管理台 `/admin` | **已做**（Profiles / Clusters / Secrets / Audit）；`/admin/*` 同样 openapi 未收录 | 同上；delete 409 的 `detail.profiles[]` 已按约定展示 |
 | 日志跟随 / 虚拟滚动 | 一次性读取，无 follow 流 | `?follow=1` 流式追加 + `useVirtualizer`（>10k 行） |
-| 权限 | 全部操作可见（dev 模式） | 按 `GET /me` 的 role 隐藏写按钮；403 时降级提示 |
-| 测试 | 无 | Vitest + MSW（错误码映射、SSE reducer）、Playwright e2e |
+| 权限 | **已按 role 收口**：viewer 只读（提交/校验/取消 Run/取消 Task/重试置灰 + title），`/admin` 非 admin 显示无权限页 | 服务端仍是权威，前端只做前置提示 |
+| 测试 | Playwright：3 条 UI 冒烟 + 1 条演示脚本（`tests/demo.spec.ts`，产出 8 张截图） | 补 Vitest + MSW（错误码映射、SSE reducer） |
 | Lint | 无 | eslint / prettier 按 CI 要求补 |
 
 ## 验证过的事

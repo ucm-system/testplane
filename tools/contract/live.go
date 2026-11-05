@@ -172,6 +172,8 @@ type Live struct {
 	taskA      string
 	runB       string
 	taskB      string
+	runF       string
+	taskF      string
 }
 
 func NewLive(spec *Spec, opts Options) *Live {
@@ -237,11 +239,18 @@ func (l *Live) Run() ([]check, []string, error) {
 	}
 	l.runB, l.taskB = l.submitFixture(ctx, "B")
 	if l.runB != "" {
+		l.probeDeployLogs(ctx, l.runB, "live.getRunDeployLogs.queued")
 		l.probeCancels(ctx)
+	}
+	l.runF, l.taskF = l.submitFailureFixture(ctx)
+	if l.runF != "" {
+		l.waitFixtureTerminal(ctx, l.runF, "F", 120*time.Second)
+		l.probeRetry(ctx)
 	}
 
 	// ---- 错误体形状 ----------------------------------------------------
 	l.probeErrorEnvelopes(ctx)
+	l.probeAdmin(ctx)
 
 	// ---- SSE ----------------------------------------------------------
 	if l.runA != "" {
@@ -692,6 +701,386 @@ func (l *Live) submitFixture(ctx context.Context, label string) (runID, taskID s
 	return runID, taskID
 }
 
+// opIDFor 按 method+path 找 operationId，避免把新端点的 opID 写死在探针里。
+func (l *Live) opIDFor(method, path string) string {
+	for _, op := range l.spec.Operations {
+		if strings.EqualFold(op.Method, method) && op.Path == path {
+			return op.ID
+		}
+	}
+	return ""
+}
+
+// probeDeployLogs 断言 deploy 日志端点 200 + pods/entries 数组（无 Deploy 阶段也允许空数组）。
+func (l *Live) probeDeployLogs(ctx context.Context, runID, checkName string) {
+	path := "/api/v1/runs/" + url.PathEscape(runID) + "/deploy/logs?limit=10"
+	opID := l.opIDFor(http.MethodGet, "/api/v1/runs/{run_id}/deploy/logs")
+	if opID == "" {
+		l.add(checkName, false, "openapi 缺少 GET /runs/{run_id}/deploy/logs")
+		return
+	}
+	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, path, nil, "", nil)
+	l.markOp(opID)
+	if err != nil {
+		l.recordErr(checkName, err)
+		return
+	}
+	if status != http.StatusOK {
+		l.add(checkName, false, fmt.Sprintf("期望 200，实际 %d：%s", status, truncate(raw, 300)))
+		return
+	}
+	if issues := l.validateSuccess(opID, status, hdr, raw, "DeployLogs"); len(issues) > 0 {
+		l.add(checkName, false, strings.Join(issues, "；"))
+		return
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &body); err != nil {
+		l.add(checkName, false, "响应不是 JSON 对象："+err.Error())
+		return
+	}
+	for _, key := range []string{"pods", "entries", "gaps"} {
+		if _, ok := body[key]; !ok {
+			l.add(checkName, false, "缺数组字段 "+key)
+			return
+		}
+	}
+	var pods, entries []any
+	_ = json.Unmarshal(body["pods"], &pods)
+	_ = json.Unmarshal(body["entries"], &entries)
+	l.add(checkName, true, fmt.Sprintf("HTTP 200，pods=%d entries=%d", len(pods), len(entries)))
+}
+
+// submitFailureFixture 提交一个必然失败的 service Run（endpoint 不可达，precheck off），用于 retry。
+func (l *Live) submitFailureFixture(ctx context.Context) (runID, taskID string) {
+	name := "retry-" + time.Now().Format("20060102-150405")
+	manifest := fmt.Sprintf(`run:
+  name: %q
+  service:
+    url: "http://127.0.0.1:1/v1"
+    model_name: mock-llm
+  precheck: off
+  cleanup: { policy: never }
+  tests:
+    - name: retry-a
+      tester: endpoint-probe
+      version: "1.0.0"
+      execution: { profile: %q }
+      args: "--wait_timeout_seconds=2 --retry_interval_seconds=1"
+`, name, l.profile())
+	status, _, raw, err := l.client.do(ctx, http.MethodPost, "/api/v1/runs", []byte(manifest), "application/yaml", nil)
+	if err != nil {
+		l.recordErr("live.submitRun.failure", err)
+		return "", ""
+	}
+	l.markOp("submitRun")
+	if status != http.StatusAccepted {
+		l.add("live.submitRun.failure", false, fmt.Sprintf("期望 202，实际 %d：%s", status, truncate(raw, 300)))
+		return "", ""
+	}
+	var accepted struct {
+		Run   map[string]any   `json:"run"`
+		Tasks []map[string]any `json:"tasks"`
+	}
+	if err := json.Unmarshal(raw, &accepted); err != nil || len(accepted.Tasks) == 0 {
+		l.add("live.submitRun.failure", false, "202 响应缺 run/tasks")
+		return "", ""
+	}
+	runID = asString(accepted.Run["id"])
+	taskID = asString(accepted.Tasks[0]["id"])
+	if runID == "" || taskID == "" {
+		l.add("live.submitRun.failure", false, "run.id 或 tasks[0].id 为空")
+		return "", ""
+	}
+	l.add("live.submitRun.failure", true, "HTTP 202，run_id="+runID)
+	return runID, taskID
+}
+
+func (l *Live) profile() string {
+	if l.opts.Profile != "" {
+		return l.opts.Profile
+	}
+	return "k8s-npu"
+}
+
+// waitFixtureTerminal 是带 label 的终态等待（失败 fixture 也有自己的检查名）。
+func (l *Live) waitFixtureTerminal(ctx context.Context, runID, label string, timeout time.Duration) bool {
+	wctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	start := time.Now()
+	checkName := "live.fixture" + label + ".terminal"
+	for {
+		status, _, raw, err := l.client.do(wctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID), nil, "", nil)
+		if err != nil {
+			l.recordErr(checkName, err)
+			return false
+		}
+		if status != http.StatusOK {
+			l.add(checkName, false, fmt.Sprintf("GET /runs/%s 返回 %d", runID, status))
+			return false
+		}
+		var body struct {
+			Status string `json:"status"`
+		}
+		_ = json.Unmarshal(raw, &body)
+		if isTerminalRunStatus(body.Status) {
+			l.add(checkName, true, fmt.Sprintf("status=%s，耗时 %.1fs", body.Status, time.Since(start).Seconds()))
+			return true
+		}
+		if wctx.Err() != nil {
+			l.add(checkName, false, fmt.Sprintf("%s 内未到终态，最后 status=%s", timeout, body.Status))
+			return false
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+type retryPlanBody struct {
+	RunID          string           `json:"run_id"`
+	Retryable      *bool            `json:"retryable"`
+	Reason         string           `json:"reason"`
+	Reuse          []map[string]any `json:"reuse"`
+	Rerun          []map[string]any `json:"rerun"`
+	BlockedItems   []map[string]any `json:"blocked_items"`
+	ManifestDigest string           `json:"manifest_digest"`
+	NewRunID       string           `json:"new_run_id"`
+	RetryOf        string           `json:"retry_of"`
+}
+
+// probeRetry 覆盖 retry-plan / retry-run / retry-task，并对新 Run 再探一次 plan。
+func (l *Live) probeRetry(ctx context.Context) {
+	failID := url.PathEscape(l.runF)
+	planPath := "/api/v1/runs/" + failID + "/retry-plan"
+	planOp := l.opIDFor(http.MethodGet, "/api/v1/runs/{run_id}/retry-plan")
+	if planOp == "" {
+		l.add("live.getRunRetryPlan", false, "openapi 缺少 GET /runs/{run_id}/retry-plan")
+		return
+	}
+	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, planPath, nil, "", nil)
+	l.markOp(planOp)
+	if err != nil {
+		l.recordErr("live.getRunRetryPlan", err)
+		return
+	}
+	if status != http.StatusOK {
+		l.add("live.getRunRetryPlan", false, fmt.Sprintf("期望 200，实际 %d：%s", status, truncate(raw, 300)))
+		return
+	}
+	if issues := l.validateSuccess(planOp, status, hdr, raw, "RetryPlan"); len(issues) > 0 {
+		l.add("live.getRunRetryPlan", false, strings.Join(issues, "；"))
+		return
+	}
+	var plan retryPlanBody
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		l.add("live.getRunRetryPlan", false, "响应不是 RetryPlan："+err.Error())
+		return
+	}
+	if plan.Retryable == nil || !*plan.Retryable || len(plan.Rerun) == 0 || plan.ManifestDigest == "" {
+		l.add("live.getRunRetryPlan", false, fmt.Sprintf("失败 Run 的计划应 retryable=true 且有 rerun；实际 retryable=%v rerun=%d digest=%q",
+			plan.Retryable, len(plan.Rerun), plan.ManifestDigest))
+		return
+	}
+	l.add("live.getRunRetryPlan", true, fmt.Sprintf("retryable=true，reuse=%d rerun=%d blocked=%d",
+		len(plan.Reuse), len(plan.Rerun), len(plan.BlockedItems)))
+
+	// task retry：旧失败 Task 终态可重开 Attempt。
+	taskPath := "/api/v1/tasks/" + url.PathEscape(l.taskF) + "/retry"
+	taskOp := l.opIDFor(http.MethodPost, "/api/v1/tasks/{task_id}/retry")
+	if taskOp == "" {
+		l.add("live.retryTask", false, "openapi 缺少 POST /tasks/{task_id}/retry")
+	} else {
+		st, th, tr, terr := l.client.do(ctx, http.MethodPost, taskPath, nil, "", nil)
+		l.markOp(taskOp)
+		if terr != nil {
+			l.recordErr("live.retryTask", terr)
+		} else if st != http.StatusAccepted {
+			l.add("live.retryTask", false, fmt.Sprintf("期望 202，实际 %d：%s", st, truncate(tr, 300)))
+		} else if issues := l.validateSuccess(taskOp, st, th, tr, "TaskRetryAccepted"); len(issues) > 0 {
+			l.add("live.retryTask", false, strings.Join(issues, "；"))
+		} else {
+			var body struct {
+				TaskID    string `json:"task_id"`
+				AttemptNo int    `json:"attempt_no"`
+			}
+			_ = json.Unmarshal(tr, &body)
+			ok := body.TaskID == l.taskF && body.AttemptNo >= 2
+			l.add("live.retryTask", ok, fmt.Sprintf("HTTP 202，task_id=%s attempt_no=%d", body.TaskID, body.AttemptNo))
+		}
+	}
+
+	// retry run：创建新 Run（retry_of=原 Run）。
+	retryPath := "/api/v1/runs/" + failID + "/retry"
+	retryOp := l.opIDFor(http.MethodPost, "/api/v1/runs/{run_id}/retry")
+	if retryOp == "" {
+		l.add("live.retryRun", false, "openapi 缺少 POST /runs/{run_id}/retry")
+		return
+	}
+	st, th, tr, terr := l.client.do(ctx, http.MethodPost, retryPath, nil, "", nil)
+	l.markOp(retryOp)
+	if terr != nil {
+		l.recordErr("live.retryRun", terr)
+		return
+	}
+	if st != http.StatusAccepted {
+		l.add("live.retryRun", false, fmt.Sprintf("期望 202，实际 %d：%s", st, truncate(tr, 300)))
+		return
+	}
+	if issues := l.validateSuccess(retryOp, st, th, tr, "RetryPlan"); len(issues) > 0 {
+		l.add("live.retryRun", false, strings.Join(issues, "；"))
+		return
+	}
+	var accepted retryPlanBody
+	if err := json.Unmarshal(tr, &accepted); err != nil || accepted.NewRunID == "" {
+		l.add("live.retryRun", false, "202 响应缺 new_run_id")
+		return
+	}
+	if accepted.NewRunID == l.runF {
+		l.add("live.retryRun", false, "new_run_id 不能等于原 Run")
+		return
+	}
+	if accepted.RetryOf != l.runF {
+		l.add("live.retryRun", false, fmt.Sprintf("202 retry_of=%q，期望 %q", accepted.RetryOf, l.runF))
+		return
+	}
+	// 新 Run 的 retry_of 必须指回原 Run。
+	nst, _, nr, nerr := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(accepted.NewRunID), nil, "", nil)
+	if nerr != nil || nst != http.StatusOK {
+		l.add("live.retryRun", false, fmt.Sprintf("GET 新 Run 失败（%d）：%v", nst, nerr))
+		return
+	}
+	var newRun struct {
+		RetryOf string `json:"retry_of"`
+	}
+	_ = json.Unmarshal(nr, &newRun)
+	if newRun.RetryOf != l.runF {
+		l.add("live.retryRun", false, fmt.Sprintf("新 Run retry_of=%q，期望 %q", newRun.RetryOf, l.runF))
+		return
+	}
+	l.add("live.retryRun", true, "HTTP 202，new_run_id="+accepted.NewRunID+"，retry_of="+newRun.RetryOf)
+
+	// 新 Run 再取 plan：若已经 retry-in-progress / cancel 等，允许 200 retryable=false 或 409。
+	nplanPath := "/api/v1/runs/" + url.PathEscape(accepted.NewRunID) + "/retry-plan"
+	pst, ph, pr, perr := l.client.do(ctx, http.MethodGet, nplanPath, nil, "", nil)
+	if perr != nil {
+		l.recordErr("live.getRunRetryPlan.after_retry", perr)
+		return
+	}
+	switch pst {
+	case http.StatusOK:
+		var p retryPlanBody
+		_ = json.Unmarshal(pr, &p)
+		ok := p.Retryable == nil || !*p.Retryable
+		retryable := false
+		if p.Retryable != nil {
+			retryable = *p.Retryable
+		}
+		l.add("live.getRunRetryPlan.after_retry", ok, fmt.Sprintf("HTTP 200，retryable=%v reason=%s", retryable, p.Reason))
+	case http.StatusConflict:
+		issues := l.validateError(planOp, pst, ph, pr)
+		l.add("live.getRunRetryPlan.after_retry", len(issues) == 0, "HTTP 409 Conflict（允许）")
+	default:
+		l.add("live.getRunRetryPlan.after_retry", false, fmt.Sprintf("期望 200 retryable=false 或 409，实际 %d：%s", pst, truncate(pr, 300)))
+	}
+}
+
+// probeAdmin 覆盖管理面读端点与写端点的“错误契约”：
+// 契约不创建 profile/cluster/secret（避免污染环境），写操作只断言校验/冲突/404 的 Error 形态。
+func (l *Live) probeAdmin(ctx context.Context) {
+	type op struct {
+		method, path, body string
+		allowed            []int
+	}
+	read := []op{
+		{http.MethodGet, "/api/v1/admin/audit?limit=20", "", []int{200}},
+		{http.MethodGet, "/api/v1/secrets?limit=20", "", []int{200}},
+		{http.MethodGet, "/api/v1/admin/secrets?limit=20", "", []int{200}},
+	}
+	for _, o := range read {
+		base := strings.SplitN(o.path, "?", 2)[0]
+		opID := l.opIDFor(o.method, base)
+		if opID == "" {
+			l.add("live."+strings.TrimPrefix(base, "/api/v1/"), false, "openapi 缺少 "+o.method+" "+base)
+			continue
+		}
+		status, hdr, raw, err := l.client.do(ctx, o.method, o.path, nil, "", nil)
+		l.markOp(opID)
+		if err != nil {
+			l.recordErr("live."+opID, err)
+			continue
+		}
+		if status != http.StatusOK {
+			l.add("live."+opID, false, fmt.Sprintf("期望 200，实际 %d：%s", status, truncate(raw, 300)))
+			continue
+		}
+		if issues := l.validateSuccess(opID, status, hdr, raw, ""); len(issues) > 0 {
+			l.add("live."+opID, false, strings.Join(issues, "；"))
+			continue
+		}
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &body); err != nil {
+			l.add("live."+opID, false, "响应不是 JSON 对象："+err.Error())
+			continue
+		}
+		if _, ok := body["items"]; !ok {
+			l.add("live."+opID, false, "缺 items 数组")
+			continue
+		}
+		l.add("live."+opID, true, "HTTP 200，items 存在")
+	}
+
+	writes := []op{
+		{http.MethodPost, "/api/v1/admin/profiles", "{}", []int{400}},
+		{http.MethodPut, "/api/v1/admin/profiles", "{}", []int{400}},
+		{http.MethodDelete, "/api/v1/admin/profiles?name=contract-no-such", "", []int{404}},
+		{http.MethodPost, "/api/v1/admin/clusters", "{}", []int{400}},
+		{http.MethodPut, "/api/v1/admin/clusters", "{}", []int{400}},
+		{http.MethodDelete, "/api/v1/admin/clusters?name=contract-no-such", "", []int{404}},
+		{http.MethodPost, "/api/v1/admin/secrets", "{}", []int{400}},
+		{http.MethodPost, "/api/v1/admin/secrets/contract-no-such/rotate", "{}", []int{400, 404, 409}},
+		{http.MethodDelete, "/api/v1/admin/runs/r-contract-no-such/artifacts", "", []int{404}},
+	}
+	for _, o := range writes {
+		base := strings.SplitN(o.path, "?", 2)[0]
+		template := base
+		if strings.HasPrefix(base, "/api/v1/admin/secrets/") && strings.HasSuffix(base, "/rotate") {
+			template = "/api/v1/admin/secrets/{name}/rotate"
+		}
+		if strings.HasPrefix(base, "/api/v1/admin/runs/") && strings.HasSuffix(base, "/artifacts") {
+			template = "/api/v1/admin/runs/{run_id}/artifacts"
+		}
+		opID := l.opIDFor(o.method, template)
+		if opID == "" {
+			l.add("live."+strings.TrimPrefix(base, "/api/v1/"), false, "openapi 缺少 "+o.method+" "+template)
+			continue
+		}
+		var body []byte
+		ct := ""
+		if o.body != "" {
+			body, ct = []byte(o.body), "application/json"
+		}
+		status, hdr, raw, err := l.client.do(ctx, o.method, o.path, body, ct, nil)
+		l.markOp(opID)
+		if err != nil {
+			l.recordErr("live."+opID+".negative", err)
+			continue
+		}
+		allowed := false
+		for _, s := range o.allowed {
+			if status == s {
+				allowed = true
+			}
+		}
+		if !allowed {
+			l.add("live."+opID+".negative", false, fmt.Sprintf("期望错误码 %v，实际 %d：%s", o.allowed, status, truncate(raw, 300)))
+			continue
+		}
+		if issues := l.validateError(opID, status, hdr, raw); len(issues) > 0 {
+			l.add("live."+opID+".negative", false, strings.Join(issues, "；"))
+			continue
+		}
+		l.add("live."+opID+".negative", true, fmt.Sprintf("HTTP %d，Error 形状正确（写端点只验错误契约）", status))
+	}
+}
+
 func (l *Live) checkDryRun(ctx context.Context, manifest []byte, contentType string) {
 	status, hdr, raw, err := l.client.do(ctx, http.MethodPost, "/api/v1/runs?dry_run=true", manifest, contentType, nil)
 	if err != nil {
@@ -731,6 +1120,7 @@ func (l *Live) probeRunReads(ctx context.Context) {
 	l.probeRunDeploy(ctx, l.runA)
 	l.probeRunReport(ctx, l.runA, "/report", "Report", "getRunReport")
 	l.probeRunReport(ctx, l.runA, "/report.md", "", "getRunReportMarkdown")
+	l.probeDeployLogs(ctx, l.runA, "live.getRunDeployLogs")
 
 	if l.taskA == "" {
 		l.add("live.getTask", false, "fixture Run 没有 Task，无法校验 getTask/attempts")

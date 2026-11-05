@@ -1,0 +1,4 @@
+# 前端本地产物（不入库）
+.data/
+test-results/
+playwright-report/

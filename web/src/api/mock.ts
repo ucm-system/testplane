@@ -11,35 +11,51 @@
 import { ApiClientError, getCurrentUser } from './client'
 import type { Api, LogOptions } from './contract'
 import type {
+  AdminCluster,
+  AdminSecret,
   Attempt,
   AttemptStatus,
+  AuditEntry,
+  AuditQuery,
   CancelResult,
   Cluster,
+  ClusterWrite,
   DashboardStats,
   Deploy,
   DeployPod,
   DeploySnapshot,
   DryRunResult,
   Endpoint,
+  ExecutionProfile,
   Failure,
   Identity,
   LogChunk,
   Meta,
   Page,
+  ProfileWrite,
   QueueStatus,
+  Report,
+  ReportCounts,
+  ReportFailure,
+  ReportTask,
+  RetryAccepted,
+  RetryPlan,
   RetryPolicy,
+  RetryTaskRef,
   Run,
   RunEvent,
   RunEventType,
   RunListQuery,
   RunManifest,
   RunStatus,
+  SecretWrite,
   SkippedReason,
   SubmitResult,
   Task,
   TaskCancelResult,
   TaskDetail,
   TaskListQuery,
+  TaskRetryAccepted,
   TaskStatus,
   TaskSummary,
   Tester,
@@ -50,7 +66,7 @@ import type {
   WaitingTask,
 } from './types'
 import { normalizeTester } from './normalize'
-import { applyIdentity, clearAuth } from './auth'
+import { applyIdentity, clearAuth, getAuthState } from './auth'
 
 /* ================================================================ 基础工具 */
 
@@ -228,6 +244,11 @@ interface MockState {
   seq: Record<string, number>
   testers: TesterWire[]
   clusters: Cluster[]
+  /** `/admin/*` 的数据（P1） */
+  profiles: ExecutionProfile[]
+  adminClusters: AdminCluster[]
+  secrets: AdminSecret[]
+  audit: AuditEntry[]
   timers: Map<string, ReturnType<typeof setInterval>>
 }
 
@@ -240,6 +261,10 @@ const state: MockState = {
   seq: {},
   testers: clone(TESTERS),
   clusters: [],
+  profiles: [],
+  adminClusters: [],
+  secrets: [],
+  audit: [],
   timers: new Map(),
 }
 
@@ -524,6 +549,92 @@ function seedAll(): void {
     },
   ]
 
+  // /admin/* 的种子（P1）：Profile 必须有 k8s-npu，提交页与契约都依赖它存在
+  state.profiles = [
+    {
+      name: 'k8s-npu',
+      cluster: 'prod-npu-01',
+      namespace: 'testplane',
+      mounts: [{ name: 'dataset', pvc: 'testplane-dataset', sub_path: null, kind: 'dataset' }],
+      scheduler: 'volcano',
+      queue: 'npu-batch',
+      image_pull_secrets: ['registry-cred'],
+      resource_defaults: { cpu: '4', memory: '16Gi' },
+      deploy_timeout_seconds: 259200,
+    },
+    {
+      name: 'k8s-gpu',
+      cluster: 'prod-gpu-02',
+      namespace: 'testplane',
+      mounts: [],
+      scheduler: 'default',
+      queue: null,
+      image_pull_secrets: [],
+      resource_defaults: { cpu: '2', memory: '8Gi' },
+      deploy_timeout_seconds: 86400,
+    },
+  ]
+
+  state.adminClusters = state.clusters.map((cluster) => ({
+    name: cluster.name,
+    api_server: cluster.api_server,
+    kubeconfig_key: `${cluster.name}.kubeconfig`,
+    namespace: 'testplane',
+    description: cluster.description ?? null,
+    last_check_at: cluster.last_check_at ?? null,
+    last_check_result: cluster.last_check_result ?? null,
+  }))
+
+  state.secrets = [
+    {
+      name: 'endpoint/prod-qwen',
+      namespace: 'testplane',
+      secret_name: 'endpoint-prod-qwen',
+      key: 'api-key',
+      description: '生产 Qwen 接入 token',
+    },
+    {
+      name: 'registry/pull-secret',
+      namespace: 'testplane',
+      secret_name: 'registry-cred',
+      key: '.dockerconfigjson',
+      description: '镜像拉取凭据',
+    },
+  ]
+
+  state.audit = [
+    {
+      id: 'a-0001',
+      at: iso(180),
+      actor: '林知微',
+      role: 'operator',
+      action: 'run.submit',
+      object_type: 'run',
+      object_id: 'r-20261105-0006',
+      detail: { tasks: 4 },
+    },
+    {
+      id: 'a-0002',
+      at: iso(120),
+      actor: 'root',
+      role: 'admin',
+      action: 'profile.update',
+      object_type: 'profile',
+      object_id: 'k8s-npu',
+      detail: { deploy_timeout_seconds: 259200 },
+    },
+    {
+      id: 'a-0003',
+      at: iso(60),
+      actor: '陈一鸣',
+      role: 'operator',
+      action: 'run.cancel',
+      object_type: 'run',
+      object_id: 'r-20261105-0001',
+      detail: null,
+    },
+  ]
+
   const model = 'Qwen3-32B'
   const depReady: Deploy = {
     provider: 'genet',
@@ -737,6 +848,29 @@ function pushEvent(
   return event
 }
 
+/** 写操作的审计记录（mock 的 /admin/audit 数据源）。 */
+function auditLog(
+  action: string,
+  objectType: string,
+  objectId: string,
+  detail?: Record<string, unknown>,
+): void {
+  const auth = getAuthState()
+  state.audit = [
+    ...state.audit,
+    {
+      id: `a-${String(state.audit.length + 1).padStart(4, '0')}`,
+      at: nowIso(),
+      actor: auth.user ?? getCurrentUser(),
+      role: auth.role ?? 'operator',
+      action,
+      object_type: objectType,
+      object_id: objectId,
+      detail: detail ?? null,
+    },
+  ]
+}
+
 function isTerminal(status: RunStatus): boolean {
   return ['succeeded', 'completed_with_errors', 'service_unavailable', 'failed', 'canceled'].includes(status)
 }
@@ -833,6 +967,8 @@ function step(runId: string): void {
       const attempt = task.attempts[task.attempts.length - 1]
       if (attempt) {
         attempt.status = 'succeeded'
+        // phase 跟 status 一起收口，别让「成功」的 Attempt 还挂着 Running
+        attempt.phase = 'Succeeded'
         attempt.exit_code = 0
         attempt.finished_at = nowIso()
       }
@@ -1371,6 +1507,299 @@ export const mockApi: Api = {
         skipped_precheck_names: [...PRE_CHECK_NAMES],
       },
     }
+  },
+
+  /* ---------------------------------------------------------------- 报告（契约内） */
+
+  async getReport(runId: string): Promise<Report> {
+    await delay(120)
+    const run = findRun(runId)
+    const tasks = run.tasks ?? []
+    const rows: ReportTask[] = tasks.map((summary) => {
+      const detail = state.tasks[summary.id]
+      return {
+        task_id: summary.id,
+        name: summary.name,
+        status: summary.status,
+        attempts: detail?.current_attempt ?? 0,
+        result_ref: detail?.result_ref ?? null,
+        duration_ms: detail?.attempts?.[0]?.started_at && detail.attempts[0].finished_at
+          ? new Date(detail.attempts[0].finished_at as string).getTime() - new Date(detail.attempts[0].started_at as string).getTime()
+          : null,
+      }
+    })
+    const counts: ReportCounts = {
+      total: rows.length,
+      succeeded: rows.filter((r) => r.status === 'succeeded').length,
+      failed: rows.filter((r) => r.status === 'failed').length,
+      skipped: rows.filter((r) => r.status === 'skipped').length,
+      canceled: rows.filter((r) => r.status === 'canceled').length,
+    }
+    const failures: ReportFailure[] = tasks
+      .filter((task) => task.error || task.status === 'failed')
+      .map((task) => ({
+        task_id: task.id,
+        reason: task.error?.message ?? 'Task 失败',
+        error_code: task.error?.code ?? null,
+      }))
+    return { run_id: run.id, status: run.status, counts, tasks: rows, failures }
+  },
+
+  async getReportMd(runId: string): Promise<string> {
+    await delay(100)
+    const run = findRun(runId)
+    const report = await mockApi.getReport(runId)
+    const lines = [
+      `# Run ${run.id} 报告`,
+      '',
+      `- 名称：${run.name}`,
+      `- 状态：${run.status}`,
+      `- 提交人：${run.submitted_by}`,
+      `- 提交时间：${run.submitted_at}`,
+      '',
+      '## Task 统计',
+      '',
+      `| 总数 | 成功 | 失败 | 跳过 | 取消 |`,
+      `| --- | --- | --- | --- | --- |`,
+      `| ${report.counts.total} | ${report.counts.succeeded} | ${report.counts.failed} | ${report.counts.skipped} | ${report.counts.canceled} |`,
+      '',
+      '## 失败',
+      '',
+      ...(report.failures.length === 0
+        ? ['无。']
+        : report.failures.map((f) => `- \`${f.task_id}\`：${f.reason}（${f.error_code ?? '—'}）`)),
+    ]
+    return lines.join('\n')
+  },
+
+  /* ---------------------------------------------------------------- Execution Profile */
+
+  async listProfiles(): Promise<ExecutionProfile[]> {
+    await delay(80)
+    return clone(state.profiles)
+  },
+
+  /* ---------------------------------------------------------------- 重试（P1） */
+
+  async getRetryPlan(runId: string): Promise<RetryPlan> {
+    await delay(140)
+    const run = findRun(runId)
+    const tasks = run.tasks ?? []
+    const reuse: RetryTaskRef[] = tasks
+      .filter((task) => task.status === 'succeeded')
+      .map((task) => ({ task_id: task.id, name: task.name, status: task.status, error_code: null }))
+    const rerun: RetryTaskRef[] = tasks
+      .filter((task) => task.status !== 'succeeded')
+      .map((task) => ({
+        task_id: task.id,
+        name: task.name,
+        status: task.status,
+        error_code: task.error?.code ?? null,
+      }))
+    const retryableStatuses = ['failed', 'completed_with_errors', 'service_unavailable']
+    const retryable = retryableStatuses.includes(run.status) && rerun.length > 0
+    return {
+      run_id: run.id,
+      retryable,
+      reason: retryable
+        ? null
+        : run.status === 'canceled'
+          ? '已取消的 Run 不支持重试'
+          : `Run 当前状态为 ${run.status}，没有可重跑的 Task`,
+      reuse,
+      rerun,
+    }
+  },
+
+  async retryRun(runId: string): Promise<RetryAccepted> {
+    await delay(260)
+    const run = findRun(runId)
+    const plan = await mockApi.getRetryPlan(runId)
+    if (!plan.retryable) {
+      throw new ApiClientError(409, { code: 'CONFLICT', message: plan.reason ?? '当前 Run 不可重试', retryable: false })
+    }
+    const newRunId = nextRunId()
+    const reuse = (run.tasks ?? []).filter((task) => task.status === 'succeeded')
+    const rerun = (run.tasks ?? []).filter((task) => task.status !== 'succeeded')
+    const taskSeeds: TaskSeed[] = [
+      ...reuse.map((task) => ({
+        seq: task.attempts,
+        name: task.name,
+        tester: state.tasks[task.id]?.tester_name ?? 'endpoint-probe',
+        status: 'succeeded' as TaskStatus,
+        args: state.tasks[task.id]?.args_raw,
+        startedMinAgo: 3,
+        durationSec: 30,
+      })),
+      ...rerun.map((task, index) => ({
+        seq: index + 4,
+        name: task.name,
+        tester: state.tasks[task.id]?.tester_name ?? 'aisbench-acc',
+        status: 'queued' as TaskStatus,
+        args: state.tasks[task.id]?.args_raw,
+        waiting: 'slot_waiting' as WaitingReason,
+      })),
+    ]
+    const created = seedRun({
+      id: newRunId,
+      name: `${run.name} (retry)`,
+      status: 'queued',
+      submittedBy: getCurrentUser(),
+      submittedMinAgo: 0,
+      endpoint: run.endpoint ?? null,
+      deploy: run.deploy ?? undefined,
+      tasks: taskSeeds,
+    })
+    created.retry_of = run.id
+    auditLog('run.retry', 'run', newRunId, { retry_of: run.id })
+    return { new_run_id: created.id, retry_of: run.id }
+  },
+
+  async retryTask(taskId: string): Promise<TaskRetryAccepted> {
+    await delay(200)
+    const task = findTask(taskId)
+    if (!['succeeded', 'failed', 'canceled', 'skipped'].includes(task.status)) {
+      throw new ApiClientError(409, { code: 'CONFLICT', message: 'Task 还没结束，不能重跑', retryable: false })
+    }
+    const run = findRun(task.run_id)
+    if (run.status === 'canceled') {
+      throw new ApiClientError(409, { code: 'CONFLICT', message: 'Run 已取消，不能重跑其中的 Task', retryable: false })
+    }
+    task.current_attempt += 1
+    task.status = 'queued'
+    task.waiting_reason = 'slot_waiting'
+    task.status_reason = null
+    task.error = null
+    task.updated_at = nowIso()
+    task.attempts = [
+      ...task.attempts,
+      {
+        id: `${task.id}-a${task.current_attempt}`,
+        task_id: task.id,
+        idx: task.current_attempt,
+        status: 'preparing',
+        phase: 'Pending',
+        exit_code: null,
+        image_digest: 'sha256:mock',
+        started_at: null,
+        finished_at: null,
+        log_ref: `tasks/${task.id}/attempts/${task.current_attempt}/stdout.log`,
+        error: null,
+        executor_ref: null,
+      },
+    ]
+    syncSummary(task)
+    pushEvent(task.run_id, 'attempt.started', null, 'preparing', {
+      task_id: task.id,
+      attempt_id: `${task.id}-a${task.current_attempt}`,
+    })
+    auditLog('task.retry', 'task', task.id, { attempt: task.current_attempt })
+    return { task_id: task.id, run_id: task.run_id, new_attempt_idx: task.current_attempt }
+  },
+
+  /* ---------------------------------------------------------------- /admin/*（P1） */
+
+  async listAdminClusters(): Promise<AdminCluster[]> {
+    await delay(90)
+    return clone(state.adminClusters)
+  },
+
+  async createAdminCluster(body: ClusterWrite): Promise<AdminCluster> {
+    await delay(160)
+    if (state.adminClusters.some((cluster) => cluster.name === body.name)) {
+      throw new ApiClientError(409, { code: 'CONFLICT', message: `集群「${body.name}」已存在`, retryable: false })
+    }
+    const created: AdminCluster = {
+      name: body.name,
+      api_server: body.api_server,
+      kubeconfig_key: body.kubeconfig_key ?? `${body.name}.kubeconfig`,
+      description: body.description ?? null,
+      last_check_at: nowIso(),
+      last_check_result: 'ok',
+    }
+    state.adminClusters = [...state.adminClusters, created]
+    state.clusters = [...state.clusters, { name: created.name, api_server: created.api_server, description: created.description }]
+    auditLog('cluster.create', 'cluster', created.name)
+    return clone(created)
+  },
+
+  async updateAdminCluster(name: string, body: ClusterWrite): Promise<AdminCluster> {
+    await delay(160)
+    const index = state.adminClusters.findIndex((cluster) => cluster.name === name)
+    if (index < 0) notFound(`集群 ${name}`)
+    const updated: AdminCluster = {
+      ...(state.adminClusters[index] as AdminCluster),
+      ...body,
+      name: body.name || name,
+    }
+    state.adminClusters = state.adminClusters.map((cluster, i) => (i === index ? updated : cluster))
+    auditLog('cluster.update', 'cluster', updated.name)
+    return clone(updated)
+  },
+
+  async deleteAdminCluster(name: string): Promise<void> {
+    await delay(160)
+    const referenced = state.profiles.filter((profile) => profile.cluster === name)
+    if (referenced.length > 0) {
+      throw new ApiClientError(409, {
+        code: 'CONFLICT',
+        message: `集群「${name}」仍被 ${referenced.length} 个 Profile 引用`,
+        detail: { profiles: referenced.map((profile) => profile.name) },
+        retryable: false,
+      })
+    }
+    state.adminClusters = state.adminClusters.filter((cluster) => cluster.name !== name)
+    state.clusters = state.clusters.filter((cluster) => cluster.name !== name)
+    auditLog('cluster.delete', 'cluster', name)
+  },
+
+  async createProfile(body: ProfileWrite): Promise<ExecutionProfile> {
+    await delay(160)
+    if (state.profiles.some((profile) => profile.name === body.name)) {
+      throw new ApiClientError(409, { code: 'CONFLICT', message: `Profile「${body.name}」已存在`, retryable: false })
+    }
+    const created: ExecutionProfile = { ...body, mounts: [], image_pull_secrets: [] }
+    state.profiles = [...state.profiles, created]
+    auditLog('profile.create', 'profile', created.name)
+    return clone(created)
+  },
+
+  async updateProfile(name: string, body: ProfileWrite): Promise<ExecutionProfile> {
+    await delay(160)
+    const index = state.profiles.findIndex((profile) => profile.name === name)
+    if (index < 0) notFound(`Profile ${name}`)
+    const updated: ExecutionProfile = { ...(state.profiles[index] as ExecutionProfile), ...body }
+    state.profiles = state.profiles.map((profile, i) => (i === index ? updated : profile))
+    auditLog('profile.update', 'profile', updated.name)
+    return clone(updated)
+  },
+
+  async deleteProfile(name: string): Promise<void> {
+    await delay(160)
+    state.profiles = state.profiles.filter((profile) => profile.name !== name)
+    auditLog('profile.delete', 'profile', name)
+  },
+
+  async listAdminSecrets(): Promise<AdminSecret[]> {
+    await delay(90)
+    return clone(state.secrets)
+  },
+
+  async createAdminSecret(body: SecretWrite): Promise<AdminSecret> {
+    await delay(160)
+    const created: AdminSecret = { ...body, description: body.description ?? null }
+    state.secrets = [...state.secrets, created]
+    auditLog('secret.register', 'secret', created.name)
+    return clone(created)
+  },
+
+  async listAudit(query: AuditQuery = {}): Promise<Page<AuditEntry>> {
+    await delay(90)
+    const filtered = state.audit
+      .filter((entry) => (query.action ? entry.action === query.action : true))
+      .slice()
+      .sort((a, b) => b.at.localeCompare(a.at))
+    return paginate(clone(filtered), query.cursor, query.limit ?? 50)
   },
 
   async getDashboardStats(): Promise<DashboardStats> {

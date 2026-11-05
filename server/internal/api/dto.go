@@ -25,9 +25,12 @@ type runDTO struct {
 	Endpoint      json.RawMessage `json:"endpoint"`
 	Deploy        json.RawMessage `json:"deploy"`
 	Error         json.RawMessage `json:"error"`
-	Revision      int64           `json:"revision"`
-	TaskCounts    *runTaskCounts  `json:"task_counts,omitempty"`
-	Tasks         []taskBriefDTO  `json:"tasks,omitempty"`
+	// RetryOf 是本 Run 由哪次重试产生（原 Run 的 ID）；nil 表示不是重试产生的。
+	// 与 tasks.reused_from_task_id 一起表达"跨 Run 续跑"（03 §4.1）。
+	RetryOf    *string        `json:"retry_of"`
+	Revision   int64          `json:"revision"`
+	TaskCounts *runTaskCounts `json:"task_counts,omitempty"`
+	Tasks      []taskBriefDTO `json:"tasks,omitempty"`
 }
 
 // runTaskCounts 是 Run 的 Task 状态聚合（openapi Run.task_counts）。
@@ -188,6 +191,7 @@ func toRunDTO(r *store.Run) runDTO {
 		Endpoint:      store.JSONOrNil(r.Endpoint),
 		Deploy:        store.JSONOrNil(r.Deploy),
 		Error:         store.JSONOrNil(r.Error),
+		RetryOf:       r.RetryOf,
 	}
 }
 

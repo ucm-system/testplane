@@ -57,10 +57,12 @@ type Server struct {
 	webui    fs.FS
 	volcano  VolcanoProvider
 	metrics  *metricsRegistry
-	clock    domain.Clock
-	authn    *auth.Authenticator
-	version  string
-	now      func() time.Time
+	// deployLogsKube 是 Deploy 日志端点的 K8s 客户端（懒加载；测试可直接注入 fake）。
+	deployLogsKube deployLogClient
+	clock          domain.Clock
+	authn          *auth.Authenticator
+	version        string
+	now            func() time.Time
 }
 
 // New 构造 API Server。
@@ -135,6 +137,32 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/runs", s.handleSubmitRun)
 			r.Post("/runs/{id}/cancel", s.handleCancelRun)
 			r.Post("/tasks/{id}/cancel", s.handleCancelTask)
+			// 重试（07 §5.1/§8）：retry 创建新 Run（retry_of=原 Run），task retry 重开 Attempt。
+			r.Post("/runs/{id}/retry", s.handleRetryRun)
+			r.Post("/tasks/{id}/retry", s.handleRetryTask)
+		})
+
+		// 管理面（07 §5.4）：全部要求 admin。写操作同事务/事后写 audit_log（C-10）。
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireRole(authRoleAdmin))
+			r.Post("/admin/profiles", s.handleAdminCreateProfile)
+			r.Put("/admin/profiles", s.handleAdminUpdateProfile)
+			r.Delete("/admin/profiles", s.handleAdminDeleteProfile)
+			r.Post("/admin/clusters", s.handleAdminCreateCluster)
+			r.Put("/admin/clusters", s.handleAdminUpdateCluster)
+			r.Delete("/admin/clusters", s.handleAdminDeleteCluster)
+			r.Get("/admin/secrets", s.handleAdminListSecretRefs)
+			r.Post("/admin/secrets", s.handleAdminCreateSecretRef)
+			r.Post("/admin/secrets/{name}/rotate", s.handleAdminRotateSecret)
+			r.Get("/admin/audit", s.handleAdminListAudit)
+			r.Delete("/admin/runs/{run_id}/artifacts", s.handleAdminCleanupArtifacts)
+		})
+
+		// Secret 引用只读列表（07 §5.3）：**operator 及以上**（07 §2.3 / C-8.2：
+		// "有哪些 Secret 被平台引用"本身是运维信息）；只回名称与说明，不回显值。
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireRole(authRoleOperator))
+			r.Get("/secrets", s.handleListSecretRefs)
 		})
 
 		// Run（只读：viewer）
@@ -149,6 +177,8 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/runs/{id}/report.md", s.handleRunReportMarkdown)
 		r.Get("/runs/{id}/manifest", s.handleRunManifest)
 		r.Get("/runs/{id}/deploy", s.handleRunDeploy)
+		r.Get("/runs/{id}/deploy/logs", s.handleRunDeployLogs)
+		r.Get("/runs/{id}/retry-plan", s.handleRetryPlan)
 		r.Get("/runs/{id}/artifacts", s.handleRunArtifacts)
 		r.Get("/runs/{id}/files", s.handleRunFile)
 
