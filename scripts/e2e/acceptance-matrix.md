@@ -103,6 +103,10 @@ pwsh scripts/e2e/failure-injection.ps1          # 需要控制面 + kind executo
 - `allow-missing.txt` **16 → 0**；openapi **50** operation，设计 50 / openapi-only 0；`spec.design_endpoints_present` = “0 个（已登记 0）”，`spec.operation_count` 从实际推导 50。
 - 契约 `--mode all`：**80/80 PASS**（spec 17/17 + live 63/63）；retry 3、deploy/logs（终态 + 排队）、`GET /secrets`、`/admin/*` 12 个 operation 全部被 live 覆盖；admin 写只验 400/404/409 错误契约。
 - 新增 `retry-check.ps1`：**17/17 PASS**（Run `r-20261105-CC2Q` → retry `r-20261105-7SEC`；新 Run 再取 plan 为 `retryable=false, reason=nothing_to_retry`）。
-- 新增 `admin-check.ps1`：**23/23 PASS**；rotate 在无 Secret get RBAC 时接受 503 `EXECUTOR_UNAVAILABLE`（生产 D-55 resourceNames Role 下为 404）。
-- 老回归：run-local 31/31、probe 5/5、failure-injection 5/5、cancel 10/10、timeout 17/17、mixed 11/11；deploy 正常 9/9 / blocked 7/7 / failure 4/4；artifact 44/44；restart 13/13；Playwright 6 passed（1 skipped）。
+- 新增 `admin-check.ps1`：**26/26 PASS**；`secret.rotate_verified_200` 走 D-55 窄 Role；`it-forbidden-ref` 稳定 503 `reason=forbidden`。
+- 老回归：run-local 31/31、probe 5/5、failure-injection 5/5、cancel 10/10、timeout 17/17、mixed 11/11；deploy 正常 9/9 / blocked 7/7 / failure 4/4；artifact 44/44；restart 13/13；Playwright **9 passed / 2 skipped**。
+- 评审红确认：DELETE 改路径 → `client-contract.spec.ts` 1 failed；`deploy/logs` 忽略 pod → `TestDeployLogs_TwoPodsPaging` FAIL；审计改提交后补记 → `TestAuditFailure_RollsBackAdminWrite` FAIL；均已还原，恢复后全绿。
+
+
+
 
