@@ -44,10 +44,10 @@ func (e *SSEUnavailableError) Unwrap() error { return e.Err }
 
 // SSEFrame 是一条 SSE 帧（空行分隔）。
 type SSEFrame struct {
-	Event  string
-	Data   []byte
-	ID     string
-	HasID  bool
+	Event string
+	Data  []byte
+	ID    string
+	HasID bool
 }
 
 // ReadSSE 逐帧解析 SSE（07 §7）：`id:` / `event:` / `data:`，`:` 开头是注释（心跳）。
@@ -306,6 +306,9 @@ func waitSSE(ctx context.Context, api RunReader, runID string, deadline time.Tim
 		}
 
 		finished := false
+		// 只有从 seq=0 开始回放时才需要跳过历史；重连时 lastSeq>0，后续事件都是新的。
+		seenInitial := lastSeq > 0
+		initialStatus := initial.status
 		frameErr := ReadSSE(body, func(frame SSEFrame) error {
 			if frame.HasID {
 				if n, err := strconv.ParseInt(strings.TrimSpace(frame.ID), 10, 64); err == nil {
@@ -317,18 +320,31 @@ func waitSSE(ctx context.Context, api RunReader, runID string, deadline time.Tim
 			}
 			switch frame.Event {
 			case "run.state_changed":
-				if st := sseEventStatus(frame.Data); st != "" {
-					last.status = st
-					tracker.update(st)
+				st := sseEventStatus(frame.Data)
+				if st == "" {
+					break
 				}
+				// 服务端从 seq=1 回放；在回放到"初始 GET 的状态"之前都是历史事件，
+				// 不再重复打印（否则终端会出现 testing→queued→testing 的倒序噪声）。
+				if !seenInitial {
+					if st == initialStatus {
+						seenInitial = true
+					}
+					break
+				}
+				last.status = st
+				tracker.update(st)
 			case "run.finished":
 				finished = true
 				if st := sseEventStatus(frame.Data); st != "" {
 					last.status = st
+					seenInitial = true
 					tracker.update(st)
 				}
 			case "resync_required":
 				// 服务端会从窗口起点继续补齐；这里只需保留 lastSeq，不做整页重建。
+				// 窗口起点之后的事件都是新的，后续状态可以正常展示。
+				seenInitial = true
 			}
 			return nil
 		})

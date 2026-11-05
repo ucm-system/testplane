@@ -3,6 +3,9 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Tool 是 tools/list 的一项（MCP 规范：name / description / inputSchema）。
@@ -22,7 +26,7 @@ type Tool struct {
 	InputSchema map[string]any `json:"inputSchema"`
 }
 
-// toolList 返回 9 个工具的静态清单。inputSchema 是 JSON Schema 2020-12 的子集
+// toolList 返回 11 个工具的静态清单。inputSchema 是 JSON Schema 2020-12 的子集
 // （object / string / boolean / number / integer / enum / default / required），
 // 与 design/impl/agent-integration.md §5 的表逐字对应。
 func toolList() []Tool {
@@ -44,11 +48,12 @@ func toolList() []Tool {
 		},
 		{
 			Name:        "testplane_wait_run",
-			Description: "轮询 Run 到终态或超时（GET /api/v1/runs/{run_id}）。返回 outcome：success | failed | canceled | timeout；timeout 不是错误，只表示这次等待没等到终态，可再次调用。",
+			Description: "轮询/订阅 Run 到终态或超时。follow=true 时先用 SSE（GET /runs/{run_id}/events，按 Last-Event-ID 续传、断线重连 3 次），SSE 不可用会自动降级为轮询，结果里 wait_mode 标明实际方式。返回 outcome：success | failed | canceled | timeout；timeout 不是错误。",
 			InputSchema: schemaObject(map[string]any{
 				"run_id":           schemaString("Run ID"),
-				"timeout_seconds":  schemaNumber("总等待时长（秒），默认 3600", 3600, 1, 86400),
-				"interval_seconds": schemaNumber("轮询间隔（秒），默认 3", 3, 0.01, 60),
+				"timeout_seconds":  schemaNumber("总等待时长（秒），默认 3600", 3600, 0.1, 86400),
+				"interval_seconds": schemaNumber("轮询间隔（秒），默认 3；follow=true 时只在降级后使用", 3, 0.01, 60),
+				"follow":           schemaBoolean("true 时优先用 SSE 事件流等待（服务端侧），仍一次返回", false),
 			}, "run_id"),
 		},
 		{
@@ -87,13 +92,32 @@ func toolList() []Tool {
 			}, "task_id"),
 		},
 		{
+			Name:        "testplane_list_artifacts",
+			Description: "读取产物清单：给 run_id 走 GET /runs/{run_id}/artifacts；给 task_id + attempt 走 GET /tasks/{task_id}/attempts/{idx}/artifacts。两者二选一，返回 {items[], by_kind, total_size_bytes}；path 可直接给 testplane_get_file。",
+			InputSchema: schemaObject(map[string]any{
+				"run_id":  schemaString("Run ID（与 task_id 二选一）"),
+				"task_id": schemaString("Task ID（与 run_id 二选一）"),
+				"attempt": schemaInteger("Attempt 序号（给 task_id 时使用），默认 1", 1, 1, 1000),
+			}),
+		},
+		{
+			Name:        "testplane_get_file",
+			Description: "读取 Run 产物文件（GET /runs/{run_id}/files?path=）并返回**摘要**：path、size、sha256、前 2KB 文本或 base64 标记。默认最多取 1 MiB（Range 前缀），不会把二进制整个塞进 content；需要完整文件请走 HTTP 下载。",
+			InputSchema: schemaObject(map[string]any{
+				"run_id":    schemaString("Run ID"),
+				"path":      schemaString("产物路径；直接给 testplane_list_artifacts 返回的 path（含 <run_id>/ 前缀会自动剥离）"),
+				"range":     schemaString("可选 HTTP Range（如 bytes=0-1048575）；缺省按 max_bytes 取前缀"),
+				"max_bytes": schemaInteger("未给 range 时最多读取的字节数，默认 1 MiB", 1048576, 1024, 33554432),
+			}, "run_id", "path"),
+		},
+		{
 			Name:        "testplane_queue_status",
 			Description: "平台槽位 + 平台侧等待原因 + Volcano 只读快照（GET /api/v1/queue-status）。三者语义不同，**不可相加**成一个排队数。",
 			InputSchema: schemaObject(nil),
 		},
 		{
 			Name:        "testplane_list_profiles",
-			Description: "列出 Execution Profile（GET /api/v1/profiles）。注意：控制面 MVP 尚未实现该端点（IMPLEMENTATION §15.2），当前调用会返回 NOT_FOUND。",
+			Description: "列出已登记的 Execution Profile 与挂载能力（GET /api/v1/profiles）：name/cluster/namespace/scheduler/queue/mounts；提交 Run 时 execution.profile 必须命中这里。",
 			InputSchema: schemaObject(nil),
 		},
 	}
@@ -164,6 +188,10 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		return s.toolGetReport(ctx, args)
 	case "testplane_get_logs":
 		return s.toolGetLogs(ctx, args)
+	case "testplane_list_artifacts":
+		return s.toolListArtifacts(ctx, args)
+	case "testplane_get_file":
+		return s.toolGetFile(ctx, args)
 	case "testplane_queue_status":
 		return s.toolQueueStatus(ctx, args)
 	case "testplane_list_profiles":
@@ -223,6 +251,7 @@ func (s *Server) toolWaitRun(ctx context.Context, raw json.RawMessage) (any, *rp
 		RunID           string  `json:"run_id"`
 		TimeoutSeconds  float64 `json:"timeout_seconds"`
 		IntervalSeconds float64 `json:"interval_seconds"`
+		Follow          bool    `json:"follow"`
 	}
 	if err := decodeArgs(raw, &a); err != nil {
 		return nil, invalidParams("testplane_wait_run: " + err.Error())
@@ -234,79 +263,52 @@ func (s *Server) toolWaitRun(ctx context.Context, raw json.RawMessage) (any, *rp
 	if timeout == 0 {
 		timeout = 3600
 	}
-	if timeout < 0 || timeout > 86400 {
-		return nil, invalidParams("testplane_wait_run: timeout_seconds 必须在 1..86400 之间")
+	if timeout < 0.1 || timeout > 86400 {
+		return nil, invalidParams("testplane_wait_run: timeout_seconds 必须在 0.1..86400 之间")
 	}
 	interval := a.IntervalSeconds
 	if interval == 0 {
 		interval = 3
 	}
-	if interval <= 0 || interval < 0.01 || interval > 60 {
+	if interval < 0.01 || interval > 60 {
 		return nil, invalidParams("testplane_wait_run: interval_seconds 必须在 0.01..60 之间")
 	}
 
-	started := time.Now()
-	deadline := started.Add(time.Duration(timeout * float64(time.Second)))
-	path := "/api/v1/runs/" + pathEscape(a.RunID)
-
-	var last runSnapshot
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			break
-		}
-		reqCtx, cancel := context.WithTimeout(ctx, remaining)
-		res, err := s.client.Get(reqCtx, path, nil)
-		cancel()
-		if err != nil {
-			if time.Now().After(deadline) || (errors.Is(err, context.DeadlineExceeded) && !time.Now().Before(deadline)) {
-				break
-			}
-			return restError(err), nil
-		}
-		snap, perr := parseRunSnapshot(res.Body)
-		if perr != nil {
-			return errorResult("控制面返回的 Run 不是合法 JSON: " + perr.Error()), nil
-		}
-		last = snap
-
-		terminal := isTerminalRunStatus(snap.Status)
-		if terminal || !time.Now().Before(deadline) {
-			outcome := runOutcome(snap.Status)
-			if !terminal {
-				outcome = "timeout"
-			}
-			return jsonResult(map[string]any{
-				"run_id":          a.RunID,
-				"status":          snap.Status,
-				"terminal":        terminal,
-				"outcome":         outcome,
-				"task_counts":     rawOrNil(snap.TaskCounts),
-				"error":           rawOrNil(snap.Error),
-				"elapsed_seconds": roundSeconds(time.Since(started)),
-			}), nil
-		}
-
-		wait := time.Duration(interval * float64(time.Second))
-		if rest := time.Until(deadline); rest < wait {
-			wait = rest
-		}
-		select {
-		case <-ctx.Done():
-			return errorResult("等待被取消: " + ctx.Err().Error()), nil
-		case <-time.After(wait):
-		}
+	// SSE 是服务端侧等待：MCP 仍是同步 request/response，一次返回，不推 progress。
+	res, err := Wait(ctx, s.client, a.RunID, WaitOptions{
+		Timeout:  time.Duration(timeout * float64(time.Second)),
+		Interval: time.Duration(interval * float64(time.Second)),
+		Follow:   a.Follow,
+	})
+	if err != nil {
+		return restError(err), nil
+	}
+	snap, perr := parseRunSnapshot(res.RunJSON)
+	if perr != nil {
+		return errorResult("控制面返回的 Run 不是合法 JSON: " + perr.Error()), nil
 	}
 
-	return jsonResult(map[string]any{
+	out := map[string]any{
 		"run_id":          a.RunID,
-		"status":          last.Status,
-		"terminal":        false,
-		"outcome":         "timeout",
-		"task_counts":     rawOrNil(last.TaskCounts),
-		"error":           rawOrNil(last.Error),
-		"elapsed_seconds": roundSeconds(time.Since(started)),
-	}), nil
+		"status":          res.Status,
+		"terminal":        isTerminalRunStatus(res.Status),
+		"outcome":         res.Outcome,
+		"task_counts":     rawOrNil(snap.TaskCounts),
+		"error":           rawOrNil(snap.Error),
+		"elapsed_seconds": roundSeconds(res.Elapsed),
+		"wait_mode":       res.Mode,
+	}
+	if res.FallbackReason != "" {
+		out["fallback_reason"] = res.FallbackReason
+	}
+	if res.TimedOut {
+		out["timed_out"] = true
+	}
+	if h, ok := hintForSnapshot(snap); ok {
+		out["next_action"] = h.NextAction
+		out["hint"] = h.Hint
+	}
+	return jsonResult(out), nil
 }
 
 func (s *Server) toolCancelRun(ctx context.Context, raw json.RawMessage) (any, *rpcError) {
@@ -478,6 +480,130 @@ func (s *Server) toolGetLogs(ctx context.Context, raw json.RawMessage) (any, *rp
 	return jsonResult(out), nil
 }
 
+func (s *Server) toolListArtifacts(ctx context.Context, raw json.RawMessage) (any, *rpcError) {
+	var a struct {
+		RunID   string `json:"run_id"`
+		TaskID  string `json:"task_id"`
+		Attempt int    `json:"attempt"`
+	}
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, invalidParams("testplane_list_artifacts: " + err.Error())
+	}
+	hasRun := strings.TrimSpace(a.RunID) != ""
+	hasTask := strings.TrimSpace(a.TaskID) != ""
+	if hasRun == hasTask {
+		return nil, invalidParams("testplane_list_artifacts: run_id 与 task_id 必须二选一")
+	}
+
+	var path string
+	if hasRun {
+		path = "/api/v1/runs/" + pathEscape(a.RunID) + "/artifacts"
+	} else {
+		if a.Attempt == 0 {
+			a.Attempt = 1
+		}
+		if a.Attempt < 1 {
+			return nil, invalidParams("testplane_list_artifacts: attempt 必须 ≥1")
+		}
+		path = fmt.Sprintf("/api/v1/tasks/%s/attempts/%d/artifacts", pathEscape(a.TaskID), a.Attempt)
+	}
+	res, err := s.client.Get(ctx, path, nil)
+	if err != nil {
+		return restError(err), nil
+	}
+	return jsonBodyResult(res.Body)
+}
+
+// toolGetFile 返回文件**摘要**（path/size/sha256/前 2KB 预览），不把二进制塞进 content。
+// 默认用 Range 取前缀（1 MiB），避免大文件把 MCP 消息撑爆。
+func (s *Server) toolGetFile(ctx context.Context, raw json.RawMessage) (any, *rpcError) {
+	var a struct {
+		RunID    string `json:"run_id"`
+		Path     string `json:"path"`
+		Range    string `json:"range"`
+		MaxBytes int64  `json:"max_bytes"`
+	}
+	if err := decodeArgs(raw, &a); err != nil {
+		return nil, invalidParams("testplane_get_file: " + err.Error())
+	}
+	if strings.TrimSpace(a.RunID) == "" || strings.TrimSpace(a.Path) == "" {
+		return nil, invalidParams("testplane_get_file: run_id 与 path 都不能为空")
+	}
+	if a.MaxBytes == 0 {
+		a.MaxBytes = 1 << 20
+	}
+	if a.MaxBytes < 1024 || a.MaxBytes > 32<<20 {
+		return nil, invalidParams("testplane_get_file: max_bytes 必须在 1024..33554432 之间")
+	}
+
+	rangeHeader := strings.TrimSpace(a.Range)
+	if rangeHeader != "" {
+		if !strings.HasPrefix(strings.ToLower(rangeHeader), "bytes=") {
+			rangeHeader = "bytes=" + rangeHeader
+		}
+	} else {
+		rangeHeader = fmt.Sprintf("bytes=0-%d", a.MaxBytes-1)
+	}
+
+	// artifacts 返回的 path 是 storage-root 相对的（含 <run_id>/ 前缀），而
+	// /files?path= 要的是 run 目录内相对路径；两种写法都接受，统一剥离前缀。
+	apiPath := normalizeRunFilePath(a.RunID, a.Path)
+	if apiPath == "" {
+		return nil, invalidParams("testplane_get_file: path 不能为空")
+	}
+
+	q := url.Values{}
+	q.Set("path", apiPath)
+	res, err := s.client.GetWithHeaders(ctx, "/api/v1/runs/"+pathEscape(a.RunID)+"/files", q,
+		map[string]string{"Range": rangeHeader})
+	if err != nil {
+		return restError(err), nil
+	}
+
+	body := res.Body
+	total := int64(len(body))
+	scope := "full"
+	if res.Status == http.StatusPartialContent {
+		if t, ok := contentRangeTotal(res.Header.Get("Content-Range")); ok {
+			total = t
+		}
+		if int64(len(body)) < total {
+			scope = "partial"
+		}
+	}
+
+	sum := sha256.Sum256(body)
+	out := map[string]any{
+		"run_id":           a.RunID,
+		"path":             a.Path,
+		"api_path":         apiPath,
+		"http_status":      res.Status,
+		"content_type":     res.Header.Get("Content-Type"),
+		"size_bytes":       len(body),
+		"total_size_bytes": total,
+		"sha256":           hex.EncodeToString(sum[:]),
+		"sha256_scope":     scope,
+		"truncated":        scope == "partial",
+		"range":            rangeHeader,
+	}
+	if cr := res.Header.Get("Content-Range"); cr != "" {
+		out["content_range"] = cr
+	}
+
+	preview := body
+	if len(preview) > 2048 {
+		preview = preview[:2048]
+	}
+	if looksText(preview) {
+		out["encoding"] = "text"
+		out["preview"] = string(preview)
+	} else {
+		out["encoding"] = "base64"
+		out["preview_base64"] = base64.StdEncoding.EncodeToString(preview)
+	}
+	return jsonResult(out), nil
+}
+
 func (s *Server) toolQueueStatus(ctx context.Context, _ json.RawMessage) (any, *rpcError) {
 	res, err := s.client.Get(ctx, "/api/v1/queue-status", nil)
 	if err != nil {
@@ -489,14 +615,6 @@ func (s *Server) toolQueueStatus(ctx context.Context, _ json.RawMessage) (any, *
 func (s *Server) toolListProfiles(ctx context.Context, _ json.RawMessage) (any, *rpcError) {
 	res, err := s.client.Get(ctx, "/api/v1/profiles", nil)
 	if err != nil {
-		var ae *APIError
-		if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
-			return isErrorJSON(map[string]any{"error": map[string]any{
-				"http_status": ae.Status,
-				"code":        "ENDPOINT_NOT_IMPLEMENTED",
-				"message":     "控制面尚未实现 GET /api/v1/profiles（IMPLEMENTATION §15.2「P1 首批」）；当前没有可替代端点，不伪造数据。",
-			}}), nil
-		}
 		return restError(err), nil
 	}
 	return jsonBodyResult(res.Body)
@@ -551,8 +669,8 @@ func jsonBodyResult(body []byte) (any, *rpcError) {
 }
 
 // restError 把 REST 错误映射成 MCP 的 isError 结果（协议层保持成功）：
-// 控制面错误信封 -> {error:{http_status,code,message,retryable,trace_id,retry_after}}；
-// 传输失败 -> code=UNREACHABLE。这样 Agent 能读到结构化原因，而不是一句纯文本。
+// 控制面错误信封 -> {error:{http_status,code,message,retryable,trace_id,retry_after,next_action,hint}}；
+// 传输失败 -> code=UNREACHABLE。Agent 能直接读到结构化原因与下一步动作。
 func restError(err error) toolResult {
 	var ae *APIError
 	if errors.As(err, &ae) {
@@ -571,14 +689,25 @@ func restError(err error) toolResult {
 		if ae.RetryAfter != "" {
 			e["retry_after"] = ae.RetryAfter
 		}
+		if h, ok := HintForError(ae.Code); ok {
+			e["next_action"] = h.NextAction
+			if h.Hint != "" {
+				e["hint"] = h.Hint
+			}
+		}
 		return isErrorJSON(map[string]any{"error": e})
 	}
 	if IsTransportError(err) {
-		return isErrorJSON(map[string]any{"error": map[string]any{
+		e := map[string]any{
 			"code":      "UNREACHABLE",
 			"message":   err.Error(),
 			"retryable": true,
-		}})
+		}
+		if h, ok := HintForError("UNREACHABLE"); ok {
+			e["next_action"] = h.NextAction
+			e["hint"] = h.Hint
+		}
+		return isErrorJSON(map[string]any{"error": e})
 	}
 	return errorResult(err.Error())
 }
@@ -599,6 +728,48 @@ func parseRunSnapshot(body []byte) (runSnapshot, error) {
 		return runSnapshot{}, err
 	}
 	return snap, nil
+}
+
+// hintForSnapshot 给终态 Run 找下一步提示：优先用 Run.error.code，其次用终态本身。
+func hintForSnapshot(snap runSnapshot) (Hint, bool) {
+	var failure struct {
+		Code string `json:"code"`
+	}
+	if len(snap.Error) > 0 && json.Unmarshal(snap.Error, &failure) == nil && failure.Code != "" {
+		if h, ok := HintForError(failure.Code); ok {
+			return h, true
+		}
+	}
+	return HintForRunStatus(snap.Status)
+}
+
+// contentRangeTotal 解析 `bytes 0-1023/2048` 的总长度。
+func contentRangeTotal(header string) (int64, bool) {
+	_, totalPart, ok := strings.Cut(header, "/")
+	if !ok {
+		return 0, false
+	}
+	total, err := strconv.ParseInt(strings.TrimSpace(totalPart), 10, 64)
+	if err != nil || total < 0 {
+		return 0, false
+	}
+	return total, true
+}
+
+// looksText 判断前 2KB 是否适合以文本预览：合法 UTF-8 且没有 NUL/控制字符（换行、Tab、CR 除外）。
+func looksText(b []byte) bool {
+	if len(b) == 0 || !utf8.Valid(b) {
+		return false
+	}
+	for _, r := range string(b) {
+		if r == '\n' || r == '\r' || r == '\t' {
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func isTerminalRunStatus(status string) bool {
@@ -647,6 +818,17 @@ func looksLikeJSON(s string) bool {
 }
 
 func pathEscape(id string) string { return url.PathEscape(id) }
+
+// normalizeRunFilePath 容忍两种产物路径写法：
+//   - artifacts 返回的 storage-root 相对路径（`<run_id>/tasks/...`）；
+//   - /files?path= 需要的 run 目录内相对路径（`tasks/...`）。
+func normalizeRunFilePath(runID, p string) string {
+	p = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(p), "/"))
+	if runID != "" {
+		p = strings.TrimPrefix(p, strings.TrimSpace(runID)+"/")
+	}
+	return p
+}
 
 func rawOrNil(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 || string(bytes.TrimSpace(raw)) == "null" {

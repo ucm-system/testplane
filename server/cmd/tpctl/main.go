@@ -140,6 +140,10 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return a.cmdReport(rest)
 	case "logs":
 		return a.cmdLogs(rest)
+	case "artifacts":
+		return a.cmdArtifacts(rest)
+	case "files":
+		return a.cmdFiles(rest)
 	case "cancel":
 		return a.cmdCancel(rest)
 	case "testers":
@@ -248,6 +252,7 @@ func (a *app) fail(err error) int {
 
 	switch {
 	case errors.As(err, &apiErr):
+		hint, hasHint := mcp.HintForError(apiErr.Code)
 		if a.jsonOut {
 			payload := map[string]any{
 				"http_status": apiErr.Status,
@@ -264,22 +269,35 @@ func (a *app) fail(err error) int {
 			if apiErr.RetryAfter != "" {
 				payload["retry_after"] = apiErr.RetryAfter
 			}
+			if hasHint {
+				payload["next_action"] = hint.NextAction
+				if hint.Hint != "" {
+					payload["hint"] = hint.Hint
+				}
+			}
 			writeJSONLine(a.stderr, map[string]any{"error": payload})
 		} else {
 			fmt.Fprintf(a.stderr, "tpctl: %v\n", apiErr)
+			if hasHint {
+				fmt.Fprintf(a.stderr, "tpctl: 下一步: %s\n", hint.NextAction)
+			}
 		}
 		return exitFailure
 
 	case errors.As(err, &netErr):
+		hint, _ := mcp.HintForError("UNREACHABLE")
 		if a.jsonOut {
 			writeJSONLine(a.stderr, map[string]any{"error": map[string]any{
-				"code":      "UNREACHABLE",
-				"message":   netErr.Error(),
-				"retryable": true,
-				"base_url":  a.baseURL,
+				"code":        "UNREACHABLE",
+				"message":     netErr.Error(),
+				"retryable":   true,
+				"base_url":    a.baseURL,
+				"next_action": hint.NextAction,
+				"hint":        hint.Hint,
 			}})
 		} else {
 			fmt.Fprintf(a.stderr, "tpctl: 连不上控制面 %s（%v）\n", a.baseURL, netErr.err)
+			fmt.Fprintf(a.stderr, "tpctl: 下一步: %s\n", hint.NextAction)
 		}
 		return exitUnreachable
 
@@ -327,16 +345,20 @@ func usage(w io.Writer) {
 
 命令:
   submit -f <manifest.yaml> [--dry-run]        提交 Run（Manifest 原样转发）
-  status <run_id>                              Run 摘要（状态/终态/计数/错误码）
-  wait <run_id> [--timeout 3600] [--interval 3]
-                                               轮询到终态；退出码 = Run 结局
+  status <run_id>                              Run 摘要（状态/终态/计数/错误码/next_action）
+  wait <run_id> [--follow] [--timeout 3600] [--interval 3]
+                                               等待终态；--follow 用 SSE，不可用时降级轮询
   report <run_id> [--md]                       报告 JSON / Markdown 原文
   logs <task_id> [--attempt 1] [--offset N] [--tail N]
                                                Attempt 日志；X-Log-Offset 打到 stderr
+  artifacts <run_id> | --task <task_id> [--attempt 1]
+                                               产物清单（按 kind 分组）
+  files <run_id> <path> [--out <file>] [--range 0-1023]
+                                               下载产物；--out 落盘并打印 sha256
   cancel <run_id> | --task <task_id>           取消 Run 或 Task，202 后回读确认
   testers [--role test|pre_check] [--orphaned] Tester 目录
   queue                                        队列与槽位（平台 + Volcano）
-  profiles                                     Execution Profile（端点待 P1 落地）
+  profiles                                     Execution Profile 与挂载能力
   mcp                                          在 stdio 上启动 MCP server
   help                                         本帮助
 

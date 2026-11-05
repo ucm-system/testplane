@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -42,6 +43,9 @@ type Client struct {
 	BaseURL string
 	Token   string
 	HTTP    *http.Client
+
+	// streamHTTP 专用于 SSE（无 TotalTimeout，由 ctx 的 deadline 控制）。
+	streamHTTP *http.Client
 }
 
 // NewClient 校验并构造客户端。baseURL 只接受 http/https（本地开发是明文）。
@@ -67,6 +71,8 @@ func NewClient(baseURL, token string, timeout time.Duration) (*Client, error) {
 		BaseURL: strings.TrimRight(raw, "/"),
 		Token:   token,
 		HTTP:    &http.Client{Timeout: timeout},
+		// SSE 是长连接，不能吃 HTTP 超时；用独立 client，由请求 ctx 控制生死。
+		streamHTTP: &http.Client{},
 	}, nil
 }
 
@@ -80,7 +86,12 @@ type Response struct {
 
 // Get 发一个 GET；query 可为 nil。
 func (c *Client) Get(ctx context.Context, path string, query url.Values) (*Response, error) {
-	return c.do(ctx, http.MethodGet, path, query, nil, "")
+	return c.do(ctx, http.MethodGet, path, query, nil, "", nil)
+}
+
+// GetWithHeaders 是带额外请求头的 GET（files 下载的 Range）。
+func (c *Client) GetWithHeaders(ctx context.Context, path string, query url.Values, headers map[string]string) (*Response, error) {
+	return c.do(ctx, http.MethodGet, path, query, nil, "", headers)
 }
 
 // Post 发一个 POST；body 为 nil 时表示空体（不带 Content-Type）。
@@ -88,10 +99,10 @@ func (c *Client) Post(ctx context.Context, path string, query url.Values, body [
 	if contentType == "" {
 		contentType = "application/json"
 	}
-	return c.do(ctx, http.MethodPost, path, query, body, contentType)
+	return c.do(ctx, http.MethodPost, path, query, body, contentType, nil)
 }
 
-func (c *Client) do(ctx context.Context, method, path string, query url.Values, body []byte, contentType string) (*Response, error) {
+func (c *Client) do(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, headers map[string]string) (*Response, error) {
 	if c == nil || c.HTTP == nil {
 		return nil, errors.New("mcp: 未初始化控制面客户端")
 	}
@@ -111,6 +122,9 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	req.Header.Set("Authorization", "Bearer "+tokenOrDefault(c.Token))
 	req.Header.Set("Accept", "application/json, text/plain, text/markdown")
 	req.Header.Set("User-Agent", "testplane-mcp/"+Version)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -134,6 +148,61 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return res, newAPIError(res)
 	}
 	return res, nil
+}
+
+// GetRun 是 RunReader 的实现：返回 GET /api/v1/runs/{id} 的原始 JSON。
+func (c *Client) GetRun(ctx context.Context, runID string) ([]byte, error) {
+	res, err := c.Get(ctx, "/api/v1/runs/"+url.PathEscape(runID), nil)
+	if err != nil {
+		return nil, err
+	}
+	return res.Body, nil
+}
+
+// OpenRunEvents 打开 SSE（GET /api/v1/runs/{id}/events），返回未读取的 body。
+//
+// 不可用（404/405/5xx/Content-Type 不是 text/event-stream/连接失败）→ *SSEUnavailableError，
+// 由 Wait 降级为轮询；401/403 等鉴权错误 → *APIError，原样上抛（轮询也会失败）。
+func (c *Client) OpenRunEvents(ctx context.Context, runID string, lastEventID int64) (io.ReadCloser, error) {
+	if c == nil || c.streamHTTP == nil {
+		return nil, errors.New("mcp: 未初始化 SSE 客户端")
+	}
+	target := c.BaseURL + "/api/v1/runs/" + url.PathEscape(runID) + "/events"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, &SSEUnavailableError{Reason: "构造事件流请求失败", Err: err}
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenOrDefault(c.Token))
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("User-Agent", "testplane-mcp/"+Version)
+	if lastEventID > 0 {
+		req.Header.Set("Last-Event-ID", strconv.FormatInt(lastEventID, 10))
+	}
+
+	resp, err := c.streamHTTP.Do(req)
+	if err != nil {
+		return nil, &SSEUnavailableError{Reason: "连接事件流失败", Err: err}
+	}
+	if resp.StatusCode != http.StatusOK {
+		err := apiErrorFromStream(resp)
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, err
+		}
+		return nil, &SSEUnavailableError{Reason: "事件流不可用（HTTP " + strconv.Itoa(resp.StatusCode) + "）", Err: err}
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		_ = resp.Body.Close()
+		return nil, &SSEUnavailableError{Reason: "事件流不可用（Content-Type=" + ct + "）"}
+	}
+	return resp.Body, nil
+}
+
+// apiErrorFromStream 读一小段错误体并转成 *APIError（用于 SSE 端点的 4xx/5xx）。
+func apiErrorFromStream(resp *http.Response) *APIError {
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+	return newAPIError(&Response{Status: resp.StatusCode, Header: resp.Header, Body: data})
 }
 
 // APIError 是控制面错误信封（07 §3）的投影。非 JSON 的错误体（例如 chi 的 404 纯文本）
