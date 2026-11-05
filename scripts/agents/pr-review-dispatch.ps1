@@ -1,4 +1,4 @@
-# TestPlane · PR 自动评审 dispatcher
+﻿# TestPlane · PR 自动评审 dispatcher
 #
 # 做什么：轮询打开的 PR，发现"新的 PR / PR 有新提交"（按 head SHA 去重）就起一个
 # **独立 agent 进程**评审，然后：
@@ -34,7 +34,9 @@ param(
     [string]$AgentCmd = 'dsh --profile headless -'
 )
 
-$ErrorActionPreference = 'Stop'
+# 5.1 下 'Stop' 会把原生命令（git/gh）写到 stderr 的内容当成终止错误，
+# 所以用 Continue，并在需要的地方显式检查 $LASTEXITCODE。
+$ErrorActionPreference = 'Continue'
 $stateDir = Join-Path $RepoRoot '.data/pr-review'
 $statePath = Join-Path $stateDir 'state.json'
 $lockPath = Join-Path $stateDir '.lock'
@@ -46,12 +48,25 @@ New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 
 $rubric = if ($RubricPath) { $RubricPath } else { Join-Path $RepoRoot 'docs/agents/pr-review.md' }
 if (-not (Test-Path $rubric)) { $rubric = Join-Path $PSScriptRoot 'pr-review.md' }
+if (-not (Test-Path $rubric)) { $rubric = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'docs/agents/pr-review.md' }
 if (-not (Test-Path $rubric)) { throw "找不到评审标准：$rubric" }
+
+# Windows PowerShell 5.1 的 `-Encoding utf8` 会写 BOM，BOM 会污染评论正文与 state.json。
+# 计划任务可能用 5.1 跑（本机没有独立 pwsh 7 二进制），所以统一走 .NET 的 UTF-8 无 BOM。
+function Save-Utf8([string]$Path, [string]$Text) {
+    $dir = Split-Path $Path -Parent
+    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Add-Utf8([string]$Path, [string]$Text) {
+    [System.IO.File]::AppendAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
 
 function Write-Log([string]$Message) {
     $line = '[{0}] {1}' -f (Get-Date -Format 'HH:mm:ss'), $Message
     Write-Host $line
-    Add-Content -Path (Join-Path $stateDir 'dispatch.log') -Value $line -Encoding utf8
+    Add-Utf8 (Join-Path $stateDir 'dispatch.log') ($line + "`r`n")
 }
 
 # ---- 单实例 ----
@@ -63,7 +78,7 @@ if (Test-Path $lockPath) {
     }
     Remove-Item $lockPath -Force
 }
-Set-Content -Path $lockPath -Value (Get-Date -Format o) -Encoding utf8
+Save-Utf8 $lockPath (Get-Date -Format o)
 
 try {
     # ---- 状态：PR 号 -> 已评的 head SHA ----
@@ -153,7 +168,7 @@ $($p.body)
 4. 严格按「输出契约」结尾给 VERDICT。
 "@
             $promptFile = Join-Path $stateDir ('prompt-{0}-{1}.md' -f $num, $short)
-            Set-Content -Path $promptFile -Value $prompt -Encoding utf8
+            Save-Utf8 $promptFile $prompt
 
             # ---- 起 agent（独立进程，超时保护）----
             $logFile = Join-Path $stateDir ('review-{0}-{1}.md' -f $num, $short)
@@ -209,7 +224,7 @@ $body
 
             # ---- 贴评论（sticky）----
             $commentFile = Join-Path $stateDir ('comment-{0}-{1}.md' -f $num, $short)
-            Set-Content -Path $commentFile -Value $comment -Encoding utf8
+            Save-Utf8 $commentFile $comment
             $comments = gh api "repos/$GitHubRepo/issues/$num/comments" --paginate 2>$null | ConvertFrom-Json
             $existing = ($comments | Where-Object { $_.body -like "*$marker*" } | Select-Object -First 1).id
             if ($existing) {
@@ -233,7 +248,7 @@ $body
             $state[[string]$num] = $sha
             $stateObj = @{}
             foreach ($k in $state.Keys) { $stateObj[$k] = @{ sha = $state[$k] } }
-            ($stateObj | ConvertTo-Json -Depth 4) | Set-Content $statePath -Encoding utf8
+            Save-Utf8 $statePath ($stateObj | ConvertTo-Json -Depth 4)
 
             if ($verdict -ne 'approve') { $exitCode = 1 }
         }
