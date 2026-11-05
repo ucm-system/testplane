@@ -343,6 +343,44 @@ docker run --rm -e PGPASSWORD=testplane postgres:16-alpine `
   psql -h host.docker.internal -U testplane -d testplane -c "select 1"
 ```
 
+### 6.1 Secret rotate 的窄 RBAC（D-55，按登记项生成）
+
+`POST /admin/secrets/{name}/rotate` 需要确认"目标 Secret 存在且 key 非空"。
+`06 §4.4` 仍然**不授予**通配 `secrets get/list/watch`；唯一例外是 `resourceNames` 限定到
+`secret_refs` 里**已登记的那一条** Secret 的 `get`（D-55，评审 #5）。
+
+清单**不要手写**：`resourceNames` 必须等于 `secret_refs.secret_name`，按登记项生成：
+
+```powershell
+# 1) 生成（Role 在目标 Secret 的 namespace，RoleBinding 绑控制面 SA）
+pwsh deploy/k8s/gen-secret-rotate-role.ps1 `
+  -Namespace testplane -SecretName tp-secret-endpoint-mock `
+  -Out deploy/k8s/rbac-secret-rotate.yaml
+
+# 2) apply（本地 kind）
+kubectl --context kind-testplane apply -f deploy/k8s/rbac-secret-rotate.yaml
+
+# 3) 验证（真实结果必须与设计一致）
+#    精确到名字的授权：allowed=true
+kubectl --context kind-testplane create -f - -o jsonpath='{.status.allowed}{"\n"}' <<'EOF'
+apiVersion: authorization.k8s.io/v1
+kind: SubjectAccessReview
+spec:
+  user: system:serviceaccount:testplane:testplane
+  resourceAttributes: {namespace: testplane, verb: get, resource: secrets, name: tp-secret-endpoint-mock}
+EOF
+#    未登记的名字：allowed=false（resourceNames 生效）
+#    通配询问：kubectl auth can-i get secrets --as=system:serviceaccount:testplane:testplane -n testplane
+#             → 返回 no（因为没有 list/全部名字的权限，这正是"窄"的证据）
+
+# 4) rotate 正向（控制面 SA 身份）：200 且 verified=true
+#    e2e 也会断言这条：pwsh scripts/e2e/admin-check.ps1
+```
+
+> - 每个登记项各生成一份（Role 名 `testplane-secret-rotate-<secret>`，同一输入稳定同名）。
+> - 轮换/新增登记后重新生成并 apply；撤销登记就把对应清单删掉再 `kubectl delete`。
+> - 生成脚本会做 DNS-1123 校验；namespace / Secret 名不合法时直接报错，不会产出坏 YAML。
+
 ---
 
 ## 7 验收速查（贴进 issue 用这几条）

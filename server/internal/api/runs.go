@@ -236,7 +236,13 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.machines.Runs.Cancel(ctx, runID, Actor(ctx)); err != nil {
+	// 状态推进 + 审计同事务（PR #33 #6）：取消生效就一定有一条 audit_log。
+	entry := s.auditEntry(r, "cancel", "run", runID, map[string]any{"status_before": run.Status})
+	if _, err := s.machines.Runs.CancelAudited(ctx, runID, Actor(ctx), entry); err != nil {
+		if errors.Is(err, domain.ErrTx) {
+			s.failAuditTx(w, r, "cancel", "run", runID, err)
+			return
+		}
 		if errors.Is(err, domain.ErrConflict) {
 			// 竞态：读回事实，幂等返回。
 			if cur, getErr := s.st.Runs.Get(ctx, nil, runID); getErr == nil {
@@ -246,12 +252,6 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		}
 		s.failErr(w, r, err)
 		return
-	}
-	if err := s.st.Audits.Insert(ctx, nil, store.AuditEntry{
-		Actor: Actor(ctx), Role: Role(ctx), Action: "cancel",
-		ObjectType: "run", ObjectID: runID,
-	}); err != nil {
-		s.logger.Warn("写审计失败", "err", err, "run_id", runID)
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"run_id": runID, "status": string(domain.RunCancelling),

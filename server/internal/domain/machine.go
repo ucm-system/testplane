@@ -80,6 +80,40 @@ var runTransitions = map[edge]TransitionSpec{
 	{RunCancelling.Status(), RunFailed.Status()}: {Command: "Fail", Event: EventRunFinished},
 }
 
+// TerminalRunStatuses 是 Run 的**终态**集合——唯一真源。
+//
+// 用途（禁止再各写一遍）：
+//   - Go 侧判定：`TerminalRunStatus(st)`；
+//   - SQL 侧判定：`status = ANY($n)`，把本切片的字符串形态传进去（`TerminalRunStatusStrings()`）。
+//
+// 依赖它的地方：retry 前置（run 必须终态才可重试）、"是否已有进行中的 retry"判定。
+var TerminalRunStatuses = []RunStatus{
+	RunSucceeded,
+	RunCompletedWithErrors,
+	RunFailed,
+	RunCanceled,
+	RunServiceUnavailable,
+}
+
+// TerminalRunStatus 报告 Run 状态是否终态（与 TerminalRunStatuses 同源）。
+func TerminalRunStatus(st RunStatus) bool {
+	for _, t := range TerminalRunStatuses {
+		if st == t {
+			return true
+		}
+	}
+	return false
+}
+
+// TerminalRunStatusStrings 返回终态集合的字符串形态，供 SQL 的 `status = ANY($n)` 使用。
+func TerminalRunStatusStrings() []string {
+	out := make([]string, 0, len(TerminalRunStatuses))
+	for _, t := range TerminalRunStatuses {
+		out = append(out, string(t))
+	}
+	return out
+}
+
 // ---- Task 转移表（T1–T11，02 §2.2）---------------------------------------
 
 var taskTransitions = map[edge]TransitionSpec{

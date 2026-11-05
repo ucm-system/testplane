@@ -1,0 +1,26 @@
+# 本地/演示环境 overlay：把仓库默认清单里的"安全默认"（oidc + prod）改回本地开发形态
+#
+#   kubectl apply -k deploy/overlays/local-dev
+#
+# 只用于 kind / 本机演示。**任何共享环境都不要 apply 这个 overlay**：
+# dev 鉴权意味着"任何能连上 :8080 的调用者都是 admin"（06 §6.1、07 §2.1）。
+#
+# 注意：不要在这里写 `namespace:` —— 基础清单里已经有两个 Namespace（testplane /
+# testplane-mock），再叠 namespace 变换会把它们压成同一个 name 而报 ID 冲突。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../k8s
+
+patches:
+  - target:
+      kind: ConfigMap
+      name: testplane-config
+    patch: |-
+      - op: replace
+        path: /data/TESTPLANE_ENV
+        value: "dev"
+      - op: replace
+        path: /data/TESTPLANE_AUTH_MODE
+        value: "dev"

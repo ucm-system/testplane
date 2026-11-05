@@ -88,3 +88,32 @@ test('operator：Task 取消按钮可点并走二次确认', async ({ page }) =>
   await expect(page.getByRole('button', { name: '确认取消 Task' })).toBeVisible()
   // 这里不点确认：点了会改 mock 内存状态，后续断言没必要依赖它
 })
+
+/**
+ * 管理台页签的**键盘可达性**（评审 #13）：roving tabindex + 方向键。
+ * `admin` 角色下打开 /admin，用 ArrowRight 从 Profiles 走到 Audit，面板要跟着换。
+ */
+test('admin：键盘 ←/→ 切换页签到 Audit', async ({ page }) => {
+  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.goto('/admin')
+  await expect(page.getByText('Execution Profiles')).toBeVisible()
+
+  const profilesTab = page.getByRole('tab', { name: 'Profiles' })
+  await profilesTab.focus()
+  await expect(profilesTab).toHaveAttribute('aria-selected', 'true')
+
+  // 方向键切页签（不是 Tab 键）
+  await page.keyboard.press('ArrowRight') // Clusters
+  await page.keyboard.press('ArrowRight') // Secrets
+  await page.keyboard.press('ArrowRight') // Audit
+  const auditTab = page.getByRole('tab', { name: 'Audit' })
+  await expect(auditTab).toHaveAttribute('aria-selected', 'true')
+  await expect(auditTab).toBeFocused()
+  await expect(page.getByRole('tabpanel')).toContainText('审计日志')
+
+  // Home / End 回到两端
+  await page.keyboard.press('Home')
+  await expect(page.getByRole('tab', { name: 'Profiles' })).toHaveAttribute('aria-selected', 'true')
+  await page.keyboard.press('End')
+  await expect(page.getByRole('tab', { name: 'Audit' })).toHaveAttribute('aria-selected', 'true')
+})

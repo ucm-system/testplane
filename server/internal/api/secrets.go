@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
@@ -152,20 +153,25 @@ func (s *Server) handleAdminCreateSecretRef(w http.ResponseWriter, r *http.Reque
 		Name: name, Namespace: namespace, SecretName: secretName, Key: key,
 		Description: optionalText(req.Description), CreatedBy: Actor(ctx),
 	}
-	if err := s.st.CreateSecretRef(ctx, ref); err != nil {
-		if errors.Is(err, domain.ErrConflict) {
+	// 审计只记定位信息（这是设计允许保存的内容），不记任何值；与登记同事务。
+	err := s.st.InAuditedTx(ctx, s.auditEntry(r, action, objectType, name, map[string]any{
+		"namespace": namespace, "secret_name": secretName, "key": key,
+	}), func(tx pgx.Tx) error {
+		return s.st.CreateSecretRefTx(ctx, tx, ref)
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrConflict):
 			s.rejectWrite(w, r, action, objectType, name,
 				http.StatusConflict, domain.CodeConflict,
 				"Secret 引用名已存在", map[string]any{"name": name}, false)
-			return
+		case errors.Is(err, domain.ErrTx):
+			s.failAuditTx(w, r, action, objectType, name, err)
+		default:
+			s.failWriteErr(w, r, action, objectType, name, err)
 		}
-		s.failErr(w, r, err)
 		return
 	}
-	// 审计只记定位信息（这是设计允许保存的内容），不记任何值。
-	s.auditOK(r, action, objectType, name, map[string]any{
-		"namespace": namespace, "secret_name": secretName, "key": key,
-	})
 	writeJSON(w, http.StatusCreated, toSecretRefDTO(*ref))
 }
 
@@ -194,7 +200,7 @@ func (s *Server) handleAdminRotateSecret(w http.ResponseWriter, r *http.Request)
 				"Secret 引用不存在", map[string]any{"name": name}, false)
 			return
 		}
-		s.failErr(w, r, err)
+		s.failWriteErr(w, r, action, objectType, name, err)
 		return
 	}
 
@@ -212,12 +218,17 @@ func (s *Server) handleAdminRotateSecret(w http.ResponseWriter, r *http.Request)
 	exists, keyNonEmpty, err := probe.CheckSecretKey(pctx, ref.Namespace, ref.SecretName, ref.Key)
 	if err != nil {
 		// 不清空引用、不报成功：轮换校验失败只告警（C-10）。
+		// 区分 forbidden 与不可达：前者说明 D-55 的 resourceNames Role 没 apply。
+		reason := "k8s_unavailable"
+		if errors.Is(err, errSecretForbidden) {
+			reason = "forbidden"
+		}
 		s.logger.Warn("轮换校验读 Secret 失败", "err", err, "secret_ref", name,
-			"namespace", ref.Namespace, "request_id", RequestID(ctx))
+			"namespace", ref.Namespace, "reason", reason, "request_id", RequestID(ctx))
 		s.rejectWrite(w, r, action, objectType, name,
 			http.StatusServiceUnavailable, domain.CodeExecutorUnavailable,
 			"无法读取目标 Secret（集群不可达或无权限）",
-			map[string]any{"reason": "k8s_unavailable", "verified": false}, true)
+			map[string]any{"reason": reason, "verified": false}, true)
 		return
 	}
 	if !exists {
@@ -235,12 +246,19 @@ func (s *Server) handleAdminRotateSecret(w http.ResponseWriter, r *http.Request)
 	}
 
 	checkedAt := s.now().UTC()
-	// 审计只记录定位信息与检查时间，不记录值。
-	s.auditOK(r, action, objectType, name, map[string]any{
+	// rotate 没有业务状态可回滚，但审计写不进去就不能报成功：
+	// 审计上下文与客户端连接解耦（断连也要留下 verified 记录）。
+	err = s.appendAuditDetached(ctx, s.auditEntry(r, action, objectType, name, map[string]any{
 		"namespace": ref.Namespace, "secret_name": ref.SecretName, "key": ref.Key,
 		"verified": true, "checked_at": checkedAt.Format(time.RFC3339),
+	}))
+	if err != nil {
+		s.failAuditTx(w, r, action, objectType, name, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rotated": true, "verified": true, "checked_at": checkedAt,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"rotated": true, "checked_at": checkedAt})
 }
 
 // listAllSecretRefs 拉全量引用（引用表是配置级数据，量级很小）。

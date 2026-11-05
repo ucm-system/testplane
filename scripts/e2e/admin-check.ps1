@@ -1,14 +1,24 @@
-# 管理面 P1 端点验收：profiles/clusters CRUD、secrets 登记与 rotate 负向、
+# 管理面 P1 端点验收：profiles/clusters CRUD、secrets 登记与 rotate、
 # audit 有记录、人工清理产物（终态 200 / 非终态 409）。
 #
-# 前置：控制面可访问（默认 http://127.0.0.1:8093），dev 模式角色 admin。
+# 前置：
+#   1) 控制面可访问（默认 http://127.0.0.1:8093），dev 模式角色 admin；
+#   2) rotate 真集群用例要求 D-55 的窄授权已 apply（否则 verified 用例按设计判红）：
+#        pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace testplane `
+#          -SecretName tp-secret-endpoint-mock -Out deploy/k8s/rbac-secret-rotate.yaml
+#        kubectl --context kind-testplane apply -f deploy/k8s/rbac-secret-rotate.yaml
+#      该用例走的是**部署的 SA**（控制面 Pod 的 ServiceAccount），不是本机 admin kubeconfig。
+#
 # 用法：pwsh scripts/e2e/admin-check.ps1 -BaseUrl http://127.0.0.1:8093
 param(
     [string]$BaseUrl = 'http://127.0.0.1:8093',
     [string]$User = 'dev',
     [string]$MockURL = 'http://mock-llm.default.svc:18080/v1',
     [string]$SlowMockURL = 'http://mock-llm-slow.default.svc:18080/v1',
-    [string]$Namespace = 'testplane'
+    [string]$Namespace = 'testplane',
+    # rotate 正向用例的目标 Secret（deploy 预置的 mock 端点密钥，key=api_key）。
+    [string]$RotateSecretName = 'tp-secret-endpoint-mock',
+    [string]$RotateSecretKey = 'api_key'
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -80,9 +90,22 @@ Add-Check 'secret.create_no_value_echo' ($r.Content -notmatch '"value"|"secret_v
 
 $r = Call POST "/api/v1/admin/secrets/$secretRef/rotate" @{}
 $j = JsonOf $r
-$rotateNegativeOK = (($r.StatusCode -eq 404 -and $j.code -eq 'NOT_FOUND') -or
-                     ($r.StatusCode -eq 503 -and $j.code -eq 'EXECUTOR_UNAVAILABLE'))
-Add-Check 'secret.rotate_missing_negative' $rotateNegativeOK ("status=" + $r.StatusCode + " code=" + $j.code + "（404 或 RBAC 未就绪的 503 均接受）")
+# 目标 Secret 不存在：正确结果 404；若 D-55 的窄授权没 apply，只能是 503 且必须带 reason
+# （评审 #5：不接受"裸 503"，也不接受把授权缺失当成正常）。
+$rotateMissingOK = (($r.StatusCode -eq 404 -and $j.code -eq 'NOT_FOUND') -or
+                    ($r.StatusCode -eq 503 -and $j.code -eq 'EXECUTOR_UNAVAILABLE' -and $j.detail.reason -in @('forbidden', 'k8s_unavailable')))
+Add-Check 'secret.rotate_missing_negative' $rotateMissingOK ("status=" + $r.StatusCode + " code=" + $j.code + " reason=" + $j.detail.reason)
+
+# ---- rotate 真集群正向：部署 SA + D-55 窄授权必须能返回 verified ----------
+# 走的是控制面 Pod 的 ServiceAccount（不是本机 admin kubeconfig）；
+# Role 没 apply 时这里会红——这正是要检出的问题。
+$rotateRef = "e2e-rotate-$stamp"
+$r = Call POST '/api/v1/admin/secrets' @{ name = $rotateRef; namespace = $Namespace; secret_name = $RotateSecretName; key = $RotateSecretKey; description = 'e2e rotate verified' }
+Add-Check 'secret.rotate_ref_create_201' ($r.StatusCode -eq 201) ("status=" + $r.StatusCode)
+$r = Call POST "/api/v1/admin/secrets/$rotateRef/rotate" @{}
+$j = JsonOf $r
+$rotateVerifiedOK = ($r.StatusCode -eq 200 -and $j.rotated -eq $true -and $j.verified -eq $true)
+Add-Check 'secret.rotate_verified_200' $rotateVerifiedOK ("status=" + $r.StatusCode + " verified=" + $j.verified + " reason=" + $j.detail.reason + "（要求 D-55 的 resourceNames Role 已 apply）")
 
 $r = Call GET '/api/v1/admin/audit?limit=100'
 $j = JsonOf $r
@@ -91,6 +114,9 @@ Add-Check 'audit.list_200' ($r.StatusCode -eq 200 -and @($j.items).Count -gt 0) 
 Add-Check 'audit.has_admin_writes' (($actions -contains 'register') -and ($actions -contains 'secret_rotated')) ("actions=" + (($actions | Select-Object -Unique) -join ','))
 $rejected = @($j.items | Where-Object { $_.action -eq 'secret_rotated' -and $_.detail.result -eq 'rejected' }).Count
 Add-Check 'audit.rotate_rejected_recorded' ($rejected -ge 1) ("secret_rotated rejected=" + $rejected)
+$verified = @($j.items | Where-Object { $_.action -eq 'secret_rotated' -and $_.detail.result -eq 'ok' -and $_.detail.verified -eq $true }).Count
+Add-Check 'audit.rotate_verified_recorded' ($verified -ge 1) ("secret_rotated verified=true 记录=" + $verified)
+
 
 # ---- 人工清理产物：非终态 409 / 终态 200 + 列表清空 --------------------
 $slowManifest = @{

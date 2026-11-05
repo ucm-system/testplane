@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -108,11 +108,12 @@ test('演示：提交服务形态 Run → 详情 → 报告 → 集群 → 管�
   await expect(page.locator('[data-testid="retry-confirm"]')).toBeEnabled()
   await shot('08-retry-dialog')
 
-  // 收尾自检：八张截图路径都打出来，方便直接贴给人看
+  // 收尾自检（评审 #15）：断言**文件真的存在且非空**，不是断言路径字符串
   for (const step of STEPS) {
     const file = join(OUT_DIR, `${step}.png`)
     // eslint-disable-next-line no-console
     console.log(`screenshot: ${file}`)
-    expect(file).toBeTruthy()
+    expect(existsSync(file), `${step}.png 应该已经写到磁盘`).toBe(true)
+    expect(statSync(file).size, `${step}.png 不应是空文件`).toBeGreaterThan(1024)
   }
 })

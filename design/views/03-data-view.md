@@ -347,23 +347,30 @@ CREATE TABLE audit_log (
 );
 CREATE INDEX audit_at_idx     ON audit_log (at DESC);
 CREATE INDEX audit_object_idx ON audit_log (object_type, object_id);
+```
+
 ### 4.6.1 审计动作枚举（`audit_log.action`）
 
 写操作必须落审计；**失败的尝试也记**（`detail.result = "rejected"`，含 `code` 与对象标识），只有"畸形 JSON / 超大 body"这类**无法归属对象**的请求不记。
 
 | action | 触发 | object_type |
 |---|---|---|
-| `submit` | 提交 Run / 独立 Task | `run` / `task` |
-| `cancel` | 取消 Run / Task | `run` / `task` |
-| `retry` | 重试 Run / 重跑 Task | `run` / `task` |
+| `submit` / `cancel` / `retry` | 提交 / 取消 / 重试（与状态推进**同事务**；失败也记 `rejected`） | `run` / `task` |
 | `register` | 新建 Profile / Cluster / Secret 引用 | `execution_profile` / `cluster` / `secret_ref` |
 | `update` | 更新 Profile / Cluster | `execution_profile` / `cluster` |
 | `delete_profile` / `delete_cluster` | 删除 Profile / Cluster | 同名 object_type |
 | `secret_rotated` | 轮换校验（D-55 窄例外：只对登记项做存在性检查，不读值） | `secret_ref` |
 | `cleanup_artifacts` | 人工清理某 Run 的产物 | `run` |
+| `rbac_rejected` | 403：角色不足（中间件拒绝，进不到 handler） | `http_request` |
+| `csrf_rejected` | 403：Cookie 写操作缺/错 `X-CSRF-Token` | `http_request` |
+| `auth_rejected` | 401：无/坏凭据（`actor=anonymous`） | `http_request` |
 
+> **审计口径（PR #33 评审第 6 条）**：所有写操作（`submit`/`cancel`/`retry` + admin 写 + `rotate` + 清理产物）与 `audit_log` 在**同一事务**提交——审计写失败 → 整体回滚 + 5xx，不允许"数据改了、审计没写"。拒绝类（403/401/CSRF）进不到 handler，在事务外用 `context.WithoutCancel` + 2s 超时补记，`detail.result=rejected` 且带 `code`/`reason`；`http_request` 的 `object_id` 记请求路径。畸形 JSON / 超大 body 不记（无法归属对象）。
+>
 > `actor` / `role` 由服务端按当前身份记录，**不接受客户端传**；`detail` 里禁止出现任何 Secret 值（`06 §4.4` + D-55）。
-```
+>
+
+
 
 ---
 

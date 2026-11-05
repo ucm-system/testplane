@@ -874,7 +874,7 @@ Run `report.json` 严格按 §8.4：只做组织与索引，不做指标聚合�
 | `GET` | `/runs/{id}/manifest` | viewer | Manifest 快照（用于"照上次配置再来一次"与事后核对） |
 | `GET` | `/runs/{id}/retry-plan` | viewer | 重试预览：将复用 / 将重跑的 Task（W-4.4） |
 | `GET` | `/runs/{id}/deploy` | viewer | 部署快照（manifest/pods/状态） |
-| `GET` | `/runs/{id}/deploy/logs` | viewer | `?pod=&segment=&tail=` |
+| `GET` | `/runs/{id}/deploy/logs` | viewer | `?pod=`（必选）`&offset=&limit=&tail_lines=`（游标单 Pod 内；`tail_lines` 与 `offset` 互斥；Pod 已回收时返回 `message` + `gaps[].reason`） |
 | `GET` | `/runs/{id}/files` | viewer | `?path=` 产物下载（白名单 + Range） |
 | `GET` | `/runs/{id}/artifacts` | viewer | Run 级产物清单（报告页与下载列表用） |
 | `POST` | `/tasks` | operator | 独立提交 Task（C-5.9，`task:` 形态，`service` 必填 `url`，禁止 `deploy`）；`?dry_run=true` 只校验 |

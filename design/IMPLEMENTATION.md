@@ -383,7 +383,7 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 |---|---|---|
 | MCP Server | 复用同一 OpenAPI 生成的客户端；MCP 只是另一层 adapter，无独有逻辑 | 🟢 进行中（本轮已交付最小可用）：`server/internal/mcp`，stdio + JSON-RPC 2.0，9 个工具 |
 | CLI `tpctl` | 同上；命令与 API 一一对应 | 🟢 进行中（本轮已交付最小可用）：`server/cmd/tpctl`，10 个子命令 |
-| 失败续跑（跨 Run） | `runs.retry_of` 字段已在 DDL 预留；复用校验条件在 C-5.6 定义 | ⬜ 之后 |
+| 失败续跑（跨 Run） | `runs.retry_of` + `tasks.reused_from_task_id`；**retry = 新 Run**（`02 §2.6`），复用产物落 `tasks/<task>/reused/` | ✅ 已实现（`api/retry.go`、`store/retry.go`） |
 | Run 对比 | 读 `result.json` 的 UI 层能力（按指标名 + labels + workload 对齐）；P1 可依赖 MongoDB 指标集合 | ⬜ 之后 |
 | 指标索引（跨 Run 查询） | P0 只存 `result.json` 文件；P1 可写 **MongoDB**（`metrics` 集合：run/task/attempt/name/statistic/unit/value/labels），查询接口不变；也可先加 PostgreSQL `metrics_index` 表过渡 | ⬜ 之后 |
 | Matrix 展开 | 提交前的纯函数变换（`args` 展开为多个 Task），不改变调度与契约 | ⬜ 之后 |
@@ -410,7 +410,7 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 三角色单二进制（`--role=api\|controller\|collector\|all`） | ✅ `api`/`controller`/`all` 可用；`collector` 未拆（日志由 executor 采、报告由终态 hook 写） | `server/cmd/testplaned` |
 | 状态机内核（Run/Task/Attempt/Tester + Deploy 子状态） | ✅ 转移表 R1–R10 / T1–T11，`Kernel.Apply` 8 步、CAS、事件 seq | `server/internal/domain`、`server/internal/store` |
 | 存储与迁移 | ✅ 11 张表 + 15 索引，启动自动迁移（`migrate up` 子命令亦可） | `server/migrations`、`server/internal/store` |
-| REST + SSE（25 operations） | ✅ `/api/v1` 全量；SSE 断点续传 + `events/history` | `server/internal/api`、`server/api/openapi.yaml` |
+| REST + SSE（**50 operations**） | ✅ `/api/v1` 全量；SSE 断点续传 + `events/history` | `server/internal/api`、`server/api/openapi.yaml` |
 | 调度（门控 / 独占 / 全局并发 / 公平性） | ✅ 门控与两类并发上限、`waiting_reason` 六值；公平性仅"按提交时间" | `server/internal/orchestrator` |
 | K8s Job 执行器 | ✅ 真集群跑通（渲染/提交/观测/取消/日志/digest） | `server/internal/executor` |
 | Deploy 阶段（Genet） | 🟡 **mock**；**适配设计已按 Genet 真实实现定稿**（Helm release 为部署单元、`noWait=true`、ready≠可用、位次不可得，见 D-44～D-48 与 `impl/execution.md §9`），实现待 P1 | `server/internal/genet/mocks` |
@@ -421,7 +421,7 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | Volcano / gang / 队列看板 | ⬜ 未做（`/queue-status` 报 `volcano_unavailable`） | — |
 | OIDC / RBAC / CSRF | ⬜ 未做（仅 `TESTPLANE_AUTH_MODE=dev`） | — |
 | 独立 Task（`POST /tasks`） | ⬜ 未做 | — |
-| 失败续跑（`POST /runs/{id}/retry`）、`/report` 富指标 | ⬜ 未做（P1） | — |
+| 失败续跑（`POST /runs/{id}/retry`）、`/report` 富指标 | ✅ 续跑 3 条已实现（`retry`/`retry-plan`/`tasks/{id}/retry`）；`/report` 仍是基础版（无富指标） | `02 §2.6`、`07 §8` |
 
 ### 15.2 P0 剩余端点收口（原「延后项」表，PR #18 后全部实现）
 
@@ -436,7 +436,12 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 
 > 这张表是评审 [PR #13](https://github.com/ucm-system/testplane/pull/13)「API 面比设计少、且没有延后说明」的补记；PR #18 已把 6 项全部实现并补测试，`openapi.yaml` 同步这 6 个 operation（`make openapi-lint` 0 error）。
 >
-> **仍未实现（明确延后，P1）**：`POST /runs/{id}/retry`、`GET /runs/{id}/retry-plan`（失败续跑，需复用判定与 Attempt 生成策略）、`GET /runs/{id}/deploy/logs`（Deploy 多 Pod 日志分段，依赖 collector 分段索引）、`/admin/profiles|clusters|secrets|audit` 与 `DELETE /admin/runs/{id}/artifacts`（admin RBAC 与 OIDC 一起做）、`GET /secrets`（Secret 引用清单，依赖 admin 面）。`GET /tasks` 的 `/tasks/{id}/retry` 同样延后。
+> **实现边界（票 #33 之后）**：`design/views/07-api.md §5` 里 50 个端点**全部实现**，`tools/contract/allow-missing.txt` 为 **0 条**。仍属"明确不做"的只有 `POST /tasks`（独立 Task 提交，`ARCHITECTURE §13` 当期不做）。
+>
+> 三条**有意的实现偏差**（每条都写进 §15.3 偏差表）：
+> 1. `GET /runs/{id}/deploy/logs` 是**实时读 K8s `pods/log`**，不是设计里的落盘 `deploy/logs/<pod>.log`；Pod 被 GC 回收后读不到，端点会显式返回 `message` 说明"Pod 已回收"，**不假装空日志**（§15.3 第 20 行）；
+> 2. 续跑产物用**硬链接 + 新建 `reused/` 目录**，不是设计设想的"引用旧目录"（§15.3 第 21 行）；
+> 3. rotat​e 的 Secret 读取是 D-55 的**窄例外**（`resourceNames` 限定），未在默认清单里授予通配权限。
 >
 > **未在 §15.2/§15.4 列出的端点均已实现；白名单每条的记录指针见 `tools/contract/allow-missing.txt`。**
 
@@ -459,6 +464,8 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 13 | 卸载失败/校验未过时写 `cleanup.failed` 事件（`state_events.type`）；`Repos` 为此加了一个**最小专用**方法 `AppendRunEvent(ctx, runID, type, payload)`，未开放通用事件 API | payload = `{release_name, cleanup_errors[], attempt, verified_at}`；`uninstall.state` 的四个取值已收进 `domain` 常量。契约侧已回写：`03-data-view.md §4.6` 的 type 枚举与 `07-api.md §7` 的 SSE 事件类型表都补了 `cleanup.failed`；openapi 的 `EventType` 枚举同补，并新增 `DeployUninstall` schema（`state ∈ pending|running|verified|skipped|failed`） |
 | 14 | `testers/endpoint-probe/tester.yaml` 的 `placeholder` 是多行说明而非一行命令，`parameters.url.description` 里还写了"退出码 2"（`ARCHITECTURE §5.4` 要求一行示例、§5.8 只有 0/非 0） | **不改 Tester 内容**：内容一变就要升版本（K-3 版本钉死，注册表实测会拒绝启动——本轮试改后已回滚）。平台侧取 `placeholder` 首行作占位、退出码一律按 0 / 非 0 归类；待 `/testers/{name}/versions/{version}` 与版本升级流程就绪后，由 Tester 维护者在下一个版本里修（G-15） |
 | 19 | 卸载收口路径曾忽略 `cleanup_policy`（快路径不看策略，与对账不同口径）；`cleanup.failed` 载荷漂移（含 `attempt`、缺 `uninstall_state`） | 已按票 #28 修：`never` → `uninstall.state=skipped`、`on_failure` → 仅在"存在非 succeeded 的 Task"时卸载（新增 `domain.UninstallSkipped`）；载荷改为 `{release_name, cleanup_errors[], uninstall_state, verified_at}`；`ListDeployCleanupPending` 纳入 `canceled` 终态。**C-5.7 顺序**改为"先落终态 → 事务外卸载"，见 `impl/control-plane.md:722` |
+| 20 | `GET /runs/{id}/deploy/logs` 与设计不一致：设计要求 Deploy 日志落 `deploy/logs/<pod>.log` 且**不随 Pod 回收**（`ARCHITECTURE §8.1`、`execution.md §8`），实现是**实时读 K8s `pods/log`** | MVP 明确记为偏差：直读 `pods/log`，Pod 被 GC 回收后读不到。端点在"Pod 已回收"时返回 **200 + `message`**（写明"日志随 Pod 回收，MVP 未落盘"）**+ `gaps[].reason="pod recycled…"`**，不静默空数组；落盘由 collector 在 P1 补（届时端点实现不变、只换数据源）。游标为**单 Pod**（`?pod=` 必选），`tail_lines` 与 `offset` 互斥 |
+| 21 | 续跑复用产物：设计只要求"复用已成功 Task"，没规定产物怎么指向 | 实现选**硬链接到新 Run 自己的 `tasks/<task>/reused/`**（跨设备自动退化为复制），而不是引用旧目录：这样 `/runs/{id}/artifacts` 与 `/files?path=` 的路径前缀始终属于本 Run，不需要为复用开特例；复用 Task 不产生 Attempt（`attempt_no=0`） |
 | 15 | 业务时间曾直调 `time.Now()`（05 §6.5 禁止）：超窗判定、退避、`accepted_at/queued_at/ready_at/last_polled_at/finished_at/created_at` 等写库时间戳 | 引入 `domain.Clock`（`internal/domain/clock.go`，默认 `SystemClock`）；`store.Store.SetClock` 与 `orchestrator.Options.Clock` 注入，编排/存储两层的**业务时间**全部改走注入时钟；退避基准从 SQL `now()` 改为传入的事务时间 `at`（`effectScheduleRetry`），部署窗口判定从 `time.Since(...)` 改为 `now.Sub(...)`。回归：`TestDeployWindowUsesInjectedClock`、`TestWatchdogUsesInjectedClock`、`TestRetryBackoffUsesInjectedClock`。**保留 `time.Now()` 的位置与理由**见 15.3.1；执行层同步：`executor.Options.Clock` 注入 `domain.Clock`，`classifyOutcome` 的 `JobOutcome.FinishedAt` 不再直调 `time.Now()`（票 #31 executor 半边，`internal/executor/observe.go:218`） |
 | 16 | 请求链路曾用 `context.Background()`（丢掉 trace 与取消） | `cmd/testplaned/wire.go` 的 `taskView` 改为接收 `ctx`，`TesterRegistry.Resolve` 用请求上下文（`GetTask`/`ListTasks`/`ListActiveTasks` 一路透传 `r.Context()`）。**保留 Background 的位置**：进程信号（`main.go` 启动/关闭/migrate）、后台 goroutine（`store.fireRunFinished` 的 2 分钟超时、`notifier` 的 `notifyEmitDeadline`、`controller.cancelJobAsync` 用 `context.WithoutCancel`）——这些没有上游请求，必须显式给超时或 `WithoutCancel` |
 | 17 | `orchestrator/memory.go`（894 行内存 Repos）混在产线代码里，`go build` 会把它编进二进制 | 改名为 `memory_test.go`（同包 `_test` 文件，`go build` 不再包含；单测仍可直接用 `NewMemoryRepos()`）。`go build ./internal/orchestrator/` 与 `go test ./internal/orchestrator/` 均通过 |
@@ -481,6 +488,6 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 
 1. 真实 Genet 适配（替换 `internal/genet/mocks`，接口不变）。
 2. OIDC + 会话 + CSRF + RBAC（`TESTPLANE_AUTH_MODE=oidc`）。
-3. 失败续跑（`retry` / `retry-plan`）与 `POST /tasks` 独立 Task。
+3. `POST /tasks` 独立 Task（`ARCHITECTURE §13` 明确当期不做）。
 4. 指标索引（MongoDB）与 Run 对比、看板。
 5. `oapi-codegen` / `sqlc` 与生成物 diff 门禁。

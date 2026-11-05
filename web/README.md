@@ -80,7 +80,7 @@ src/
 
 ```bash
 cd web
-pnpm exec playwright test tests/demo.spec.ts   # 走 mock，不依赖后端；产物在 web/.data/demo/
+pnpm exec playwright test tests/demo.spec.ts   # 走 mock，不依赖后端；产物在 web/.data/demo/（入库副本见 docs/demo/）
 ```
 
 八步截图：`01-home` / `02-submit` / `03-runs` / `04-run-detail` / `05-report` / `06-clusters` / `07-admin-audit` / `08-retry-dialog`。
@@ -99,9 +99,9 @@ pnpm exec playwright test tests/demo.spec.ts   # 走 mock，不依赖后端；�
   Tester、args、profile、Attempt 全部靠点开时 `GET /tasks/{id}` 拉 `TaskDetail`。
 - `task_counts`：`failed` 含 canceled、`pending` 含 queued；契约只必填 `total/succeeded/failed`，
   缺 `pending/running/skipped` 时按 0 处理，整个字段缺失时列表显示 `—`。
-- **不调** `GET /runs/{id}/deploy/logs`：不在 MVP 契约里；Deploy 的 Pod 拓扑/参数快照来自 `GET /runs/{id}/deploy`。
-- **调了但不在 openapi 里的 P1 端点**（字段按 Lead 约定实现，后端落地后对齐）：
-  `GET /runs/{id}/retry-plan`、`POST /runs/{id}/retry`、`POST /tasks/{id}/retry`、`/admin/profiles`、`/admin/clusters`、`/admin/secrets`、`/admin/audit`。
+- **已接** `GET /runs/{id}/deploy/logs`（按 Pod 分页签，`?pod=` 必选、`offset` 单 Pod 游标、`tail_lines` 与 `offset` 二选一、`gaps[]` 显式标缺口）；Pod 拓扑/参数快照来自 `GET /runs/{id}/deploy`。
+- **重试与管理端点均已在 openapi 内**：`GET /runs/{id}/retry-plan`、`POST /runs/{id}/retry`、`POST /tasks/{id}/retry`
+  与 `/admin/{profiles,clusters,secrets,audit}`；字段按 schema 对齐（改成路径参数之类的偏差请先改 openapi）。
 
 ### 与后端实测的差异（2026-11-05 首轮联调）
 
@@ -218,6 +218,8 @@ dev 部署与 mock 模式都没有 `/auth/*`：`/me` 无 `csrf_token` → mode=d
 （`font-display: swap`），`index.css` 里 `@import "./styles/fonts.css"` 且 `--font-sans` 用原型同序栈
 （Albert Sans → Noto Sans SC → 系统兜底）。运行时零外网请求。
 
+> `web/public/fonts/*.woff2` 是 `design/prototype/assets/fonts/` 的**副本**：改字体要同步两处（原型是设计基准）。
+
 ### 圆角与染底
 
 `Card` 统一 `overflow-hidden`：语义染底的卡头（`bg-primary-weak` / `bg-warn-weak` …）、表头底色、
@@ -234,16 +236,22 @@ dev 部署与 mock 模式都没有 `/auth/*`：`/me` 无 `csrf_token` → mode=d
 | 执行环境 | 契约已有 `GET /profiles`；提交页仍是可编辑文本框（默认 `k8s-npu`），管理台可维护 | 提交页改下拉（一行改动） |
 | 报告页 / 指标表 | 报告页**已做**（`/runs/:id/report`：counts / Task 明细 / 失败清单 / `report.md` 原文）；指标表仍不做（契约明确不聚合） | 需要聚合视图时另开票 |
 | Deploy 日志 | **已接**：`GET /runs/{id}/deploy/logs`，按 Pod 分页签、`offset/next_offset` 加载更多、`tail_lines` 先看最新、`gaps[]` 显式标「此处不连续」 | 滚动跟随时可加 `follow` |
-| Run / Task 级重试 | **已做**（`GET /runs/{id}/retry-plan` + `POST /runs/{id}/retry` + `POST /tasks/{id}/retry`）：**这几个端点 openapi 未收录**，字段按 Lead 约定实现 | 后端落地后把 `types.ts` 的「P1」块改成按 openapi 生成 |
-| 管理台 `/admin` | **已做**（Profiles / Clusters / Secrets / Audit）；`/admin/*` 同样 openapi 未收录 | 同上；delete 409 的 `detail.profiles[]` 已按约定展示 |
+| Run / Task 级重试 | **已做**（`GET /runs/{id}/retry-plan` + `POST /runs/{id}/retry` + `POST /tasks/{id}/retry`），字段按 openapi 的 `RetryPlan`/`TaskRetryAccepted` 对齐（`reuse[].reason`、`rerun[].failure`、`blocked_items[]`） | `types.ts` 的直写类型换 `openapi-typescript` 生成 |
+| 管理台 `/admin` | **已做**（Profiles / Clusters / Secrets / Audit），路径按 openapi：`PUT /admin/{profiles,clusters}` 名字走 body、`DELETE …?name=` | delete 409 的 `detail.profiles[]` 在确认弹窗里展示 |
 | 日志跟随 / 虚拟滚动 | 一次性读取，无 follow 流 | `?follow=1` 流式追加 + `useVirtualizer`（>10k 行） |
 | 权限 | **已按 role 收口**：viewer 只读（提交/校验/取消 Run/取消 Task/重试置灰 + title），`/admin` 非 admin 显示无权限页 | 服务端仍是权威，前端只做前置提示 |
-| 测试 | Playwright：3 条 UI 冒烟 + 1 条演示脚本（`tests/demo.spec.ts`，产出 8 张截图） | 补 Vitest + MSW（错误码映射、SSE reducer） |
+| 测试 | Playwright：UI 冒烟 4 条（含 viewer 门禁与页签键盘）+ 布局/Deploy 日志 3 条 + client 契约 1 条 + 演示脚本 1 条；`tests/layout-audit.mjs` 35 项 DOM 实测；真后端用例 2 条（需 `VITE_USE_MOCK=0`） | 补 Vitest + MSW（错误码映射、SSE reducer） |
 | Lint | 无 | eslint / prettier 按 CI 要求补 |
 
 ## 验证过的事
 
-- `pnpm exec tsc -b` ✅、`pnpm build` ✅（entry ≈112KB gz、CSS ≈7.4KB gz，路由级拆包）。
+- **布局/页头坐标**：`tests/layout.spec.ts`（`getBoundingClientRect` 断言 240 / vw−288 / 三列等高 / main 先于 aside）+ `tests/layout-audit.mjs`（35 项，需 `DEMO_BASE`）→ 全绿。
+- **client 请求形状**：`tests/client-contract.spec.ts` 在浏览器里 import `real.ts`、替换 `fetch` 记录 URL/method/body，
+  断言 admin 更新/删除走 `?name=` + body（改成路径参数这条会红）。
+- **真后端 CRUD**：`tests/real-api.spec.ts` 的 admin profile 创建→更新→删除（走前端 client，需 `VITE_USE_MOCK=0` + `TESTPLANE_BACKEND`）。
+- **Deploy 日志单 Pod 游标**：`tests/layout.spec.ts` 第三条断言页签切换带 `pod`、`tail_lines` 不与 `offset` 同传、`next_offset` 续读、缺 pod 400 / 未知 pod 404。
+
+- `pnpm exec tsc -b` ✅、`pnpm build` ✅（entry ≈119.3 KB，gzip ≈8.1 KB；路由级拆包）。
 - `pnpm dev` 在 5173 起得来（默认 `VITE_USE_MOCK=0`，请求打到代理目标）。
 - 默认（真实后端）产物在没有后端时**不白屏**：`/` 显示 `ENDPOINT_UNREACHABLE` + 中文说明 + 可重试 + detail，其余区块走空态；
   页头无 `mock` 徽标、页脚显示「控制台」，确认 mock 没有被编进默认产物。

@@ -19,6 +19,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,10 +33,16 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// errSecretForbidden 表示"能连上集群但没权限读这条 Secret"。
+// 调用方据此把 detail.reason 报成 forbidden（说明 D-55 的 resourceNames Role 没 apply），
+// 而不是笼统的 k8s_unavailable——评审 #5 要求运维能一眼看出是授权没落。
+var errSecretForbidden = errors.New("k8s: 无权读取该 Secret")
+
 // SecretProbe 校验 secret_refs 指向的 K8s Secret 与 key 是否可读。
 type SecretProbe interface {
 	// CheckSecretKey 返回 (Secret 是否存在, key 是否存在且非空, 错误)。
-	// 不存在不是错误（由调用方映射 404）；错误表示集群不可达 / 无权限。
+	// 不存在不是错误（由调用方映射 404）；错误表示集群不可达 / 无权限
+	// （无权限包 errSecretForbidden）。
 	CheckSecretKey(ctx context.Context, namespace, secretName, key string) (exists bool, keyNonEmpty bool, err error)
 }
 
@@ -127,6 +135,11 @@ func (p *k8sSecretProbe) CheckSecretKey(ctx context.Context, namespace, secretNa
 	secret, err := p.cs.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return false, false, nil
+	}
+	if apierrors.IsForbidden(err) {
+		// 能连上集群但没权限：D-55 的 resourceNames Role 没 apply（或 apply 到了别的 namespace）。
+		// 只把"哪条 Secret 读不了"包进 sentinel，不回传 k8s 原文（可能含用户/角色信息）。
+		return false, false, fmt.Errorf("%w（%s/%s）: %w", errSecretForbidden, namespace, secretName, err)
 	}
 	if err != nil {
 		return false, false, err
