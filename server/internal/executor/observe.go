@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -493,4 +494,36 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// JobState 是对账（C-3.5「重启恢复与对账」）需要的 Job 观测结论：
+// 编排层据此判断"任务已死但租约还在"的僵尸状态。
+type JobState struct {
+	// Exists 表示 K8s 里还能查到该 Job（false = 已被 GC/人工删除/从未创建成功）。
+	Exists bool
+	// Terminal 表示 Job 已到终态（Complete/Failed/超时/镜像拉取失败等）。
+	Terminal bool
+	// Outcome 在 Terminal 或 Exists=false 时可用（Missing 时 Phase 为空）。
+	Outcome ports.JobOutcome
+}
+
+// Probe 是一次同步观测，供启动对账与周期兜底使用：不阻塞、不回调、不写库。
+// 与 Watch 的区别是它是"拉"语义，适合 controller 重启后补齐状态（execution §4.2）。
+func (e *Executor) Probe(ctx context.Context, h ports.JobHandle) (JobState, error) {
+	if h.JobName == "" {
+		return JobState{}, fmt.Errorf("%w: job name is empty", ErrSpecInvalid)
+	}
+	out, terminal, err := e.evaluate(ctx, h)
+	switch {
+	case errors.Is(err, ErrJobNotFound):
+		// Job 与 Pod 都不在了：任务已失联，交给编排层按 EXECUTOR_LOST 收口。
+		return JobState{Exists: false}, nil
+	case err != nil:
+		return JobState{}, err
+	}
+	if !terminal {
+		return JobState{Exists: true}, nil
+	}
+	out.Handle = h
+	return JobState{Exists: true, Terminal: true, Outcome: *out}, nil
 }

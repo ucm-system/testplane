@@ -252,6 +252,83 @@ func (m *MemoryRepos) ListCancellingRuns(ctx context.Context, limit int) ([]RunV
 	return out, nil
 }
 
+// ---- 对账（C-3.5）----------------------------------------------------------
+
+// ListActiveTasks 返回 status ∈ {preparing, running} 的 Task。
+func (m *MemoryRepos) ListActiveTasks(ctx context.Context, limit int) ([]TaskView, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []TaskView
+	for _, t := range m.tasks {
+		if t.Status == domain.TaskPreparing || t.Status == domain.TaskRunning {
+			out = append(out, t.TaskView)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// AttemptByTask 读该 Task 进行中的 Attempt（没有则 ErrNotFound）。
+func (m *MemoryRepos) AttemptByTask(ctx context.Context, taskID string) (AttemptRef, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, a := range m.attempts {
+		if a.TaskID == taskID && !a.Status.IsTerminal() {
+			return a.AttemptRef, nil
+		}
+	}
+	return AttemptRef{}, fmt.Errorf("memory: no active attempt for task %s: %w", taskID, domain.ErrNotFound)
+}
+
+// DeleteLeaseByTask 幂等删除租约。
+func (m *MemoryRepos) DeleteLeaseByTask(ctx context.Context, taskID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.leases, taskID)
+	return nil
+}
+
+// ListStaleLeases 返回"租约还在但 Task 已终态/不存在"的 task_id。
+func (m *MemoryRepos) ListStaleLeases(ctx context.Context, limit int) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for taskID := range m.leases {
+		t, ok := m.tasks[taskID]
+		if !ok || t.Status.IsTerminal() {
+			out = append(out, taskID)
+		}
+	}
+	sort.Strings(out)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// SeedActiveTask 预置一个"僵尸"：Task 处于 running/preparing、Attempt 未终态、
+// 且持有端点租约（用于对账单测）。
+func (m *MemoryRepos) SeedActiveTask(t TaskView, attempt AttemptRef, leaseKey string, startedAt time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := t
+	cp.Status = domain.TaskRunning
+	cp.AttemptNo = attempt.AttemptNo
+	m.tasks[t.ID] = &memTask{TaskView: cp, Precheck: t.TesterRole == domain.RolePreCheck}
+	m.attempts[attempt.AttemptID] = &memAttempt{
+		AttemptRef: attempt,
+		Status:     domain.AttemptRunning,
+		StartedAt:  startedAt,
+		Timeout:    time.Duration(t.TimeoutSeconds) * time.Second,
+	}
+	if leaseKey != "" {
+		m.leases[t.ID] = leaseKey
+	}
+}
+
 // ---- 调度 ------------------------------------------------------------------
 
 // ClaimForExecution 原子地取 permit：Run 状态 → Pre-Check 门控 → 端点租约 →
@@ -328,7 +405,7 @@ func (m *MemoryRepos) ClaimForExecution(ctx context.Context, req ClaimRequest) (
 	m.attempts[attemptID] = &memAttempt{
 		AttemptRef: AttemptRef{
 			AttemptID: attemptID, TaskID: t.ID, RunID: t.RunID,
-			AttemptNo: attemptNo, JobID: jobName,
+			AttemptNo: attemptNo, JobName: jobName,
 		},
 		Status:  domain.AttemptPreparing,
 		Timeout: time.Duration(t.TimeoutSeconds) * time.Second,

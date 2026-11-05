@@ -348,19 +348,23 @@ CREATE INDEX audit_object_idx ON audit_log (object_type, object_id);
 
 ```json
 {
-  "run": { "name": "qwen3-32b-daily" },
-  "deploy": { "provider": "genet", "parameters": { "model": "Qwen3-32B" } },
-  "precheck": "auto",
-  "env": { "LOG_LEVEL": "info" },
-  "secrets": { "ENDPOINT_API_KEY": "endpoint/prod-qwen" },
-  "tests": [
-    { "name": "accuracy-a", "tester": "aisbench-acc", "version": "1.0.0",
-      "execution": { "profile": "k8s-npu" }, "args": "--dataset=/data/a",
-      "on_failure": "continue" }
-  ],
-  "cleanup": { "policy": "always" }
+  "run": {
+    "name": "qwen3-32b-daily",
+    "deploy": { "provider": "genet", "parameters": { "model": "Qwen3-32B" } },
+    "precheck": "auto",
+    "env": { "LOG_LEVEL": "info" },
+    "secrets": { "ENDPOINT_API_KEY": "endpoint/prod-qwen" },
+    "tests": [
+      { "name": "accuracy-a", "tester": "aisbench-acc", "version": "1.0.0",
+        "execution": { "profile": "k8s-npu" }, "args": "--dataset=/data/a",
+        "on_failure": "continue" }
+    ],
+    "cleanup": { "policy": "always" }
+  }
 }
 ```
+
+**Manifest 的唯一形态是嵌套 `run:`**（D-40，与 `07-api.md §4.1` 一致）；`runs.manifest` 原样保存提交原文，平台不会"展开成平级"。
 
 `secrets` 只存引用名；`args` 是字符串。结构以 `schemas/manifest.schema.json` 为机器可校验真相。
 

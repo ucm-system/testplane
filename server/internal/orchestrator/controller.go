@@ -15,15 +15,18 @@ import (
 	"github.com/ucm-system/testplane/server/internal/ports"
 )
 
-// 调度与推进的默认时序（C-4.1、C-5.3、C-6.3）。
+// 调度与推进的默认时序（C-4.1、C-5.3、C-6.3、C-3.5）。
 const (
-	DefaultDispatchInterval = time.Second
-	DefaultDeployInterval   = time.Second
-	DefaultWatchdogInterval = 10 * time.Second
-	DefaultMaxCandidates    = 50
-	DefaultTaskTimeout      = 4 * time.Hour
-	DefaultDeployTimeout    = 72 * time.Hour
-	defaultRunner           = "controller"
+	DefaultDispatchInterval  = time.Second
+	DefaultDeployInterval    = time.Second
+	DefaultWatchdogInterval  = 10 * time.Second
+	DefaultReconcileInterval = 60 * time.Second
+	DefaultMaxCandidates     = 50
+	DefaultTaskTimeout       = 4 * time.Hour
+	DefaultDeployTimeout     = 72 * time.Hour
+	defaultRunner            = "controller"
+	// reconcileBatchLimit 是单轮对账处理的 Task 上限（execution §4.2 的 500 条口径的保守值）。
+	reconcileBatchLimit = 200
 )
 
 // Config 是编排层配置（由 cmd 从 internal/config 投影）。
@@ -42,10 +45,12 @@ type Config struct {
 	TaskTimeoutDefault time.Duration
 	// DeployTimeout 是 Deploy 总窗口（默认 72h，K-6）。
 	DeployTimeout time.Duration
-	// DispatchInterval / DeployInterval / WatchdogInterval 是三个循环的节拍。
-	DispatchInterval time.Duration
-	DeployInterval   time.Duration
-	WatchdogInterval time.Duration
+	// DispatchInterval / DeployInterval / WatchdogInterval / ReconcileInterval 是各循环节拍。
+	// ReconcileInterval 默认 60s：启动时先跑一次，之后周期兜底（C-3.5「重启恢复与对账」）。
+	DispatchInterval  time.Duration
+	DeployInterval    time.Duration
+	WatchdogInterval  time.Duration
+	ReconcileInterval time.Duration
 	// MaxCandidates 是单轮候选上限（C-4.2 LIMIT 50）。
 	MaxCandidates int
 }
@@ -92,16 +97,25 @@ type Options struct {
 	Executor  ports.Executor
 	Deployer  ports.Deployer
 	Validator ports.ResultValidator
-	Config    Config
-	Logf      func(format string, args ...any)
+	// Prober 是对账用的同步观测能力（*executor.Executor 直接满足）。为空则跳过对账。
+	Prober JobProber
+	Config Config
+	Logf   func(format string, args ...any)
 }
 
-// Controller 是编排主循环：调度 → Submit/Watch → 终态推进 → Deploy/取消/超时。
+// JobProber 是编排层对执行器的"拉"语义观测能力（executor.Executor.Probe）。
+// 单独成接口是为了让单测能注入假实现，也避免对账依赖 Watch 的生命周期。
+type JobProber interface {
+	Probe(ctx context.Context, h ports.JobHandle) (executor.JobState, error)
+}
+
+// Controller 是编排主循环：对账 → 调度 → Submit/Watch → 终态推进 → Deploy/取消/超时。
 type Controller struct {
 	repos     Repos
 	exec      ports.Executor
 	deployer  ports.Deployer
 	validator ports.ResultValidator
+	prober    JobProber
 	cfg       Config
 	logf      func(format string, args ...any)
 
@@ -122,11 +136,19 @@ func New(opts Options) (*Controller, error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
+	prober := opts.Prober
+	if prober == nil {
+		// 允许 Executor 自己兼作 Prober（*executor.Executor 满足），省掉一处装配。
+		if p, ok := opts.Executor.(JobProber); ok {
+			prober = p
+		}
+	}
 	return &Controller{
 		repos:     opts.Repos,
 		exec:      opts.Executor,
 		deployer:  opts.Deployer,
 		validator: opts.Validator,
+		prober:    prober,
 		cfg:       opts.Config.withDefaults(),
 		logf:      logf,
 		watches:   make(map[string]context.CancelFunc),

@@ -52,6 +52,7 @@ TestPlane 是**对内工具**，以下事项已由团队裁决，本文按结论
 | 0.3 | 2026-11-04 | 落地实践后的修订：取消 Blocked 图里的 `PENDING/QUEUED → CANCELED` 箭头（与 §7.6 对齐）；明确 Pre-Check 门控后其余 Task 可并发（不另加串行顺序）；`SERVICE_UNAVAILABLE` 仅限可重试的 Pre-Check 失败；`cleanup.policy` 与产物保留期解耦；Deploy 增加排队状态与 72h 窗口；删除平台日志脱敏义务（团队裁决日志明文） |
 | 0.4 | 2026-11-05 | 可追溯性补充：镜像 tag 可变，执行层记录实际拉取的 digest；失败续跑复用优先比较 digest |
 | 0.5 | 2026-11-05 | **取消提交幂等**：删除 `Idempotency-Key` 与 `idempotency_keys` 表，`POST /runs` / `POST /tasks` 每次都创建新资源；平台不判断两次提交是否等价（硬件 / 驱动 / HDK 版本等环境因素对平台透明）。内部操作（建 Job、Genet 部署）的可重试安全不变 |
+| 0.6 | 2026-11-05 | **MVP 实现回写**（见 `design/IMPLEMENTATION.md §15`）：① Tester 注册只做"镜像内 `tester.yaml` + 启动/周期扫描"，不提供运行时注册 API（D-38）；② 对外错误体为**扁平** `{code,message,detail,retryable,trace_id}`（D-39）；③ 提交体以**嵌套** `run:` 为唯一形态，`03-data-view.md §4.1` 的平级示例按文档缺陷处理（D-40）；④ 产物 PVC 名统一为 `testplane-storage`（D-41）；⑤ 开发环境种子 `cluster-01` + `k8s-npu`，由进程启动时补齐（D-42）；⑥ MVP 的执行环境是宿主 Kind + `kind load docker-image`，Deploy 阶段由 mock 顶替 Genet（D-43） |
 
 ---
 
@@ -1833,3 +1834,9 @@ env:                          # 运行期环境变量声明（§12.4）
 | D-35 | **Pre-Check 不可重试失败归 `COMPLETED_WITH_ERRORS`**：只有"窗口内一直没就绪"这类可重试失败才记 `SERVICE_UNAVAILABLE` | §7.5 |
 | D-36 | **可追溯性以"引用 + 实际 digest"为准**：执行层记录 K8s 实际拉取的镜像 digest；续跑复用优先比较 digest；引用只表示"要什么"，digest 表示"实际跑了什么" | §5.7、§7.7、§12.4 |
 | D-37 | **不做提交幂等**：`POST /runs` / `POST /tasks` 每次都创建新资源，重复提交产生多个 Run/Task；平台不判断两次提交是否等价——硬件、驱动、HDK 版本等环境因素对平台透明，相同 Manifest 也可能不是同一测试条件。内部操作（Job 创建、Genet 部署）仍须可重试安全，但不属于接口幂等 | §9.2、§11.4、附录 D |
+| D-38 | **Tester 只做镜像内发现，不做运行时注册**：注册表来自镜像内的 `tester.yaml`，启动扫描 + 周期重扫入库；不提供 `POST /testers` 之类的写入端点（与 K-3 一致）。「自发现注册」指的是平台发现，不是提交方上传 | §5.6、`IMPLEMENTATION.md §15` |
+| D-39 | **对外错误体是扁平的**：`{code,message,detail,retryable,trace_id}`，不套 `{error:{…}}` 外壳；`code` 取附录 D 枚举，校验类错误用 `detail.issues[]` | `07-api.md §3` |
+| D-40 | **提交 Manifest 的唯一形态是嵌套 `run:`**：`run:` 内承载 `name`/`deploy`/`service`/`precheck`/`env`/`secrets`/`tests`/`cleanup`；`runs.manifest` 原样保存该形态。`03-data-view.md §4.1` 的平级示例按文档缺陷处理（属实现期发现的回写项） | `07-api.md §4.1` |
+| D-41 | **产物 PVC 名统一 `testplane-storage`**：`06-physical-view.md §2`（`testplane-storage-root`）与 `impl/execution.md §2.2`（`testplane-artifacts`）属文档不一致，以实现与清单为准回写 | §6.8、附录 B |
+| D-42 | **开发/验收环境的种子由进程启动补齐**：`cluster-01` 与 `k8s-npu`（namespace `testplane`）在表为空时插入；生产仍走 Helm values 首次 seed。种子名沿用全文档示例（`k8s-npu`），不另起名字 | §6.11、`03-data-view.md §9` |
+| D-43 | **MVP 执行环境 = 宿主 Kind + `kind load docker-image`**：不引入镜像仓库，镜像以本地 tag 灌入节点；Deploy 阶段由 mock 顶替 Genet（状态与字段真实，副作用为空），P1 换真实实现时接口不变 | §6.8、§7.4、`impl/execution.md §9` |

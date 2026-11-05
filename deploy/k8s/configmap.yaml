@@ -60,6 +60,22 @@ data:
   TESTPLANE_SSE_HEARTBEAT: "15s"
   TESTPLANE_SSE_REPLAY_HOURS: "24"
 
+  # ---- Deploy mock（MVP 用 internal/genet/mocks，不联网；D-14）----
+  # 没有这三行，deploy 形态的 Run 走完 DeployReady 后注入的 Endpoint 会指向
+  # 一个不存在的地址（默认是 http://mock-llm.testplane.svc:8080/v1），
+  # 于是 pre-check 直接 ENDPOINT_UNREACHABLE——集群内测 deploy 形态必须设。
+  # 键名以 internal/genet/mocks/genet.go 的 Env* 常量为准（不是 TESTPLANE_ 前缀的都认）。
+  TESTPLANE_MOCK_ENDPOINT_URL: "http://mock-llm.default.svc:18080/v1"
+  # mocks 读 DEPLOY_MOCK_MODEL_NAME 优先，其次 MODEL_NAME；两个都写，免得换实现时漏
+  MODEL_NAME: "mock-llm"
+  DEPLOY_MOCK_MODEL_NAME: "mock-llm"
+  # 受理到 ready 的模拟耗时；3s 足够看状态流转，又不拖 E2E
+  DEPLOY_MOCK_DURATION_SECONDS: "3"
+
+  # 另外两个 mock 开关（默认不设 = 正常成功路径），需要验证失败/阻塞时再用：
+  #   DEPLOY_MOCK_FAIL: "true"      # 部署失败 → Run FAILED
+  #   DEPLOY_MOCK_BLOCKED: "true"   # 卡在 blocked → 验证 UI 的 waiting 展示
+
   # ------------------------------------------------------------------------
   # 设计里有、**当前代码还不读**的键（写在这里只作登记，加了等于没加，
   # 别指望它生效；等 config.go 补上再启用）：

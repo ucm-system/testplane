@@ -120,7 +120,7 @@ spec:
                 subPath: r-20261103-0001/tasks/t-0001/attempts/1 }
             - { name: tmp, mountPath: /tmp }
       volumes:
-        - { name: output, persistentVolumeClaim: { claimName: testplane-artifacts } }   # RWX
+        - { name: output, persistentVolumeClaim: { claimName: testplane-storage } }   # RWX
         - { name: tmp, emptyDir: { sizeLimit: 256Mi } }
 ```
 

@@ -53,7 +53,7 @@ flowchart LR
 | ServiceAccount | `testplane` | `automountServiceAccountToken: true` | 只有控制面需要；Tester Pod 一律 `false`（E-2.1） |
 | Role / RoleBinding | `testplane` | `jobs`、`pods`、`pods/log`、`persistentvolumeclaims`、`events`、`leases`（动词见 W-9） | namespace 级；**不授予 `secrets`** |
 | ClusterRole（只读） | `testplane-view` | `nodes`、Volcano `queues`/`podgroups`/`jobs` | 看板与 `waiting_reason` 的数据源 |
-| PVC | `testplane-storage-root` | `ReadWriteMany`、`storageClassName: nfs-csi`、容量按保留期规划（示例 `20Ti`，以 03 §8 估算校准） | 只挂控制面到 `/storage-root`；Tester 用同 PVC 的 subPath |
+| PVC | `testplane-storage` | `ReadWriteMany`、`storageClassName: nfs-csi`、容量按保留期规划（示例 `20Ti`，以 03 §8 估算校准） | 只挂控制面到 `/storage-root`；Tester 用同 PVC 的 subPath |
 | NetworkPolicy | `testplane-default-deny` + 放行条目 | ingress/egress 双向默认拒绝 | 见 §4；每 Job 另生成一条同名策略（E-2.1） |
 | PDB | `testplaned` | `minAvailable: 1` | 单副本下会阻塞 drain，见 §7.1 |
 | Lease | `testplane-controller` / `testplane-collector-leader` / `tp-log-<hash>` | TTL 15s / 续约 5s；日志 Lease 30s / 10s | 选主与"同文件单写者"（E-7.3） |
@@ -65,7 +65,7 @@ flowchart LR
 ### 3.1 目录树
 
 ```text
-/storage-root/                              # PVC testplane-storage-root（RWX）
+/storage-root/                              # PVC testplane-storage（RWX）
 └── r-20261103-0001/                        # run_id；独立 Task 也有占位 Run 目录
     ├── report.json  report.md  metadata.json
     ├── events.jsonl                        # 派生文件：库为准，可按 seq 重建

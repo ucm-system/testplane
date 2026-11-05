@@ -396,3 +396,51 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 - 本文与三份分册随实现更新；契约字段变化一律先改 ARCHITECTURE（§15）。
 - 每个实现 PR 在描述里写：对应 §14.1 的验收项、是否触及 §12 的缺口项、是否改 `api/openapi.yaml`。
 - `schemas/` 与 `api/openapi.yaml` 是机器可校验的真相；文档与它们不一致时，先修文档再修代码。
+
+---
+
+## 15. MVP 实现状态与偏差（2026-11-05）
+
+本节记录"按本文实现出来的 P0 MVP 到底做到了哪一步"，是**实现回写**，不是新需求。逐项验收与证据见 `docs/runbook/acceptance.md`，运行步骤见 `docs/runbook/local-kind.md`。
+
+### 15.1 状态总览
+
+| 能力 | MVP 状态 | 代码位置 |
+|---|---|---|
+| 三角色单二进制（`--role=api\|controller\|collector\|all`） | ✅ `api`/`controller`/`all` 可用；`collector` 未拆（日志由 executor 采、报告由终态 hook 写） | `server/cmd/testplaned` |
+| 状态机内核（Run/Task/Attempt/Tester + Deploy 子状态） | ✅ 转移表 R1–R10 / T1–T11，`Kernel.Apply` 8 步、CAS、事件 seq | `server/internal/domain`、`server/internal/store` |
+| 存储与迁移 | ✅ 11 张表 + 15 索引，启动自动迁移（`migrate up` 子命令亦可） | `server/migrations`、`server/internal/store` |
+| REST + SSE（25 operations） | ✅ `/api/v1` 全量；SSE 断点续传 + `events/history` | `server/internal/api`、`server/api/openapi.yaml` |
+| 调度（门控 / 独占 / 全局并发 / 公平性） | ✅ 门控与两类并发上限、`waiting_reason` 六值；公平性仅"按提交时间" | `server/internal/orchestrator` |
+| K8s Job 执行器 | ✅ 真集群跑通（渲染/提交/观测/取消/日志/digest） | `server/internal/executor` |
+| Deploy 阶段（Genet） | 🟡 **mock**：`queued→deploying→ready/blocked`，不发真实 Genet 请求 | `server/internal/genet/mocks` |
+| Tester 注册（自发现） | ✅ 启动扫描 + 周期重扫 + 15 条校验 + 版本钉死 + orphan | `server/internal/registry` |
+| 报告与产物 | ✅ `report.json` / `report.md` / `events.jsonl` / 产物索引，终态后异步写 | `server/internal/report` |
+| Web UI | ✅ 6 路由（概览/列表/详情/提交/Tester/集群），SSE 实时 | `web/` |
+| 部署与镜像 | ✅ Kind + kustomize（Component + overlay）+ 两镜像 | `deploy/` |
+| Volcano / gang / 队列看板 | ⬜ 未做（`/queue-status` 报 `volcano_unavailable`） | — |
+| OIDC / RBAC / CSRF | ⬜ 未做（仅 `TESTPLANE_AUTH_MODE=dev`） | — |
+| 独立 Task（`POST /tasks`） | ⬜ 未做 | — |
+| 失败续跑（`POST /runs/{id}/retry`）、`/report` 富指标 | ⬜ 未做（P1） | — |
+
+### 15.2 与设计文档的偏差（已由 ARCHITECTURE v0.6 / D-38…D-43 裁决）
+
+| # | 偏差 | 处置 |
+|---|---|---|
+| 1 | 不提供 `POST /testers` 运行时注册 | 符合 K-3；自发现=启动/周期扫描（D-38），`07-api.md` 端点表本就无此端点 |
+| 2 | 错误体为**扁平** `{code,message,detail,retryable,trace_id}` | 以 `07-api.md §3` 为准（D-39）；`api/openapi.yaml` 同步 |
+| 3 | 提交体以**嵌套** `run:` 为唯一形态 | 以 `07-api.md §4.1` 为准（D-40）；`03-data-view.md §4.1` 的平级示例是文档缺陷，待回写 |
+| 4 | 产物 PVC 名统一 `testplane-storage` | 06 §2（`-storage-root`）与 execution §2.2（`-artifacts`）待回写（D-41） |
+| 5 | 开发种子 `cluster-01` + `k8s-npu` 由进程启动时插入 | 03 §9 原为"Helm values 首次 seed"（D-42）；MVP 简化为进程内 seed |
+| 6 | 执行环境为宿主 Kind + `kind load docker-image`，无镜像仓库 | D-43 |
+| 7 | 未采用 `oapi-codegen` / `sqlc` 生成物，handler 与 DTO 手写 | 05 §5.2 的"重生成 diff 为空"门禁暂不适用；P1 再引入 |
+| 8 | `task_counts` 为 MVP 新增的 Run 投影字段 | 已写入 `server/api/openapi.yaml`；`03/07` 待回写 |
+| 9 | 架构表实为 **11 张**（文档曾按 12 表述） | 以 `03-data-view.md §3.2` 实际 DDL 为准 |
+
+### 15.3 P1 优先项（按投入产出排序）
+
+1. 真实 Genet 适配（替换 `internal/genet/mocks`，接口不变）。
+2. OIDC + 会话 + CSRF + RBAC（`TESTPLANE_AUTH_MODE=oidc`）。
+3. 失败续跑（`retry` / `retry-plan`）与 `POST /tasks` 独立 Task。
+4. 指标索引（MongoDB）与 Run 对比、看板。
+5. `oapi-codegen` / `sqlc` 与生成物 diff 门禁。

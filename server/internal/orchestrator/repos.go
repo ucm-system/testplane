@@ -21,8 +21,8 @@ type AttemptRef struct {
 	AttemptID string
 	TaskID    string
 	RunID     string
-	AttemptNo int // 1-based
-	JobID     string
+	AttemptNo int    // 1-based
+	JobName   string // K8s Job 名（tp-<task_id>-a<n>），来自 attempts.executor_ref.job
 }
 
 // RunView 是编排层看到的 Run 快照（不含无关字段）。
@@ -189,6 +189,17 @@ type Repos interface {
 	ListRunsInDeploy(ctx context.Context, limit int) ([]RunView, error)
 	// ListCancellingRuns 返回处于 cancelling 的 Run（用于兜底收口）。
 	ListCancellingRuns(ctx context.Context, limit int) ([]RunView, error)
+
+	// ---- 对账（C-3.5「重启恢复与对账」）----
+	// ListActiveTasks 返回 status ∈ {preparing, running} 的 Task（对账的输入集合）。
+	ListActiveTasks(ctx context.Context, limit int) ([]TaskView, error)
+	// AttemptByTask 读该 Task 当前进行中的 Attempt（含 executor_ref 里的 Job 名）。
+	AttemptByTask(ctx context.Context, taskID string) (AttemptRef, error)
+	// DeleteLeaseByTask 幂等删除该 Task 的端点租约（C-4.3 的泄漏兜底）。
+	DeleteLeaseByTask(ctx context.Context, taskID string) error
+	// ListStaleLeases 返回"Task 已终态（或已不存在）但租约还在"的 task_id，
+	// 用于清理旧版本/历史遗留的僵尸租约。
+	ListStaleLeases(ctx context.Context, limit int) ([]string, error)
 
 	// ---- 调度 ----
 	// ClaimForExecution 是原子入口：claimed=false 时 reason 为 C-4.7 的等待原因
