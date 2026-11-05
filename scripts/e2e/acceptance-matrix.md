@@ -101,12 +101,31 @@ pwsh scripts/e2e/failure-injection.ps1          # 需要控制面 + kind executo
 ## P1 端点收口（2026-11-05 16:39，镜像 `df0be9d4…`）
 
 - `allow-missing.txt` **16 → 0**；openapi **50** operation，设计 50 / openapi-only 0；`spec.design_endpoints_present` = “0 个（已登记 0）”，`spec.operation_count` 从实际推导 50。
-- 契约 `--mode all`：**80/80 PASS**（spec 17/17 + live 63/63）；retry 3、deploy/logs（终态 + 排队）、`GET /secrets`、`/admin/*` 12 个 operation 全部被 live 覆盖；admin 写只验 400/404/409 错误契约。
+- 契约 `--mode all`：**81/81 PASS**（spec 17/17 + live 64/64）；retry 3、deploy/logs（终态 + 排队 + 缺 pod 200）、`GET /runs/{id}/bundle`、`GET /secrets`、`/admin/*` 12 个 operation 全部被 live 覆盖；admin 写只验 400/404/409 错误契约。
 - 新增 `retry-check.ps1`：**17/17 PASS**（Run `r-20261105-CC2Q` → retry `r-20261105-7SEC`；新 Run 再取 plan 为 `retryable=false, reason=nothing_to_retry`）。
 - 新增 `admin-check.ps1`：**26/26 PASS**；`secret.rotate_verified_200` 走 D-55 窄 Role；`it-forbidden-ref` 稳定 503 `reason=forbidden`。
-- 老回归：run-local 31/31、probe 5/5、failure-injection 5/5、cancel 10/10、timeout 17/17、mixed 11/11；deploy 正常 9/9 / blocked 7/7 / failure 4/4；artifact 44/44；restart 13/13；Playwright **9 passed / 2 skipped**。
+- 老回归：run-local 31/31、probe 5/5、failure-injection 5/5、cancel 10/10、timeout 17/17、mixed 11/11；deploy 正常 9/9 / blocked 7/7 / failure 4/4；artifact 44/44；restart 13/13；Playwright **18 passed / 2 skipped**。
 - 评审红确认：DELETE 改路径 → `client-contract.spec.ts` 1 failed；`deploy/logs` 忽略 pod → `TestDeployLogs_TwoPodsPaging` FAIL；审计改提交后补记 → `TestAuditFailure_RollsBackAdminWrite` FAIL；均已还原，恢复后全绿。
 
+## 最终复核（2026-11-05 21:20，main `8a588b5` + 镜像 `testplane-server:issue2`）
 
+| 项 | 结果 | 说明 |
+|---|---|---|
+| 契约 `--mode all` | **81/81** | spec 17/17 + live 64/64；**51 operation 全覆盖**；设计 51 / baseline 51（`74468cb1…`）/ 白名单 0 |
+| `bundle-check.ps1` | **11/11** | 终态 Run：`MANIFEST.counts.artifacts` 与 `/artifacts` 一致；非终态 `missing[]` 含 `report.md` |
+| `deploy-logs-check.ps1` | **4/4** | `deploy.namespace=testplane-mock`；缺省 pod（单 Pod）200；`tail_lines=50&limit=10` → `window=tail`/`truncated=false`/`next_offset=0`/50 行 |
+| `retry-check.ps1` | **17/17** | 含「三代复用产物 sha256 与二代一致」「retry 出的 Run 再取 plan 不可重试」 |
+| `admin-check.ps1` | **26/26** | 含 rotate `verified`（部署 SA 身份）与 `503 reason=forbidden` 负向 |
+| `run-local.ps1` | **31/31** | |
+| Playwright | **18 passed / 2 skipped** | 20 条；`real-api` 2 条按 `VITE_USE_MOCK=0` 跳过；`workers: 1`（几何断言 + 截图不适合并发） |
+| go / 契约工具 | build+vet+test（真 PG）+ `-race`（api/store/orchestrator/domain）全绿；gofmt 179 文件；redocly valid | |
+| 沿用（上一轮最终值） | artifact 44/44、restart 13/13、deploy 9 + blocked 7 + failure 4、cancel 10/10、timeout 17/17、mixed 11/11 | |
 
+## 已知陷阱（写在这里，避免下次又踩）
 
+1. **"补数据才能过"的 e2e 一律不算绿**。`runs.deploy.namespace` 缺失时，`deploy-logs-check` 曾手动补 JSON 才通过——这恰好掩盖了"结构体有字段、写入端没人赋值"的真缺口（#42 修）。规则：**e2e 里不写兜底；要过就先修实现，修不了就显式标成 fixture 缺陷并在矩阵里记一笔**。
+2. **契约与实现同时改时，先看是谁错**。`POST /tasks/{id}/retry` 曾把 openapi 改成"只支持 failed"去迁就实现，被评审判为"用实现改写规格"（#40-1）。设计是唯一规格来源，改代码或改设计文档，**不能只改 openapi**。
+3. **`omitempty` + jsonb 增量合并是双刃剑**：空值不写键 → 不会冲掉冻结字段（好），但"从来不赋值"也会静默空着（坏）。凡是 `runs.deploy` / `tasks` 这类 jsonb 快照，新增字段时**必须同时写一条"落库断言"用例**。
+4. **同类漏网**：`GET /runs/{id}/deploy` 的 `pods[]` 目前恒空（deploy 拓扑没有写入点）——已开 #43，不阻塞。
+5. **本机 Docker Desktop 两个坑**：`kind load docker-image` 失效 → 用 `docker save → docker cp → ctr -n k8s.io images import`；pnpm 12 的 supply-chain 策略（`minimumReleaseAge`）与 `ignored builds`（esbuild）会让镜像构建红，Dockerfile 里已带修正参数。
+6. **测试库跨轮累积**会让 `runs.id`（4 位 base32）偶发撞主键 → 表现为个别用例偶发 500；跑前重置 `testplane_test*` schema。
