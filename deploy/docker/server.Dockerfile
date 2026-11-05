@@ -67,9 +67,13 @@ RUN pnpm --config.verifyDepsBeforeRun=false --config.minimumReleaseAge=0 run bui
 # （构建末尾的 `! ldd` 与 ELF e_machine 自检会守住这一点）。
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
 
-# buildx 提供的目标平台参数；普通 `docker build` 时由 Dockerfile 前端自动填成当前平台。
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+# buildx 提供的目标平台参数。
+#
+# ⚠️ **不要给它们写默认值**（`ARG TARGETARCH=amd64` 这种）：默认值会**盖掉** buildx 注入的值，
+# 结果 arm64 那一份也会编出 amd64 二进制（实测踩过：镜像层 digest 不同、ELF 却都是 `3e 00`）。
+# 普通 `docker build`（非 buildx）时这两个变量为空，所以下面 RUN 里用 `${TARGETARCH:-amd64}` 兜底。
+ARG TARGETOS
+ARG TARGETARCH
 
 # git：Go 模块走 vcs 时要它；ca-certificates：拉依赖可能走 https
 RUN apk add --no-cache git ca-certificates
@@ -99,7 +103,7 @@ ENV CGO_ENABLED=0
 # 产物名固定 testplaned（与 06 §2 的 Deployment 名、`/testplaned migrate up` 一致）
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+    GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -trimpath \
       -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
       -o /out/testplaned ./cmd/testplaned
 
@@ -115,11 +119,11 @@ RUN test -x /out/testplaned && \
     ! ldd /out/testplaned 2>/dev/null && \
     echo "BUILD_CHECK_OK: static binary" && \
     elf_machine=$(od -An -tx1 -j18 -N2 /out/testplaned | tr -d ' \n') && \
-    case "${TARGETARCH}:${elf_machine}" in \
+    case "${TARGETARCH:-amd64}:${elf_machine}" in \
       amd64:3e00) echo "BUILD_CHECK_OK: elf x86-64 (amd64)" ;; \
       arm64:b700) echo "BUILD_CHECK_OK: elf aarch64 (arm64)" ;; \
       arm:2800)   echo "BUILD_CHECK_OK: elf arm32 (arm)" ;; \
-      *)          echo "BUILD_CHECK_FAIL: TARGETARCH=${TARGETARCH}, elf e_machine=${elf_machine}" >&2; exit 1 ;; \
+      *)          echo "BUILD_CHECK_FAIL: TARGETARCH=${TARGETARCH:-amd64}, elf e_machine=${elf_machine}" >&2; exit 1 ;; \
     esac
 
 # ---------------------------------------------------------------------------

@@ -138,9 +138,62 @@ pwsh deploy/docker/build-push.ps1 -Registry ccr.ccs.tencentyun.com/keriko -Push
 
 ## 多架构注意
 
-`-Platforms linux/amd64,linux/arm64` 会推 **manifest list**（digest 取 index 的），
-并真的在 arm64 上构建（qemu 模拟：server 约 6 分钟、web 约 2 分钟、tester 秒级）。
+`-Platforms linux/amd64,linux/arm64` 会推 **manifest list**（digest 取 index 的）。
+
+`server.Dockerfile` 用 **交叉编译**：web 阶段与 golang 构建阶段都钉在 `--platform=$BUILDPLATFORM`，
+按 `GOARCH=$TARGETARCH` 产出目标架构二进制（`CGO_ENABLED=0`，静态二进制）。实测双架构从 361s 降到 **~18s**。
+
+> ⚠️ 两条踩过的坑，改 Dockerfile 时别重犯：
+> 1. **不要给 `ARG TARGETARCH` 写默认值**（`ARG TARGETARCH=amd64`）。默认值会盖掉 buildx 注入的值，
+>    结果 arm64 镜像里塞的是 amd64 二进制。要兜底就在 RUN 里写 `${TARGETARCH:-amd64}`。
+> 2. 光看"构建成功"不够。构建末尾有 ELF 自检（读 `e_machine`：`3e00`=x86-64、`b700`=AArch64），
+>    它会拿实际二进制与 `TARGETARCH` 比对，不一致直接让构建失败。
+>    验证产物时**必须真跑**：`docker run --platform linux/arm64 --entrypoint /bin/sh <ref> -c 'uname -m; dd if=/testplaned bs=1 count=20 | od -An -tx1'`。
+
 集群里没有 arm 节点时按需在 chart 里用 `nodeSelector` 限定，或只发 amd64。
+
+## CI 产出与本地产出的对应关系
+
+CI（`.github/workflows/**`，仓库维护者负责）与本脚本用**同一套组件名**，对不上时照这张表查：
+
+| CI matrix 值 | 本脚本命令 | 镜像 | Dockerfile | 构建上下文 |
+|---|---|---|---|---|
+| `server` | `-Component server` | `ghcr.io/ucm-system/testplane-server` | `deploy/docker/server.Dockerfile` | 仓库根 |
+| `web` | `-Component web` | `ghcr.io/ucm-system/testplane-web` | `deploy/docker/web.Dockerfile` | 仓库根 |
+| `tester:endpoint-probe` | `-Component tester:endpoint-probe` | `ghcr.io/ucm-system/testplane-tester-endpoint-probe` | `testers/endpoint-probe/build/Dockerfile` | `testers/endpoint-probe/` |
+
+每个镜像都打两个 tag（`:<tag>`、`:sha-<12>`）；CI 解析脚本输出的 `DIGEST=` 写 job summary，
+Helm chart 的 `image.digest`、Tester 的 `tester.yaml` 都用它。
+
+## 排障表
+
+| 症状 | 先看什么 |
+|---|---|
+| `web` 容器**起来就退出** | 入口脚本的 `nginx -t` 自检输出（渲染坏/变量写错都会在这里明确报错，而不是留个 502 的容器） |
+| `web` 起来但 `/api/` 502 | 有没有设 `TESTPLANE_API_UPSTREAM`、上游是否可达；纯静态模式下 `/api/` 会返回 `index.html`（200），不是错误 |
+| `web` 只读根下崩溃 | `/tmp` 是否挂了可写空挂（`--tmpfs /tmp` / emptyDir）；`securityContext.fsGroup: 10001` |
+| `server` 构建报 `BUILD_CHECK_FAIL: TARGETARCH=…, elf e_machine=…` | 交叉编译的 `GOARCH` 没生效（见上文坑 1） |
+| `kind load docker-image` 报找不到镜像 | 这不是 "load 失败"，是 Docker Desktop + containerd + manifest list；用 `-KindCluster`（走 save→cp→ctr import） |
+| 推送 403/denied | GHCR：token 缺 `write:packages`；CCR：没 `docker login` |
+
+## Tester 发版流程约束（重要）
+
+`testers/<name>/tester.yaml` 是 **Tester 契约**，`image:` 是契约内容的一部分（K-3：版本钉死、注册表会校验）。
+镜像换了但 `version` 没换 = 同一版本号指向不同内容，注册表校验/复现都会出问题。
+
+正确流程（对应设计里的 G-15「版本升级流程」）：
+
+```text
+1. CI 产出新镜像：ghcr.io/ucm-system/testplane-tester-<name>@sha256:<digest>（+ :sha-<12> tag）
+2. Tester 维护者改 tester.yaml：
+     image:   ghcr.io/ucm-system/testplane-tester-<name>@sha256:<digest>   # 建议用 digest 而不是 tag
+     version: <新版本号>                                                    # 必须一起改
+3. 走新版本发布（版本号 → 注册表重新入库 → 平台按新版本调度）
+```
+
+**严禁**只改 `image:` 不改 `version:`——那会让"同一个版本号"对应两份不同内容，历史 Run 无法复现。
+（本仓库当前的 `testers/endpoint-probe/tester.yaml` 仍指向旧的 `registry.dev.huawei.com/...:1.0.0`，
+等 G-15 落地后由 Tester 维护者按上面流程一次性升级。）
 
 ## kind 的坑（本机实测）
 
