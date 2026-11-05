@@ -1,0 +1,41 @@
+# TestPlane · 开发环境专用 kind 集群配置
+#
+# 用途（见 design/views/06-physical-view.md §6.1 dev 行）：
+#   dev = kind 单节点 + 容器 PG + local-path/hostPath 模拟 RWX。
+#
+# 创建：  .\.tools\kind.exe create cluster --config deploy\kind\testplane.yaml
+# 删除：  .\.tools\kind.exe delete cluster --name testplane
+# 重建：  先 delete 再 create（kind 的 extraMounts 只在建集群时生效）
+#
+# 注意：
+# 1) 集群名就叫 testplane。**不要**用这个文件去重建/覆盖 claw-fleet、unitest-k3s、
+#    docker-desktop 等已有集群——kind 只认 --config 里的 name。
+# 2) extraMounts 把宿主 .data\storage 挂进节点 /storage-root。hostPath PV 直接指向
+#    /storage-root，于是「宿主目录 ↔ 节点路径 ↔ PVC」三者是同一份数据，单节点下
+#    这就是 RWX 的等价物（多节点没有共享盘，真 RWX 要 NFS CSI，属 P1）。
+#    宿主路径用正斜杠：Docker Desktop 的 -v 认 D:/... 这种写法，
+#    反斜杠会被当成转义序列。
+# 3) 不映射 NodePort：控制面用 kubectl port-forward 访问，避免与宿主 8080/3000 冲突。
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: testplane
+nodes:
+  - role: control-plane
+    # 节点上的 /storage-root -> 宿主 D:\Project\TestPalne\.data\storage
+    extraMounts:
+      - hostPath: D:/Project/TestPalne/.data/storage
+        containerPath: /storage-root
+        readOnly: false
+    # 存储类打标签：方便后续把 StorageClass / PV 绑到这个节点（单节点集群里
+    # 只有它一个候选，这里显式标出来是为了多节点时不用改清单）。
+    labels:
+      ingress-ready: "true"
+      testplane.io/storage-node: "true"
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            # 控制面 Pod 与 Tester Pod 混跑在同一个节点上，默认 110 不够用
+            # （200 Task 的规划上限见 06 §5.4，这里给到 dev 够用的 250）。
+            max-pods: "250"

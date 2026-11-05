@@ -1,0 +1,157 @@
+# TestPlane Web
+
+TestPlane 的前端（控制台）。规格来源：**接口以 `server/api/openapi.yaml` 为准**（唯一机器契约），
+视觉基准 `design/prototype/`（tokens.css / holy-grail.css + screenshots），实现方案 `design/impl/web-and-delivery.md`。
+
+## 技术栈
+
+| 关注点 | 选型 |
+|---|---|
+| 构建 | Vite 7（`build.target=chrome110`，产物 `dist/`，由 server embed，别改路径） |
+| 框架 | React 19 + TypeScript 5.9（`strict` + `noUncheckedIndexedAccess`） |
+| 样式 | Tailwind CSS v4（`@tailwindcss/vite`），语义 token 在 `src/index.css` 的 `@theme` 里 |
+| 组件 | 手写 shadcn/ui 风格基元（`src/components/ui/`，无 Radix 依赖） |
+| 路由 | react-router 7（`BrowserRouter`，路由级 `lazy` 拆包） |
+| 图标 | `lucide-react` |
+| YAML | `yaml`（提交页解析 deploy 段、渲染部署参数快照） |
+
+## 命令
+
+```bash
+pnpm install
+pnpm dev        # http://127.0.0.1:5173（端口 5173，strictPort）
+pnpm build      # tsc -b && vite build → dist/
+pnpm preview
+pnpm typecheck  # 只跑 tsc -b
+```
+
+## 环境变量（`.env.local`，参考 `.env.example`）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `VITE_USE_MOCK` | `0` | `0` 打真实后端（**默认，别改**：dist 会被 go:embed 进二进制）；`1` 用 `src/api/mock.ts` 的假数据，只在 `.env.local` 里开 |
+| `VITE_API_BASE` | `/api/v1` | 接口前缀（07 §1） |
+| `VITE_DEV_USER` | `dev` | dev 鉴权的默认 Bearer subject |
+| `TESTPLANE_BACKEND` | `http://127.0.0.1:8080` | **仅 vite dev 用**：`server.proxy` 的目标（可用 `.env.local` 覆盖） |
+
+- 接后端（默认路线）：`pnpm dev`，代理目标默认 8080；端口转发到别处就写 `TESTPLANE_BACKEND=http://127.0.0.1:8081` 到 `.env.local`。
+- 后端没起、只想看页面：在 `web/.env.local` 里写 `VITE_USE_MOCK=1`（`.env.local` 已被 gitignore）。
+
+Vite 代理把 `/api` 转给控制面，并对 SSE 关缓冲 + `no-cache`。
+
+## 目录
+
+```text
+src/
+├── api/            # client（fetch/错误归一/鉴权头）、contract（Api 接口）、real（真接口）、
+│                   # mock（假数据 + 事件模拟）、normalize（信封/Tester 归一）、sse（fetch 流）、types（契约类型）
+├── components/
+│   ├── ui/         # shadcn 风格基元：button card badge table input dialog drawer tabs toast segmented skeleton states
+│   └── app/        # AppShell（圣杯外壳）、RightRail、StatusBadge、LogViewer、EventTimeline、KpiCard
+├── hooks/          # useAsync（三态数据）、useRunEvents（SSE）、useIdentity
+├── lib/            # status（状态→中文标签/色）、utils（时间/时长/复制/cn）
+└── pages/          # dashboard runs run-detail submit testers clusters
+```
+
+## 路由
+
+| 路由 | 页面 | 数据 |
+|---|---|---|
+| `/` | 概览：4 个 KPI（进行中 Run / 排队 Task / 成功率 / Tester 数）+ 最近 Run + 排队 Task | `GET /runs`、`GET /testers`、`GET /queue-status` 现算 |
+| `/runs` | Run 列表：状态过滤（服务端 `?status=a,b`）、时间与关键字（本地）、游标分页 | `GET /runs?limit&cursor&status` |
+| `/runs/:id` | Run 详情：概要、执行链路、Deploy 区块（排队位次 / Pod 拓扑 / 参数快照）、Task 摘要列表 + 点开的 Task 详情（Attempt + 日志）、事件流；页头「打开报告」 | `GET /runs/{id}`、`GET /runs/{id}/deploy`、`GET /tasks/{id}`、`GET /tasks/{id}/attempts`、`GET /tasks/{id}/attempts/{idx}/logs`、`GET /runs/{id}/events`(SSE)、`GET /runs/{id}/events/history`、`GET /runs/{id}/report.md`(新窗口) |
+| `/submit` | 提交：部署 / 不部署两形态、env + secrets、执行环境 profile、Task 列表（Tester 下拉 + args） | `GET /testers`、`POST /runs?dry_run=true`、`POST /runs` |
+| `/testers` | Tester 目录（只读）+ 详情抽屉（参数 / env 声明） | `GET /testers`、`GET /testers/{name}` |
+| `/clusters` | 集群与队列：集群连通性、平台槽位、Volcano 队列、排队 Task + 等待原因计数 | `GET /clusters`、`GET /queue-status` |
+| `/endpoints` | 旧链接兼容 → 重定向 `/clusters` | — |
+
+页面级操作放在 main 顶部（详情页：返回列表 / 取消 Run / 打开报告），右上角是 dev 身份切换（Bearer subject）。
+
+## 接口约定
+
+- 前缀 `/api/v1`；dev 鉴权 `Authorization: Bearer <subject>`（默认 `dev`），当前身份 `GET /api/v1/me` → `{user, role}`。
+- 列表分页：游标，响应 `{items, next_cursor, has_more}`；`status` 支持逗号多值。
+- 错误信封：契约是**扁平** `{code, message, detail?, retryable, trace_id}`；`api/client.ts` 同时兼容 `{error:{…}}` 包裹形态，
+  页面统一展示 **code + message**（+ retryable / trace_id / detail 折叠）。
+- 取消：`POST /runs/{id}/cancel`、`POST /tasks/{id}/cancel`（子路径，202 与「已 canceling」的 200 同构）。
+- Attempt 以 `{task_id}` + `{idx}`（idx 从 1 开始）寻址；日志 `text/plain`，带 `X-Log-Offset` / `X-Log-Coverage`。
+- `Run` 没有 `duration_seconds`：前端用 `started_at`（缺省 `submitted_at`）→ `finished_at`（缺省 now）现算。
+- `Run.tasks` 是 `TaskSummary`（只有 id/name/status/waiting_reason/attempts/error）——**没有 tester/seq/耗时**；
+  Tester、args、profile、Attempt 全部靠点开时 `GET /tasks/{id}` 拉 `TaskDetail`。
+- `task_counts`：`failed` 含 canceled、`pending` 含 queued；契约只必填 `total/succeeded/failed`，
+  缺 `pending/running/skipped` 时按 0 处理，整个字段缺失时列表显示 `—`。
+- **不调** `GET /runs/{id}/deploy/logs`：不在 MVP 契约里；Deploy 的 Pod 拓扑/参数快照来自 `GET /runs/{id}/deploy`。
+- **不做** Run 级重试（P1）、不做报告页（只用新窗口打开 `report.md`）。
+
+### 与后端实测的差异（2026-11-05 首轮联调）
+
+| 观察项 | 契约（openapi.yaml） | 后端实测 | 前端处理 |
+|---|---|---|---|
+| 错误信封 | 扁平 `{code,message,detail?,retryable,trace_id}` | 未取到错误体（联调时再核对） | 两种形态都能吃 |
+| `GET /runs/{id}` | 200 + `Run`（含 `tasks[]`） | 200 但**空 body**（backend-core 修中） | 详情页会落到错误/空态，等修完再看 |
+| `Run.task_counts` | 有 | 列表响应里**还没返回** | 列表「Task x / y」暂显示 `—` |
+| `Run.duration_seconds` | 无 | 无 | 前端现算 |
+| `TaskSummary.tester` | 无 | 无 | Task 表不显示 Tester，点开拉 TaskDetail |
+| `GET /clusters` | `{items: Cluster[]}`，`Cluster{name, api_server, description, last_check_*} ` | 同形状 ✓ | 已按契约 |
+| `GET /queue-status` | `{slots{concurrency_max,active,available,endpoints}, waiting{total,by_reason,tasks}, volcano{available,detail,queues}}` | 同形状 ✓ | 已按契约 |
+| `GET /testers` | `Tester.parameters/env` 是 **map** | map ✓（含 `required`） | api 层归一成数组再给 UI |
+| `POST /runs` 提交体 | 顶层 `run:` 嵌套 | 目前只吃**平级**写法（backend-core 修中） | 前端按嵌套发，等后端修完即通 |
+| `tests[].execution.profile` | 必填 | — | **MVP 没有 `/profiles` 端点**：提交页给可编辑默认值 `k8s-npu`（待裁决） |
+
+## SSE
+
+`hooks/useRunEvents.ts` + `api/sse.ts`：
+
+1. 首屏 `GET /runs/{id}/events/history` 补时间线（`since_seq` 续取，`next_cursor` 就是末条 seq）；
+2. 再 `fetch` + `ReadableStream` 订阅 `/runs/{id}/events`（带 `Last-Event-ID` 与 `Authorization`），按 `\n\n` 切帧；
+3. seq 去重（Set）+ 断点存 `sessionStorage["testplane:sse:<runId>"]`；
+4. 退避 1→2→4→8→30s；连续失败 → 状态变 `polling`，hook 自己 3s 轮询 `events/history` 兜底（页头写明「已降级」）；
+5. 切后台断开、回来续传；`resync_required` → 丢断点重建；终态 Run 不订阅只补历史。
+
+不用原生 `EventSource` 的原因：要带自定义请求头（Authorization / Last-Event-ID），且 401 时不能静默重连。
+
+事件信封按契约取 `{seq,type,run_id,task_id?,attempt_id?,at,from?,to?,reason?,payload?}`；时间线文案优先后端的 `payload.text`。
+
+## 视觉与设计 token
+
+`src/index.css` 的 `@theme` 把 `design/prototype/assets/tokens.css` + `holy-grail.css`（最终生效的 slate 家族）
+搬成语义类名：`bg-canvas` / `bg-surface` / `text-fg[-2|-3]` / `border-line[-soft|-strong]` /
+`text-primary-text` / `bg-success-chip` 等；圆角 6/8/12/16，字号 11–30，间距 4 的倍数，动效 150ms ease-out，只用 sm/md 两档阴影。
+业务组件里不写裸 hex（唯一例外：日志终端的 `slate-300` 一类终端配色与 `#0b1220` 底，已在 `@theme` 里定成 `bg-terminal`）。
+
+响应式：`≥1280` 三列（240 / 1fr / 288），`<1280` 隐右栏，`<768` 左栏收进抽屉（页头汉堡）。
+
+## 已知偏差 / TODO
+
+| 项 | 现状 | 后续 |
+|---|---|---|
+| 类型来源 | `api/types.ts` **按 `server/api/openapi.yaml` 手写**（每个类型标注 schema 名） | `openapi-typescript` 生成并入库，CI 校验 diff |
+| 数据层 | 约 50 行 `useAsync`（无缓存层） | 换成 TanStack Query，query key 按 web-and-delivery §3 |
+| 字体 | 系统字体栈（`Segoe UI` / `Microsoft YaHei`） | 自托管 Albert Sans + Noto Sans SC 子集（设计 §5） |
+| 提交页 YAML 编辑 | `textarea` + 解析校验 | CodeMirror 6（按行标错、`?from=<run>` 回填） |
+| 执行环境 | MVP 无 `/profiles` 端点，profile 是可编辑文本框（默认 `k8s-npu`） | 后端提供 `/profiles` 后改成下拉 |
+| 报告页 / 指标表 | **不做**（P0 裁决）；详情页页头新窗口打开 `report.md` | 需要时另开票 |
+| Deploy 日志 | **不接**：`/runs/{id}/deploy/logs` 不在契约内；Pod 拓扑来自 `GET /runs/{id}/deploy`，`deploy.pods` 非空才渲染那块 | 真实 Pod 日志上线后再加页签 |
+| Run 级重试 | **不做**（P1），详情页只有取消 | P1 |
+| 日志跟随 / 虚拟滚动 | 一次性读取，无 follow 流 | `?follow=1` 流式追加 + `useVirtualizer`（>10k 行） |
+| 权限 | 全部操作可见（dev 模式） | 按 `GET /me` 的 role 隐藏写按钮；403 时降级提示 |
+| 测试 | 无 | Vitest + MSW（错误码映射、SSE reducer）、Playwright e2e |
+| Lint | 无 | eslint / prettier 按 CI 要求补 |
+
+## 验证过的事
+
+- `pnpm exec tsc -b` ✅、`pnpm build` ✅（entry ≈112KB gz、CSS ≈7.4KB gz，路由级拆包）。
+- `pnpm dev` 在 5173 起得来（默认 `VITE_USE_MOCK=0`，请求打到代理目标）。
+- 默认（真实后端）产物在没有后端时**不白屏**：`/` 显示 `ENDPOINT_UNREACHABLE` + 中文说明 + 可重试 + detail，其余区块走空态；
+  页头无 `mock` 徽标、页脚显示「控制台」，确认 mock 没有被编进默认产物。
+- mock 产物（`VITE_USE_MOCK=1`）跑 jsdom 冒烟：`/`、`/runs`、`/runs/:id`（deploy 排队 / 就绪 / 执行中三种）、`/submit`、`/testers`、`/clusters`
+  全部 0 运行时错误；详情页 Deploy 区块有 Pod 拓扑与参数快照、Task 点开有 Attempt 与日志、事件时间线有内容；
+  执行中 Run 的 SSE 在 9s 内追加了 attempt/task 事件；不存在的 Run 落到 `NOT_FOUND`（code + message 同时展示）。
+
+## 联调记录
+
+| 日期 | 后端 | 走通的功能 | 关键响应 / 差异 |
+|---|---|---|---|
+| 2026-11-05 | port-forward `127.0.0.1:8081`（kind 内 `testplaned`） | 只读探测：`/meta`、`/me`、`/clusters`、`/queue-status`、`/runs?limit=3`、`/testers`、`/tasks?limit=2` 全部 200 且形状与契约一致；据此把 `types.ts` 全量对齐 openapi.yaml | 差异见上面「与后端实测的差异」表：`GET /runs/{id}` 空 body、`task_counts` 未返回、提交体平级写法，均在 backend-core 修 |
+| 2026-11-05 | **契约 fixture**（本地 18083，按 openapi 形状手写的假后端）+ `pnpm dev` 代理 | 真实模式（`VITE_USE_MOCK=0`）端到端跑通：`/`、`/runs`、`/runs/:id`、`/submit`、`/testers`、`/clusters` **0 运行时错误**；`/me` 身份（dev·admin）进来、列表 `task_counts` 进度（2 / 2）、Tester `parameters` map→数组（2 参数）、详情 Deployment ID / Pod 拓扑 / `report.md` 链接、Attempt + `X-Log-Offset`/`X-Log-Coverage` 日志、Volcano 不可达降级都验到了；代理对 SSE 不缓冲（`text/event-stream` 逐帧到） | 差异：无（fixture 就是按契约写的） |
+| 待办 | 真后端（8081） | 提交（含 deploy）→ 详情 → 事件流 → Testers → Clusters 全链路 | 等 backend-core 报「改完」后填这一行 |

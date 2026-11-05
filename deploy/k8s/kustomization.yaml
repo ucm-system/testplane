@@ -1,0 +1,22 @@
+# TestPlane · 基础设施层 kustomization（不含控制面）
+#
+# 只搭环境：namespace / SA / RBAC / PV+PVC / ConfigMap。
+# 应用：kubectl apply -k deploy/k8s
+# 预览：kubectl kustomize deploy/k8s
+# 删除：kubectl delete -k deploy/k8s
+#
+# 控制面不在这里 —— 它要的镜像 `testplane-server:dev` 必须先 docker build + kind load
+# 才能跑，所以放在 kustomize Component 里按需叠加：
+#   kubectl apply -k deploy/overlays/with-control-plane
+# 对应文件：deploy/components/control-plane/{deployment,migrate-job}.yaml
+#
+# 另外两份「有前提条件」的清单仍然单独 apply（各自文件头写了原因）：
+#   k8s/rbac-cluster-executor.yaml  Job 要落到 testplane 以外的 namespace 时（扩权，需评审）
+#   k8s/networkpolicy.yaml          有真 CNI 时；kindnet 不实现 NetworkPolicy
+#   k8s/pdb.yaml                    单副本 + minAvailable:1 会阻塞 drain，dev 不需要
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - rbac.yaml
+  - storage.yaml
+  - configmap.yaml

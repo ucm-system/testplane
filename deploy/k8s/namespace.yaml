@@ -1,0 +1,18 @@
+# TestPlane · namespace
+#
+# 一个 namespace 装控制面 + Tester Job + PVC + Lease（design/views/06-physical-view.md §2）。
+# PSA 打 restricted：控制面与 Tester Pod 都必须在 restricted 档下可跑
+# （runAsNonRoot / drop ALL / seccomp RuntimeDefault / 无 hostPath 的 Pod 级挂载）。
+#
+# 注意：PSA 只管 **Pod**。deploy/k8s/storage.yaml 里的 hostPath PV 是集群级对象，
+# 不受 PSA 约束——这是 dev 用 hostPath 模拟 RWX 的前提，prod 换 NFS CSI 后这层依赖消失。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: testplane
+  labels:
+    app.kubernetes.io/name: testplane
+    app.kubernetes.io/part-of: testplane
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

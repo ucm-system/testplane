@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="accent" x1="128" y1="362" x2="386" y2="142" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#22D3EE"/>
+      <stop offset="0.52" stop-color="#38BDF8"/>
+      <stop offset="1" stop-color="#6366F1"/>
+    </linearGradient>
+    <linearGradient id="plane" x1="160" y1="290" x2="370" y2="170" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#67E8F9"/>
+      <stop offset="1" stop-color="#60A5FA"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Solid app-icon field -->
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="#0B1220"/>
+
+  <!-- Two quiet layers: the test plane -->
+  <path d="M118 319L255 246L394 319L256 392L118 319Z" fill="#172B43"/>
+  <path d="M118 286L255 213L394 286L256 359L118 286Z" fill="#203B59"/>
+
+  <!-- A single forward-moving plane / verification stroke -->
+  <path d="M126 274L371 153L293 341L251 282L126 274Z" fill="url(#accent)"/>
+  <path d="M251 282L371 153L293 341L251 282Z" fill="#2563EB" opacity="0.62"/>
+  <path d="M126 274L251 282L293 341" stroke="#A5F3FC" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
+</svg>

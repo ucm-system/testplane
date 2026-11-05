@@ -10,24 +10,76 @@
 
 | 部分 | 状态 | 位置 |
 |---|---|---|
-| 设计约束文档（系统边界 / 契约 / 语义） | ✅ 定稿 | [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) |
+| 设计约束文档（系统边界 / 契约 / 语义） | ✅ 定稿（v0.6） | [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) |
 | 可点击原型（6 个页面 + 全状态谱） | ✅ 可交互 | [`design/prototype/`](design/prototype/) |
 | 参考 Tester：endpoint-probe（Pre-Check） | ✅ 可运行 | [`testers/endpoint-probe/`](testers/endpoint-probe/) |
-| 控制面：API / 状态机 / 编排 / 存储 | ⬜ P0 待实现 | 规划 `server/` |
-| Executor：K8s Job、超时与取消、日志采集 | ⬜ P0 待实现 | 规划 `server/executor/` |
-| Genet 适配：部署 / 状态查询 / Endpoint | ⬜ P0 待实现 | 规划 `server/genet/` |
-| Tester Registry：目录发现与校验 | ⬜ P0 待实现 | 规划 `server/registry/` |
-| Web UI：列表 / 详情 / 报告 / 日志 / 提交 | ⬜ P0 待实现 | 规划 `web/` |
-| 部署与镜像 | ⬜ 待实现 | 规划 `deploy/` |
-| P1：MCP Server / CLI / SSE / 失败续跑 / Run 对比 | ⬜ 之后 | 见 §14.2 |
+| 实现技术方案（总览 + 三份分册） | 🟢 提案 v3（12 项决策已并入） | [`design/IMPLEMENTATION.md`](design/IMPLEMENTATION.md) |
+| 4+1 设计视图（场景 / 逻辑 / 数据 / 进程 / 开发 / 部署 / API） | 🟢 可开发基线 | [`design/views/`](design/views/) |
+| 契约：OpenAPI 3.1（25 operations） | ✅ 定稿 | [`server/api/openapi.yaml`](server/api/openapi.yaml) |
+| 控制面：API / 状态机 / 编排 / 存储 | ✅ **MVP 已实现** | [`server/`](server/) |
+| Executor：K8s Job、超时与取消、日志采集 | ✅ **MVP 已实现**（真 Kind 集群跑通） | [`server/internal/executor/`](server/internal/executor/) |
+| Genet 适配：部署 / 状态查询 / Endpoint | 🟡 **MVP 为 mock**，接口已留 | [`server/internal/genet/mocks/`](server/internal/genet/mocks/) |
+| Tester Registry：目录发现与校验 | ✅ **MVP 已实现**（启动 + 周期扫描） | [`server/internal/registry/`](server/internal/registry/) |
+| Web UI：列表 / 详情 / 报告 / 日志 / 提交 | ✅ **MVP 已实现**（6 路由） | [`web/`](web/) |
+| 部署与镜像（Kind / K8s 清单 / 镜像构建） | ✅ 可用 | [`deploy/`](deploy/) |
+| 测试：单测 / 契约测试 / 端到端 / 失败注入 | ✅ 可用 | [`tools/`](tools/)、[`scripts/e2e/`](scripts/e2e/) |
+| P1：MCP Server / CLI / 失败续跑 / Run 对比 | ⬜ 之后 | 见 §14.2 |
 
-P0 的完整验收清单是 [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) §14.1 的 17 项，上表只是按模块归了类；验收以那 17 项为准，不以本表为准。
+P0 的完整验收清单是 [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) §14.1 的 17 项，上表只是按模块归了类；验收以那 17 项为准，不以本表为准。MVP 的逐项状态（做过 / mock / 未做）与偏差清单见 [`design/IMPLEMENTATION.md`](design/IMPLEMENTATION.md) §15 与 [`docs/runbook/acceptance.md`](docs/runbook/acceptance.md)。
+
+### 快速开始（本机 Kind，约 10 分钟）
+
+前置：Docker Desktop 在跑、`kubectl` 在 PATH、Python/Go/Node 就绪。命令都在**仓库根**执行（PowerShell）。
+
+```powershell
+# 0. 装 kind 到仓库内（.tools/ 已 gitignore）
+New-Item -ItemType Directory -Force -Path .tools | Out-Null
+Invoke-WebRequest -Uri 'https://kind.sigs.k8s.io/dl/v0.29.0/kind-windows-amd64' -OutFile '.tools\kind.exe' -UseBasicParsing
+
+# 1. 基础设施：Kind 集群（含宿主 .data\storage → 节点 /storage-root 挂载）+ PostgreSQL 16 + 存储 + RBAC
+New-Item -ItemType Directory -Force -Path .data\storage | Out-Null
+& .\.tools\kind.exe create cluster --config deploy\kind\testplane.yaml --wait 180s
+docker volume create testplane-pg-data
+docker run -d --name testplane-pg --restart unless-stopped `
+  -e POSTGRES_DB=testplane -e POSTGRES_USER=testplane -e POSTGRES_PASSWORD=testplane `
+  -e TZ=Asia/Shanghai -p 5432:5432 -v testplane-pg-data:/var/lib/postgresql/data postgres:16-alpine
+kubectl --context kind-testplane apply -k deploy/k8s
+
+# 2. 构建镜像并灌进集群（kind 节点看不到宿主镜像库，必须 kind load）
+#    有 make 时用 `make build`；Windows 原生没有 make 时用下面两行等价命令
+pnpm --dir web install; pnpm --dir web build
+Remove-Item -Recurse -Force server\internal\webui\dist -ErrorAction SilentlyContinue
+Copy-Item -Recurse web\dist server\internal\webui\dist
+Push-Location server; $env:CGO_ENABLED=0; go build -trimpath -o ..\bin\testplaned.exe ./cmd/testplaned; Pop-Location
+docker build -f deploy/docker/server.Dockerfile -t testplane-server:dev .
+& .\.tools\kind.exe load docker-image testplane-server:dev --name testplane
+
+# 3. 起控制面（启动时自动迁移；也可单独跑 migrate Job，见 runbook）
+kubectl --context kind-testplane apply -k deploy/overlays/with-control-plane
+kubectl --context kind-testplane -n testplane scale deploy/testplaned --replicas=1
+kubectl --context kind-testplane -n testplane rollout status deploy/testplaned --timeout=180s
+
+# 4. 被测服务（mock LLM 顶替）+ 提交第一个 Run
+kubectl --context kind-testplane apply -f scripts/e2e/kind/mock-llm.yaml
+kubectl --context kind-testplane -n testplane port-forward svc/testplane 8080:8080   # 另开一个终端跑下面的 curl
+curl -sS -X POST http://127.0.0.1:8080/api/v1/runs -H 'Content-Type: application/json' -d '{"run":{"name":"smoke","service":{"url":"http://mock-llm.default.svc:18080/v1","model_name":"mock-llm"},"precheck":"auto","tests":[{"name":"probe","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"}}]}}'
+```
+
+**判据**：`kubectl -n testplane get pods` 里 `testplaned-*` 是 `1/1 Running`；
+`/healthz` 与 `/readyz` 都返回 `ok`；Run 从 `queued` 走到 `succeeded`，两个 Task（precheck + probe）都成功。
+
+改了代码之后重灌集群是**五步**（构建 → load → apply → scale → 验健康），顺序不能换，见
+[`docs/runbook/local-kind.md`](docs/runbook/local-kind.md) §0；排障、ConfigMap 必填项、常见坑也在那里。
+17 项 P0 验收的逐项状态（做过 / mock / 未做 + 证据）见 [`docs/runbook/acceptance.md`](docs/runbook/acceptance.md)。
 
 ## 目录
 
 ```text
 design/               设计文档与可点击原型（已有）
   ARCHITECTURE.md     设计裁决集合（1800+ 行）
+  IMPLEMENTATION.md   实现技术方案：选型 / 模块 / 交付路线 / 待拍板项
+  impl/               实现分册：控制面、执行层、Web 与交付
+  views/              4+1 设计视图：用例、逻辑、数据、进程、开发、部署、API
   prototype/          单文件原型 + 渲染截图 + 自托管字体
 
 testers/              Tester 实现，一个目录一个 Tester（已有）

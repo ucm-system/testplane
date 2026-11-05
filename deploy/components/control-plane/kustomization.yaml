@@ -1,0 +1,18 @@
+# TestPlane · 控制面组件（kustomize Component，**默认不启用**）
+#
+# 这是「按需叠加」的载体：被 deploy/overlays/with-control-plane 引用时才生效。
+# 单独 apply 它没意义（Component 不是完整清单，不能直接 `kubectl apply -k` 它）。
+#
+# 启用：
+#   kubectl apply -k deploy/overlays/with-control-plane
+#
+# 为什么不放在 deploy/k8s/ 里：kustomize 的加载限制不允许 overlay 引用自身根目录
+# 之外的**单文件**，而 base 又没法"条件包含"某个文件；Component 是 kustomize 官方的
+# 按需叠加机制，且允许被上层目录引用（已实测 `kubectl kustomize` 出 12 个对象）。
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  # 控制面 Deployment + Service（testplaned，--role=all）
+  - deployment.yaml
+  # 迁移 Job（testplaned migrate up，必须先于控制面跑完；W-11）
+  - migrate-job.yaml

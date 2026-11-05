@@ -1,0 +1,146 @@
+# 失败注入用的 mock-llm 变体：每个 Deployment 一种故障，Service 名即端口。
+#
+#   kubectl apply -f scripts/e2e/kind/mock-llm-faults.yaml
+#
+# 供 scripts/e2e/failure-injection.ps1 使用；跑完可 delete -f 清掉。
+# 正常路径的 mock-llm 由 mock-llm.yaml 提供（default ns）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-llm-500
+  labels: { app: mock-llm-500 }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: mock-llm-500 }
+  template:
+    metadata:
+      labels: { app: mock-llm-500 }
+    spec:
+      containers:
+        - name: mock-llm
+          image: testplane/mock-llm:dev
+          imagePullPolicy: IfNotPresent
+          args: ["-addr=:18080", "-fail=500"]
+          ports: [{ name: http, containerPort: 18080 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 200m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-llm-500
+spec:
+  selector: { app: mock-llm-500 }
+  ports: [{ name: http, port: 18080, targetPort: 18080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-llm-401
+  labels: { app: mock-llm-401 }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: mock-llm-401 }
+  template:
+    metadata:
+      labels: { app: mock-llm-401 }
+    spec:
+      containers:
+        - name: mock-llm
+          image: testplane/mock-llm:dev
+          imagePullPolicy: IfNotPresent
+          args: ["-addr=:18080", "-fail=401"]
+          ports: [{ name: http, containerPort: 18080 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 200m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-llm-401
+spec:
+  selector: { app: mock-llm-401 }
+  ports: [{ name: http, port: 18080, targetPort: 18080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-llm-error200
+  labels: { app: mock-llm-error200 }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: mock-llm-error200 }
+  template:
+    metadata:
+      labels: { app: mock-llm-error200 }
+    spec:
+      containers:
+        - name: mock-llm
+          image: testplane/mock-llm:dev
+          imagePullPolicy: IfNotPresent
+          args: ["-addr=:18080", "-error-in-200"]
+          ports: [{ name: http, containerPort: 18080 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 200m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-llm-error200
+spec:
+  selector: { app: mock-llm-error200 }
+  ports: [{ name: http, port: 18080, targetPort: 18080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-llm-slow
+  labels: { app: mock-llm-slow }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: mock-llm-slow }
+  template:
+    metadata:
+      labels: { app: mock-llm-slow }
+    spec:
+      containers:
+        - name: mock-llm
+          image: testplane/mock-llm:dev
+          imagePullPolicy: IfNotPresent
+          # 窗口内永远不会就绪：用于断言 precheck 可重试失败 → service_unavailable
+          args: ["-addr=:18080", "-ready-after=3600s"]
+          ports: [{ name: http, containerPort: 18080 }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 200m, memory: 64Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-llm-slow
+spec:
+  selector: { app: mock-llm-slow }
+  ports: [{ name: http, port: 18080, targetPort: 18080 }]

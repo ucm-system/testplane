@@ -1,0 +1,44 @@
+# 构建上下文过滤（BuildKit 的 Dockerfile 专用 ignore 文件）
+#
+# 生效条件：与 Dockerfile 同目录、命名为 <Dockerfile 名>.dockerignore，
+# 且用 BuildKit 构建（Docker 23+ 默认）。构建命令必须显式 -f：
+#   docker build -f deploy/docker/server.Dockerfile -t testplane-server:dev .
+#
+# 上下文是**仓库根**（W-8 要求：要用 server/、web/、testers/），所以这里的目的
+# 是把设计文档、原型截图、依赖目录、本地数据全部挡在上下文之外——
+# 否则 design/prototype 的几 MB 截图会进构建层缓存，每次都变。
+
+# 版本控制与本地环境
+.git
+.gitattributes
+.tools
+.data
+.dsh
+.github
+
+# 设计文档与原型（含 100+ KB 的 HTML 与 700+ KB 截图）——不属于运行时
+design/
+docs/
+
+# 部署清单自身：镜像不需要它们，改清单不该让镜像重建
+deploy/
+
+# 前端依赖与产物（产物由 web 阶段生成后显式 COPY --from=web，不进上下文）
+web/node_modules
+**/node_modules
+web/dist
+**/.vite
+
+# Go 构建缓存与产物
+**/*.exe
+**/*.test
+bin/
+
+# 本地文件
+*.log
+*.tmp
+**/.env
+**/.env.*
+!**/.env.example
+
+# 说明：testers/ **不能**排除——镜像要把它们 COPY 到 /app/testers（E-10）。

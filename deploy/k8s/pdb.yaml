@@ -1,0 +1,23 @@
+# TestPlane · PodDisruptionBudget（**默认不启用，opt-in**）
+#
+# 依据 design/views/06-physical-view.md §2、§7.1。
+#
+# ⚠️ 单副本 + minAvailable: 1 会让节点 drain **永久阻塞**（06 §7.1「PDB 的坑」）。
+#    运维手册口径：先 kubectl scale --replicas=2（新 Pod 会抢 Lease），
+#    或临时删掉 PDB 再 drain——两者都要留记录。
+#
+# dev 单节点 kind 没有 drain 场景，所以默认不开；上 staging/prod 再启用。
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: testplaned
+  namespace: testplane
+  labels:
+    app.kubernetes.io/name: testplaned
+    app.kubernetes.io/part-of: testplane
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: testplaned
+      app.kubernetes.io/part-of: testplane
