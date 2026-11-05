@@ -402,5 +402,7 @@ func TestEndpointKeyNormalization(t *testing.T) {
 	if got := EndpointKey("http://10.0.0.10:8000/v1"); got != "http://10.0.0.10:8000" {
 		t.Errorf("key = %q", got)
 	}
-	if EndpointKey("") != "" { t.Errorf("empty endpoint has no key; the scheduler guard must reject it (C-4.5)") }
+	if EndpointKey("") != "" {
+		t.Errorf("empty endpoint has no key; the scheduler guard must reject it (C-4.5)")
+	}
 }

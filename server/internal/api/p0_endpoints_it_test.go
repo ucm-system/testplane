@@ -462,3 +462,68 @@ func TestRunFile_PrefixedPathStillValidated(t *testing.T) {
 
 // urlQueryEscape 用 QueryEscape 拼 path（与真实客户端一致）。
 func urlQueryEscape(s string) string { return url.QueryEscape(s) }
+
+// TestSubmitRun_UsesInjectedClock 是票 #31 的验收：把时钟拨到过去，
+// 提交时间戳（响应 submitted_at 与库内 runs.submitted_at）以及 run_id 的日期段必须随之变化。
+func TestSubmitRun_UsesInjectedClock(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	past := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	clk := domain.NewFixedClock(past)
+	srv.clock = clk
+	srv.now = clk.Now
+	srv.submit.clock = clk
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs", strings.NewReader(validSubmitYAML))
+	req.Header.Set("Content-Type", "application/yaml")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Run struct {
+			ID          string `json:"id"`
+			SubmittedAt string `json:"submitted_at"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析: %v", err)
+	}
+	// run_id 的日期段来自注入时钟（r-YYYYMMDD-XXXX）。
+	if !strings.HasPrefix(resp.Run.ID, "r-20260304-") {
+		t.Fatalf("run_id = %q, 期望 r-20260304-*（日期段应来自注入时钟）", resp.Run.ID)
+	}
+	// 响应里的 submitted_at 也应是注入时钟的时间。
+	got, err := time.Parse(time.RFC3339, resp.Run.SubmittedAt)
+	if err != nil {
+		t.Fatalf("解析 submitted_at: %v (%q)", err, resp.Run.SubmittedAt)
+	}
+	if !got.Equal(past) {
+		t.Fatalf("submitted_at = %v, 期望注入时钟 %v", got, past)
+	}
+	// 库内值同样来自注入时钟。
+	run, err := st.Runs.Get(context.Background(), nil, resp.Run.ID)
+	if err != nil {
+		t.Fatalf("读 run: %v", err)
+	}
+	if !run.SubmittedAt.Equal(past) {
+		t.Fatalf("库内 submitted_at = %v, 期望 %v", run.SubmittedAt, past)
+	}
+	// 拨动时钟后再提交，时间戳应跟着前进（证明不是缓存值）。
+	clk.Advance(2 * time.Hour)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/runs", strings.NewReader(validSubmitYAML))
+	req.Header.Set("Content-Type", "application/yaml")
+	srv.Handler().ServeHTTP(rec, req)
+	var resp2 struct {
+		Run struct {
+			SubmittedAt string `json:"submitted_at"`
+		} `json:"run"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp2)
+	got2, _ := time.Parse(time.RFC3339, resp2.Run.SubmittedAt)
+	if !got2.Equal(past.Add(2 * time.Hour)) {
+		t.Fatalf("拨动后 submitted_at = %v, 期望 %v", got2, past.Add(2*time.Hour))
+	}
+}

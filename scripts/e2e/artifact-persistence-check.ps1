@@ -32,13 +32,26 @@ $script:ApiBase = $BaseUrl
 $script:ForwardProcs = @()
 $script:NextForwardPort = 8125
 
+$delayedNamespace = ''
 if ([string]::IsNullOrWhiteSpace($MockURL)) {
-    $MockURL = 'http://mock-llm.default.svc:18080/v1'
+    # 产物 drill 要在终态前抓住 Job 并打 hold；mock-llm 太快会秒删 Job。
+    # 优先用 delayed fixture（ready-after=15s），并在下面重启它重置窗口。
     foreach ($ns in @('testplane-mock', 'default', 'testplane', 'testplane-svc')) {
-        $svc = & kubectl -n $ns get svc mock-llm -o name --request-timeout=3s 2>$null
+        $svc = & kubectl -n $ns get svc mock-llm-delayed -o name --request-timeout=3s 2>$null
         if ($LASTEXITCODE -eq 0 -and (($svc | Out-String).Trim()) -ne '') {
-            $MockURL = "http://mock-llm.$ns.svc:18080/v1"
+            $delayedNamespace = $ns
+            $MockURL = "http://mock-llm-delayed.$ns.svc:18080/v1"
             break
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($MockURL)) {
+        $MockURL = 'http://mock-llm.default.svc:18080/v1'
+        foreach ($ns in @('testplane-mock', 'default', 'testplane', 'testplane-svc')) {
+            $svc = & kubectl -n $ns get svc mock-llm -o name --request-timeout=3s 2>$null
+            if ($LASTEXITCODE -eq 0 -and (($svc | Out-String).Trim()) -ne '') {
+                $MockURL = "http://mock-llm.$ns.svc:18080/v1"
+                break
+            }
         }
     }
 }
@@ -85,6 +98,15 @@ function Invoke-Api {
     return Invoke-RestMethod -Method $Method -Uri $uri -Headers $h
 }
 
+function Invoke-KubectlText {
+    param([string[]]$KubectlArgs)
+    $out = & kubectl @KubectlArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ("kubectl " + ($KubectlArgs -join ' ') + " 失败（exit $LASTEXITCODE）：" + (($out | Out-String).Trim()))
+    }
+    return @($out | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() -ne '' })
+}
+
 function Get-FileBytes {
     param([string]$RelativePath, [hashtable]$ExtraHeaders = @{})
     $tmp = Join-Path $OutDir ("file-" + [guid]::NewGuid().ToString('N') + ".bin")
@@ -126,6 +148,12 @@ function Add-Check([string]$Name, [bool]$Ok, [string]$Detail) {
 }
 
 Write-Host "产物持久化验收：$BaseUrl（mock=$MockURL）" -ForegroundColor Cyan
+if ($delayedNamespace -ne '') {
+    # 重置 delayed mock 的 ready-after 窗口，给 Job 捕获 + hold 留时间。
+    Write-Host "重启 mock-llm-delayed（ns=$delayedNamespace，重置 15s 就绪窗口）…"
+    $null = Invoke-KubectlText @('-n', $delayedNamespace, 'rollout', 'restart', 'deploy/mock-llm-delayed')
+    $null = Invoke-KubectlText @('-n', $delayedNamespace, 'rollout', 'status', 'deploy/mock-llm-delayed', '--timeout=90s')
+}
 if (-not $SkipForward) {
     $script:ForwardProcs += Start-ApiForward -Port $ForwardPort
     $script:ApiBase = "http://127.0.0.1:$ForwardPort"
@@ -136,6 +164,46 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $submitted = Invoke-Api -Method POST -Path '/api/v1/runs' -Body (New-Manifest -Stamp $stamp)
 $script:RunId = [string]$submitted.run.id
 Write-Host "已提交 Run $($script:RunId)"
+
+# 先记录要删的对象名，并用 hold-until 保证它不会被正常终态清理提前删掉；
+# 否则“删后不见了”可能只是本来就没见过（票 #29-2）。
+$previewTask = @($submitted.tasks | Where-Object { $_.name -eq 'artifact-a' })[0]
+if (-not $previewTask) { $previewTask = @($submitted.tasks)[0] }
+$previewTaskId = [string]$previewTask.id
+$jobName = "tp-" + $previewTaskId.ToLower() + "-a1"
+$jobQueryOK = $false
+$jobExistsBefore = $false
+$jobSw = [System.Diagnostics.Stopwatch]::StartNew()
+while ($jobSw.Elapsed.TotalSeconds -lt 60) {
+    try {
+        $jobOut = Invoke-KubectlText @('-n', $Namespace, 'get', 'job', $jobName, '-o', 'name', '--ignore-not-found')
+        $jobQueryOK = $true
+        if (@($jobOut).Count -gt 0) { $jobExistsBefore = $true; break }
+    } catch {
+        $jobQueryOK = $false
+        break
+    }
+    Start-Sleep -Milliseconds 500
+}
+Add-Check 'k8s.job_query_before' $jobQueryOK $(if ($jobQueryOK) { "查询 $jobName 成功" } else { "kubectl 查询失败" })
+Add-Check 'k8s.job_existed_before' $jobExistsBefore ("job=" + $jobName)
+$podNamesBefore = @()
+if ($jobExistsBefore) {
+    try {
+        $holdUntil = (Get-Date).ToUniversalTime().AddMinutes(10).ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $null = Invoke-KubectlText @('-n', $Namespace, 'annotate', 'job', $jobName, ("testplane.io/hold-until=" + $holdUntil), '--overwrite')
+        Add-Check 'k8s.hold_annotate' $true ("hold-until=" + $holdUntil)
+        $podSw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($podSw.Elapsed.TotalSeconds -lt 60) {
+            $podNamesBefore = @(Invoke-KubectlText @('-n', $Namespace, 'get', 'pods', '-l', "job-name=$jobName", '-o', 'name') | ForEach-Object { $_ -replace '^pod/', '' })
+            if ($podNamesBefore.Count -gt 0) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        Add-Check 'k8s.pods_existed_before' ($podNamesBefore.Count -gt 0) ("pods=" + ($podNamesBefore -join ', '))
+    } catch {
+        Add-Check 'k8s.hold_annotate' $false ($_.Exception.Message)
+    }
+}
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $run = $null
@@ -157,6 +225,7 @@ $task = @($tasks | Where-Object { $_.name -eq 'artifact-a' })[0]
 if (-not $task) { $task = $tasks[0] }
 $taskId = [string]$task.id
 $fileRel = "tasks/$taskId/attempts/1/result.json"
+Add-Check 'task.same_as_held_job' ($taskId -eq $previewTaskId) ("held=" + $previewTaskId + " selected=" + $taskId)
 $taskDetail = Invoke-Api -Method GET -Path "/api/v1/tasks/$taskId"
 $attempts = @($taskDetail.attempts)
 $attemptTerminal = $attempts.Count -gt 0 -and @($attempts | Where-Object { $_.status -notin @('succeeded', 'failed', 'canceled') }).Count -eq 0
@@ -187,24 +256,66 @@ Add-Check 'baseline.prefixed_sha_same' ($basePrefixedFile.sha256 -eq $baseFile.s
 Write-Host ("基线：artifacts={0}, total={1}, result={2}, fileBytes={3}, sha={4}" -f $baseCount, $baseTotal, $baseResultCount, $baseFile.bytes.Length, $baseFile.sha256)
 
 # 确认 Attempt 已终态后删除 Job（不等 GC，加速；语义与 GC 删除后的读取一致）。
-$jobName = "tp-t-" + $taskId.ToLower() + "-a1"
-$jobFound = & kubectl -n $Namespace get job $jobName -o name --ignore-not-found 2>&1
-if ($LASTEXITCODE -ne 0) { throw "kubectl get job 失败：$($jobFound -join ' ')" }
-if (($jobFound | Out-String).Trim() -ne '') {
-    Write-Host "删除 Job $jobName（Attempt 已终态）…"
-    kubectl -n $Namespace delete job $jobName --wait=true --timeout=60s 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "kubectl delete job $jobName 失败" }
+$jobName = "tp-" + $taskId.ToLower() + "-a1"
+# 删前按名确认对象存在；先移除 hold-until，再删。
+$holdRemoved = $false
+if ($jobExistsBefore) {
+    try {
+        $null = Invoke-KubectlText @('-n', $Namespace, 'annotate', 'job', $jobName, 'testplane.io/hold-until-')
+        $holdRemoved = $true
+    } catch { }
+}
+Add-Check 'k8s.hold_remove' $holdRemoved ("job=" + $jobName)
+$jobQueryOK = $false
+$jobExistsNow = $false
+try {
+    $jobFound = Invoke-KubectlText @('-n', $Namespace, 'get', 'job', $jobName, '-o', 'name', '--ignore-not-found')
+    $jobQueryOK = $true
+    $jobExistsNow = @($jobFound).Count -gt 0
+} catch { }
+Add-Check 'k8s.job_query_before_delete' $jobQueryOK ("job=" + $jobName)
+Add-Check 'k8s.job_exists_before_delete' $jobExistsNow ("job=" + $jobName)
+if ($jobExistsNow) {
+    Write-Host "删除 Job $jobName（Attempt 已终态，删前已记录对象名）…"
+    try {
+        $null = Invoke-KubectlText @('-n', $Namespace, 'delete', 'job', $jobName, '--wait=true', '--timeout=60s')
+        Add-Check 'k8s.job_delete' $true ("job=" + $jobName)
+    } catch {
+        Add-Check 'k8s.job_delete' $false ($_.Exception.Message)
+    }
 } else {
-    Write-Host "Job $jobName 已被 GC"
+    Add-Check 'k8s.job_delete' $false '删前 Job 不存在，无法证明删后消失'
 }
-$podSw = [System.Diagnostics.Stopwatch]::StartNew()
-$pods = @()
-while ($podSw.Elapsed.TotalSeconds -lt $PodGoneTimeoutSeconds) {
-    $pods = @(& kubectl -n $Namespace get pods -o name 2>&1 | Where-Object { $_ -match [regex]::Escape("tp-t-$($taskId.ToLower())") })
-    if ($pods.Count -eq 0) { break }
-    Start-Sleep -Seconds 2
+$jobGoneQueryOK = $false
+$jobGone = $false
+try {
+    $jobAfter = Invoke-KubectlText @('-n', $Namespace, 'get', 'job', $jobName, '-o', 'name', '--ignore-not-found')
+    $jobGoneQueryOK = $true
+    $jobGone = @($jobAfter).Count -eq 0
+} catch { }
+Add-Check 'k8s.job_query_after' $jobGoneQueryOK ("job=" + $jobName)
+Add-Check 'k8s.job_gone_by_name' $jobGone ("job=" + $jobName)
+
+# Pod 按删前记录的 exact name 复查，不能只 grep 前缀。
+$podQueryOK = $true
+$podsLeft = @()
+foreach ($podName in $podNamesBefore) {
+    try {
+        $left = Invoke-KubectlText @('-n', $Namespace, 'get', 'pod', $podName, '-o', 'name', '--ignore-not-found')
+        if (@($left).Count -gt 0) { $podsLeft += $podName }
+    } catch { $podQueryOK = $false }
 }
-Add-Check 'pod.gone' ($pods.Count -eq 0) $(if ($pods.Count -eq 0) { "无 tp-t-$($taskId.ToLower()) Pod" } else { $pods -join ', ' })
+Add-Check 'k8s.pod_query_by_name' $podQueryOK ("before=" + ($podNamesBefore -join ', '))
+Add-Check 'pod.gone_by_name' ($podQueryOK -and $podNamesBefore.Count -gt 0 -and $podsLeft.Count -eq 0) ("left=" + ($podsLeft -join ', ') + " / beforeCount=" + $podNamesBefore.Count)
+# 再按 job-name label 扫一次，防止出现同前缀但不同名的残留。
+$podsByJob = @()
+$podLabelQueryOK = $false
+try {
+    $podsByJob = @(Invoke-KubectlText @('-n', $Namespace, 'get', 'pods', '-l', "job-name=$jobName", '-o', 'name'))
+    $podLabelQueryOK = $true
+} catch { }
+Add-Check 'k8s.pods_query' $podLabelQueryOK ("job=" + $jobName)
+Add-Check 'pod.gone' ($podLabelQueryOK -and $podsByJob.Count -eq 0) $(if ($podLabelQueryOK -and $podsByJob.Count -eq 0) { "无 job-name=$jobName Pod" } else { $podsByJob -join ', ' })
 
 Write-Host ""
 Write-Host "Pod 消失后断言：" -ForegroundColor Cyan
@@ -241,18 +352,33 @@ Add-Check 'negative.prefixed_traversal_400' ($badPrefix400.StatusCode -eq 400) (
 if (-not $SkipRestart) {
     Write-Host ""
     Write-Host "控制面重启后断言：" -ForegroundColor Cyan
-    kubectl -n $Namespace rollout restart deploy/testplaned 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'rollout restart 失败' }
-    kubectl -n $Namespace rollout status deploy/testplaned --timeout="$($RestartTimeoutSeconds)s" 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'rollout status 超时' }
-    if (-not $SkipForward) { Restart-ApiForward }
-    $null = Invoke-WebRequest -UseBasicParsing "$script:ApiBase/healthz" -TimeoutSec 10
-    $restartFile = Get-FileBytes -RelativePath $fileRel
-    $restartPrefixedFile = Get-FileBytes -RelativePath $prefixedRel
-    Add-Check 'restart.file_200' ($restartFile.status -eq 200) ("status=" + $restartFile.status + " / bytes=" + $restartFile.bytes.Length)
-    Add-Check 'restart.sha256_same' ($restartFile.sha256 -eq $baseFile.sha256) ("before=" + $baseFile.sha256 + " after=" + $restartFile.sha256)
-    Add-Check 'restart.prefixed_200' ($restartPrefixedFile.status -eq 200) ("status=" + $restartPrefixedFile.status + " / bytes=" + $restartPrefixedFile.bytes.Length)
-    Add-Check 'restart.prefixed_sha_same' ($restartPrefixedFile.sha256 -eq $baseFile.sha256) ("before=" + $baseFile.sha256 + " after=" + $restartPrefixedFile.sha256)
+    $restartOK = $true
+    try {
+        $null = Invoke-KubectlText @('-n', $Namespace, 'rollout', 'restart', 'deploy/testplaned')
+        Add-Check 'restart.rollout_restart' $true 'rollout restart 成功'
+    } catch {
+        Add-Check 'restart.rollout_restart' $false ($_.Exception.Message)
+        $restartOK = $false
+    }
+    if ($restartOK) {
+        try {
+            $null = Invoke-KubectlText @('-n', $Namespace, 'rollout', 'status', 'deploy/testplaned', "--timeout=$($RestartTimeoutSeconds)s")
+            Add-Check 'restart.rollout_status' $true ("timeout=" + $RestartTimeoutSeconds + "s")
+        } catch {
+            Add-Check 'restart.rollout_status' $false ($_.Exception.Message)
+            $restartOK = $false
+        }
+    }
+    if ($restartOK) {
+        if (-not $SkipForward) { Restart-ApiForward }
+        $null = Invoke-WebRequest -UseBasicParsing "$script:ApiBase/healthz" -TimeoutSec 10
+        $restartFile = Get-FileBytes -RelativePath $fileRel
+        $restartPrefixedFile = Get-FileBytes -RelativePath $prefixedRel
+        Add-Check 'restart.file_200' ($restartFile.status -eq 200) ("status=" + $restartFile.status + " / bytes=" + $restartFile.bytes.Length)
+        Add-Check 'restart.sha256_same' ($restartFile.sha256 -eq $baseFile.sha256) ("before=" + $baseFile.sha256 + " after=" + $restartFile.sha256)
+        Add-Check 'restart.prefixed_200' ($restartPrefixedFile.status -eq 200) ("status=" + $restartPrefixedFile.status + " / bytes=" + $restartPrefixedFile.bytes.Length)
+        Add-Check 'restart.prefixed_sha_same' ($restartPrefixedFile.sha256 -eq $baseFile.sha256) ("before=" + $baseFile.sha256 + " after=" + $restartPrefixedFile.sha256)
+    }
 }
 
 foreach ($p in $script:ForwardProcs) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }

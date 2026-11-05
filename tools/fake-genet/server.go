@@ -302,10 +302,10 @@ func (s *Server) callInfo(info ReleaseInfo) map[string]any {
 	}
 	_ = epStatus
 	return map[string]any{
-		"namespace": s.Namespace,
-		"model":     s.Model,
+		"namespace":   s.Namespace,
+		"model":       s.Model,
 		"serviceName": fmt.Sprintf("%s-%s", info.Name, s.ServiceNameSuffix),
-		"endpoint":  endpoint,
+		"endpoint":    endpoint,
 	}
 }
 

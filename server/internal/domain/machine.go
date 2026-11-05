@@ -110,12 +110,12 @@ var taskTransitions = map[edge]TransitionSpec{
 // ---- Attempt 转移表（02 §2.3）--------------------------------------------
 
 var attemptTransitions = map[edge]TransitionSpec{
-	{AttemptPreparing.Status(), AttemptRunning.Status()}:   {Command: "Start", Event: EventAttemptStarted},
-	{AttemptPreparing.Status(), AttemptFailed.Status()}:    {Command: "Fail", Event: EventAttemptFinished},
-	{AttemptPreparing.Status(), AttemptCanceled.Status()}:  {Command: "Cancel", Event: EventAttemptFinished},
-	{AttemptRunning.Status(), AttemptSucceeded.Status()}:   {Command: "Succeed", Event: EventAttemptFinished},
-	{AttemptRunning.Status(), AttemptFailed.Status()}:      {Command: "Fail", Event: EventAttemptFinished},
-	{AttemptRunning.Status(), AttemptCanceled.Status()}:    {Command: "Cancel", Event: EventAttemptFinished},
+	{AttemptPreparing.Status(), AttemptRunning.Status()}:  {Command: "Start", Event: EventAttemptStarted},
+	{AttemptPreparing.Status(), AttemptFailed.Status()}:   {Command: "Fail", Event: EventAttemptFinished},
+	{AttemptPreparing.Status(), AttemptCanceled.Status()}: {Command: "Cancel", Event: EventAttemptFinished},
+	{AttemptRunning.Status(), AttemptSucceeded.Status()}:  {Command: "Succeed", Event: EventAttemptFinished},
+	{AttemptRunning.Status(), AttemptFailed.Status()}:     {Command: "Fail", Event: EventAttemptFinished},
+	{AttemptRunning.Status(), AttemptCanceled.Status()}:   {Command: "Cancel", Event: EventAttemptFinished},
 }
 
 // ---- Tester 转移表（02 §2.4）--------------------------------------------

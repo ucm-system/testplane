@@ -78,18 +78,39 @@ func TestRoleMapper(t *testing.T) {
 	}
 }
 
+// TestSafeReturn 是票 #27-1 的验收：反斜杠/编码变体不得绕过白名单，
+// 任何情况下返回值都必须以 "/" 开头且不含 host（不会跳出站内）。
 func TestSafeReturn(t *testing.T) {
 	cases := map[string]string{
-		"/runs/r-1":        "/runs/r-1",
-		"":                 "/",
-		"http://evil.com":  "/",
-		"//evil.com/x":     "/",
-		"javascript:alert": "/",
-		"runs":             "/",
+		// 合法：白名单路由原样返回（归一后）
+		"/runs/r-1":          "/runs/r-1",
+		"/runs":              "/runs",
+		"/tasks":             "/tasks",
+		"/submit":            "/submit",
+		"/runs/../etc":       "/", // 归一后是 /etc，不在白名单 → 回 /
+		"/runs/r-1?tab=logs": "/runs/r-1?tab=logs",
+		"":                   "/",
+		// 开放重定向变体：全部回 /
+		"/\\evil.com":         "/",
+		"/%5Cevil.com":        "/",
+		"%5c%2f":              "/",
+		"//evil.com":          "/",
+		"//evil.com/x":        "/",
+		"https://evil.com":    "/",
+		"http://evil.com":     "/",
+		"javascript:alert(1)": "/",
+		"evil.com":            "/",
+		"/runs-evil":          "/",
+		"/\\evil.com/x":       "/",
 	}
 	for in, want := range cases {
-		if got := safeReturn(in); got != want {
+		got := safeReturn(in)
+		if got != want {
 			t.Fatalf("safeReturn(%q) = %q, 期望 %q", in, got, want)
+		}
+		// 通用不变量：结果必须是站内绝对路径，且不带 host/scheme。
+		if !strings.HasPrefix(got, "/") || strings.HasPrefix(got, "//") || strings.Contains(got, "evil") {
+			t.Fatalf("safeReturn(%q) = %q 不安全", in, got)
 		}
 	}
 }

@@ -114,11 +114,11 @@ func TestTransitionTable_IllegalEdgesRejected(t *testing.T) {
 		{RunSucceeded, RunQueued},
 		{RunFailed, RunCancelling},
 		{RunCanceled, RunTesting},
-		{RunSubmitted, RunSucceeded},   // 跳过 cleanup
-		{RunQueued, RunCleanup},        // 跳过 testing
-		{RunTesting, RunSucceeded},     // 终态只能由 cleanup 判定
-		{RunCancelling, RunQueued},     // 取消不可回退
-		{RunCleanup, RunTesting},       // cleanup 不能回 testing
+		{RunSubmitted, RunSucceeded}, // 跳过 cleanup
+		{RunQueued, RunCleanup},      // 跳过 testing
+		{RunTesting, RunSucceeded},   // 终态只能由 cleanup 判定
+		{RunCancelling, RunQueued},   // 取消不可回退
+		{RunCleanup, RunTesting},     // cleanup 不能回 testing
 	}
 	for _, e := range illegalRuns {
 		if _, ok := RunTransition(e.from, e.to); ok {
@@ -127,15 +127,15 @@ func TestTransitionTable_IllegalEdgesRejected(t *testing.T) {
 	}
 
 	illegalTasks := []struct{ from, to TaskStatus }{
-		{TaskPending, TaskRunning},     // 跳步
-		{TaskQueued, TaskCanceled},     // C-3.1：未开始的取消记 skipped
-		{TaskPending, TaskCanceled},    // 同上
-		{TaskSucceeded, TaskFailed},    // 终态不可逆
-		{TaskSucceeded, TaskQueued},    // 终态不可逆
-		{TaskCanceled, TaskQueued},     // 终态不可逆
-		{TaskSkipped, TaskQueued},      // 终态不可逆
-		{TaskRunning, TaskPreparing},   // 回退
-		{TaskPreparing, TaskQueued},    // 回退
+		{TaskPending, TaskRunning},   // 跳步
+		{TaskQueued, TaskCanceled},   // C-3.1：未开始的取消记 skipped
+		{TaskPending, TaskCanceled},  // 同上
+		{TaskSucceeded, TaskFailed},  // 终态不可逆
+		{TaskSucceeded, TaskQueued},  // 终态不可逆
+		{TaskCanceled, TaskQueued},   // 终态不可逆
+		{TaskSkipped, TaskQueued},    // 终态不可逆
+		{TaskRunning, TaskPreparing}, // 回退
+		{TaskPreparing, TaskQueued},  // 回退
 	}
 	for _, e := range illegalTasks {
 		if _, ok := TaskTransition(e.from, e.to); ok {

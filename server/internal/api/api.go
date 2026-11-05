@@ -41,6 +41,9 @@ type Deps struct {
 	Version string
 	// Volcano 可选：不设时 /queue-status 的 volcano 块降级为 scheduler_unavailable。
 	Volcano VolcanoProvider
+	// Clock 是业务时间来源（05 §6.5）；nil 时用 domain.SystemClock。
+	// 提交时间戳、run_id 日期段、resolved 快照时间都走它（票 #31）。
+	Clock domain.Clock
 }
 
 // Server 持有 HTTP 层依赖。
@@ -54,6 +57,7 @@ type Server struct {
 	webui    fs.FS
 	volcano  VolcanoProvider
 	metrics  *metricsRegistry
+	clock    domain.Clock
 	authn    *auth.Authenticator
 	version  string
 	now      func() time.Time
@@ -77,11 +81,19 @@ func New(d Deps) *Server {
 		now:      func() time.Time { return time.Now().UTC() },
 		metrics:  newMetricsRegistry(),
 	}
+	s.clock = d.Clock
+	if s.clock == nil {
+		s.clock = domain.SystemClock
+	}
+	// 业务时间统一取注入时钟（票 #31）：提交时间戳、/meta.generated_at、SSE 回放窗口
+	// 都走它；runtime 机制（Ticker/Timeout）仍用 time.Now()。
+	s.now = s.clock.Now
 	s.authn = s.buildAuthenticator()
 	s.submit = &Submitter{
 		resolver:       d.Resolver,
 		profiles:       d.Store.Profiles,
 		logger:         lg,
+		clock:          s.clock,
 		MaxTasks:       d.Config.RunMaxTasks,
 		DefaultTimeout: d.Config.TaskTimeoutDefault,
 		MaxTimeout:     d.Config.TaskTimeoutMax,

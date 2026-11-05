@@ -59,9 +59,33 @@ func (c *Controller) cleanupDeploy(ctx context.Context, runID string) {
 	record := func(u *domain.DeployUninstall) {
 		_ = c.repos.RecordDeployState(ctx, runID, domain.DeploySnapshot{Uninstall: u})
 	}
-	// 已 verified 的不再打 Genet（对账每轮都会路过这里）。
-	if run, err := c.repos.GetRun(ctx, runID); err == nil && uninstallState(run.DeployJSON) == domain.UninstallVerified {
+
+	run, err := c.repos.GetRun(ctx, runID)
+	if err != nil {
+		c.logf("orchestrator: WARN deploy_cleanup read run %s: %v", runID, err)
 		return
+	}
+	if st := uninstallState(run.DeployJSON); st == domain.UninstallVerified || st == domain.UninstallSkipped {
+		return // 已收口（对账每轮都会路过这里）
+	}
+	// cleanup_policy 必须与对账路径一致（票 #28-1）：never 一律不卸载；
+	// on_failure 只在"存在非 succeeded 的 Task"时卸载。快路径过去忽略它，会违背用户显式配置。
+	switch run.CleanupPolicy {
+	case "never":
+		record(&domain.DeployUninstall{State: domain.UninstallSkipped, Force: false, CleanupErrors: []string{}})
+		c.logf("orchestrator: deploy_cleanup skipped (cleanup_policy=never): run %s", runID)
+		return
+	case "on_failure":
+		failed, ferr := c.hasNonSucceededTask(ctx, runID)
+		if ferr != nil {
+			c.logf("orchestrator: WARN deploy_cleanup list tasks %s: %v", runID, ferr)
+			return
+		}
+		if !failed {
+			record(&domain.DeployUninstall{State: domain.UninstallSkipped, Force: false, CleanupErrors: []string{}})
+			c.logf("orchestrator: deploy_cleanup skipped (cleanup_policy=on_failure, all tasks succeeded): run %s", runID)
+			return
+		}
 	}
 	cleaner, canVerify := c.deployer.(ports.DeployCleaner)
 	verify := func() bool {
@@ -82,7 +106,7 @@ func (c *Controller) cleanupDeploy(ctx context.Context, runID string) {
 		record(&domain.DeployUninstall{
 			State: domain.UninstallFailed, Force: true, CleanupErrors: []string{err.Error()},
 		})
-		c.appendCleanupFailed(ctx, runID, []string{err.Error()})
+		c.appendCleanupFailed(ctx, runID, releaseNameOf(run.DeployJSON), []string{err.Error()})
 		c.logf("orchestrator: WARN deploy_cleanup_failed: run %s: %v", runID, err)
 		return
 	}
@@ -94,14 +118,14 @@ func (c *Controller) cleanupDeploy(ctx context.Context, runID string) {
 			record(&domain.DeployUninstall{
 				State: domain.UninstallFailed, Force: true, CleanupErrors: []string{err.Error()},
 			})
-			c.appendCleanupFailed(ctx, runID, []string{err.Error()})
+			c.appendCleanupFailed(ctx, runID, releaseNameOf(run.DeployJSON), []string{err.Error()})
 			c.logf("orchestrator: WARN deploy_cleanup_verify: run %s: %v", runID, err)
 			return
 		case !gone:
 			record(&domain.DeployUninstall{
 				State: domain.UninstallFailed, Force: true, CleanupErrors: []string{"release still present after uninstall"},
 			})
-			c.appendCleanupFailed(ctx, runID, []string{"release still present after uninstall"})
+			c.appendCleanupFailed(ctx, runID, releaseNameOf(run.DeployJSON), []string{"release still present after uninstall"})
 			c.logf("orchestrator: WARN deploy_cleanup_verify: run %s: release still present", runID)
 			return
 		}
@@ -119,6 +143,7 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
 // uninstallState 读 runs.deploy.uninstall.state（缺省为空串）。
 func uninstallState(raw json.RawMessage) string {
 	if len(raw) == 0 {
@@ -134,20 +159,39 @@ func uninstallState(raw json.RawMessage) string {
 	}
 	return doc.Uninstall.State
 }
+
 // appendCleanupFailed 写一条 cleanup.failed 事件（只用于卸载失败；载荷见 03-data-view §4.6）。
-func (c *Controller) appendCleanupFailed(ctx context.Context, runID string, cleanupErrors []string) {
+//
+// 载荷：{release_name, cleanup_errors[], uninstall_state, verified_at}。
+// release_name 由调用方从 `runs.deploy` 快照带下来——**不要**在这里重查 Run：
+// 卸载失败恰好是最容易连读库都失败的时刻（票 #28-3）。
+func (c *Controller) appendCleanupFailed(ctx context.Context, runID, releaseName string, cleanupErrors []string) {
 	payload := map[string]any{
-		"release_name":   "",
-		"cleanup_errors": cleanupErrors,
-		"attempt":        nil, // 清理发生在 Run 级，没有"某一次 Attempt"可指；键保留以便前端统一渲染
-		"verified_at":    nil,
-	}
-	if run, err := c.repos.GetRun(ctx, runID); err == nil {
-		payload["release_name"] = releaseNameOf(run.DeployJSON)
+		"release_name":    releaseName,
+		"cleanup_errors":  cleanupErrors,
+		"uninstall_state": domain.UninstallFailed,
+		"verified_at":     nil,
 	}
 	if err := c.repos.AppendRunEvent(ctx, runID, domain.EventCleanupFailed, payload); err != nil {
 		c.logf("orchestrator: WARN append cleanup.failed event: run %s: %v", runID, err)
 	}
+}
+
+// hasNonSucceededTask 报告该 Run 是否还有"非 succeeded"的 Task（cleanup_policy=on_failure 的判据）。
+//
+// 用 Task 状态而不是 Run 终态名：`completed_with_errors` / `failed` / `canceled` 三种终态
+// 都可能藏着失败或取消的 Task，按终态名枚举会漏（票 #28-2）。
+func (c *Controller) hasNonSucceededTask(ctx context.Context, runID string) (bool, error) {
+	tasks, err := c.repos.ListTasks(ctx, runID)
+	if err != nil {
+		return false, err
+	}
+	for _, t := range tasks {
+		if t.Status != domain.TaskSucceeded && t.Status != domain.TaskSkipped {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // releaseNameOf 读 runs.deploy.release_name（缺失返回空串）。

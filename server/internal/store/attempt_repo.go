@@ -200,3 +200,37 @@ func (r *AttemptRepo) SetPhysicalFacts(ctx context.Context, tx pgx.Tx, id string
 	}
 	return nil
 }
+
+// AttemptJobState 是 GC 需要的"某个 Job 对应 Attempt 的库内状态"（一次批量查询）。
+type AttemptJobState struct {
+	Found    bool
+	Terminal bool
+}
+
+// StatesByJobNames 批量把 Job 名映射成 Attempt 状态（票 #20-5：禁止 N+1）。
+// Job 名取自 attempts.executor_ref->>'job'；终态 = succeeded|failed|canceled。
+func (r *AttemptRepo) StatesByJobNames(ctx context.Context, tx pgx.Tx, jobNames []string) (map[string]AttemptJobState, error) {
+	out := make(map[string]AttemptJobState, len(jobNames))
+	if len(jobNames) == 0 {
+		return out, nil
+	}
+	rows, err := r.s.db(tx).Query(ctx, `
+		SELECT COALESCE(executor_ref->>'job', ''), status
+		  FROM attempts
+		 WHERE COALESCE(executor_ref->>'job', '') = ANY($1)`, jobNames)
+	if err != nil {
+		return nil, fmt.Errorf("store: attempt states by job names: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var job, status string
+		if err := rows.Scan(&job, &status); err != nil {
+			return nil, fmt.Errorf("store: scan attempt job state: %w", err)
+		}
+		out[job] = AttemptJobState{
+			Found:    true,
+			Terminal: status == "succeeded" || status == "failed" || status == "canceled",
+		}
+	}
+	return out, rows.Err()
+}

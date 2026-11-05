@@ -90,7 +90,7 @@ func TestPublicParamConflict(t *testing.T) {
 		{[]string{"--url", "http://x"}, []string{"url"}},
 		{[]string{"--model_name=m"}, []string{"model_name"}},
 		{[]string{"--model_path=/m"}, []string{"model_path"}},
-		{[]string{"--urlx=http://x"}, nil},     // 精确匹配，不走前缀误判
+		{[]string{"--urlx=http://x"}, nil}, // 精确匹配，不走前缀误判
 		{[]string{"--my-url=x"}, nil},
 		{[]string{"--url=a", "--url=b"}, []string{"url"}}, // 只报一次
 	}

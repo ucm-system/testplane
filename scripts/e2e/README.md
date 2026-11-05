@@ -11,14 +11,14 @@
 | `tools/mock-llm`（OpenAI 兼容假服务 + 故障注入） | ✅ 完成，18 个单测通过；真实 `endpoint-probe` 五种场景验证通过 |
 | `tools/e2e`（submit / wait / assert CLI） | ✅ 完成，22 个 fake 控制面测试通过；对真控制面 **31/31** 通过 |
 | 无后端时干净报错 | ✅ 退出码 3，提示 `make dev` 与 8080，不崩 |
-| 契约测试（`tools/contract`） | ✅ 规格 15/15 + 实现 42/42 = **57/57**（设计 50 / openapi 34 / 白名单 16） |
+| 契约测试（`tools/contract`） | ✅ 规格 17/17 + 实现 43/43 = **60/60**（设计 50 / openapi 34 / 白名单 16） |
 | 前端冒烟（`pnpm build`、`GET /`） | ✅ build 通过、`GET /` 200 text/html |
 | 失败注入（经平台，`service_unavailable` 路径） | ✅ 5/5（success/500/401/200包错误/slow-ready） |
 | 一成一败混合结果（#15） | ✅ `mixed-result-check.ps1` 11/11 |
 | 重启恢复演练（#9） | ✅ `restart-drill.ps1` 13/13（新镜像；Run `r-Q0VT`） |
 | Web UI Playwright 冒烟（#16） | ✅ **3 passed**（ui-smoke + viewer/operator 取消） |
 | deploy 形态（PR #18） | ✅ 正常 9/9；blocked 7/7；500 4/4（超窗仅单测） |
-| 产物持久化（#14） | ✅ `artifact-persistence-check.ps1` **28/28**（两种 path 形态 + Pod/Job 消失 + 控制面重启后 sha256 一致） |
+| 产物持久化（#14） | ✅ `artifact-persistence-check.ps1` **44/44**（两种 path 形态 + 删前对象名/删后按名复查 + hold-until + 控制面重启后 sha256 一致） |
 | 验收矩阵 17 项结论 | ✅ 见 [`acceptance-matrix.md`](acceptance-matrix.md) |
 
 ## 目录
@@ -140,7 +140,7 @@ pwsh scripts/e2e/cancel-check.ps1 -DryRun          # 只打 Manifest/阈值，�
 超时路径（平台 watchdog 超时）同样有独立脚本：
 
 ```powershell
-pwsh scripts/e2e/timeout-check.ps1 -BaseUrl http://127.0.0.1:8095
+pwsh scripts/e2e/timeout-check.ps1 -BaseUrl http://127.0.0.1:8093
 pwsh scripts/e2e/timeout-check.ps1 -DryRun
 ```
 
@@ -219,7 +219,7 @@ pwsh scripts/e2e/artifact-persistence-check.ps1
 `tasks/<task>/attempts/1/result.json` sha256；删除 Job/Pod 后要求条目数、大小、
 result 数、路径集合、sha256 **完全一致**，再 `rollout restart testplaned` 复核；
 同时验 attempt artifacts、`Range: bytes=0-9` → 206+10B、不存在 path 404、
-`../../etc/passwd` 400；两种 `/files` path 形态（artifacts 原始 `r-xxx/...` 与 run 相对）都要 200 且 sha 一致；带前缀 `r-xxx/../../etc/passwd` 也要 400。实跑 `r-20261105-YZCW` **28/28 PASS**。
+`../../etc/passwd` 400；两种 `/files` path 形态（artifacts 原始 `r-xxx/...` 与 run 相对）都要 200 且 sha 一致；带前缀 `r-xxx/../../etc/passwd` 也要 400。实跑 `r-20261105-GEEX` **44/44 PASS**；Job/Pod 删前按名记录并断言存在，删后按名复查，hold-until 期间不被删。
 
 默认**严格**：report 必现（终态后 ≤2s，30s 等待足够）、`/logs` 必非空；只有显式
 `-AllowKnownGaps` 才把当前已知的 report/logs 缺口从失败项里剔除，修复后不要带这个开关。

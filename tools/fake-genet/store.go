@@ -144,12 +144,12 @@ func (h *HelmStore) List(ctx context.Context) ([]ReleaseInfo, error) {
 		return nil, err
 	}
 	var raw []struct {
-		Name         string `json:"name"`
-		Namespace    string `json:"namespace"`
-		Status       string `json:"status"`
-		Chart        string `json:"chart"`
-		Revision     string `json:"revision"`
-		AppVersion   string `json:"app_version"`
+		Name       string `json:"name"`
+		Namespace  string `json:"namespace"`
+		Status     string `json:"status"`
+		Chart      string `json:"chart"`
+		Revision   string `json:"revision"`
+		AppVersion string `json:"app_version"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("decode helm list: %w", err)
@@ -237,9 +237,9 @@ func isNotFound(err error) bool {
 
 // SimStore 不碰集群：安装后过 readyAfter 变 deployed，Pod 视为 Ready。
 type SimStore struct {
-	mu      sync.Mutex
-	rel     map[string]*simRelease
-	Now     func() time.Time
+	mu         sync.Mutex
+	rel        map[string]*simRelease
+	Now        func() time.Time
 	ReadyAfter time.Duration
 }
 

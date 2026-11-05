@@ -183,12 +183,22 @@ type Prepared struct {
 
 // Submitter 做提交校验与解析。它不落库（落库由 handler 调 store.CreateRun）。
 type Submitter struct {
-	resolver       TesterResolver
-	profiles       profileChecker
-	logger         *slog.Logger
+	resolver TesterResolver
+	profiles profileChecker
+	logger   *slog.Logger
+	// clock 是业务时间来源（05 §6.5）：提交时间戳与 run_id 日期段都走它。
+	clock          domain.Clock
 	MaxTasks       int
 	DefaultTimeout time.Duration
 	MaxTimeout     time.Duration
+}
+
+// now 返回业务时间（UTC）。**不要**在提交链路里直调 time.Now()。
+func (s *Submitter) now() time.Time {
+	if s.clock != nil {
+		return s.clock.Now()
+	}
+	return domain.SystemClock.Now()
 }
 
 // profileChecker 是 execution_profiles 的存在性检查（窄接口，便于测试）。
@@ -746,4 +756,3 @@ func retryJSON(r *RetrySpec) []byte {
 	}
 	return b
 }
-

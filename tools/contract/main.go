@@ -29,21 +29,22 @@ type resultJSON struct {
 
 // Options 是契约校验器的命令行参数。
 type Options struct {
-	SpecPath     string
-	DesignPath   string
-	AllowMissing string
-	BaseURL      string
-	User         string
-	Token        string
-	NoAuth       bool
-	Mode         string // spec | live | all
-	Manifest     string
-	MockURL      string
-	Profile      string
-	RunName      string
-	Timeout      time.Duration
-	JSONOut      string
-	Verbose      bool
+	SpecPath            string
+	DesignPath          string
+	AllowMissing        string
+	BaseURL             string
+	User                string
+	Token               string
+	NoAuth              bool
+	Mode                string // spec | live | all
+	Manifest            string
+	MockURL             string
+	Profile             string
+	RunName             string
+	Timeout             time.Duration
+	JSONOut             string
+	Verbose             bool
+	PrintDesignBaseline bool
 }
 
 func main() {
@@ -59,6 +60,15 @@ func runCLI(argv []string) int {
 	}
 	if opts.Mode == "help" {
 		fmt.Print(usageText)
+		return 0
+	}
+	if opts.PrintDesignBaseline {
+		design, derr := LoadDesign(opts.DesignPath)
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "contract: %v\n", derr)
+			return 2
+		}
+		fmt.Printf("design_endpoints=%d\nsha256=%s\n", len(design.Endpoints), design.SetHash)
 		return 0
 	}
 

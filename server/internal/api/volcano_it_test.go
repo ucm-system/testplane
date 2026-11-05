@@ -93,8 +93,8 @@ func TestQueueStatus_VolcanoAvailablePassesQueues(t *testing.T) {
 		Available: true,
 		Queues: []VolcanoQueue{{
 			Name: "cluster-01/genet-shared", State: &state,
-			Capability: map[string]string{"huawei.com/Ascend910": "8"},
-			Allocated:  map[string]string{"huawei.com/Ascend910": "3"},
+			Capability:  map[string]string{"huawei.com/Ascend910": "8"},
+			Allocated:   map[string]string{"huawei.com/Ascend910": "3"},
 			PendingJobs: 2, LongestWaitSeconds: 540, Reason: &reason,
 		}},
 	}}

@@ -232,6 +232,7 @@ func (l *Live) Run() ([]check, []string, error) {
 	// ---- fixture Run --------------------------------------------------
 	l.runA, l.taskA = l.submitFixture(ctx, "A")
 	if l.runA != "" {
+		l.waitRunTerminal(ctx, l.runA, 120*time.Second)
 		l.probeRunReads(ctx)
 	}
 	l.runB, l.taskB = l.submitFixture(ctx, "B")
@@ -600,6 +601,39 @@ func (l *Live) artifactResponseCheck(opID string, require200 bool, status int, h
 	}
 }
 
+// waitRunTerminal 轮询 fixture Run 到终态；等不到就 FAIL，不允许后续 /report 探测降级成 404。
+func (l *Live) waitRunTerminal(ctx context.Context, runID string, timeout time.Duration) bool {
+	wctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	start := time.Now()
+	for {
+		status, _, raw, err := l.client.do(wctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID), nil, "", nil)
+		if err != nil {
+			l.recordErr("live.fixtureA.terminal", err)
+			return false
+		}
+		if status != http.StatusOK {
+			l.add("live.fixtureA.terminal", false, fmt.Sprintf("GET /runs/%s 返回 %d", runID, status))
+			return false
+		}
+		var body struct {
+			Status string `json:"status"`
+		}
+		_ = json.Unmarshal(raw, &body)
+		if isTerminalRunStatus(body.Status) {
+			l.add("live.fixtureA.terminal", true,
+				fmt.Sprintf("status=%s，耗时 %.1fs", body.Status, time.Since(start).Seconds()))
+			return true
+		}
+		if wctx.Err() != nil {
+			l.add("live.fixtureA.terminal", false,
+				fmt.Sprintf("%s 内未到终态，最后 status=%s", timeout, body.Status))
+			return false
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 func (l *Live) submitFixture(ctx context.Context, label string) (runID, taskID string) {
 	name := "live.submitRun"
 	detailPrefix := "fixture " + label
@@ -709,8 +743,77 @@ func (l *Live) probeRunReads(ctx context.Context) {
 	l.probeSchema(ctx, "getTask", "/api/v1/tasks/"+task, 200, "TaskDetail")
 	l.probeSchema(ctx, "listTaskAttempts", "/api/v1/tasks/"+task+"/attempts?limit=50", 200, "AttemptList")
 	l.probeSchema(ctx, "listAttemptArtifacts", "/api/v1/tasks/"+task+"/attempts/1/artifacts", 200, "ArtifactList")
-	l.probeOptional(ctx, "getTaskAttemptResult", "/api/v1/tasks/"+task+"/attempts/1/result", 200, "Result", 404, "")
-	l.probeOptional(ctx, "getTaskAttemptLogs", "/api/v1/tasks/"+task+"/attempts/1/logs?stream=stdout&limit=4096", 200, "", 404, "text/plain")
+	l.probeAttemptEndpoints(ctx, l.taskA)
+}
+
+// probeAttemptEndpoints 按 Attempt 状态区分 result/logs 的 404：
+// 已终态（且 fixture 已成功产出）必须 200；未终态才允许 404。
+func (l *Live) probeAttemptEndpoints(ctx context.Context, taskID string) {
+	status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(taskID), nil, "", nil)
+	if err != nil {
+		l.recordErr("live.getTaskAttemptResult", err)
+		l.recordErr("live.getTaskAttemptLogs", err)
+		return
+	}
+	if status != http.StatusOK {
+		msg := fmt.Sprintf("GET /tasks/%s 返回 %d，无法判断 Attempt 状态", taskID, status)
+		l.add("live.getTaskAttemptResult", false, msg)
+		l.add("live.getTaskAttemptLogs", false, msg)
+		return
+	}
+	var detail struct {
+		Attempts []struct {
+			Status string `json:"status"`
+		} `json:"attempts"`
+	}
+	_ = json.Unmarshal(raw, &detail)
+	if len(detail.Attempts) == 0 {
+		l.add("live.getTaskAttemptResult", false, "Attempt 列表为空，无法校验 result")
+		l.add("live.getTaskAttemptLogs", false, "Attempt 列表为空，无法校验 logs")
+		return
+	}
+	attemptTerminal := true
+	for _, a := range detail.Attempts {
+		switch a.Status {
+		case "succeeded", "failed", "canceled":
+		default:
+			attemptTerminal = false
+		}
+	}
+	task := url.PathEscape(taskID)
+	// 产物是否存在决定 404 是否合法：已终态 + 有 result/log 时必须 200。
+	artStatus, _, artRaw, err := l.client.do(ctx, http.MethodGet, "/api/v1/tasks/"+task+"/attempts/1/artifacts", nil, "", nil)
+	var artifactItems []struct {
+		Kind string `json:"kind"`
+	}
+	if err == nil && artStatus == http.StatusOK {
+		var list struct {
+			Items []struct {
+				Kind string `json:"kind"`
+			} `json:"items"`
+		}
+		_ = json.Unmarshal(artRaw, &list)
+		artifactItems = list.Items
+	}
+	hasResult, hasLog := false, false
+	for _, it := range artifactItems {
+		switch it.Kind {
+		case "result":
+			hasResult = true
+		case "log":
+			hasLog = true
+		}
+	}
+	if attemptTerminal && hasResult {
+		l.probeSchema(ctx, "getTaskAttemptResult", "/api/v1/tasks/"+task+"/attempts/1/result", 200, "Result")
+	} else {
+		l.probeOptional(ctx, "getTaskAttemptResult", "/api/v1/tasks/"+task+"/attempts/1/result", 200, "Result", 404, "")
+	}
+	if attemptTerminal && hasLog {
+		l.probeText(ctx, "getTaskAttemptLogs", "/api/v1/tasks/"+task+"/attempts/1/logs?stream=stdout&limit=4096", []int{200})
+	} else {
+		l.probeOptional(ctx, "getTaskAttemptLogs", "/api/v1/tasks/"+task+"/attempts/1/logs?stream=stdout&limit=4096", 200, "", 404, "text/plain")
+	}
 }
 
 // checkRunTaskListComplete 校验 GET /runs/{id}/tasks 覆盖 Run 详情里的全部 Task。
@@ -871,10 +974,9 @@ func (l *Live) validateSuccess(opID string, status int, hdr http.Header, raw []b
 	}
 	var issues []string
 	if len(resp.ContentTypes) > 0 {
-		want := resp.ContentTypes[0]
 		got := hdr.Get("Content-Type")
-		if !strings.HasPrefix(got, want) {
-			issues = append(issues, fmt.Sprintf("Content-Type=%q，spec 期望 %q", got, want))
+		if !contentTypeAllowed(resp.ContentTypes, got) {
+			issues = append(issues, fmt.Sprintf("Content-Type=%q，spec 允许 %v", got, resp.ContentTypes))
 		}
 	}
 	if schemaName != "" {
@@ -940,10 +1042,20 @@ func (l *Live) contentTypeIssues(opID string, status int, hdr http.Header) []str
 		return nil
 	}
 	got := hdr.Get("Content-Type")
-	if !strings.HasPrefix(got, resp.ContentTypes[0]) {
-		return []string{fmt.Sprintf("Content-Type=%q，spec 期望 %q", got, resp.ContentTypes[0])}
+	if !contentTypeAllowed(resp.ContentTypes, got) {
+		return []string{fmt.Sprintf("Content-Type=%q，spec 允许 %v", got, resp.ContentTypes)}
 	}
 	return nil
+}
+
+// contentTypeAllowed 允许多个合法媒体类型（文件下载按扩展名返回 json/plain/markdown/octet-stream）。
+func contentTypeAllowed(want []string, got string) bool {
+	for _, w := range want {
+		if strings.HasPrefix(got, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkTesterRegistry 用 GET /testers 证明 endpoint-probe 已被扫描入库（K-3：无运行时注册）。

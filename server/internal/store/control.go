@@ -244,16 +244,16 @@ type AttemptFinish struct {
 
 // AttemptFinishResult 汇报推进结果。
 type AttemptFinishResult struct {
-	AttemptApplied  domain.Applied
-	TaskStatus      domain.TaskStatus
-	TaskTerminal    bool
-	RunAllTerminal  bool
-	RunStatus       domain.RunStatus
-	AbortTriggered  bool
-	SkippedTasks    []string
-	CancelAttempts  []string
-	PreCheckPassed  bool
-	RetryScheduled  bool
+	AttemptApplied domain.Applied
+	TaskStatus     domain.TaskStatus
+	TaskTerminal   bool
+	RunAllTerminal bool
+	RunStatus      domain.RunStatus
+	AbortTriggered bool
+	SkippedTasks   []string
+	CancelAttempts []string
+	PreCheckPassed bool
+	RetryScheduled bool
 }
 
 // FinishAttempt 落一次 Attempt 终态并推进 Task / Run（C-5.4、C-5.8）。
@@ -329,7 +329,11 @@ func (s *Store) FinishAttempt(ctx context.Context, in AttemptFinish) (*AttemptFi
 			out.TaskStatus = domain.TaskSucceeded
 			out.TaskTerminal = true
 			// Pre-Check 通过：其余 Task 由调用方放行（NeedsQueueUnblocked）。
-			if t.Seq == 0 && s.isPrecheck(ctx, tx, t) {
+			// 判据与放行 SQL 同源（03-data-view §4.2）：resolved.precheck.injected=true **且** seq=0。
+			// 不看 testers.role：endpoint-probe 本身 role=pre_check，用户可在 precheck:"off" 下
+			// 把它当普通测试提交；也不能依赖注册表里"是否已有该 Tester 行"（未落库时门永远开不了）。
+			precheckIDs, err := s.PrecheckTaskIDs(ctx, tx, runID)
+			if err == nil && precheckIDs[t.ID] {
 				out.PreCheckPassed = true
 			}
 		} else {
@@ -450,14 +454,14 @@ func (s *Store) finishRunLocked(ctx context.Context, tx pgx.Tx, run *Run, at tim
 				}
 			}
 		}
-		isPrecheck := precheckIDs[t.ID]
-		if isPrecheck {
+		isPre := precheckIDs[t.ID]
+		if isPre {
 			pre := summary
 			input.Precheck = &pre
 		}
 		// TASK_TIMEOUT 属 C-5.8 #3 的平台侧错误 → Run failed；但 Pre-Check 的超时
 		// 仍走 #4（可重试 → service_unavailable），不能被这里的平台错误抢走。
-		if !isPrecheck && summary.Status == domain.TaskFailed && summary.ErrorCode == domain.CodeTaskTimeout {
+		if !isPre && summary.Status == domain.TaskFailed && summary.ErrorCode == domain.CodeTaskTimeout {
 			platformTimeout = true
 		}
 		input.Tasks = append(input.Tasks, summary)
@@ -559,14 +563,6 @@ func (s *Store) abortOthers(ctx context.Context, tx pgx.Tx, runID, failedTaskID,
 	}
 	activeAttempts, err = collectIDs(arows)
 	return skipped, activeAttempts, err
-}
-
-func (s *Store) isPrecheck(ctx context.Context, tx pgx.Tx, t *Task) bool {
-	var role string
-	err := tx.QueryRow(ctx,
-		`SELECT COALESCE(role, '') FROM testers WHERE name = $1 AND version = $2`,
-		t.TesterName, t.TesterVersion).Scan(&role)
-	return err == nil && role == domain.RolePreCheck
 }
 
 // retryAllowed 判断 T11 是否成立：错误码在 retry_on 且 idx < max_attempts（03 §4.5）。
@@ -691,8 +687,8 @@ func (s *Store) RequestCancelRunTx(ctx context.Context, runID, actor string) ([]
 		}
 		if _, err := s.Apply(ctx, tx, domain.Transition{
 			Entity: domain.EntityRun, ID: runID,
-			From: domain.RunStatuses(domain.RunNonTerminal()...),
-			To:   domain.RunCancelling.Status(),
+			From:    domain.RunStatuses(domain.RunNonTerminal()...),
+			To:      domain.RunCancelling.Status(),
 			Command: "cancel", Actor: actor, At: s.now(),
 		}); err != nil && !errors.Is(err, domain.ErrConflict) {
 			return err

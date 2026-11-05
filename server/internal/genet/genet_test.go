@@ -730,6 +730,7 @@ func TestStartPrefersFrozenValues(t *testing.T) {
 		t.Fatalf("values = %q, want the frozen values untouched", values)
 	}
 }
+
 // ---- "删干净"校验（§9.7）-----------------------------------------------------
 
 func TestVerifyUninstalled(t *testing.T) {

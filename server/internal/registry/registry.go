@@ -85,17 +85,17 @@ var (
 	}
 	// 禁止出现的 K8s 清单（§6.8、§10 校验项 15）。
 	forbiddenManifests = map[string]struct{}{
-		"job.yaml":        {},
-		"job.yml":         {},
-		"deployment.yaml": {},
-		"deployment.yml":  {},
-		"pod.yaml":        {},
-		"pod.yml":         {},
-		"service.yaml":    {},
-		"service.yml":     {},
-		"ingress.yaml":    {},
-		"configmap.yaml":  {},
-		"pvc.yaml":        {},
+		"job.yaml":           {},
+		"job.yml":            {},
+		"deployment.yaml":    {},
+		"deployment.yml":     {},
+		"pod.yaml":           {},
+		"pod.yml":            {},
+		"service.yaml":       {},
+		"service.yml":        {},
+		"ingress.yaml":       {},
+		"configmap.yaml":     {},
+		"pvc.yaml":           {},
 		"networkpolicy.yaml": {},
 	}
 	// 禁止出现的 tester.yaml 顶层字段（§10 校验项 7）。
@@ -112,10 +112,10 @@ type K8sSection struct {
 
 // Record 是注册表里的一行（spec + 指纹 + 来源）。
 type Record struct {
-	Spec      domain.TesterSpec `json:"spec"`
-	ContentSHA string           `json:"content_sha"`
-	SourceFile string           `json:"source_file"`
-	Orphaned  bool              `json:"orphaned"`
+	Spec       domain.TesterSpec `json:"spec"`
+	ContentSHA string            `json:"content_sha"`
+	SourceFile string            `json:"source_file"`
+	Orphaned   bool              `json:"orphaned"`
 }
 
 // Store 是注册表对持久化的唯一依赖（由 backend-core 的 store 适配）。
@@ -160,11 +160,11 @@ type SyncDiff struct {
 // Registry 是 Tester 注册表。内存快照服务于热路径（Resolve/List），
 // 持久化通过 Store 完成；启动扫描失败即拒绝启动（K-3：不做运行时更新）。
 type Registry struct {
-	mu       sync.RWMutex
-	records  map[string]Record // key = name@version
-	latest   map[string]string // name -> 最新 version
-	store    Store
-	opts     Options
+	mu      sync.RWMutex
+	records map[string]Record // key = name@version
+	latest  map[string]string // name -> 最新 version
+	store   Store
+	opts    Options
 }
 
 // New 构造注册表。store 可为 nil（纯内存模式，供测试与本地联调）。
@@ -433,21 +433,21 @@ func (r *Registry) RunRescan(ctx context.Context, dir string, interval time.Dura
 // testerYAML 是 tester.yaml 的解析 DTO。容忍未知字段（yaml.v3 默认忽略），
 // 与附录 C 的字段差异不会导致注册失败。
 type testerYAML struct {
-	Name        string              `yaml:"name"`
-	Version     string              `yaml:"version"`
-	DisplayName string              `yaml:"display_name"`
-	Description string              `yaml:"description"`
-	Role        string              `yaml:"role"`
-	OnFailure   string              `yaml:"on_failure"`
-	Entry       string              `yaml:"entry"`
-	Image       string              `yaml:"image"`
-	Resources   resourcesYAML       `yaml:"resources"`
-	Concurrency concurrencyYAML     `yaml:"concurrency"`
-	Mounts      []mountYAML         `yaml:"mounts"`
+	Name        string               `yaml:"name"`
+	Version     string               `yaml:"version"`
+	DisplayName string               `yaml:"display_name"`
+	Description string               `yaml:"description"`
+	Role        string               `yaml:"role"`
+	OnFailure   string               `yaml:"on_failure"`
+	Entry       string               `yaml:"entry"`
+	Image       string               `yaml:"image"`
+	Resources   resourcesYAML        `yaml:"resources"`
+	Concurrency concurrencyYAML      `yaml:"concurrency"`
+	Mounts      []mountYAML          `yaml:"mounts"`
 	Parameters  map[string]paramYAML `yaml:"parameters"`
-	Placeholder string              `yaml:"placeholder"`
-	Env         map[string]envYAML  `yaml:"env"`
-	K8s         *K8sSection         `yaml:"k8s"`
+	Placeholder string               `yaml:"placeholder"`
+	Env         map[string]envYAML   `yaml:"env"`
+	K8s         *K8sSection          `yaml:"k8s"`
 }
 
 type resourcesYAML struct {

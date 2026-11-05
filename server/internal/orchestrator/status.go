@@ -7,10 +7,10 @@ import (
 // TerminalRunStatus 实现 C-5.8 的终态判定优先级（不含"用户取消"与"平台侧错误"：
 // 那两条由调用方显式命令写入，不在"全部 Task 终态"这条路径上）：
 //
-//	3. 部署受理但未就绪 / blocked → service_unavailable（由 DeployBlocked 直接写）
-//	4. pre_check 失败且错误**可重试** → service_unavailable
-//	5. 所有非 SKIPPED 的 Task 均 succeeded → succeeded
-//	6. 其余 → completed_with_errors
+//  3. 部署受理但未就绪 / blocked → service_unavailable（由 DeployBlocked 直接写）
+//  4. pre_check 失败且错误**可重试** → service_unavailable
+//  5. 所有非 SKIPPED 的 Task 均 succeeded → succeeded
+//  6. 其余 → completed_with_errors
 //
 // **第 4 条的"可重试"只认实例字段 `failure.retryable`**（07-api.md §3 的 Pre-Check
 // 错误对象约定：终态判定以实例为准）。不再按错误码查表抬升——否则 Tester 明确写了

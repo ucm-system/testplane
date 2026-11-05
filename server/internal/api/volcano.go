@@ -8,10 +8,10 @@ import (
 // Volcano 快照的四个降级态（openapi `VolcanoSnapshot.detail` 枚举）。
 // 红线：**不可达 ≠ 0 排队**——任何一态都不得渲染成"空闲/无排队"。
 const (
-	VolcanoCRDMissing         = "crd_missing"           // 集群没装 Volcano
-	VolcanoRBACForbidden      = "rbac_forbidden"        // 有 CRD 但无权读
+	VolcanoCRDMissing           = "crd_missing"           // 集群没装 Volcano
+	VolcanoRBACForbidden        = "rbac_forbidden"        // 有 CRD 但无权读
 	VolcanoSchedulerUnavailable = "scheduler_unavailable" // 超时/连不上/未接入
-	VolcanoDisabled           = "disabled"              // 装了但调度未启用
+	VolcanoDisabled             = "disabled"              // 装了但调度未启用
 )
 
 // VolcanoQueue 是 openapi `VolcanoQueue` 的投影（只读快照，不做单位换算）。

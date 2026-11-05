@@ -85,10 +85,10 @@ stateDiagram-v2
 | # | from | to | 命令 | 守卫 | 同事务副作用 |
 |---|---|---|---|---|---|
 | R1 | `submitted` | `queued` | `Enqueue` | 事务提交成功 | 写事件；NOTIFY 调度器 |
-| R2 | `queued` | `deploying` | `BeginDeploy` | Manifest 有 `deploy` | 调 Genet（**事务外**）→ 记 `deploy.state=queued/accepted` |
+| R2 | `queued` | `deploying` | `BeginDeploy` | Manifest 有 `deploy` | 先冻结 `runs.deploy`（`release_name`/`values_digest`/`accepted_at`）再调 Genet（**事务外**）；始终 `noWait=true` |
 | R3 | `queued` | `testing` | `BeginTesting` | 无 `deploy` 或 `service` 模式 | 计算/写入 `endpoint`；预检 Task 入队（见 2.2） |
 | R4 | `deploying` | `testing` | `DeployReady` | Endpoint 非空 | 回填全部 Task 的 `endpoint_key`、`injected_argv`；清空 deploy 排队字段 |
-| R5 | `deploying` | `service_unavailable` | `DeployBlocked/DeployTimeout` | Genet `blocked` 或超 72h | 全部 Task → `skipped(reason)`；事件带后端原因 |
+| R5 | `deploying` | `service_unavailable` | `DeployBlocked` | `endpoint.status=blocked`、Genet 终态 `failed/superseded/uninstalling/uninstalled`、404 超 180s 宽限、或超 72h 窗口（D-47 折叠，不再有独立的 `DeployTimeout` 命令） | 全部 Task → `skipped(reason)`；`failure.code=DEPLOY_BLOCKED`（可重试）+ `detail.reason` 保留后端原文 |
 | R6 | `testing` | `cleanup` | `BeginCleanup` | 全部 Task 终态 | 停止日志采集意图；触发卸载判定 |
 | R7 | `cleanup` | 终态 | `Finish` | 按优先级判定（下表） | 落库终态 → 异步报告 |
 | R8 | 任意非终态 | `cancelling` | `Cancel` | actor 有 operator 权限 | 记取消意图；返回后异步删 Job/uninstall |
@@ -201,11 +201,11 @@ stateDiagram-v2
 
 | Deploy 状态 | Run 状态 | 平台动作 |
 |---|---|---|
-| `queued` | `deploying` | 记录位次/原因/已等待时长；不按分钟级超时判失败 |
-| `accepted` / `deploying` | `deploying` | 轮询；发现 Pod 即开始日志采集 |
-| `ready` | `testing`（R4） | 回填 Endpoint 与 Task 参数 |
-| `blocked` | `service_unavailable`（R5） | 终态，附后端原因 |
-| 超 72h（可配） | `service_unavailable` | 排队/部署超时，不是平台调不通 |
+| `queued` | `deploying` | 记录 `PodGroup.phase` + 水位计数 + 原因原文 + 已等待时长；**没有位次**（D-46）；不按分钟级超时判失败 |
+| `accepted` / `deploying` | `deploying` | 轮询**两根轴**：helm `status`（`pending-*`/`deployed`/终态）与 `callInfo.endpoint.status`（`pending`/`ready`/`blocked`）；发现 Pod 即开始日志采集 |
+| `ready` | `testing`（R4） | 回填 Endpoint 与 Task 参数；**`endpoint.status=ready` 只代表地址可解析**，可用性仍由 Pre-Check 服务门判定（D-45） |
+| `blocked` | `service_unavailable`（R5） | 终态，附后端原因；Genet 的 `failed/superseded/uninstalling/uninstalled` 都落这里 |
+| 超 72h（可配） | `service_unavailable` | 排队/部署超时，不是平台调不通；`failure.code=DEPLOY_BLOCKED` + `detail.reason=timeout` |
 | 取消 | `cancelling → canceled` | 先请求 Genet 取消排队/卸载；失败只记 `CLEANUP_FAILED` |
 
 ---

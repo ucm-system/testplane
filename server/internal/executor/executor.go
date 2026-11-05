@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/ports"
 )
 
@@ -46,6 +47,9 @@ type Options struct {
 	// Logf 是可选日志钩子：渲染告警（如 secret_env_unbound）通过它落日志，
 	// 不影响执行结果（execution §4.3.1 的 warning 口径）。
 	Logf func(format string, args ...any)
+	// Clock 是业务时间来源（05 §6.5）：JobOutcome.FinishedAt 等**会落库**的时间戳必须走它，
+	// 默认 domain.SystemClock；不要在业务代码里直调 time.Now()（票 #31）。
+	Clock domain.Clock
 }
 
 func (o Options) withDefaults() Options {
@@ -61,6 +65,9 @@ func (o Options) withDefaults() Options {
 	if o.ForceWait <= 0 {
 		o.ForceWait = DefaultForceWait
 	}
+	if o.Clock == nil {
+		o.Clock = domain.SystemClock
+	}
 	return o
 }
 
@@ -69,8 +76,11 @@ type Executor struct {
 	client    kubernetes.Interface
 	namespace string
 	opts      Options
-	now       func() time.Time
-	logf      func(format string, args ...any)
+	// clock 是业务时间来源（Options.Clock，默认 SystemClock）。
+	clock domain.Clock
+	// now 是 clock.Now 的快捷方式（历史调用点保留）。
+	now  func() time.Time
+	logf func(format string, args ...any)
 }
 
 // 确保实现契约（签名与 ports.Executor 逐字一致）。
@@ -86,7 +96,8 @@ func New(client kubernetes.Interface, opts Options) *Executor {
 		client:    client,
 		namespace: "testplane",
 		opts:      opts.withDefaults(),
-		now:       time.Now,
+		clock:     opts.withDefaults().Clock,
+		now:       opts.withDefaults().Clock.Now,
 		logf:      logf,
 	}
 }
@@ -227,14 +238,10 @@ func (e *Executor) Cancel(ctx context.Context, h ports.JobHandle) error {
 	// patch 错误并入返回错误路径只在删除也失败时才有意义，所以仅尝试一次。
 	_ = e.markCanceled(ctx, ns, job)
 
-	policy := metav1.DeletePropagationForeground
-	grace := int64(defaultDeleteGrace)
-	delErr := e.client.BatchV1().Jobs(ns).Delete(ctx, h.JobName, metav1.DeleteOptions{
-		PropagationPolicy:  &policy,
-		GracePeriodSeconds: &grace,
-	})
-	if delErr != nil && !apierrors.IsNotFound(delErr) {
-		return fmt.Errorf("executor: delete job %s/%s: %w", ns, h.JobName, delErr)
+	// 取消/超时收口用 Foreground：确保 Pod 真正消失再返回，避免容器继续写 NFS
+	// （execution §5.2）。复用 Delete 的同一份实现，不再内联一份 propagation 逻辑。
+	if delErr := e.Delete(ctx, h, ports.DeleteForeground); delErr != nil {
+		return delErr
 	}
 
 	if err := e.waitPodsGone(ctx, ns, h, e.opts.CancelWait); err == nil {

@@ -187,9 +187,9 @@ func RenderWithWarnings(spec ports.JobSpec) (*batchv1.Job, []string, error) {
 	seccomp := corev1.SeccompProfileTypeRuntimeDefault
 
 	podSpec := corev1.PodSpec{
-		RestartPolicy:                corev1.RestartPolicyNever,
-		AutomountServiceAccountToken: &automount,
-		EnableServiceLinks:           &enableServiceLinks,
+		RestartPolicy:                 corev1.RestartPolicyNever,
+		AutomountServiceAccountToken:  &automount,
+		EnableServiceLinks:            &enableServiceLinks,
 		TerminationGracePeriodSeconds: &gracePeriod,
 		SecurityContext: &corev1.PodSecurityContext{
 			RunAsNonRoot:   &runAsNonRoot,
