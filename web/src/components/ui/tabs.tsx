@@ -21,8 +21,8 @@ export interface TabsProps<T extends string> {
  * 轻量页签（shadcn Tabs 的等价物）：受控、无位移动画。
  *
  * 键盘可达性（评审 #13）：roving tabindex + `←/→/Home/End` 切页签，Tab 键只落在当前页签上；
- * 页签用 `role="tab"` + `aria-selected` + `aria-controls`，面板侧用 `role="tabpanel"` +
- * `aria-labelledby`（见 `tabPanelProps`）。
+ * 页签用 `role="tab"` + `aria-selected`，面板侧用 `role="tabpanel"` + `aria-labelledby`（见 `tabPanelProps`）。
+ * `aria-controls` **只给活动页签**：面板按需挂载，非活动页签指向不存在的 id 会成为悬空引用。
  */
 export function Tabs<T extends string>({ value, onChange, items, className, ariaLabel, idBase }: TabsProps<T>) {
   const autoId = useId().replace(/[:]/g, '')
@@ -87,7 +87,8 @@ export function Tabs<T extends string>({ value, onChange, items, className, aria
             type="button"
             role="tab"
             aria-selected={active}
-            aria-controls={`${base}-panel-${item.value}`}
+            // 只有活动页签的面板真的在 DOM 里；非活动页签不写 aria-controls，避免指向不存在的元素
+            aria-controls={active ? `${base}-panel-${item.value}` : undefined}
             tabIndex={active ? 0 : -1}
             onClick={() => onChange(item.value)}
             className={cn(

@@ -5,7 +5,7 @@ import { stringify as toYaml } from 'yaml'
 import { API_BASE, api, writeBlockedReason } from '@/api'
 import { toApiError } from '@/api/client'
 import type { ApiErrorBody, Attempt, Deploy, DeploySnapshot, RetryPlan, Run, TaskDetail, TaskSummary } from '@/api/types'
-import { EventTimeline } from '@/components/app/EventTimeline'
+import { EventTimeline, CONNECTION_LABEL, connectionStateOf } from '@/components/app/EventTimeline'
 import { LogViewer } from '@/components/app/LogViewer'
 import { RightRail, RailCard } from '@/components/app/RightRail'
 import { RunResultView } from '@/components/app/RunResultView'
@@ -18,11 +18,12 @@ import { KV } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Banner, EmptyState, ErrorState, LoadingBlock } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
-import { Tabs } from '@/components/ui/tabs'
+import { Tabs, tabPanelProps } from '@/components/ui/tabs'
 import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
 import { DeployLogsPanel } from '@/components/app/DeployLogsPanel'
 import { useIdentity } from '@/hooks/useIdentity'
+import { useLogTail } from '@/hooks/useLogTail'
 import { useRunEvents } from '@/hooks/useRunEvents'
 import {
   attemptStatusMeta,
@@ -265,7 +266,7 @@ const RETRY_PLAN_REASON: Record<string, string> = {
               <span className="text-sm font-semibold text-fg">Deploy 日志</span>
               <span className="text-2xs text-fg-3">按 Pod 分页签，不合并；断过的地方显式标 gap</span>
             </div>
-            <DeployLogsPanel runId={run.id} deployState={deploy.state} pods={pods} />
+            <DeployLogsPanel runId={run.id} deployState={deploy.state} pods={pods} live={!isTerminalRun(run.status)} />
           </div>
         </div>
       ) : (
@@ -307,10 +308,17 @@ function TaskAttemptsPanel({
   const attempts: Attempt[] = task?.attempts ?? []
   const active = attempts.find((item) => item.idx === attemptIdx) ?? attempts[attempts.length - 1] ?? null
 
-  const logs = useAsync(async () => {
-    if (!active) return null
-    return api.getAttemptLogs(summary.id, active.idx)
-  }, [summary.id, active?.idx])
+  /**
+   * 日志按游标轮询（P0）：运行中的 Attempt 每 3s 带 `offset` 取增量并**追加**；
+   * Run / Attempt 终态后停止（`live=false`），面板改为「Run 已结束，日志不再更新」。
+   * 切 Attempt / 切页签 / 卸载时 hook 内部会清掉定时器，不会重复请求。
+   */
+  const runEnded = isTerminalRun(runStatus)
+  const logs = useLogTail({
+    streamKey: active ? `${summary.id}#${active.idx}` : '',
+    live: Boolean(active) && active!.status === 'running' && !runEnded,
+    load: (offset) => api.getAttemptLogs(summary.id, active!.idx, { offset }),
+  })
 
   const TASK_TERMINAL = ['succeeded', 'failed', 'canceled', 'skipped']
   const canRetryTask = task ? TASK_TERMINAL.includes(task.status) && runStatus !== 'canceled' : false
@@ -474,13 +482,17 @@ function TaskAttemptsPanel({
           </TableWrap>
 
           <LogViewer
-            text={logs.data?.text ?? ''}
+            text={logs.text}
             loading={logs.loading}
             error={logs.error}
-            coverage={logs.data?.coverage ?? null}
-            live={active?.status === 'running'}
+            coverage={logs.coverage}
+            live={Boolean(active) && active!.status === 'running' && !runEnded}
+            ended={runEnded}
+            lastUpdatedAt={logs.lastUpdatedAt}
+            appended={logs.appended}
             onRetry={logs.reload}
             hint={active ? `tasks/${task.id}/attempts/${active.idx}/logs` : undefined}
+            testIdPrefix="attempt-log"
           />
         </>
       )}
@@ -579,24 +591,37 @@ function TaskPanels({ run, onReload }: { run: Run; onReload: () => void }) {
                       )}
                     </TD>
                     <TD className="text-right">
-                      {cancellable ? (
+                      {/* 键盘可达：行内第一个焦点是可见的「查看」按钮，整行点击仍然保留（C3） */}
+                      <span className="inline-flex items-center gap-1">
                         <Button
                           size="sm"
-                          variant="dangerGhost"
-                          data-testid="cancel-task"
-                          disabled={Boolean(blocked)}
-                          title={blocked ?? '取消这个 Task（已完成的 Task 不受影响）'}
+                          variant="ghost"
+                          data-testid="view-task"
+                          title={`查看 ${task.name} 的 Attempt 与日志`}
                           onClick={(event) => {
                             event.stopPropagation()
                             setSelectedTaskId(task.id)
-                            setPendingCancel(task)
                           }}
                         >
-                          取消 Task
+                          查看
                         </Button>
-                      ) : (
-                        <span className="text-2xs text-fg-3">—</span>
-                      )}
+                        {cancellable ? (
+                          <Button
+                            size="sm"
+                            variant="dangerGhost"
+                            data-testid="cancel-task"
+                            disabled={Boolean(blocked)}
+                            title={blocked ?? '取消这个 Task（已完成的 Task 不受影响）'}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              setSelectedTaskId(task.id)
+                              setPendingCancel(task)
+                            }}
+                          >
+                            取消 Task
+                          </Button>
+                        ) : null}
+                      </span>
                     </TD>
                   </TR>
                 )
@@ -642,7 +667,9 @@ export function RunDetailPage() {
   const navigate = useNavigate()
   // 终态 Run 不再订阅事件（只补历史）：live 在拿到详情后翻转
   const [live, setLive] = useState(true)
-  const { events, status, version, resyncToken } = useRunEvents(runId, { live })
+  const { events, status, version, resyncToken, reconnect } = useRunEvents(runId, { live })
+  // 连接态唯一来源：右栏副标题、事件区小字、页内横幅都从这一个值派生（B5）
+  const connection = connectionStateOf(status)
   const toast = useToast()
   // 终态默认看「结果」（用户：跑完了只想拿结果），运行中只有「执行细节」
   const [view, setView] = useState<'result' | 'detail'>('detail')
@@ -752,12 +779,22 @@ export function RunDetailPage() {
   return (
     <>
       <RightRail>
-        <RailCard title="事件" tone="info" sub={status === 'polling' ? '降级为 3s 轮询' : 'SSE 实时推送'}>
-          <EventTimeline events={events} status={status} />
+        <RailCard
+          title="事件"
+          tone="info"
+          sub={
+            terminal
+              ? 'Run 已结束 · 下面是历史事件'
+              : connection === 'live'
+                ? '实时更新中 · 断开后会自动重连'
+                : CONNECTION_LABEL[connection]
+          }
+        >
+          <EventTimeline events={events} connection={connection} ended={terminal} />
         </RailCard>
         <RailCard title="边界说明" tone="muted">
-          <p>状态流转与错误都记在 events 流里，UI 只读，不做乐观更新。</p>
-          <p className="mt-2">日志内容不走 SSE，由日志面板按 Attempt 单独读。</p>
+          <p>页面上的状态跟着服务端推送走，不会先替你改成「已完成」；刷新一下拿到的才是最新。</p>
+          <p className="mt-2">日志不在事件流里：点开某个 Task，才单独读它那一次尝试的日志。</p>
         </RailCard>
       </RightRail>
 
@@ -809,6 +846,21 @@ export function RunDetailPage() {
         <span className="ml-auto font-mono text-2xs text-fg-3">{runId}</span>
       </div>
 
+      {/* 断线横幅（主内容顶部）：连接态与右栏同源，恢复后自动消失 */}
+      {!terminal && connection === 'reconnecting' ? (
+        <Banner
+          tone="warn"
+          title="连接断开，正在重连…"
+          actions={
+            <Button size="sm" variant="secondary" data-testid="reconnect-events" onClick={reconnect}>
+              立即重试
+            </Button>
+          }
+        >
+          事件时间线暂时停止更新，已经收到的内容仍然可读；恢复后这条提示会自动消失。
+        </Banner>
+      ) : null}
+
       {actionError ? <ErrorState error={actionError} compact /> : null}
 
       {run.loading && !detail ? (
@@ -825,6 +877,7 @@ export function RunDetailPage() {
       {detail && terminal ? (
         <Tabs<string>
           ariaLabel="Run 详情视图"
+          idBase="run-view"
           value={view}
           onChange={(next: string) => setView(next as 'result' | 'detail')}
           items={[
@@ -835,10 +888,18 @@ export function RunDetailPage() {
         />
       ) : null}
 
-      {detail && terminal && view === 'result' ? <RunResultView run={detail} /> : null}
+      {/* 页签与面板配对：role=tabpanel + id / aria-controls / aria-labelledby（B7） */}
+      {detail && terminal && view === 'result' ? (
+        <section {...tabPanelProps('run-view', 'result')} className="flex flex-col gap-4">
+          <RunResultView run={detail} />
+        </section>
+      ) : null}
 
       {detail && (!terminal || view === 'detail') ? (
-        <>
+        <section
+          {...(terminal ? tabPanelProps('run-view', 'detail') : {})}
+          className="flex flex-col gap-4"
+        >
           <Card>
             <CardHeader
               tone="muted"
@@ -967,11 +1028,11 @@ export function RunDetailPage() {
           <Card>
             <CardFooter>
               <span>
-                事件共 {events.length} 条，连接状态：{status}
+                事件共 {events.length} 条 · {terminal ? 'Run 已结束，显示历史事件' : CONNECTION_LABEL[connection]}
               </span>
             </CardFooter>
           </Card>
-        </>
+        </section>
       ) : null}
 
       <Dialog

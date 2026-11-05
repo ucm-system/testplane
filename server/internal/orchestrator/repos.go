@@ -88,6 +88,9 @@ type TaskView struct {
 	CancelRequested bool
 	AttemptNo       int // current_attempt（已完成/进行中的次数）
 	Failure         *domain.Failure
+	// ResultRef 是 Task 终态时写的产物引用（相对 Run 目录，03-data-view §3.1）。
+	// 报告页的 tasks[].result_ref 就是它；空 = 没有产物（不造死链）。
+	ResultRef string
 }
 
 // Candidate 是调度候选（不加行锁的读，C-4.2）。
@@ -151,6 +154,12 @@ type FinishInput struct {
 	ImageDigest string
 	Failure     *domain.Failure // 已由 ResultValidator 校验过的语义失败（可为 nil）
 	FinishedAt  time.Time
+
+	// ---- 产物引用（03-data-view §3.1）：**只填真实存在的文件**，空 = 该产物不存在 ----
+	// LogRef / ArtifactRef / ResultRef 相对 `<run>/tasks/<task>/attempts/<n>/`。
+	LogRef      string
+	ArtifactRef string
+	ResultRef   string
 }
 
 // FinishOutcome 汇报推进结果，供编排层决定后续动作。
@@ -224,6 +233,9 @@ type Repos interface {
 	// ---- Task / Run 推进 ----
 	QueueTasks(ctx context.Context, runID string, onlySeqZero bool) ([]string, error)
 	FinishAttempt(ctx context.Context, in FinishInput) (FinishOutcome, error)
+	// SetAttemptRefs 回填 Attempt 的产物引用（相对 `<run>/tasks/<task>/attempts/<n>/`）。
+	// 日志是 Attempt 终态落库**之后**才异步落盘的，所以 `log_ref` 只能事后补；空值不覆盖已有引用。
+	SetAttemptRefs(ctx context.Context, attemptID, logRef, artifactRef, resultRef string) error
 	AbortRun(ctx context.Context, in AbortInput) (AbortOutcome, error)
 
 	// ---- Deploy（C-5.3）----

@@ -214,6 +214,12 @@ export async function http(path: string, init: RequestInit = {}): Promise<Respon
       }
     }
     const error = normalizeErrorBody(res.status, body)
+    // 报告未生成时后端用 `404 + Retry-After` 提示多久后再试（C-7.2 / 07 §5.4）：
+    // 把它折进 detail，页面只面对 ApiErrorBody 也能拿到秒数，不用另开一条错误通道。
+    const retryAfter = Number(res.headers.get('Retry-After') ?? '')
+    if (Number.isFinite(retryAfter) && retryAfter > 0) {
+      error.detail = { ...(error.detail ?? {}), retry_after_seconds: Math.round(retryAfter) }
+    }
     const traceId = res.headers.get('X-Request-Id')
     throw new ApiClientError(res.status, traceId && !error.trace_id ? { ...error, trace_id: traceId } : error)
   }

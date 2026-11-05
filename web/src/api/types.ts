@@ -760,6 +760,57 @@ export interface Report {
   report_ref?: string
 }
 
+/* ================================================================ result.json（契约内，只读） */
+
+/**
+ * `ResultMetric` schema：`metrics[]` 的一项（ARCHITECTURE 附录 A / §8.3）。
+ * 必须带 `unit` 与 `statistic`；同一 Task 内多组参数靠 `labels` 区分。
+ */
+export interface ResultMetric {
+  name: string
+  /** `null` 表示无法计算（Tester 要在 `notes` 里说明原因） */
+  value: number | null
+  unit: string
+  statistic: 'mean' | 'p50' | 'p90' | 'p95' | 'p99' | 'min' | 'max' | 'sum' | 'count' | string
+  sample_size?: number
+  /** 标量维度（`input_len` / `concurrency` …）；report.json 不做聚合，分组只发生在 UI */
+  labels?: Record<string, string>
+}
+
+/** `ResultArtifact` schema：`result.json.artifacts[]` 的一项。 */
+export interface ResultArtifact {
+  name: string
+  /** 相对 `/workspace/output` 的路径 */
+  path: string
+  size_bytes?: number
+  sha256?: string
+}
+
+/**
+ * `Result` schema：`GET /tasks/{task_id}/attempts/{idx}/result` 返回的 `result.json` 原文。
+ *
+ * 平台只校验不收窄字段（K-10「字段不限制，Tester 自维护」），所以允许未知字段；
+ * 必填只到平台会判 `RESULT_INVALID` 的那几项。
+ */
+export interface Result {
+  schema_version: string
+  run_id?: string
+  task_id: string
+  attempt_id?: string
+  tester: { name: string; version: string; image_ref?: string }
+  status?: 'succeeded' | 'failed'
+  started_at?: Timestamp
+  finished_at?: Timestamp
+  duration_ms?: number
+  workload?: Record<string, unknown>
+  /** 允许空数组（纯探测类），但需在 `notes` 说明 */
+  metrics: ResultMetric[]
+  error?: Failure | null
+  artifacts?: ResultArtifact[]
+  notes?: string
+  metadata?: Record<string, unknown>
+}
+
 /* ================================================================ Execution Profile（契约内，只读） */
 
 export interface ProfileMount {

@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useId } from 'react'
+import { cloneElement, forwardRef, isValidElement, useId } from 'react'
 import type {
   InputHTMLAttributes,
   LabelHTMLAttributes,
@@ -14,11 +14,15 @@ const FIELD =
   'w-full rounded-md border border-line bg-surface-2 px-3 text-sm text-fg placeholder:text-fg-3 ' +
   'transition-[background-color,border-color,box-shadow] duration-150 ease-out ' +
   'hover:border-line-strong focus:border-primary focus:bg-surface focus:outline-none ' +
-  'focus:shadow-[0_0_0_3px_var(--color-ring)] disabled:cursor-not-allowed disabled:opacity-60'
+  'focus:shadow-[0_0_0_3px_var(--color-ring)] disabled:cursor-not-allowed disabled:opacity-60 ' +
+  'aria-[invalid=true]:border-danger aria-[invalid=true]:bg-danger-weak/40 aria-[invalid=true]:focus:border-danger'
 
-export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
-  return <input className={cn(FIELD, 'h-9', className)} {...rest} />
-}
+export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function Input(
+  { className, ...rest },
+  ref,
+) {
+  return <input ref={ref} className={cn(FIELD, 'h-9', className)} {...rest} />
+})
 
 export function Textarea({ className, ...rest }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
   return <textarea className={cn(FIELD, 'py-2 leading-relaxed', className)} {...rest} />

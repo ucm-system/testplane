@@ -87,7 +87,7 @@ erDiagram
 | `current_attempt` | int | 否 | 启动 Attempt | 最新 Attempt 序号；历史 Attempt 不覆盖 |
 | `available_at` | timestamptz | 是 | 重试 | backoff 到期；空 = 立即可调度 |
 | `cancel_requested` | boolean | 否 | 取消/超时 | 置位后由 executor 异步删 Job |
-| `result_ref` | text | 是 | Task 终态 | 相对 Run 目录的结果引用 |
+| `result_ref` | text | 是 | Task 终态 | 相对 Run 目录的结果引用（`tasks/<task>/attempts/<n>/result.json`）。**refs 自 2026-11 起写入**，此前产生的历史 Run 可能为空（不回填） |
 | `reused_from_task_id` | text | 是 | P1 | 跨 Run 续跑复用来源 |
 | `error` | jsonb | 是 | 失败 | Failure；含 `retryable` 与 `detail` |
 
@@ -103,7 +103,7 @@ erDiagram
 | `phase` / `exit_code` | text / int | 是 | 执行结束 | 附录 B 原值 / 退出码；只补不改状态 |
 | `image_digest` | text | 是 | Pod Running / 终态 | K8s `imageID` 解析出的实际 digest；缺失记 unknown（03 §4.9、E-4.3.1） |
 | `started_at` / `finished_at` | timestamptz | 是 | 执行层 | 超时判定与耗时统计来源 |
-| `log_ref` / `artifact_ref` / `result_ref` | text | 是 | 执行结束 | 相对 `<run>/tasks/<task>/attempts/<n>/` |
+| `log_ref` / `artifact_ref` / `result_ref` | text | 是 | 执行结束 | 相对 `<run>/tasks/<task>/attempts/<n>/`（`logs/stdout.log` / `artifacts` / `result.json`）。**refs 自 2026-11 起写入**；只写真实存在的产物，缺失保持 NULL（不造死链），历史 Run 可能为空（不回填） |
 | `error` | jsonb | 是 | 失败 | 与 Task 的 `error` 同构；Attempt 是原始事实 |
 | `executor_ref` | jsonb | 是 | 启动 | `{cluster, namespace, job}`，用于查 K8s |
 

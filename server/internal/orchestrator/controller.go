@@ -445,6 +445,10 @@ func (c *Controller) finishReconciledAttempt(ctx context.Context, task TaskView,
 		ImageDigest: o.ImageDigest,
 		Failure:     failure,
 		FinishedAt:  o.FinishedAt,
+		// 产物引用：只填**真实存在**的文件（缺失留空 = 落库 NULL，不造死链）。
+		// 日志此时还没落盘（终态之后才异步写），log_ref 由 finalizeAttemptAsync 事后补。
+		ArtifactRef: c.attemptArtifactRefs(attempt).artifact,
+		ResultRef:   c.attemptArtifactRefs(attempt).result,
 	})
 	if err != nil {
 		return err
@@ -756,6 +760,9 @@ func (c *Controller) JobFinished(ctx context.Context, o ports.JobOutcome) error 
 		ImageDigest: o.ImageDigest,
 		Failure:     failure,
 		FinishedAt:  o.FinishedAt,
+		// 产物引用：只填真实存在的文件（同 JobFinished 路径）。
+		ArtifactRef: c.attemptArtifactRefs(attempt).artifact,
+		ResultRef:   c.attemptArtifactRefs(attempt).result,
 	})
 	if err != nil {
 		return err
@@ -917,6 +924,14 @@ func (c *Controller) finalizeAttemptAsync(attempt AttemptRef) {
 			if err := c.writeAttemptLogs(ctx, attempt); err != nil {
 				// 写失败只 WARN（execution §7 的"允许丢日志，不允许伪造连续"）。
 				c.logf("orchestrator: WARN attempt_logs_failed: attempt %s: %v", attempt.AttemptID, err)
+			}
+		}
+		// 引用回填（03-data-view §3.1）：stdout.log 已落盘，重新 stat 一次把三个 ref 一起补上
+		// （空值不覆盖已有引用）。没有日志文件时就不写 log_ref，避免死链。
+		if c.cfg.StorageRoot != "" {
+			refs := c.attemptArtifactRefs(attempt)
+			if err := c.repos.SetAttemptRefs(ctx, attempt.AttemptID, refs.log, refs.artifact, refs.result); err != nil {
+				c.logf("orchestrator: WARN attempt_refs_failed: attempt %s: %v", attempt.AttemptID, err)
 			}
 		}
 		// hold-until 守卫：日志 follower 还没收尾时不能删 Job（execution §6.3），留给 GC 下一轮。
@@ -1299,4 +1314,41 @@ func (c *Controller) jobHeld(ctx context.Context, h ports.JobHandle) bool {
 		return false // 读不到就按"没守卫"处理（多删一个 Job 好过卡住回收）
 	}
 	return held
+}
+
+// attemptRefs 是 Attempt 产物引用的**规范**（03-data-view §3.1）：相对
+// `<run>/tasks/<task>/attempts/<n>/`。只返回真实存在的产物；缺失即空串（= 落库 NULL）。
+// 不造指向不存在文件的引用——那会让报告页出现死链（票 UX-2026-11）。
+type attemptRefs struct {
+	log      string // logs/stdout.log
+	artifact string // artifacts
+	result   string // result.json
+}
+
+func (c *Controller) attemptArtifactRefs(attempt AttemptRef) attemptRefs {
+	var out attemptRefs
+	if c.cfg.StorageRoot == "" {
+		return out
+	}
+	dir := filepath.Join(c.cfg.StorageRoot, filepath.FromSlash(mustSubPath(attempt)))
+	if fileExists(filepath.Join(dir, "logs", AttemptLogFileName)) {
+		out.log = "logs/" + AttemptLogFileName
+	}
+	if dirExists(filepath.Join(dir, "artifacts")) {
+		out.artifact = "artifacts"
+	}
+	if fileExists(filepath.Join(dir, "result.json")) {
+		out.result = "result.json"
+	}
+	return out
+}
+
+func fileExists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular()
+}
+
+func dirExists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.IsDir()
 }

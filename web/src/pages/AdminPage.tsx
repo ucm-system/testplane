@@ -732,12 +732,12 @@ export function AdminPage() {
   return (
     <>
       <RightRail>
-        <RailCard title="边界" tone="warn">
-          <p>管理台只维护「定位信息」：Profile 指向集群与队列、Cluster 指向 kubeconfig 文件名、Secret 只登记引用。</p>
-          <p className="mt-2">任何凭据值都不经过前端。</p>
+        <RailCard title="这里只登记位置" tone="warn">
+          <p>管理台只维护「东西在哪」：Profile 说明用哪个集群和队列，集群条目只记 kubeconfig 的文件名，Secret 只登记引用。</p>
+          <p className="mt-2">凭据本身不经过浏览器，所以这一页没有「查看密钥」这类入口。</p>
         </RailCard>
-        <RailCard title="动作都会进审计" tone="muted">
-          <p>新建 / 编辑 / 删除都会写审计（Audit Tab 可见），actor 与 role 由服务端按会话记录。</p>
+        <RailCard title="改动都会留痕" tone="muted">
+          <p>新建、编辑、删除都会记一条审计，在 Audit 页签里能查到是谁、什么时候做的。</p>
         </RailCard>
       </RightRail>
 

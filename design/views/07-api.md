@@ -158,6 +158,8 @@ run:
 
 也接受 JSON 等价对象。`dry_run=true` 只校验不落库，返回：
 
+**必填与下限**（`D-57`/`D-58`，PR 复核时补）：`run.name` 必填且 **≤200 字符**（超长会让列表/面包屑/工单标题不可用，`maxLength: 200`）；**`tests` 至少 1 条**——Pre-Check 是平台按 `precheck` 注入的（`seq=0`），**不算用户测试**，所以「0 个 Task 也能提交成功」是不允许的（否则会产出一个"成功地什么都没测"的 Run，列表里显示绿色成功、报告写"全部 1 个 Task 通过"，误导性极强）。0 条时报 `VALIDATION_ERROR`，`detail.issues[0].path = "tests"`、`message = "至少需要 1 个测试 Task（Pre-Check 由平台注入，不计入测试）"`。前端在 Task 列表为空时同样要禁用提交并就地说明原因。
+
 ```json
 { "valid": false,
   "issues": [ { "path": "tests[0].args", "code": "PUBLIC_PARAM_CONFLICT",

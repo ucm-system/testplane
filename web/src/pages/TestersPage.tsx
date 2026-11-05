@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '@/api'
 import type { Tester } from '@/api/types'
 import { RightRail, RailCard } from '@/components/app/RightRail'
@@ -127,20 +127,33 @@ function TesterDrawer({ name, onClose }: { name: string | null; onClose: () => v
 }
 
 export function TestersPage() {
-  const [openName, setOpenName] = useState<string | null>(null)
+  /**
+   * 抽屉状态进 URL（C1）：打开写 `?open=<name>`，关闭删掉。
+   * 直接访问 `/testers?open=aisbench-acc` 也会打开 —— 分享/刷新可复现。
+   */
+  const [params, setParams] = useSearchParams()
+  const openName = params.get('open')
+
+  const setOpenName = (name: string | null) => {
+    const next = new URLSearchParams(params)
+    if (name) next.set('open', name)
+    else next.delete('open')
+    setParams(next, { replace: true })
+  }
+
   const testers = useAsync(() => api.listTesters(), [])
   const list: Tester[] = testers.data ?? []
 
   return (
     <>
       <RightRail>
-        <RailCard title="注册规则" tone="info">
-          <p>只认根目录的 tester.yaml + run.sh；role: pre_check 必须声明 on_failure: abort_run。</p>
-          <p className="mt-2">Tester 是镜像内不可变元数据，没有运行时状态；目录在平台启动时扫描。</p>
+        <RailCard title="这些 Tester 从哪来" tone="info">
+          <p>随镜像一起发版：平台启动时扫一遍目录，控制台不能上传、也不能在这儿注册新的。</p>
+          <p className="mt-2">想做新 Tester，得把目录加进镜像再重启平台；这里看到的永远是当前这一版。</p>
         </RailCard>
-        <RailCard title="参数语义" tone="muted">
-          <p>parameters 只供 Agent 与维护者阅读，平台不渲染、不校验。</p>
-          <p className="mt-2">公共参数（--url / --model_name / --model_path）由平台注入，Tester 不再重复声明来源。</p>
+        <RailCard title="参数清单怎么用" tone="muted">
+          <p>参数清单是写给写 Run 的人看的说明书，平台不会照着它做校验。</p>
+          <p className="mt-2">url / model_name / model_path 这三项由平台自动带上，写 Run 时不用再写一遍。</p>
         </RailCard>
       </RightRail>
 

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -240,6 +242,15 @@ type AttemptFinish struct {
 	ImageDigest string
 	Failure     *domain.Failure
 	FinishedAt  time.Time
+
+	// ---- 产物引用（03-data-view §3.1：attempts.log_ref/artifact_ref/result_ref，
+	// 相对 `<run>/tasks/<task>/attempts/<n>/`；tasks.result_ref 相对 Run 目录）----
+	//
+	// 只填**真实存在**的文件：空字符串表示"没有这个产物"，落库保持 NULL。
+	// 造一个指向不存在文件的引用会让报告变成死链（票 UX-2026-11）。
+	LogRef      string // logs/stdout.log
+	ArtifactRef string // artifacts
+	ResultRef   string // result.json
 }
 
 // AttemptFinishResult 汇报推进结果。
@@ -290,6 +301,18 @@ func (s *Store) FinishAttempt(ctx context.Context, in AttemptFinish) (*AttemptFi
 		if in.Failure != nil {
 			payload["error"] = *in.Failure
 		}
+		// 产物引用：kernel 会把它们写进 attempts.log_ref/artifact_ref/result_ref
+		// （COALESCE，不覆盖已有值）。同时这个 payload 会复用到 Task 终态转换，
+		// 所以 tasks.result_ref 也一并落库（03-data-view §3.1：Task 终态写）。
+		if in.LogRef != "" {
+			payload["log_ref"] = in.LogRef
+		}
+		if in.ArtifactRef != "" {
+			payload["artifact_ref"] = in.ArtifactRef
+		}
+		if in.ResultRef != "" {
+			payload["result_ref"] = in.ResultRef
+		}
 		applied, err := s.Apply(ctx, tx, domain.Transition{
 			Entity: domain.EntityAttempt, ID: in.AttemptID,
 			From:    []domain.Status{domain.AttemptPreparing.Status(), domain.AttemptRunning.Status()},
@@ -312,6 +335,21 @@ func (s *Store) FinishAttempt(ctx context.Context, in AttemptFinish) (*AttemptFi
 		}
 
 		// 2. Task 终态
+		//
+		// tasks.result_ref 是**相对 Run 目录**的（03-data-view §3.1），而 attempts.result_ref
+		// 相对 Attempt 目录；所以这里把前缀补上再传给 Task 的转换 payload。
+		taskPayload := payload
+		if in.ResultRef != "" {
+			if n := attemptIdxFromID(in.AttemptID); n > 0 {
+				cp := make(map[string]any, len(payload)+1)
+				for k, v := range payload {
+					cp[k] = v
+				}
+				cp["result_ref"] = fmt.Sprintf("tasks/%s/attempts/%d/%s",
+					taskID, n, strings.TrimPrefix(in.ResultRef, "/"))
+				taskPayload = cp
+			}
+		}
 		t, err := s.Tasks.Get(ctx, tx, taskID)
 		if err != nil {
 			return err
@@ -321,7 +359,7 @@ func (s *Store) FinishAttempt(ctx context.Context, in AttemptFinish) (*AttemptFi
 				Entity: domain.EntityTask, ID: taskID,
 				From:    []domain.Status{domain.TaskRunning.Status()},
 				To:      domain.TaskSucceeded.Status(),
-				Command: "succeed", Actor: "system:executor", Payload: payload,
+				Command: "succeed", Actor: "system:executor", Payload: taskPayload,
 				At: in.FinishedAt,
 			}); err != nil && !errors.Is(err, domain.ErrConflict) {
 				return err
@@ -346,7 +384,7 @@ func (s *Store) FinishAttempt(ctx context.Context, in AttemptFinish) (*AttemptFi
 				From:    []domain.Status{domain.TaskPreparing.Status(), domain.TaskRunning.Status()},
 				To:      domain.TaskFailed.Status(),
 				Command: "fail", Reason: failure.Code, Actor: "system:executor",
-				Payload: map[string]any{"error": failure}, At: in.FinishedAt,
+				Payload: failPayload(taskPayload, failure), At: in.FinishedAt,
 			}); err != nil && !errors.Is(err, domain.ErrConflict) {
 				return err
 			}
@@ -359,7 +397,7 @@ func (s *Store) FinishAttempt(ctx context.Context, in AttemptFinish) (*AttemptFi
 					From:    []domain.Status{domain.TaskFailed.Status()},
 					To:      domain.TaskQueued.Status(),
 					Command: "retry", Actor: "system:orchestrator",
-					Payload: map[string]any{"error": failure}, At: in.FinishedAt,
+					Payload: failPayload(taskPayload, failure), At: in.FinishedAt,
 				})
 				if err == nil {
 					out.RetryScheduled = true
@@ -723,4 +761,47 @@ func (s *Store) listTasks(ctx context.Context, tx pgx.Tx, runID string) ([]Task,
 		return nil, fmt.Errorf("store: list tasks %s: %w", runID, err)
 	}
 	return collectTasks(rows)
+}
+
+// SetAttemptRefs 回填 Attempt 的产物引用（相对 `<run>/tasks/<task>/attempts/<n>/`）。
+//
+// 典型调用时机：Attempt 终态落库 → 日志异步落盘完成 → 用它补 `log_ref`。
+// 空字符串表示"该产物不存在"，COALESCE 语义下不会覆盖已有引用（不造死链）。
+func (s *Store) SetAttemptRefs(ctx context.Context, attemptID, logRef, artifactRef, resultRef string) error {
+	return s.InTx(ctx, func(tx pgx.Tx) error {
+		f := PhysicalFacts{}
+		if logRef != "" {
+			f.LogRef = &logRef
+		}
+		if artifactRef != "" {
+			f.ArtifactRef = &artifactRef
+		}
+		if resultRef != "" {
+			f.ResultRef = &resultRef
+		}
+		return s.Attempts.SetPhysicalFacts(ctx, tx, attemptID, f)
+	})
+}
+
+// attemptIdxFromID 从 `<task>-a<n>` 里取 idx（1-based）；解析不出返回 0。
+func attemptIdxFromID(attemptID string) int {
+	i := strings.LastIndex(attemptID, "-a")
+	if i < 0 || i+2 >= len(attemptID) {
+		return 0
+	}
+	n, err := strconv.Atoi(attemptID[i+2:])
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// failPayload 是 Task 失败转换的 payload：错误 + （有就带上）run 相对路径的 result_ref。
+// Task 无论成功失败都要能指出自己的产物（03-data-view §3.1），否则报告页失败任务没有指标表。
+func failPayload(base map[string]any, failure domain.Failure) map[string]any {
+	p := map[string]any{"error": failure}
+	if ref, ok := base["result_ref"].(string); ok && ref != "" {
+		p["result_ref"] = ref
+	}
+	return p
 }

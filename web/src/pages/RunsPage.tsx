@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { Search } from 'lucide-react'
+import { Link, useSearchParams } from 'react-router-dom'
+import { Search, X } from 'lucide-react'
 import { api } from '@/api'
 import { toApiError } from '@/api/client'
 import type { ApiErrorBody, RunSummary } from '@/api/types'
@@ -33,6 +33,9 @@ const TIME_MS: Record<TimeFilter, number | null> = {
   '7d': 7 * 24 * 3600_000,
 }
 
+const STATUS_VALUES: StatusFilter[] = ['all', 'active', 'terminal', 'failed']
+const TIME_VALUES: TimeFilter[] = ['all', '1h', '24h', '7d']
+
 const PAGE_SIZE = 10
 
 function progress(run: RunSummary): string {
@@ -41,10 +44,38 @@ function progress(run: RunSummary): string {
   return `${counts.succeeded} / ${counts.total}`
 }
 
+function pickOne<T extends string>(value: string | null, allowed: readonly T[], fallback: T): T {
+  return allowed.includes((value ?? fallback) as T) ? ((value ?? fallback) as T) : fallback
+}
+
+/**
+ * 运行列表：筛选条件**双向同步进 URL**（B9）。
+ *
+ * `q / status / kind / tester / submitter`（外加 `time`）都从 `useSearchParams` 读，
+ * 改筛选就写回 URL —— 直接打开 `/runs?q=xxx`、刷新、把链接发给别人，看到的都是同一份结果。
+ */
 export function RunsPage() {
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
-  const [timeFilter, setTimeFilter] = useState<TimeFilter>('all')
-  const [search, setSearch] = useState('')
+  const [params, setParams] = useSearchParams()
+
+  const statusFilter = pickOne<StatusFilter>(params.get('status'), STATUS_VALUES, 'all')
+  const timeFilter = pickOne<TimeFilter>(params.get('time'), TIME_VALUES, 'all')
+  const search = params.get('q') ?? ''
+  const kind = params.get('kind') ?? ''
+  const tester = params.get('tester') ?? ''
+  const submitter = params.get('submitter') ?? ''
+
+  /** 改任意筛选参数都走这里：空值即从 URL 删掉该键（`replace` 免得每敲一个字都进历史） */
+  const updateQuery = useCallback(
+    (patch: Record<string, string | null | undefined>) => {
+      const next = new URLSearchParams(params)
+      for (const [key, value] of Object.entries(patch)) {
+        if (value == null || value === '') next.delete(key)
+        else next.set(key, value)
+      }
+      setParams(next, { replace: true })
+    },
+    [params, setParams],
+  )
 
   const [items, setItems] = useState<RunSummary[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
@@ -58,7 +89,13 @@ export function RunsPage() {
     setLoading(true)
     setError(null)
     try {
-      const page = await api.listRuns({ status: STATUS_QUERY[statusFilter], limit: PAGE_SIZE })
+      const page = await api.listRuns({
+        status: STATUS_QUERY[statusFilter],
+        kind: kind || undefined,
+        tester: tester || undefined,
+        submitter: submitter || undefined,
+        limit: PAGE_SIZE,
+      })
       if (id !== requestId.current) return
       setItems(page.items)
       setNextCursor(page.next_cursor)
@@ -70,7 +107,7 @@ export function RunsPage() {
     } finally {
       if (id === requestId.current) setLoading(false)
     }
-  }, [statusFilter])
+  }, [statusFilter, kind, tester, submitter])
 
   useEffect(() => {
     void loadFirstPage()
@@ -80,7 +117,14 @@ export function RunsPage() {
     if (!nextCursor || loadingMore) return
     setLoadingMore(true)
     try {
-      const page = await api.listRuns({ status: STATUS_QUERY[statusFilter], cursor: nextCursor, limit: PAGE_SIZE })
+      const page = await api.listRuns({
+        status: STATUS_QUERY[statusFilter],
+        kind: kind || undefined,
+        tester: tester || undefined,
+        submitter: submitter || undefined,
+        cursor: nextCursor,
+        limit: PAGE_SIZE,
+      })
       setItems((prev) => [...prev, ...page.items])
       setNextCursor(page.next_cursor)
     } catch (e) {
@@ -105,6 +149,11 @@ export function RunsPage() {
   }, [items, search, timeFilter])
 
   const activeCount = items.filter((run) => !isTerminalRun(run.status)).length
+  const advanced = [
+    kind ? { key: 'kind', label: `类型：${kind}` } : null,
+    tester ? { key: 'tester', label: `Tester：${tester}` } : null,
+    submitter ? { key: 'submitter', label: `提交人：${submitter}` } : null,
+  ].filter(Boolean) as Array<{ key: string; label: string }>
 
   return (
     <>
@@ -119,12 +168,13 @@ export function RunsPage() {
             ))}
           </ul>
           <p className="mt-3 border-t border-line-soft pt-3 text-2xs leading-relaxed text-fg-3">
-            SKIPPED 表示没跑，FAILED 表示跑了但失败，两者不混用。
+            跳过 = 没跑，失败 = 跑了但没通过，两者不混用。
           </p>
         </RailCard>
-        <RailCard title="过滤口径" tone="muted">
-          <p>状态过滤走服务端（`?status=` 逗号分隔），时间与关键字在当前已加载的数据上过滤。</p>
-          <p className="mt-2">分页是游标：只回传 next_cursor，不解析、不换算成 offset。</p>
+        <RailCard title="筛选与刷新" tone="muted">
+          <p>状态由服务端筛；时间与关键字只作用在已经加载出来的这些行上。</p>
+          <p className="mt-2">列表不会自己刷新：切页、改筛选或重新打开这一页，拿到的才是最新。</p>
+          <p className="mt-2">一次加载一页，点「加载更多」才取下一页；筛选条件都在地址栏里，复制链接给别人看到的和你一样。</p>
         </RailCard>
       </RightRail>
 
@@ -132,15 +182,19 @@ export function RunsPage() {
         <CardHeader
           tone="ok"
           title="全部 Run"
-          sub={loading ? '加载中…' : `已加载 ${items.length} 个 · 进行中 ${activeCount} 个`}
+          sub={
+            loading
+              ? '加载中…'
+              : `已加载 ${items.length} 个 · 进行中 ${activeCount} 个${search ? ' · 关键字只筛本页' : ''}`
+          }
           actions={
             <div className="flex flex-wrap items-center gap-2">
               <div className="relative">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-fg-3" aria-hidden />
                 <Input
                   value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="筛选本页 Run（按名称 / ID）"
+                  onChange={(e) => updateQuery({ q: e.target.value })}
+                  placeholder="筛选本页已加载的 Run（名称 / ID）"
                   aria-label="筛选本页 Run（按名称 / ID）"
                   title="只过滤已加载的这一页，不是全局搜索"
                   className="h-9 w-56 pl-8"
@@ -149,7 +203,7 @@ export function RunsPage() {
               <Segmented<StatusFilter>
                 ariaLabel="状态过滤"
                 value={statusFilter}
-                onChange={setStatusFilter}
+                onChange={(next) => updateQuery({ status: next === 'all' ? null : next })}
                 options={[
                   { value: 'all', label: '全部' },
                   { value: 'active', label: '进行中' },
@@ -160,7 +214,7 @@ export function RunsPage() {
               <Select
                 aria-label="时间范围"
                 value={timeFilter}
-                onChange={(e) => setTimeFilter(e.target.value as TimeFilter)}
+                onChange={(e) => updateQuery({ time: e.target.value === 'all' ? null : e.target.value })}
                 className="h-9 w-28"
               >
                 <option value="all">全部时间</option>
@@ -172,6 +226,24 @@ export function RunsPage() {
           }
         />
 
+        {advanced.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2 border-b border-line-soft bg-surface-2 px-5 py-2 text-2xs text-fg-3">
+            <span>链接带来的筛选：</span>
+            {advanced.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => updateQuery({ [item.key]: null })}
+                aria-label={`清除 ${item.key} 过滤`}
+                className="inline-flex items-center gap-1 rounded-full border border-line bg-surface px-2 py-0.5 text-fg-2 transition-colors hover:border-line-strong hover:text-fg"
+              >
+                <span className="font-mono">{item.label}</span>
+                <X className="size-3" aria-hidden />
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         {error ? <div className="p-4"><ErrorState error={error} onRetry={() => void loadFirstPage()} /></div> : null}
 
         {loading && items.length === 0 ? (
@@ -182,10 +254,13 @@ export function RunsPage() {
             description={
               items.length === 0
                 ? '换个状态过滤，或去提交一个新的 Run。'
-                : '时间范围或关键字太窄，放宽一点再看。'
+                : `时间范围或关键字太窄；关键字只筛已加载的 ${items.length} 条（不是全库搜索），放宽一点或点「加载更多」再看。`
             }
             action={
-              <Button size="sm" onClick={() => { setSearch(''); setTimeFilter('all'); setStatusFilter('all') }}>
+              <Button
+                size="sm"
+                onClick={() => updateQuery({ q: null, time: null, status: null, kind: null, tester: null, submitter: null })}
+              >
                 清除过滤
               </Button>
             }

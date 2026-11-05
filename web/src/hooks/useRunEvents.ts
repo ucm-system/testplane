@@ -46,6 +46,8 @@ export interface RunEventsResult {
   version: number
   /** 服务端要求整页重建（回放窗口失效）时 +1 */
   resyncToken: number
+  /** 手动重连（页内横幅的「立即重试」）：丢掉当前连接按 lastSeq 重新订阅 */
+  reconnect: () => void
 }
 
 export interface RunEventsOptions {
@@ -192,5 +194,10 @@ export function useRunEvents(runId: string | undefined, options: RunEventsOption
     }
   }, [])
 
-  return { events, status, version, resyncToken }
+  /** 手动重连：epoch +1 触发上面的订阅 effect 重跑（lastSeq 从 sessionStorage 续上） */
+  const reconnect = useCallback(() => {
+    setEpoch((value) => value + 1)
+  }, [])
+
+  return { events, status, version, resyncToken, reconnect }
 }
