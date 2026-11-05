@@ -128,6 +128,8 @@ database:
 
 # ---- 产物存储（RWX）----
 persistence:
+  # 产物存储是**硬依赖**：Tester Job 必须挂 storage PVC（executor 渲染 Job 时校验）。
+  # enabled=false 且没有 existingClaim 会被渲染期校验拒绝。
   enabled: true
   # 生产推荐复用已有 RWX claim（NFS/CSI），chart 不创建 PVC
   existingClaim: ""
@@ -200,9 +202,11 @@ topologySpreadConstraints: []
 priorityClassName: ""
 
 podDisruptionBudget:
-  # 单副本别开（会挡住 drain）；多副本时开
+  # 单副本别开（会挡住 drain）；role=api 多副本时开
   enabled: false
   minAvailable: 1
+  # 与 minAvailable 互斥；给了它就用它（模板已处理空值问题）
+  maxUnavailable: null
 
 networkPolicy:
   # kind 默认 CNI 不支持；生产建议开（06 §4.2 的放行集）
@@ -211,6 +215,15 @@ networkPolicy:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: ingress-nginx
+  # kubelet readiness/liveness 探针来源（自管 Calico 需要填节点网段；托管 CNI 通常留空）
+  probeSources: []
+  # 出口：数据库与存储必须放行，否则迁移 hook / Tester Job 会失败
+  databasePort: 5432
+  databaseCIDR: ""        # 空 = 任意目的地（仅该端口）
+  storagePort: 2049
+  storageCIDR: ""         # 空 = 任意目的地（仅该端口）
+  dnsCIDR: ""             # 空 = 用 k8s-app=kube-dns 的 podSelector
+  egressHTTPS: true       # OIDC / Genet / 镜像仓库 / S3
   extraEgress: []
 
 # ---- 逃生口 ----

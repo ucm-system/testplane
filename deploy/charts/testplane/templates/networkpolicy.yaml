@@ -2,7 +2,13 @@
 {{- /*
 默认拒绝 + 显式放行集（06 §4.2）。生产 CNI（Calico/Cilium）上才有意义；
 kind 默认 CNI 不支持 NetworkPolicy，所以 chart 默认关闭。
-放行：DNS、PostgreSQL、Genet、OIDC、NFS、K8s API（in-cluster 需要）。
+
+⚠️ 两个必须一起配的出口（否则 `helm install` 的迁移 hook 会失败）：
+  - PostgreSQL：`networkPolicy.databasePort`（默认 5432）→ 目标 `databaseCIDR`（默认空=任意目的地）
+  - NFS/CSI 存储：`networkPolicy.storagePort`（默认 2049）→ `storageCIDR`
+  - OIDC / Genet / 镜像仓库：443（`egressHTTPS`，默认 true）
+入站：控制面 8080 只放 `ingressFrom` 里的来源；kubelet 探针来源用 `probeSources` 配（默认空，
+      多数托管 CNI 不需要；自管 Calico 需要填节点网段，否则 readiness 永远失败）。
 */}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -19,30 +25,82 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # 控制面只接受 8080（Ingress Controller / 同命名空间的 Job 回连不算入站）
+    # 控制面 8080：来自 Ingress Controller / 同命名空间组件
     - from:
+        {{- if .Values.networkPolicy.ingressFrom }}
         {{- toYaml .Values.networkPolicy.ingressFrom | nindent 8 }}
+        {{- else }}
+        - podSelector: {}
+        {{- end }}
       ports:
         - port: 8080
           protocol: TCP
+    {{- if .Values.networkPolicy.probeSources }}
+    # kubelet 探针（readiness/liveness）：自管 Calico 等 CNI 下需要显式放行节点来源
+    - from:
+        {{- toYaml .Values.networkPolicy.probeSources | nindent 8 }}
+      ports:
+        - port: 8080
+          protocol: TCP
+    {{- end }}
   egress:
     # DNS
     - to:
+        {{- if .Values.networkPolicy.dnsCIDR }}
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.dnsCIDR }}
+        {{- else }}
         - namespaceSelector: {}
           podSelector:
             matchLabels:
               k8s-app: kube-dns
+        {{- end }}
       ports:
         - port: 53
           protocol: UDP
         - port: 53
           protocol: TCP
-    # K8s API（建 Job、看 Pod、Lease）
+    # K8s API（建 Job、看 Pod、Lease）—— 走 Service IP 或 apiserver 直达
     - ports:
         - port: 443
           protocol: TCP
         - port: 6443
           protocol: TCP
+    # PostgreSQL（**迁移 hook 与业务都要它**，缺了 helm install 直接失败）
+    - to:
+        {{- if .Values.networkPolicy.databaseCIDR }}
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.databaseCIDR }}
+        {{- else }}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        {{- end }}
+      ports:
+        - port: {{ .Values.networkPolicy.databasePort }}
+          protocol: TCP
+    # NFS / CSI 存储（06 §5.5；对象存储走 443 那条）
+    - to:
+        {{- if .Values.networkPolicy.storageCIDR }}
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.storageCIDR }}
+        {{- else }}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        {{- end }}
+      ports:
+        - port: {{ .Values.networkPolicy.storagePort }}
+          protocol: TCP
+    {{- if .Values.networkPolicy.egressHTTPS }}
+    # OIDC / Genet / 镜像仓库 / 对象存储
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32
+      ports:
+        - port: 443
+          protocol: TCP
+    {{- end }}
     {{- range .Values.networkPolicy.extraEgress }}
     - {{- toYaml . | nindent 8 }}
     {{- end }}

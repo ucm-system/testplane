@@ -17,7 +17,8 @@ image:
   # pullSecrets:
   #   - name: ghcr-pull
 
-replicaCount: 2
+# controller 必须单活（没有 leader election）：要水平扩就拆 role=api（多副本）+ 独立 controller（1 副本）
+replicaCount: 1
 role: all
 
 config:
@@ -92,6 +93,13 @@ podDisruptionBudget:
 
 networkPolicy:
   enabled: true
+  # 自管 Calico 时填节点网段，否则 kubelet 探针会被拦（readiness 永远失败）
+  # probeSources:
+  #   - ipBlock: { cidr: 10.0.0.0/8 }
+  databasePort: 5432
+  databaseCIDR: "10.0.0.0/8"     # PG 在集群网段内；公网 RDS 就写那个 CIDR
+  storagePort: 2049
+  storageCIDR: "10.0.0.0/8"      # NFS
 
 resources:
   requests:

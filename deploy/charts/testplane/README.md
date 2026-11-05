@@ -67,7 +67,7 @@ Chart 会在**渲染期**直接失败并给出中文原因，不会让你部署�
 |---|---|---|
 | `image.repository` | `ghcr.io/ucm-system/testplane-server` | 镜像仓库 |
 | `image.digest` / `image.tag` | `""` / `0.1.0` | **生产用 digest**（`deploy/docker/build-push.ps1` 会打印）；tag 与 digest 二选一 |
-| `replicaCount` / `role` | `1` / `all` | 拆角色：`api` 管 HTTP/SSE，`controller` 管编排，`collector` 管日志 |
+| `replicaCount` / `role` | `1` / `all` | **controller 必须单活**（无 leader election）：`role=all\|controller` 且副本 >1 渲染期直接失败；要水平扩只能拆 `role=api`（多副本）+ 独立 `controller`（1 副本） |
 | `config.env` / `config.authMode` | `prod` / `oidc` | 生产别用 dev |
 | `config.deployProvider` | `genet` | `mock` 只用于本地（进程内假 Genet） |
 | `config.deployTimeout` | `72h` | 部署总窗口，取值 `1h..7d`（`K-6`） |
@@ -107,7 +107,7 @@ kubectl -n testplane-helm create secret generic testplane-db \
   --from-literal=dsn='postgres://testplane:testplane@host.docker.internal:5432/testplane_helm?sslmode=disable'
 # 3) 用 kind 专用 values 装（dev 鉴权 + mock 部署方，仅本地）
 helm install tp deploy/charts/testplane -n testplane-helm \
-  -f deploy/charts/testplane/values-kind.yaml --set image.tag=helm --wait
+  -f deploy/charts/testplane/values-kind.yaml --wait
 # 4) 探活
 kubectl -n testplane-helm port-forward svc/tp-testplane 8080:8080
 curl -sS localhost:8080/healthz && curl -sS localhost:8080/readyz
@@ -170,3 +170,10 @@ digest 在 Actions 的 job summary 里，直接填 `image.digest`。
 > 首次发版后去 **Packages → Package settings → Change visibility → Public**，否则匿名拉取 401。
 > CI 用 `GHCR_TOKEN`（PAT，`write:packages`）：本组织把默认 workflow 权限锁成 `read`，`GITHUB_TOKEN` 拿不到 `packages: write`。
 > 需要私有包时用 `image.pullSecrets`（`kubectl create secret docker-registry ghcr-pull ...`）。
+
+### 迁移 hook 的两条边界
+
+- **失败会留证据，但下次升级会被覆盖**：hook 用 `before-hook-creation`，失败的迁移 Job 会保留到下一次 `helm upgrade`
+  才被删掉——出事要**先看日志再升级**：`kubectl -n <ns> logs job/<release>-testplane-migrate`。
+- **Helm 只锁同一个 release**：两个不同 release 指向同一个数据库时仍会各迁移一次；`store` 层**没有** advisory lock，
+  所以同一个库只允许一个 TestPlane 安装（多环境共库是禁止的）。

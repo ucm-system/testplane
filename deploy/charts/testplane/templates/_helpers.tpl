@@ -120,3 +120,26 @@ persistence.existingClaim 优先，其次本 chart 创建的 PVC 名。
 {{- fail "database.existingSecret 与 database.dsn 只能选一个" }}
 {{- end }}
 {{- end }}
+
+{{/*
+部署形态校验（PR #35 评审 2/5）：
+  - controller 必须**单活**（04-process-view §2：调度/对账/watchdog/GC 都靠 Lease 单活），
+    而代码里没有 leader election —— 所以 `role=all|controller` 且副本 > 1 直接渲染失败。
+  - 产物存储是硬依赖（executor 渲染 Job 时写 `storage PVC`，缺了 Job 起不来），
+    不允许 `persistence.enabled=false` 且没有 existingClaim 的"半残"组合。
+*/}}
+{{- define "testplane.validateTopology" -}}
+{{- $replicas := int .Values.replicaCount }}
+{{- if and (gt $replicas 1) (or (eq .Values.role "all") (eq .Values.role "controller")) }}
+{{- fail (printf "config.role=%s 且 replicaCount=%d：controller 必须单活（没有 leader election）。要水平扩请用 role=api + 独立的 controller 副本 1。" .Values.role $replicas) }}
+{{- end }}
+{{- if and (not .Values.persistence.enabled) (not .Values.persistence.existingClaim) }}
+{{- fail "persistence：产物存储是硬依赖（Tester Job 必须挂 storage PVC）。请设 persistence.existingClaim（生产 RWX）或 persistence.enabled=true + storageClass。" }}
+{{- end }}
+{{- if and (eq .Values.config.authMode "oidc") (not .Values.oidc.redirectURL) }}
+{{- fail "config.authMode=oidc 必须给 oidc.redirectURL（必须与 IdP 登记的 callback **逐字节**一致）" }}
+{{- end }}
+{{- if and (eq .Values.config.authMode "oidc") .Values.session.secure (not .Values.ingress.enabled) }}
+{{- fail "session.secure=true 需要 HTTPS：要么开 ingress.enabled 并配 TLS，要么本地用 session.secure=false" }}
+{{- end }}
+{{- end }}

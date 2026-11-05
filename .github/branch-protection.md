@@ -8,7 +8,7 @@
 | 项 | 值 | 为什么 |
 |---|---|---|
 | 必须走 PR | 是 | 直接 push `main` 关闭（含管理员） |
-| 必需状态检查 | `go build / vet / test（含真 PG）`、`lint`、`contract`、`web`、`helm`、`kustomize` | 六道门禁全绿才能合；名字必须与 `ci.yml` 的 job `name` 完全一致 |
+| 必需状态检查 | `go build / vet / test（含真 PG）`、`gofmt / 契约工具构建`、`契约（spec 侧：openapi ↔ design 50 端点）`、`web 类型检查 / 构建 / Playwright（mock）`、`Helm chart lint / 渲染`、`本地 kind 清单可渲染` | 六道门禁全绿才能合；**必须用 job 的 `name`（不是 job id）**，写错会导致所有 PR 永久 BLOCKED（已按实际 check 名应用） |
 | 分支必须最新 | 是（`strict`） | 防止"绿了但基于旧 main"合并 |
 | 必需审批 | 0（团队目前靠 PR 评论评审） | 需要人工审批时把 `required_approving_review_count` 调成 1 |
 | 禁止 force push / 删除分支 | 是 | 保护历史 |

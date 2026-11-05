@@ -51,12 +51,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: list
+        name: 生成发布矩阵（server + web + 所有 Tester，加 Tester 不用改 workflow）
         run: |
-          names="$(ls -1 testers | while read -r d; do
-            [ -f "testers/$d/build/Dockerfile" ] && printf '"%s",' "$d"
-          done)"
-          echo "testers=[${names%,}]" >> "$GITHUB_OUTPUT"
-          echo "发现 Tester：${names%,}"
+          {
+            printf '{"image":"server","dockerfile":"deploy/docker/server.Dockerfile","context":"."},'
+            printf '{"image":"web","dockerfile":"deploy/docker/web.Dockerfile","context":"."}'
+            # Tester：上下文是 testers/<name>/（不是仓库根）
+            for d in $(ls -1 testers); do
+              if [ -f "testers/$d/build/Dockerfile" ]; then
+                printf ',{"image":"tester-%s","dockerfile":"testers/%s/build/Dockerfile","context":"testers/%s"}' "$d" "$d" "$d"
+              fi
+            done
+            echo ""
+          } > /tmp/items.txt
+          echo "matrix={\"include\":[$(cat /tmp/items.txt)]}" >> "$GITHUB_OUTPUT"
+          echo "发布矩阵："
+          cat /tmp/items.txt; echo
+          echo "Tester 数量：$(ls -1 testers | wc -l)"
 
   # PR 上只验证 Dockerfile 还能构建（amd64，不推送）
   build-only:
