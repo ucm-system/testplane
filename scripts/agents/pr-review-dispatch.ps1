@@ -245,6 +245,9 @@ $body
             # ---- commit status（check run 需要 GitHub App 身份，用户 token 会 403）----
             $st = if ($verdict -eq 'approve') { 'success' } else { 'failure' }
             $desc = if ($reason) { $reason } else { $label }
+            # GitHub 的 status description 上限 140 字符；超了整条 status 会创建失败
+            # （表现是"评论发出去了但门禁没动"，很容易漏）。
+            if ($desc.Length -gt 130) { $desc = $desc.Substring(0, 127) + '...' }
             gh api -X POST "repos/$GitHubRepo/statuses/$sha" `
                 -f "state=$st" -f "context=$statusContext" -f "description=$desc" 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { Write-Log '  ! status 创建失败' } else { Write-Log "  → status: $statusContext = $st" }
