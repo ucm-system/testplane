@@ -165,6 +165,24 @@ func decodeToolJSON(t *testing.T, text string) map[string]any {
 	return v
 }
 
+// writeSSE 把预拼好的帧原样写出并 flush，模拟控制面的 text/event-stream。
+func writeSSE(t *testing.T, w http.ResponseWriter, frames ...string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		t.Fatal("ResponseWriter 不支持 Flush")
+	}
+	for _, frame := range frames {
+		if _, err := io.WriteString(w, frame); err != nil {
+			return
+		}
+		flusher.Flush()
+	}
+}
+
 // ---- initialize / tools/list ---------------------------------------------
 
 func TestInitializeNegotiatesProtocolVersion(t *testing.T) {
@@ -244,6 +262,8 @@ func TestToolsList(t *testing.T) {
 		"testplane_list_testers",
 		"testplane_get_report",
 		"testplane_get_logs",
+		"testplane_list_artifacts",
+		"testplane_get_file",
 		"testplane_queue_status",
 		"testplane_list_profiles",
 	}
@@ -278,6 +298,17 @@ func TestToolsList(t *testing.T) {
 	waitProps, _ := got["testplane_wait_run"].InputSchema["properties"].(map[string]any)
 	if _, ok := waitProps["timeout_seconds"]; !ok {
 		t.Error("wait_run 缺少 timeout_seconds 参数")
+	}
+	if _, ok := waitProps["follow"]; !ok {
+		t.Error("wait_run 缺少 follow 参数")
+	}
+	fileProps, _ := got["testplane_get_file"].InputSchema["properties"].(map[string]any)
+	if _, ok := fileProps["range"]; !ok {
+		t.Error("get_file 缺少 range 参数")
+	}
+	fileRequired, _ := got["testplane_get_file"].InputSchema["required"].([]any)
+	if len(fileRequired) != 2 {
+		t.Errorf("get_file.required = %v，期望 [run_id path]", fileRequired)
 	}
 	if got["testplane_queue_status"].InputSchema["additionalProperties"] != false {
 		t.Error("queue_status 的 inputSchema 应为空对象（additionalProperties=false）")
@@ -541,25 +572,421 @@ func TestToolsCallHTTPErrorIsIsError(t *testing.T) {
 	}
 }
 
-func TestToolsCallProfilesNotImplemented(t *testing.T) {
+func TestToolsCallProfiles(t *testing.T) {
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r) // 控制面还没实现 GET /api/v1/profiles
+		if r.URL.Path != "/api/v1/profiles" {
+			t.Errorf("路径 = %q", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"items":[{"name":"k8s-npu","cluster":"cluster-01","namespace":"testplane","mounts":[],"scheduler":"default","deploy_timeout_seconds":259200}],"has_more":false}`)
 	}))
 	resp := h.call(t, 12, "tools/call", map[string]any{
 		"name":      "testplane_list_profiles",
 		"arguments": map[string]any{},
 	})
 	res := decodeToolResult(t, resp)
-	if !res.IsError {
-		t.Fatalf("profiles 未实现应 isError: %s", res.Content[0].Text)
+	if res.IsError {
+		t.Fatalf("profiles 不应 isError: %s", res.Content[0].Text)
 	}
 	body := decodeToolJSON(t, res.Content[0].Text)
-	errObj, _ := body["error"].(map[string]any)
-	if errObj["code"] != "ENDPOINT_NOT_IMPLEMENTED" {
-		t.Errorf("code = %v，期望 ENDPOINT_NOT_IMPLEMENTED", errObj["code"])
+	items, _ := body["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("profiles 返回 %+v", body)
 	}
-	if !strings.Contains(fmt.Sprint(errObj["message"]), "P1") {
-		t.Errorf("message 应说明它属于 P1 首批: %v", errObj["message"])
+}
+
+func TestToolsCallListArtifactsRunAndTask(t *testing.T) {
+	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/runs/r-1/artifacts":
+			_, _ = io.WriteString(w, `{"items":[{"path":"report.json","kind":"report","size_bytes":12}],"by_kind":{"report":[{"path":"report.json","kind":"report","size_bytes":12}]},"total_size_bytes":12}`)
+		case "/api/v1/tasks/t-1/attempts/2/artifacts":
+			_, _ = io.WriteString(w, `{"items":[{"path":"tasks/t-1/attempts/2/result.json","kind":"result","size_bytes":34,"task_id":"t-1"}],"by_kind":{"result":[{"path":"tasks/t-1/attempts/2/result.json","kind":"result","size_bytes":34,"task_id":"t-1"}]},"total_size_bytes":34}`)
+		default:
+			t.Errorf("意外路径: %s", r.URL.Path)
+		}
+	}))
+
+	// Run 级
+	resp := h.call(t, 20, "tools/call", map[string]any{
+		"name":      "testplane_list_artifacts",
+		"arguments": map[string]any{"run_id": "r-1"},
+	})
+	res := decodeToolResult(t, resp)
+	if res.IsError {
+		t.Fatalf("artifacts(run) 不应 isError: %s", res.Content[0].Text)
+	}
+	body := decodeToolJSON(t, res.Content[0].Text)
+	if body["total_size_bytes"] != float64(12) {
+		t.Errorf("run artifacts = %+v", body)
+	}
+
+	// Attempt 级
+	resp = h.call(t, 21, "tools/call", map[string]any{
+		"name":      "testplane_list_artifacts",
+		"arguments": map[string]any{"task_id": "t-1", "attempt": 2},
+	})
+	res = decodeToolResult(t, resp)
+	if res.IsError {
+		t.Fatalf("artifacts(task) 不应 isError: %s", res.Content[0].Text)
+	}
+	body = decodeToolJSON(t, res.Content[0].Text)
+	if body["total_size_bytes"] != float64(34) {
+		t.Errorf("attempt artifacts = %+v", body)
+	}
+
+	// XOR 校验
+	for _, args := range []map[string]any{
+		{},
+		{"run_id": "r-1", "task_id": "t-1"},
+	} {
+		resp = h.call(t, 22, "tools/call", map[string]any{
+			"name":      "testplane_list_artifacts",
+			"arguments": args,
+		})
+		if resp.Error == nil || resp.Error.Code != codeInvalidParams {
+			t.Errorf("artifacts 参数 %v 应返回 -32602，实际 %+v", args, resp.Error)
+		}
+	}
+}
+
+func TestToolsCallGetFileSummary(t *testing.T) {
+	var gotRange, gotPath string
+	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotRange = r.Header.Get("Range")
+		if r.URL.Query().Get("path") != "tasks/t-1/attempts/1/logs/stdout.log" {
+			t.Errorf("path 查询 = %q", r.URL.Query().Get("path"))
+		}
+		w.Header().Set("Content-Range", "bytes 0-15/16")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = io.WriteString(w, "hello log line\n")
+	}))
+	resp := h.call(t, 23, "tools/call", map[string]any{
+		"name": "testplane_get_file",
+		"arguments": map[string]any{
+			"run_id":    "r-1",
+			"path":      "r-1/tasks/t-1/attempts/1/logs/stdout.log", // artifacts 风格：带 run_id 前缀
+			"max_bytes": 1024,
+		},
+	})
+	res := decodeToolResult(t, resp)
+	if res.IsError {
+		t.Fatalf("get_file 不应 isError: %s", res.Content[0].Text)
+	}
+	if gotPath != "/api/v1/runs/r-1/files" || gotRange != "bytes=0-1023" {
+		t.Errorf("请求形状不对: path=%q range=%q", gotPath, gotRange)
+	}
+	body := decodeToolJSON(t, res.Content[0].Text)
+	if body["api_path"] != "tasks/t-1/attempts/1/logs/stdout.log" {
+		t.Errorf("api_path = %v，期望剥离 run_id 前缀", body["api_path"])
+	}
+	if body["encoding"] != "text" || body["preview"] != "hello log line\n" {
+		t.Errorf("预览 = %+v", body)
+	}
+	if body["sha256_scope"] != "partial" || body["truncated"] != true {
+		t.Errorf("sha256_scope/truncated = %v/%v", body["sha256_scope"], body["truncated"])
+	}
+	if body["total_size_bytes"] != float64(16) || body["size_bytes"] != float64(15) {
+		t.Errorf("size = %v/%v", body["size_bytes"], body["total_size_bytes"])
+	}
+
+	// 二进制 → base64 标记
+	h2 := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 0-3/4")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte{0x00, 0x01, 0xff, 0xfe})
+	}))
+	resp = h2.call(t, 24, "tools/call", map[string]any{
+		"name":      "testplane_get_file",
+		"arguments": map[string]any{"run_id": "r-1", "path": "bin.dat", "max_bytes": 1024},
+	})
+	res = decodeToolResult(t, resp)
+	if res.IsError {
+		t.Fatalf("get_file(binary) 不应 isError: %s", res.Content[0].Text)
+	}
+	body = decodeToolJSON(t, res.Content[0].Text)
+	if body["encoding"] != "base64" || body["preview_base64"] != "AAH//g==" {
+		t.Errorf("二进制预览 = %+v", body)
+	}
+}
+
+func TestHintsCoverKnownCodes(t *testing.T) {
+	// 附录 D 全部错误码 + 两个合成/终态码：每个都要有 next_action。
+	required := []string{
+		"VALIDATION_ERROR", "UNAUTHENTICATED", "FORBIDDEN", "NOT_FOUND", "CONFLICT",
+		"TESTER_NOT_FOUND", "TESTER_VERSION_PINNED", "TESTER_INVALID",
+		"EXECUTION_PROFILE_NOT_FOUND", "RUN_TOO_LARGE", "RESOURCE_EXHAUSTED",
+		"ARTIFACT_QUOTA_EXCEEDED", "EXECUTOR_UNAVAILABLE", "EXECUTOR_POD_ERROR",
+		"IMAGE_PULL_FAILED", "MOUNT_UNAVAILABLE", "ENDPOINT_UNREACHABLE", "PRECHECK_FAILED",
+		"TASK_TIMEOUT", "TESTER_NONZERO_EXIT", "RESULT_MISSING", "RESULT_INVALID",
+		"CLEANUP_FAILED", "CANCELED", "INTERNAL_ERROR", "DEPLOY_FAILED", "DEPLOY_BLOCKED",
+		"SERVICE_UNAVAILABLE", "UNREACHABLE",
+	}
+	for _, code := range required {
+		h, ok := HintForError(code)
+		if !ok {
+			t.Errorf("缺少错误码 %s 的提示", code)
+			continue
+		}
+		if h.Code != code || h.NextAction == "" {
+			t.Errorf("%s 的 hint 不完整: %+v", code, h)
+		}
+	}
+	if len(errorHints) != len(required) {
+		t.Errorf("hints 表有 %d 项，测试清单 %d 项；新增码时同步改两边", len(errorHints), len(required))
+	}
+	// 抽检 lead 指定的语义，防止后续改坏。
+	checks := map[string]string{
+		"PRECHECK_FAILED":      "precheck",
+		"DEPLOY_FAILED":        "不要重试",
+		"DEPLOY_BLOCKED":       "volcano",
+		"TASK_TIMEOUT":         "timeout",
+		"RESULT_MISSING":       "result.json",
+		"FORBIDDEN":            "operator",
+		"VALIDATION_ERROR":     "issues",
+		"UNAUTHENTICATED":      "token",
+		"ENDPOINT_UNREACHABLE": "deploy",
+	}
+	for code, want := range checks {
+		h, _ := HintForError(code)
+		if !strings.Contains(h.NextAction, want) && !strings.Contains(h.Hint, want) {
+			t.Errorf("%s 的提示里应提到 %q：%+v", code, want, h)
+		}
+	}
+	if _, ok := HintForError("SOME_NEW_CODE"); ok {
+		t.Error("未知错误码不应有提示")
+	}
+	if _, ok := HintForRunStatus("canceled"); !ok {
+		t.Error("canceled 终态应有提示")
+	}
+}
+
+// ---- SSE 与 wait --follow ------------------------------------------------
+
+func TestReadSSEParsesFrames(t *testing.T) {
+	stream := ": ping\n\n" +
+		"id: 7\nevent: run.state_changed\ndata: {\"seq\":7,\"to\":\"testing\"}\n\n" +
+		"id: 8\nevent: run.finished\ndata: line1\ndata: line2\n\n"
+	var frames []SSEFrame
+	if err := ReadSSE(strings.NewReader(stream), func(f SSEFrame) error {
+		frames = append(frames, f)
+		return nil
+	}); err != nil {
+		t.Fatalf("ReadSSE: %v", err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("帧数 = %d，期望 2（注释不计）", len(frames))
+	}
+	if frames[0].ID != "7" || !frames[0].HasID || frames[0].Event != "run.state_changed" {
+		t.Errorf("第一帧 = %+v", frames[0])
+	}
+	if frames[1].Event != "run.finished" || string(frames[1].Data) != "line1\nline2" {
+		t.Errorf("第二帧 = %+v", frames[1])
+	}
+}
+
+func TestWaitFollowUsesSSE(t *testing.T) {
+	var gets int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/runs/r-1":
+			n := atomic.AddInt32(&gets, 1)
+			status := "testing"
+			if n >= 2 {
+				status = "succeeded"
+			}
+			_, _ = fmt.Fprintf(w, `{"id":"r-1","status":%q,"task_counts":{"total":1,"succeeded":1}}`, status)
+		case "/api/v1/runs/r-1/events":
+			if got := r.Header.Get("Accept"); got != "text/event-stream" {
+				t.Errorf("Accept = %q", got)
+			}
+			writeSSE(t, w,
+				"id: 1\nevent: run.state_changed\ndata: {\"seq\":1,\"type\":\"run.state_changed\",\"to\":\"succeeded\"}\n\n",
+				"id: 2\nevent: run.finished\ndata: {\"seq\":2,\"type\":\"run.finished\",\"to\":\"succeeded\"}\n\n",
+			)
+		default:
+			t.Errorf("意外路径: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c, err := NewClient(srv.URL, "dev", 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Wait(context.Background(), c, "r-1", WaitOptions{
+		Timeout: 2 * time.Second, Interval: 20 * time.Millisecond, Follow: true,
+	})
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if res.Mode != "sse" || res.Outcome != "success" || res.Status != "succeeded" {
+		t.Errorf("Wait 结果 = %+v", res)
+	}
+	if res.FallbackReason != "" {
+		t.Errorf("不应降级: %s", res.FallbackReason)
+	}
+}
+
+func TestWaitFollowFallsBackToPoll(t *testing.T) {
+	var gets int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/runs/r-1/events":
+			http.Error(w, `{"code":"NOT_FOUND","message":"no sse"}`, http.StatusNotFound)
+		case "/api/v1/runs/r-1":
+			n := atomic.AddInt32(&gets, 1)
+			status := "testing"
+			if n >= 2 {
+				status = "succeeded"
+			}
+			_, _ = fmt.Fprintf(w, `{"id":"r-1","status":%q}`, status)
+		default:
+			t.Errorf("意外路径: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewClient(srv.URL, "dev", 5*time.Second)
+
+	var fallback string
+	res, err := Wait(context.Background(), c, "r-1", WaitOptions{
+		Timeout: 2 * time.Second, Interval: 20 * time.Millisecond, Follow: true,
+		OnFallback: func(reason string) { fallback = reason },
+	})
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if res.Mode != "poll" || res.Outcome != "success" || res.FallbackReason == "" || fallback == "" {
+		t.Errorf("降级结果 = %+v，fallback=%q", res, fallback)
+	}
+}
+
+func TestWaitFollowReconnectsWithLastEventID(t *testing.T) {
+	var eventsCalls int32
+	var gets int32
+	var lastID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/runs/r-1":
+			n := atomic.AddInt32(&gets, 1)
+			status := "testing"
+			if n >= 3 {
+				status = "succeeded"
+			}
+			_, _ = fmt.Fprintf(w, `{"id":"r-1","status":%q}`, status)
+		case "/api/v1/runs/r-1/events":
+			n := atomic.AddInt32(&eventsCalls, 1)
+			if n == 1 {
+				// 发一条事件就断线（不写 run.finished）。
+				writeSSE(t, w, "id: 5\nevent: task.state_changed\ndata: {\"seq\":5,\"type\":\"task.state_changed\",\"to\":\"running\"}\n\n")
+				return
+			}
+			lastID = r.Header.Get("Last-Event-ID")
+			writeSSE(t, w, "id: 6\nevent: run.finished\ndata: {\"seq\":6,\"type\":\"run.finished\",\"to\":\"succeeded\"}\n\n")
+		default:
+			t.Errorf("意外路径: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewClient(srv.URL, "dev", 5*time.Second)
+
+	res, err := Wait(context.Background(), c, "r-1", WaitOptions{
+		Timeout: 3 * time.Second, Interval: 20 * time.Millisecond, Follow: true,
+		ReconnectBackoff: 10 * time.Millisecond, MaxReconnects: 3,
+	})
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if res.Mode != "sse" || res.Outcome != "success" {
+		t.Errorf("重连结果 = %+v", res)
+	}
+	if lastID != "5" {
+		t.Errorf("重连的 Last-Event-ID = %q，期望 5", lastID)
+	}
+	if atomic.LoadInt32(&eventsCalls) != 2 {
+		t.Errorf("SSE 连接次数 = %d，期望 2", eventsCalls)
+	}
+}
+
+func TestWaitFollowSuppressesReplayNoise(t *testing.T) {
+	var gets int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/runs/r-1":
+			n := atomic.AddInt32(&gets, 1)
+			status := "testing"
+			if n >= 2 {
+				status = "succeeded"
+			}
+			_, _ = fmt.Fprintf(w, `{"id":"r-1","status":%q}`, status)
+		case "/api/v1/runs/r-1/events":
+			// 从 seq=1 回放：queued→testing 是历史，cleanup→succeeded 是新的。
+			writeSSE(t, w,
+				"id: 1\nevent: run.state_changed\ndata: {\"seq\":1,\"to\":\"queued\"}\n\n",
+				"id: 2\nevent: run.state_changed\ndata: {\"seq\":2,\"to\":\"testing\"}\n\n",
+				"id: 3\nevent: run.state_changed\ndata: {\"seq\":3,\"to\":\"cleanup\"}\n\n",
+				"id: 4\nevent: run.finished\ndata: {\"seq\":4,\"to\":\"succeeded\"}\n\n",
+			)
+		default:
+			t.Errorf("意外路径: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewClient(srv.URL, "dev", 5*time.Second)
+
+	var statuses []string
+	res, err := Wait(context.Background(), c, "r-1", WaitOptions{
+		Timeout: 2 * time.Second, Interval: 20 * time.Millisecond, Follow: true,
+		OnStatus: func(status string) { statuses = append(statuses, status) },
+	})
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if res.Mode != "sse" || res.Outcome != "success" {
+		t.Errorf("Wait 结果 = %+v", res)
+	}
+	want := []string{"testing", "cleanup", "succeeded"}
+	if strings.Join(statuses, ",") != strings.Join(want, ",") {
+		t.Errorf("OnStatus 序列 = %v，期望 %v（回放的历史 queued 应被抑制）", statuses, want)
+	}
+}
+
+func TestToolsCallWaitRunFollow(t *testing.T) {
+	var gets int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/runs/r-1/events":
+			writeSSE(t, w, "id: 3\nevent: run.finished\ndata: {\"seq\":3,\"type\":\"run.finished\",\"to\":\"failed\"}\n\n")
+		case "/api/v1/runs/r-1":
+			if atomic.AddInt32(&gets, 1) == 1 {
+				_, _ = io.WriteString(w, `{"id":"r-1","status":"testing"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"id":"r-1","status":"failed","error":{"code":"PRECHECK_FAILED","message":"precheck failed","retryable":false}}`)
+		default:
+			t.Errorf("意外路径: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c, _ := NewClient(srv.URL, "dev", 5*time.Second)
+	h := startHarness(t, c, srv)
+
+	resp := h.call(t, 25, "tools/call", map[string]any{
+		"name": "testplane_wait_run",
+		"arguments": map[string]any{
+			"run_id": "r-1", "timeout_seconds": 5, "follow": true,
+		},
+	})
+	res := decodeToolResult(t, resp)
+	if res.IsError {
+		t.Fatalf("wait(follow) 不应 isError: %s", res.Content[0].Text)
+	}
+	body := decodeToolJSON(t, res.Content[0].Text)
+	if body["wait_mode"] != "sse" || body["outcome"] != "failed" {
+		t.Errorf("wait(follow) 返回 %+v", body)
+	}
+	if !strings.Contains(fmt.Sprint(body["next_action"]), "precheck") {
+		t.Errorf("失败终态应带 next_action，实际 %+v", body["next_action"])
 	}
 }
 

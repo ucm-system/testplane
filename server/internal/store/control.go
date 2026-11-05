@@ -613,7 +613,7 @@ func (s *Store) BeginTestingService(ctx context.Context, runID string) (int, err
 			Command: "begin_testing", Actor: "system:orchestrator",
 			Payload: map[string]any{"endpoint": json.RawMessage(run.Endpoint),
 				"endpoint_key": endpointKeyOf(run.Endpoint)},
-			At: time.Now().UTC(),
+			At: s.now(),
 		}); err != nil && !errors.Is(err, domain.ErrConflict) {
 			return err
 		}
@@ -693,7 +693,7 @@ func (s *Store) RequestCancelRunTx(ctx context.Context, runID, actor string) ([]
 			Entity: domain.EntityRun, ID: runID,
 			From: domain.RunStatuses(domain.RunNonTerminal()...),
 			To:   domain.RunCancelling.Status(),
-			Command: "cancel", Actor: actor, At: time.Now().UTC(),
+			Command: "cancel", Actor: actor, At: s.now(),
 		}); err != nil && !errors.Is(err, domain.ErrConflict) {
 			return err
 		}

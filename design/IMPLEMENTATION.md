@@ -453,9 +453,26 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 9 | 架构表实为 **11 张**（文档曾按 12 表述） | 以 `03-data-view.md §3.2` 实际 DDL 为准 |
 | 10 | Pre-Check 判别曾有 4 处实现，其中门控（`orchestrator/controller.go`）、放行 SQL（`store/control.go`）、终态判定（`orchestrator/status.go`）误用 `TesterRole` / 单看 `seq=0` | 唯一判据 = `runs.resolved->'precheck'->>'injected' = true` **且** `tasks.seq = 0`（`03-data-view.md §4.2`）；`endpoint-probe` 本身 `role=pre_check`，用户可在 `precheck:"off"` 下把它当普通测试提交，故角色不可作判据。评审 #14 已修：`store.PrecheckTaskIDs`/`PrecheckFlags` + `orchestrator.TaskView.IsPrecheck` |
 | 11 | Job/Pod 正常结束后**没有回收路径**（只有取消才删 Job），也没有孤儿 GC goroutine；评审时集群已积压 53 个已终态 Job | 已按 `execution.md §6` 补齐（PR #14/#15）：`ports.Executor` 增 `Delete(ctx, h, DeletePolicy)`（`Background`/`Foreground`，404 幂等），Attempt 终态**落库之后**异步 `Delete(Background)`；新增 GC 循环（`Config.GCInterval` 默认 10min，`TESTPLANE_JOB_GC_ENABLED` 默认 true）回收"Job 已终态且 Attempt 已终态/无对应 Attempt"的 Job 与孤儿 Pod |
+| 15 | 业务时间曾直调 `time.Now()`（05 §6.5 禁止）：超窗判定、退避、`accepted_at/queued_at/ready_at/last_polled_at/finished_at/created_at` 等写库时间戳 | 引入 `domain.Clock`（`internal/domain/clock.go`，默认 `SystemClock`）；`store.Store.SetClock` 与 `orchestrator.Options.Clock` 注入，编排/存储两层的**业务时间**全部改走注入时钟；退避基准从 SQL `now()` 改为传入的事务时间 `at`（`effectScheduleRetry`），部署窗口判定从 `time.Since(...)` 改为 `now.Sub(...)`。回归：`TestDeployWindowUsesInjectedClock`、`TestWatchdogUsesInjectedClock`、`TestRetryBackoffUsesInjectedClock`。**保留 `time.Now()` 的位置与理由**见 15.3.1 |
+| 16 | 请求链路曾用 `context.Background()`（丢掉 trace 与取消） | `cmd/testplaned/wire.go` 的 `taskView` 改为接收 `ctx`，`TesterRegistry.Resolve` 用请求上下文（`GetTask`/`ListTasks`/`ListActiveTasks` 一路透传 `r.Context()`）。**保留 Background 的位置**：进程信号（`main.go` 启动/关闭/migrate）、后台 goroutine（`store.fireRunFinished` 的 2 分钟超时、`notifier` 的 `notifyEmitDeadline`、`controller.cancelJobAsync` 用 `context.WithoutCancel`）——这些没有上游请求，必须显式给超时或 `WithoutCancel` |
+| 17 | `orchestrator/memory.go`（894 行内存 Repos）混在产线代码里，`go build` 会把它编进二进制 | 改名为 `memory_test.go`（同包 `_test` 文件，`go build` 不再包含；单测仍可直接用 `NewMemoryRepos()`）。`go build ./internal/orchestrator/` 与 `go test ./internal/orchestrator/` 均通过 |
+
 | 12 | Deploy 阶段从 mock 切到**真实 Genet 客户端**（internal/genet，Helm release 语义：无部署单、无位次、oWait=true、404 宽限、取消先落意图后 DELETE） | 行为表见 impl/execution.md §9（观测 → Deploy 子状态九行映射）；kind E2E 默认仍 mock（TESTPLANE_DEPLOY_PROVIDER=mock），切真实 Genet 需 TESTPLANE_GENET_BASE_URL + TESTPLANE_GENET_API_KEY（+ 可选 _CA_FILE/_INSECURE） |
 | 13 | 卸载失败/校验未过时写 `cleanup.failed` 事件（`state_events.type`）；`Repos` 为此加了一个**最小专用**方法 `AppendRunEvent(ctx, runID, type, payload)`，未开放通用事件 API | payload = `{release_name, cleanup_errors[], attempt, verified_at}`；`uninstall.state` 的四个取值已收进 `domain` 常量。**契约侧待回写**：`03-data-view.md §4.6` 的 type 枚举补 `cleanup.failed`、`07-api.md §5` 的 SSE 事件类型表补一行（Lead 负责） |
 | 14 | `testers/endpoint-probe/tester.yaml` 的 `placeholder` 是多行说明而非一行命令，`parameters.url.description` 里还写了"退出码 2"（`ARCHITECTURE §5.4` 要求一行示例、§5.8 只有 0/非 0） | **不改 Tester 内容**：内容一变就要升版本（K-3 版本钉死，注册表实测会拒绝启动——本轮试改后已回滚）。平台侧取 `placeholder` 首行作占位、退出码一律按 0 / 非 0 归类；待 `/testers/{name}/versions/{version}` 与版本升级流程就绪后，由 Tester 维护者在下一个版本里修（G-15） |
+
+#### 15.3.1 保留 `time.Now()` 的位置与理由（05 §6.5 的边界）
+
+`time.Now()` 只允许出现在两类地方，其余业务时间一律走 `domain.Clock`：
+
+| 位置 | 类型 | 为什么保留 |
+|---|---|---|
+| `internal/domain/clock.go` 的 `realClock.Now()` | 时钟实现本身 | 唯一允许直调 `time.Now()` 的地方（且返回 UTC） |
+| `internal/store/store.go` 的 ID 兜底（`crypto/rand` 失败时用纳秒） | 唯一 ID 生成 | 与业务时间无关；只是为了"绝不同 ID"，替换成可拨时钟会导致 ID 冲突 |
+| `time.NewTicker` / `time.AfterFunc` / `context.WithTimeout` / `time.Sleep` 的参数 | 运行时机制 | 它们是调度器/网络栈的等待语义点，可拨时钟无法真正快进 goroutine 的等待；用 `Clock` 替换只会制造"看起来可测、实际仍阻塞"的假象 |
+| `cmd/testplaned/main.go` 的 `signal.NotifyContext`、shutdown `WithTimeout`、`migrate` 超时 | 进程生命周期 | 启动/关闭路径没有业务事务，也没有请求上下文 |
+
+判定口径：**会写进库或参与超窗/退避/有效期判定**的时间 → 必须走 `Clock`；**驱动 goroutine 的等待** → 保留 `time.Now()`。
 
 ### 15.4 P1 优先项（按投入产出排序）
 

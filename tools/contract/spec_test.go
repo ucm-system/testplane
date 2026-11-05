@@ -27,8 +27,10 @@ func loadRealSpec(t *testing.T) *Spec {
 
 func TestRealSpecStaticChecksAllPass(t *testing.T) {
 	spec := loadRealSpec(t)
-	if got := len(spec.Operations); got != 25 {
-		t.Fatalf("operation 数期望 25，实际 %d", got)
+	// 期望值从 openapi.paths 推导；operation 总数只是参考值，别写死。
+	want := countOpenAPIOperations(spec)
+	if got := len(spec.Operations); got != want {
+		t.Fatalf("operation 数期望 %d（从 openapi paths 推导），实际 %d", want, got)
 	}
 	if len(spec.ErrorRequired) == 0 {
 		t.Fatal("Error.required 为空")

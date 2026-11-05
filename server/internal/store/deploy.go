@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -43,7 +42,7 @@ func (s *Store) RecordDeployState(ctx context.Context, runID string, snap domain
 			INSERT INTO state_events (run_id, seq, type, reason, payload, actor, created_at)
 			VALUES ($1, $2, $3, $4, $5, 'system:orchestrator', $6)`,
 			runID, seq, domain.EventDeployStateChanged, nullableText(snap.QueueReason), raw,
-			time.Now().UTC()); err != nil {
+			s.now()); err != nil {
 			return fmt.Errorf("store: record deploy event %s: %w", runID, err)
 		}
 		return nil
@@ -59,7 +58,7 @@ func (s *Store) AbortOtherTasks(ctx context.Context, runID, failedTaskID, reason
 			return err
 		}
 		var err error
-		skipped, activeAttempts, err = s.abortOthers(ctx, tx, runID, failedTaskID, reason, time.Now().UTC())
+		skipped, activeAttempts, err = s.abortOthers(ctx, tx, runID, failedTaskID, reason, s.now())
 		return err
 	})
 	return skipped, activeAttempts, err
@@ -80,7 +79,7 @@ func (s *Store) MarkAttemptCanceled(ctx context.Context, attemptID string) error
 			From:    []domain.Status{domain.AttemptPreparing.Status(), domain.AttemptRunning.Status()},
 			To:      domain.AttemptCanceled.Status(),
 			Command: "cancel", Reason: domain.SkipCanceled, Actor: "system:executor",
-			At: time.Now().UTC(),
+			At: s.now(),
 		}); err != nil && !errors.Is(err, domain.ErrConflict) {
 			return err
 		}
@@ -89,7 +88,7 @@ func (s *Store) MarkAttemptCanceled(ctx context.Context, attemptID string) error
 			From:    []domain.Status{domain.TaskPreparing.Status(), domain.TaskRunning.Status()},
 			To:      domain.TaskCanceled.Status(),
 			Command: "cancel", Reason: domain.SkipCanceled, Actor: "system:executor",
-			At: time.Now().UTC(),
+			At: s.now(),
 		}); err != nil && !errors.Is(err, domain.ErrConflict) {
 			return err
 		}
@@ -152,7 +151,7 @@ func (s *Store) AppendRunEvent(ctx context.Context, runID, typ string, payload m
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO state_events (run_id, seq, type, reason, payload, actor, created_at)
 			VALUES ($1, $2, $3, NULL, $4, 'system:orchestrator', $5)`,
-			runID, seq, typ, raw, time.Now().UTC()); err != nil {
+			runID, seq, typ, raw, s.now()); err != nil {
 			return fmt.Errorf("store: append run event %s: %w", runID, err)
 		}
 		return nil

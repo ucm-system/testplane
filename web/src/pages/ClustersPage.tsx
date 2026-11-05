@@ -161,15 +161,26 @@ export function ClustersPage() {
           tone="warn"
           title="Volcano 队列"
           sub={volcano?.available ? '只读快照（后端缓存 15s）' : '调度器不可达时只降级本块'}
+          actions={volcano?.stale ? <Badge tone="warn">曾采到过快照</Badge> : null}
         />
         {!volcano ? null : !volcano.available ? (
-          <CardBody>
-            <p className="text-2xs text-fg-3">
-              Volcano 不可达{volcano.detail ? `（${volcano.detail}）` : ''} —— 只影响这一块，平台槽位与排队原因照常。
+          // 契约：available=false 时 queues 恒为 []，平台不回放历史数字 ——
+          // 所以这里**不能**渲染成「0 排队 / 无排队」，只给降级说明。
+          <CardBody className="flex flex-col gap-2">
+            <p className="text-xs text-fg-2">
+              Volcano 快照不可用{volcano.detail ? <span className="ml-1 font-mono text-2xs text-fg-3">{volcano.detail}</span> : null}
             </p>
+            <p className="text-2xs leading-relaxed text-fg-3">
+              这一块降级不影响平台槽位与排队原因（上面两块照常）。平台不展示历史数字，等下一次采样成功再看队列水位。
+            </p>
+            {volcano.stale ? (
+              <p className="text-2xs text-warn-text">
+                上一次刷新成功、本次失败；即使如此也不回放旧数值，只标这个徽标。
+              </p>
+            ) : null}
           </CardBody>
         ) : (volcano.queues ?? []).length === 0 ? (
-          <EmptyState title="没有队列" description="集群里还没有登记 Volcano Queue。" />
+          <EmptyState title="采样成功，但没有登记任何队列" description="集群里还没有登记 Volcano Queue。" />
         ) : (
           <TableWrap>
             <Table>
@@ -191,8 +202,15 @@ export function ClustersPage() {
                     </TD>
                     <TD className="tabular-nums">{item.pending_jobs ?? 0}</TD>
                     <TD className="whitespace-nowrap tabular-nums">{formatDuration(item.longest_wait_seconds)}</TD>
-                    <TD>
-                      {item.reason ? <WaitingReasonTag reason={item.reason} /> : <span className="text-fg-3">—</span>}
+                    <TD className="max-w-[26rem]">
+                      {/* 契约改了：reason 是 PodGroup conditions[-1].message 原文，不是枚举 —— 原样渲染，不翻译 */}
+                      {item.reason ? (
+                        <span className="block break-all font-mono text-2xs leading-relaxed text-fg-2" title={item.reason}>
+                          {item.reason}
+                        </span>
+                      ) : (
+                        <span className="text-fg-3">—</span>
+                      )}
                     </TD>
                   </TR>
                 ))}

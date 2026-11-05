@@ -41,7 +41,8 @@ func (s *Store) Apply(ctx context.Context, tx pgx.Tx, tr domain.Transition) (dom
 	}
 	at := tr.At
 	if at.IsZero() {
-		at = time.Now().UTC()
+		// 业务时间走注入时钟（05 §6.5）；显式传入的 At 优先。
+		at = s.now()
 	}
 
 	// 1. 转移表校验：From 集合里每个前置状态都必须有到 To 的合法边。

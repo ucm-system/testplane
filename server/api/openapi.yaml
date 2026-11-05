@@ -1312,8 +1312,10 @@ paths:
       operationId: downloadRunFile
       summary: 产物下载（支持 HTTP Range）
       description: |
-        07 §5.1：`?path=` 下载 `<storage-root>/<run_id>/` 下的产物。`path` 必须是相对路径：
-        绝对路径、Windows 盘符、`..`、空段一律 400（路径只由 Run 目录 + 校验后的相对路径拼出）。
+        07 §5.1：`?path=` 下载 `<storage-root>/<run_id>/` 下的产物。`path` 接受两种形态：
+        run 相对（`tasks/<task>/attempts/1/result.json`）或以 `<run_id>/` 开头的
+        storage-root 相对（即 `/runs/{id}/artifacts` 返回的 `path`），后者会被剥掉前缀。
+        绝对路径、Windows 盘符、`..`、空段一律 400（**剥前缀不豁免校验**）。
         支持 `Range`（206，越界 416）；单文件超过 1 GiB 且未带 `Range` 时返回 413，请分段下载。
       tags: [files]
       parameters:
@@ -1326,7 +1328,11 @@ paths:
         - name: path
           in: query
           required: true
-          description: 相对 `<storage-root>/<run_id>/` 的文件路径（如 `tasks/t-0002/attempts/1/logs/stdout.log`）
+          description: |
+            `path` 是 **run 相对路径**（如 `tasks/<task>/attempts/1/result.json`）；
+            也接受带 `<run_id>/` 前缀的形态（与 `/runs/{id}/artifacts` 返回的 `path` 一致），
+            服务端会先剥掉该前缀。**两种形态都仍然做穿越校验**：绝对路径、Windows 盘符、
+            `..`、空段一律 400。
           schema:
             type: string
         - name: Range
@@ -1491,6 +1497,15 @@ paths:
                 type: string
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: |
+            **仅 `TESTPLANE_AUTH_MODE=dev`**：dev 模式没有登录流程，`/auth/*` 一律 404
+            （前端据此判断"这是 dev 部署，不要跳登录"，见 `web/src/api/auth.ts`）。
+            `oidc` 模式只走 302/401 两条。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /auth/logout:
     post:
@@ -3722,6 +3737,13 @@ components:
             `scheduler_unavailable`（scheduler 不可达/无 PodGroup 状态）、`disabled`（配置关闭）。
             **红线：`available=false` 不等于「0 排队」**，UI 不得把它显示成"无排队"。
           enum: [crd_missing, rbac_forbidden, scheduler_unavailable, disabled]
+        stale:
+          type: boolean
+          default: false
+          description: |
+            上一次刷新成功、**本次刷新失败**时置 `true`（没有时间阈值，与数据多旧无关），本次成功即清空。
+            置位时仍 `available=false` + `queues=[]`——`stale` 只表达"这个块曾经采到过"，
+            **绝不回放历史数字**（D-49）。
         queues:
           type: array
           description: 已登记的 Volcano Queue 概要；不可达时为 `[]`
@@ -3758,8 +3780,13 @@ components:
           minimum: 0
           description: '`now - min(podgroup.creationTimestamp)`，即队列里最久的等待'
         reason:
-          $ref: '#/components/schemas/WaitingReason'
-          description: 该队列造成排队的主要等待原因（K8s/Volcano 侧的三个取值之一）
+          type: [string, 'null']
+          description: |
+            该队列里**等得最久**那条 PodGroup 的 `status.conditions[-1].message`（没有则取 `.reason`），
+            **原文透传、平台不翻译**（D-49）。它常是 K8s 调度器的话术（例如
+            `0/1 nodes are available: 1 insufficient nvidia.com/gpu`），因此**不是**枚举。
+            需要结构化分类看 `waiting.by_reason`（那里六个键才是枚举）。
+          example: '0/1 nodes are available: 1 insufficient nvidia.com/gpu'
 
     ExecutionProfile:
       type: object
@@ -3835,6 +3862,10 @@ components:
       properties:
         path:
           type: string
+          description: |
+            **storage-root 相对**路径，包含 `<run_id>/` 前缀
+            （如 `r-20261105-0001/tasks/t-0002/attempts/1/result.json`）。
+            可直接传给 `/runs/{run_id}/files?path=`（服务端会剥掉前缀再做穿越校验）。
         kind:
           type: string
           enum: [result, raw, log, report, other]

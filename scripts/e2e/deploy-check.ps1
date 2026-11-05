@@ -5,12 +5,11 @@
 #     queued -> accepted/deploying -> ready；
 #   - endpoint.source = genet；precheck succeeded；Run 终态 succeeded；
 #   - 终态后 helm release（namespace testplane-mock）为空。
-# 失败路径（-FailureOnly，需先把 fake Genet 的 key 改错）：
-#   - Run failed，error.code=DEPLOY_FAILED，retryable=false。
-# 超时路径（-TimeoutOnly，需 infra 临时把 TESTPLANE_DEPLOY_TIMEOUT=30s 且
-# fake-genet 用 -sim-ready-after 2m）：
+# 失败路径（-FailureOnly，fake-genet 用 -sim-error 500）：
+#   - Run failed，error.code=DEPLOY_FAILED，retryable=false，state_events 有 cleanup.failed。
+# Blocked 路径（-BlockedOnly，fake-genet 用 -sim-blocked）：
 #   - Run service_unavailable，DEPLOY_BLOCKED retryable=true，
-#     deploy.failure.detail.reason=timeout，uninstall.state=verified。
+#     deploy.failure.detail.reason=blocked，uninstall.state=verified。
 #
 # 说明：本机没有 helm CLI 时，用 Kubernetes 里 Helm 的 release Secret
 # （label owner=helm）等价判断“helm list 为空”，detail 会注明用了 fallback。
@@ -22,8 +21,9 @@ param(
     [string]$OutDir = '',
     [int]$TerminalTimeoutSeconds = 300,
     [int]$HelmWaitSeconds = 60,
+    [int]$CleanupWaitSeconds = 90,
     [switch]$FailureOnly,
-    [switch]$TimeoutOnly,
+    [switch]$BlockedOnly,
     [switch]$DryRun
 )
 
@@ -68,8 +68,8 @@ if ($DryRun) {
     Write-Host "deploy-check dry-run（不连后端、不写集群）" -ForegroundColor Cyan
     Write-Host "  base_url=$BaseUrl helm_ns=$HelmNamespace"
     Write-Host "  正常：deploy queued→accepted/deploying→ready；endpoint.source=genet；Run succeeded；helm list 空"
-    Write-Host "  失败（-FailureOnly，需先改错 Genet key）：Run failed / DEPLOY_FAILED / retryable=false"
-    Write-Host "  超时（-TimeoutOnly，需 infra 配 DEPLOY_TIMEOUT=30s + fake-genet -sim-ready-after 2m）：Run service_unavailable / DEPLOY_BLOCKED / retryable=true / detail.reason=timeout / uninstall=verified"
+    Write-Host "  失败（-FailureOnly，fake-genet -sim-error 500）：Run failed / DEPLOY_FAILED / retryable=false / cleanup.failed"
+    Write-Host "  blocked（-BlockedOnly，fake-genet -sim-blocked）：Run service_unavailable / DEPLOY_BLOCKED / retryable=true / detail.reason=blocked / uninstall=verified"
     Write-Host (New-Manifest -Stamp (Get-Date -Format 'yyyyMMdd-HHmmss'))
     Write-Host "dry-run OK" -ForegroundColor Green
     exit 0
@@ -81,7 +81,7 @@ function Add-Check([string]$Name, [bool]$Ok, [string]$Detail) {
     Write-Host ("  [{0}] {1} —— {2}" -f $(if ($Ok) { 'OK' } else { 'FAIL' }), $Name, $Detail) -ForegroundColor $(if ($Ok) { 'Green' } else { 'Red' })
 }
 
-Write-Host ("deploy 形态验收：{0}（{1}）" -f $BaseUrl, $(if ($FailureOnly) { '失败分支' } elseif ($TimeoutOnly) { '超时分支' } else { '正常分支' })) -ForegroundColor Cyan
+Write-Host ("deploy 形态验收：{0}（{1}）" -f $BaseUrl, $(if ($FailureOnly) { '失败分支' } elseif ($BlockedOnly) { 'blocked 分支' } else { '正常分支' })) -ForegroundColor Cyan
 $null = Invoke-WebRequest -UseBasicParsing "$BaseUrl/healthz" -TimeoutSec 5
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -112,6 +112,16 @@ if ($FailureOnly) {
     Add-Check 'run.failed' ($run.status -eq 'failed') ("status=" + $run.status + "，耗时 " + $elapsed + "s")
     Add-Check 'run.error_deploy_failed' ($run.error.code -eq 'DEPLOY_FAILED') ("error.code=" + $run.error.code)
     Add-Check 'run.error_not_retryable' ($run.error.retryable -eq $false) ("retryable=" + $run.error.retryable)
+    $events = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/events/history?limit=500").items
+    $cleanupFailed = @($events | Where-Object { $_.type -eq 'cleanup.failed' }).Count
+    # 部署失败没有 Attempt 终态钩子；卸载收口由对账 tick 兜底（默认 60s），等它出现。
+    $cSw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($cleanupFailed -eq 0 -and $cSw.Elapsed.TotalSeconds -lt $CleanupWaitSeconds) {
+        Start-Sleep -Seconds 2
+        $events = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/events/history?limit=500").items
+        $cleanupFailed = @($events | Where-Object { $_.type -eq 'cleanup.failed' }).Count
+    }
+    Add-Check 'events.cleanup_failed' ($cleanupFailed -gt 0) ("cleanup.failed=" + $cleanupFailed + "，等待 " + [math]::Round($cSw.Elapsed.TotalSeconds, 1) + "s")
     $jsonPath = Join-Path $OutDir ("result-" + $stamp + "-failure.json")
     $ok = -not ($checks | Where-Object { -not $_.ok })
     [pscustomobject]@{ ok = $ok; mode = 'failure'; run_id = $runId; final_status = $run.status; error = $run.error; checks = $checks; status_trace = $trace } |
@@ -121,8 +131,8 @@ if ($FailureOnly) {
     exit 0
 }
 
-if ($TimeoutOnly) {
-    # 超窗判定后 uninstall 是异步收口，等 deploy.uninstall.state=verified。
+if ($BlockedOnly) {
+    # blocked 判定后 uninstall 是异步收口，等 deploy.uninstall.state=verified。
     $uSw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($uSw.Elapsed.TotalSeconds -lt $HelmWaitSeconds) {
         $u = $run.deploy.uninstall
@@ -137,7 +147,7 @@ if ($TimeoutOnly) {
     Add-Check 'run.error_retryable' ($run.error.retryable -eq $true) ("retryable=" + $run.error.retryable)
     $deployFailure = $run.deploy.failure
     $reason = if ($deployFailure -and $deployFailure.detail) { [string]$deployFailure.detail.reason } else { '' }
-    Add-Check 'deploy.failure_detail_reason_timeout' ($reason -eq 'timeout') ("deploy.failure.detail.reason=" + $reason)
+    Add-Check 'deploy.failure_detail_reason_blocked' ($reason -eq 'blocked') ("deploy.failure.detail.reason=" + $reason)
     $uninstall = $run.deploy.uninstall
     Add-Check 'deploy.uninstall_verified' ($null -ne $uninstall -and $uninstall.state -eq 'verified') $(if ($uninstall) { "uninstall.state=" + $uninstall.state } else { '没有 uninstall' })
 
@@ -151,10 +161,10 @@ if ($TimeoutOnly) {
     }
 
     $ok = -not ($checks | Where-Object { -not $_.ok })
-    $jsonPath = Join-Path $OutDir ("result-" + $stamp + "-timeout.json")
+    $jsonPath = Join-Path $OutDir ("result-" + $stamp + "-blocked.json")
     [pscustomobject]@{
         ok = $ok
-        mode = 'timeout'
+        mode = 'blocked'
         run_id = $runId
         final_status = $run.status
         error = $run.error

@@ -11,13 +11,14 @@
 | `tools/mock-llm`（OpenAI 兼容假服务 + 故障注入） | ✅ 完成，18 个单测通过；真实 `endpoint-probe` 五种场景验证通过 |
 | `tools/e2e`（submit / wait / assert CLI） | ✅ 完成，22 个 fake 控制面测试通过；对真控制面 **31/31** 通过 |
 | 无后端时干净报错 | ✅ 退出码 3，提示 `make dev` 与 8080，不崩 |
-| 契约测试（`tools/contract`） | ✅ 规格 15/15 + 实现 32/32 = **47/47**（设计端点差集 + 白名单） |
+| 契约测试（`tools/contract`） | ✅ 规格 15/15 + 实现 42/42 = **57/57**（设计 50 / openapi 34 / 白名单 16） |
 | 前端冒烟（`pnpm build`、`GET /`） | ✅ build 通过、`GET /` 200 text/html |
 | 失败注入（经平台，`service_unavailable` 路径） | ✅ 5/5（success/500/401/200包错误/slow-ready） |
 | 一成一败混合结果（#15） | ✅ `mixed-result-check.ps1` 11/11 |
 | 重启恢复演练（#9） | ✅ `restart-drill.ps1` 13/13（新镜像；Run `r-Q0VT`） |
-| Web UI Playwright 冒烟（#16） | ✅ `web/tests/ui-smoke.spec.ts` 1 passed |
-| deploy 形态（PR #18） | 🟡 `deploy-check.ps1` 已就绪，等卸载收口后跑 |
+| Web UI Playwright 冒烟（#16） | ✅ **3 passed**（ui-smoke + viewer/operator 取消） |
+| deploy 形态（PR #18） | ✅ 正常 9/9；blocked 7/7；500 4/4（超窗仅单测） |
+| 产物持久化（#14） | ✅ `artifact-persistence-check.ps1` **28/28**（两种 path 形态 + Pod/Job 消失 + 控制面重启后 sha256 一致） |
 | 验收矩阵 17 项结论 | ✅ 见 [`acceptance-matrix.md`](acceptance-matrix.md) |
 
 ## 目录
@@ -28,6 +29,7 @@ tools/e2e/               # e2e CLI（独立 module）+ fake 控制面单测
 scripts/e2e/
 ├── README.md            # 本文件
 ├── run-local.ps1        # 一键：起 mock-llm + 跑 e2e
+├── artifact-persistence-check.ps1  # 产物持久化 #14：Pod/Job 消失后 sha256 不变
 ├── probe-check.ps1      # 用真实 endpoint-probe 反验 mock-llm（五种场景）
 └── kind/mock-llm.yaml   # Kind 里的 mock-llm Deployment + Service
 ```
@@ -81,6 +83,10 @@ go run ./tools/mock-llm -error-in-200        # HTTP 200 但正文是 error 对�
 pwsh scripts/e2e/run-local.ps1
 pwsh scripts/e2e/run-local.ps1 -Expect succeeded -Profile k8s-npu
 ```
+
+不传 `-MockURL` 时自动探测 kind 里 `mock-llm` Service（`testplane-mock` / `default` /
+`testplane` / `testplane-svc`），探测不到才回退 `http://127.0.0.1:18080/v1`；
+避免“kind 场景必须带参数才对”的假失败。
 
 控制面没起时它**明确报错并退出 3**，不会留下 mock 进程：
 
@@ -189,15 +195,31 @@ Spec 覆盖 `/runs` → 第一条 → 详情 Task 表 → `/submit` dry-run 报�
 ```powershell
 pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107 -DryRun
 pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107
-pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107 -FailureOnly  # 需先把 fake Genet key 改错
+pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107 -BlockedOnly  # fake-genet -sim-blocked
+pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107 -FailureOnly  # fake-genet -sim-error 500
 ```
 
 - 正常：`deploy:{provider:"genet"}` → `deploy.state` 依次 `queued → accepted/deploying → ready`，
   `endpoint.source=genet`，precheck `succeeded`，Run `succeeded`；终态后
   `helm list -n testplane-mock` 为空（本机无 helm CLI 时用 Helm release Secret 等价判断）。
-- 失败：`-FailureOnly` 提交同样 manifest，断言 Run `failed`、`error.code=DEPLOY_FAILED`、
-  `retryable=false`；脚本不主动改服务端 key，避免影响共享控制面。
-- 卸载收口未就绪前，正常分支会在 `helm.empty` 处 FAIL，属预期。
+- blocked：`-BlockedOnly` 断言 Run `service_unavailable`、`DEPLOY_BLOCKED` retryable=true、
+  `deploy.failure.detail.reason=blocked`、`uninstall.state=verified`。
+- 500：`-FailureOnly` 断言 Run `failed`、`DEPLOY_FAILED` retryable=false，
+  并最多等 90s 让对账写出 `cleanup.failed` state event。
+- **超窗 blocked 不做端到端**：配置下限 1h（`03 §3.2` CHECK），端到端构造不现实；
+  由 genet 72h 单测 + 编排层 blocked 单测覆盖。
+
+## 3.5 产物持久化（#14）
+
+```powershell
+pwsh scripts/e2e/artifact-persistence-check.ps1
+```
+
+2-test service Run 完成后记录 `/artifacts` 条目/大小/result 数与
+`tasks/<task>/attempts/1/result.json` sha256；删除 Job/Pod 后要求条目数、大小、
+result 数、路径集合、sha256 **完全一致**，再 `rollout restart testplaned` 复核；
+同时验 attempt artifacts、`Range: bytes=0-9` → 206+10B、不存在 path 404、
+`../../etc/passwd` 400；两种 `/files` path 形态（artifacts 原始 `r-xxx/...` 与 run 相对）都要 200 且 sha 一致；带前缀 `r-xxx/../../etc/passwd` 也要 400。实跑 `r-20261105-YZCW` **28/28 PASS**。
 
 默认**严格**：report 必现（终态后 ≤2s，30s 等待足够）、`/logs` 必非空；只有显式
 `-AllowKnownGaps` 才把当前已知的 report/logs 缺口从失败项里剔除，修复后不要带这个开关。

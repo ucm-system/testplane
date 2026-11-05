@@ -102,6 +102,7 @@ export function UserMenu() {
   }
 
   const oidc = auth.mode === 'oidc'
+  const groups = auth.identity?.groups ?? []
   const initial = (subject[0] ?? '?').toUpperCase()
 
   return (
@@ -135,6 +136,23 @@ export function UserMenu() {
               <RoleBadge role={auth.role} />
               {auth.role === 'viewer' ? <span className="text-warn-text">只读</span> : null}
             </p>
+            {/* groups 只用于排障：一眼看出"为什么我是 viewer" */}
+            {groups.length > 0 ? (
+              <p className="mt-1.5 flex flex-wrap items-center gap-1">
+                {groups.slice(0, 5).map((group) => (
+                  <span
+                    key={group}
+                    className="rounded-full bg-surface-3 px-1.5 py-0.5 font-mono text-[10px] leading-none text-fg-3"
+                    title={group}
+                  >
+                    {group}
+                  </span>
+                ))}
+                {groups.length > 5 ? (
+                  <span className="text-[10px] text-fg-3">等 {groups.length} 个</span>
+                ) : null}
+              </p>
+            ) : null}
           </div>
           <div className="my-1 h-px bg-line-soft" />
           {oidc ? (

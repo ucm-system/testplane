@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"time"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/ports"
@@ -56,7 +55,7 @@ func (c *Controller) cleanupDeploy(ctx context.Context, runID string) {
 	if c.deployer == nil {
 		return
 	}
-	now := time.Now().UTC()
+	now := c.now()
 	record := func(u *domain.DeployUninstall) {
 		_ = c.repos.RecordDeployState(ctx, runID, domain.DeploySnapshot{Uninstall: u})
 	}
@@ -138,7 +137,9 @@ func uninstallState(raw json.RawMessage) string {
 // appendCleanupFailed 写一条 cleanup.failed 事件（只用于卸载失败；载荷见 03-data-view §4.6）。
 func (c *Controller) appendCleanupFailed(ctx context.Context, runID string, cleanupErrors []string) {
 	payload := map[string]any{
+		"release_name":   "",
 		"cleanup_errors": cleanupErrors,
+		"attempt":        nil, // 清理发生在 Run 级，没有"某一次 Attempt"可指；键保留以便前端统一渲染
 		"verified_at":    nil,
 	}
 	if run, err := c.repos.GetRun(ctx, runID); err == nil {

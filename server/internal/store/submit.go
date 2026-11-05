@@ -38,7 +38,7 @@ func (s *Store) CreateRun(ctx context.Context, p SubmitParams) (*Run, []*Task, e
 	}
 	at := p.At
 	if at.IsZero() {
-		at = time.Now().UTC()
+		at = s.now()
 	}
 	if p.Run.SubmittedAt.IsZero() {
 		p.Run.SubmittedAt = at

@@ -98,6 +98,8 @@ src/
 | `POST /runs` 提交体 | 顶层 `run:` 嵌套 | 目前只吃**平级**写法（backend-core 修中） | 前端按嵌套发，等后端修完即通 |
 | `tests[].execution.profile` | 必填 | — | **MVP 没有 `/profiles` 端点**：提交页给可编辑默认值 `k8s-npu`（待裁决） |
 | `Run.deploy.queue_position` | 字段保留、**恒为 null**（D-46：部署方只给水位计数，排队在 Volcano 层，没有位次） | 恒 null | **UI 不展示位次**：排队态只显示「排队中 · 已等待 <时长>」+ `queue_reason` 原文；`types.ts` 注释写明"不要读取它做展示" |
+| `VolcanoQueue.reason` | **自由文本 `string \| null`**：PodGroup `conditions[-1].message` 原文（如 `0/8 nodes are available: 8 Insufficient nvidia.com/npu.`），平台不翻译 | 同契约 | 队列卡片按原文渲染（等宽 + `break-all`），不做枚举映射；结构化分类只看 `waiting.by_reason` 的六个键 |
+| `VolcanoSnapshot.stale` | **快照层**字段：本次刷新失败、上次成功；无时间阈值。置位时 `available=false` 且 `queues=[]`（不回放历史数字） | 同契约 | `available=false` 渲染降级卡片（`detail` 原文 + 可选「曾采到过快照」徽标），**绝不渲染成「0 排队 / 无排队」** |
 
 ## 登录态与权限（OIDC）
 

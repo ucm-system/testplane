@@ -218,6 +218,13 @@ func (l *Live) Run() ([]check, []string, error) {
 	l.probeSchema(ctx, "getTester", "/api/v1/testers/endpoint-probe", 200, "Tester")
 	l.probeSchema(ctx, "listClusters", "/api/v1/clusters", 200, "ClusterList")
 	l.probeSchema(ctx, "getQueueStatus", "/api/v1/queue-status", 200, "QueueStatus")
+	l.checkQueueStatusVolcano(ctx)
+	l.probeSchema(ctx, "listProfiles", "/api/v1/profiles", 200, "ExecutionProfileList")
+	l.probeSchema(ctx, "getTesterVersion", "/api/v1/testers/endpoint-probe/versions/1.0.0", 200, "Tester")
+	l.probeText(ctx, "getMetrics", "/metrics", []int{200})
+	l.probeAuthLogin(ctx)
+	l.checkAuthCallback(ctx)
+	l.checkAuthLogout(ctx)
 	if l.connectErr != nil {
 		return l.checks, l.warnings, l.connectErr
 	}
@@ -289,6 +296,163 @@ func (l *Live) probeSchema(ctx context.Context, opID, path string, wantStatus in
 		return
 	}
 	l.add("live."+opID, true, fmt.Sprintf("HTTP %d，%s required 齐全", status, schemaName))
+}
+
+// checkQueueStatusVolcano 断言 queue-status 的 volcano 块形态（E-11）：
+// 必须有 volcano 对象、available 布尔、queues 数组；不可达降级也不允许整块缺失。
+func (l *Live) checkQueueStatusVolcano(ctx context.Context) {
+	status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/queue-status", nil, "", nil)
+	if err != nil {
+		l.recordErr("live.queue_status.volcano", err)
+		return
+	}
+	if status != http.StatusOK {
+		l.add("live.queue_status.volcano", false, fmt.Sprintf("HTTP %d", status))
+		return
+	}
+	var body struct {
+		Volcano json.RawMessage `json:"volcano"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		l.add("live.queue_status.volcano", false, "响应不是 JSON："+err.Error())
+		return
+	}
+	if len(body.Volcano) == 0 || string(body.Volcano) == "null" {
+		l.add("live.queue_status.volcano", false, "缺少 volcano 块")
+		return
+	}
+	var v struct {
+		Available *bool             `json:"available"`
+		Queues    []json.RawMessage `json:"queues"`
+	}
+	if err := json.Unmarshal(body.Volcano, &v); err != nil {
+		l.add("live.queue_status.volcano", false, "volcano 不是对象："+err.Error())
+		return
+	}
+	if v.Available == nil {
+		l.add("live.queue_status.volcano", false, "volcano.available 缺失")
+		return
+	}
+	if v.Queues == nil {
+		l.add("live.queue_status.volcano", false, "volcano.queues 缺失（不可达时也必须是 []）")
+		return
+	}
+	l.add("live.queue_status.volcano", true,
+		fmt.Sprintf("available=%v，queues=%d", *v.Available, len(v.Queues)))
+}
+
+// probeAuthLogin 按模式断言：OIDC 302（Location 非空）或 dev 模式 404（Error 形状）。
+func (l *Live) probeAuthLogin(ctx context.Context) {
+	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/auth/login?return=/runs", nil, "", nil)
+	if err != nil {
+		l.recordErr("live.authLogin", err)
+		return
+	}
+	l.markOp("authLogin")
+	switch status {
+	case http.StatusFound:
+		loc := hdr.Get("Location")
+		if loc == "" {
+			l.add("live.authLogin", false, "HTTP 302 但没有 Location")
+			return
+		}
+		l.add("live.authLogin", true, "HTTP 302，Location 非空")
+	case http.StatusNotFound:
+		if issues := l.validateError("authLogin", status, hdr, raw); len(issues) > 0 {
+			l.add("live.authLogin", false, strings.Join(issues, "；"))
+			return
+		}
+		l.add("live.authLogin", true, "HTTP 404（dev 模式），Error 形状正确")
+	default:
+		l.add("live.authLogin", false, fmt.Sprintf("期望 302 或 404，实际 %d：%s", status, truncate(raw, 300)))
+	}
+}
+
+// checkAuthCallback 只断言跳转或认证失败两种契约形态（dev 没有完整 IdP code 流程）。
+func (l *Live) checkAuthCallback(ctx context.Context) {
+	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/auth/callback?code=contract&state=contract", nil, "", nil)
+	if err != nil {
+		l.recordErr("live.authCallback", err)
+		return
+	}
+	l.markOp("authCallback")
+	switch status {
+	case http.StatusFound:
+		if hdr.Get("Location") == "" {
+			l.add("live.authCallback", false, "HTTP 302 但没有 Location")
+			return
+		}
+		l.add("live.authCallback", true, "HTTP 302，Location 非空")
+	case http.StatusUnauthorized:
+		if issues := l.validateError("authCallback", status, hdr, raw); len(issues) > 0 {
+			l.add("live.authCallback", false, strings.Join(issues, "；"))
+			return
+		}
+		l.add("live.authCallback", true, "HTTP 401，Error 形状正确")
+	case http.StatusNotFound:
+		// dev 模式与 /auth/login 一致返回 404；openapi 已声明该 dev 404 + Error。
+		if issues := l.validateError("authCallback", status, hdr, raw); len(issues) > 0 {
+			l.add("live.authCallback", false, strings.Join(issues, "；"))
+			return
+		}
+		l.add("live.authCallback", true, "HTTP 404（dev 模式，spec 已声明），Error 形状正确")
+	default:
+		l.add("live.authCallback", false, fmt.Sprintf("期望 302 或 401，实际 %d：%s", status, truncate(raw, 300)))
+	}
+}
+
+// checkAuthLogout 在 dev/admin Bearer 下应直接 200 且 body 有 ok=true。
+func (l *Live) checkAuthLogout(ctx context.Context) {
+	status, _, raw, err := l.client.do(ctx, http.MethodPost, "/auth/logout", nil, "", nil)
+	if err != nil {
+		l.recordErr("live.authLogout", err)
+		return
+	}
+	l.markOp("authLogout")
+	if status != http.StatusOK {
+		l.add("live.authLogout", false, fmt.Sprintf("期望 HTTP 200，实际 %d：%s", status, truncate(raw, 300)))
+		return
+	}
+	var body struct {
+		OK *bool `json:"ok"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil || body.OK == nil {
+		l.add("live.authLogout", false, "响应缺 ok 字段："+truncate(raw, 200))
+		return
+	}
+	l.add("live.authLogout", true, fmt.Sprintf("HTTP 200，ok=%v", *body.OK))
+}
+
+// probeRunFileBothForms 同时探 /files 的两种 path 形态：
+//   - run 相对形态：tasks/<task>/attempts/1/result.json
+//   - 原始 artifacts 形态：<run_id>/tasks/.../result.json
+//
+// 状态 200 或 404 都按 spec 处理；两种形态必须都合法。
+func (l *Live) probeRunFileBothForms(ctx context.Context, runID string) {
+	id := url.PathEscape(runID)
+	forms := []struct {
+		name string
+		path string
+	}{
+		{"relative", "/api/v1/runs/" + id + "/files?path=report.json"},
+		{"prefixed", "/api/v1/runs/" + id + "/files?path=" + url.QueryEscape(runID+"/report.json")},
+	}
+	var details []string
+	allOK := true
+	for _, f := range forms {
+		status, hdr, raw, err := l.client.do(ctx, http.MethodGet, f.path, nil, "", nil)
+		if err != nil {
+			l.recordErr("live.downloadRunFile", err)
+			return
+		}
+		ok, detail := l.artifactResponseCheck("downloadRunFile", false, status, hdr, raw, "", "")
+		if !ok {
+			allOK = false
+		}
+		details = append(details, f.name+"=>"+fmt.Sprintf("%d", status)+"（"+detail+"）")
+	}
+	l.markOp("downloadRunFile")
+	l.add("live.downloadRunFile", allOK, strings.Join(details, "；"))
 }
 
 // probeOptional 允许"spec 声明的状态依赖错误码"（如报告未生成 404）。
@@ -528,6 +692,8 @@ func (l *Live) probeRunReads(ctx context.Context) {
 	l.checkRunTaskListComplete(ctx, l.runA)
 	l.probeSchema(ctx, "listRunEvents", "/api/v1/runs/"+id+"/events/history?since_seq=0&limit=100", 200, "EventList")
 	l.probeSchema(ctx, "getRunManifest", "/api/v1/runs/"+id+"/manifest", 200, "ManifestSnapshot")
+	l.probeSchema(ctx, "listRunArtifacts", "/api/v1/runs/"+id+"/artifacts", 200, "ArtifactList")
+	l.probeRunFileBothForms(ctx, l.runA)
 	l.probeRunDeploy(ctx, l.runA)
 	l.probeRunReport(ctx, l.runA, "/report", "Report", "getRunReport")
 	l.probeRunReport(ctx, l.runA, "/report.md", "", "getRunReportMarkdown")
@@ -542,6 +708,7 @@ func (l *Live) probeRunReads(ctx context.Context) {
 	task := url.PathEscape(l.taskA)
 	l.probeSchema(ctx, "getTask", "/api/v1/tasks/"+task, 200, "TaskDetail")
 	l.probeSchema(ctx, "listTaskAttempts", "/api/v1/tasks/"+task+"/attempts?limit=50", 200, "AttemptList")
+	l.probeSchema(ctx, "listAttemptArtifacts", "/api/v1/tasks/"+task+"/attempts/1/artifacts", 200, "ArtifactList")
 	l.probeOptional(ctx, "getTaskAttemptResult", "/api/v1/tasks/"+task+"/attempts/1/result", 200, "Result", 404, "")
 	l.probeOptional(ctx, "getTaskAttemptLogs", "/api/v1/tasks/"+task+"/attempts/1/logs?stream=stdout&limit=4096", 200, "", 404, "text/plain")
 }
@@ -833,7 +1000,7 @@ func (l *Live) checkCoverage() {
 		}
 	}
 	l.add("live.all_operations_covered", len(missing) == 0,
-		firstN(missing, 8, "25 个 operation 全部被探针覆盖"))
+		firstN(missing, 8, fmt.Sprintf("%d 个 operation 全部被探针覆盖", len(l.spec.Operations))))
 }
 
 // ---- fixture Manifest --------------------------------------------------

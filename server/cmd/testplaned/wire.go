@@ -109,7 +109,7 @@ func (r *storeRepos) runView(run *store.Run) orchestrator.RunView {
 // isPrecheck 必须由调用方给出：唯一判据是 runs.resolved.precheck.injected == true
 // 且 tasks.seq == 0（03-data-view.md §4.2），**不能**看 Tester 角色 ——
 // endpoint-probe 本身就是 role=pre_check，但用户可以在 precheck:"off" 下把它当普通测试提交。
-func (r *storeRepos) taskView(t *store.Task, isPrecheck bool) orchestrator.TaskView {
+func (r *storeRepos) taskView(ctx context.Context, t *store.Task, isPrecheck bool) orchestrator.TaskView {
 	v := orchestrator.TaskView{
 		ID: t.ID, RunID: t.RunID, Seq: t.Seq, Name: t.Name,
 		TesterName: t.TesterName, TesterVersion: t.TesterVersion,
@@ -157,7 +157,7 @@ func (r *storeRepos) taskView(t *store.Task, isPrecheck bool) orchestrator.TaskV
 	}
 	// Tester 的 role / image / entry / resources / mounts 以注册表为准（Task 只冻结了 name/version/image_ref）。
 	if r.reg != nil {
-		if spec, err := r.reg.Resolve(context.Background(), t.TesterName, t.TesterVersion); err == nil {
+		if spec, err := r.reg.Resolve(ctx, t.TesterName, t.TesterVersion); err == nil {
 			v.TesterRole = spec.Role
 			if spec.Image != "" {
 				v.Image = spec.Image
@@ -187,7 +187,7 @@ func (r *storeRepos) GetTask(ctx context.Context, taskID string) (orchestrator.T
 	if err != nil {
 		return orchestrator.TaskView{}, err
 	}
-	return r.taskView(t, flags[t.ID]), nil
+	return r.taskView(ctx, t, flags[t.ID]), nil
 }
 
 func (r *storeRepos) ListTasks(ctx context.Context, runID string) ([]orchestrator.TaskView, error) {
@@ -208,7 +208,7 @@ func (r *storeRepos) ListTasks(ctx context.Context, runID string) ([]orchestrato
 			return nil, err
 		}
 		for i := range batch {
-			out = append(out, r.taskView(&batch[i], flags[batch[i].ID]))
+			out = append(out, r.taskView(ctx, &batch[i], flags[batch[i].ID]))
 		}
 		if next == "" {
 			return out, nil
@@ -318,7 +318,7 @@ func (r *storeRepos) ListActiveTasks(ctx context.Context, limit int) ([]orchestr
 	}
 	out := make([]orchestrator.TaskView, 0, len(rows))
 	for i := range rows {
-		out = append(out, r.taskView(&rows[i], flags[rows[i].ID]))
+		out = append(out, r.taskView(ctx, &rows[i], flags[rows[i].ID]))
 	}
 	return out, nil
 }

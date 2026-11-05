@@ -254,8 +254,8 @@ function DeploySection({ run, version }: { run: Run; version: number }) {
 
 /* ---------------------------------------------------------------- Task 面板 */
 
-function TaskAttemptsPanel({ summary }: { summary: TaskSummary }) {
-  const detail = useAsync(() => api.getTask(summary.id), [summary.id])
+function TaskAttemptsPanel({ summary, version }: { summary: TaskSummary; version: number }) {
+  const detail = useAsync(() => api.getTask(summary.id), [summary.id, version])
   const [attemptIdx, setAttemptIdx] = useState<number | null>(null)
 
   const task: TaskDetail | null = detail.data
@@ -383,10 +383,40 @@ function TaskAttemptsPanel({ summary }: { summary: TaskSummary }) {
   )
 }
 
-function TaskPanels({ run }: { run: Run }) {
+/** 只有非终态的 Task 才能取消（终态取消是无效操作，服务端会 409）。 */
+const CANCELLABLE: ReadonlySet<string> = new Set(['pending', 'queued', 'preparing', 'running'])
+
+function TaskPanels({ run, onReload }: { run: Run; onReload: () => void }) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
+  const [pendingCancel, setPendingCancel] = useState<TaskSummary | null>(null)
+  const [cancelling, setCancelling] = useState(false)
+  const [refreshToken, setRefreshToken] = useState(0)
+  const toast = useToast()
+  const { auth } = useIdentity()
+  const blocked = writeBlockedReason(auth)
   const tasks = run.tasks ?? []
   const selected = tasks.find((t) => t.id === selectedTaskId) ?? tasks[0] ?? null
+
+  const confirmCancel = async () => {
+    if (!pendingCancel) return
+    setCancelling(true)
+    try {
+      await api.cancelTask(pendingCancel.id)
+      toast({
+        title: `已提交取消：${pendingCancel.name}`,
+        description: 'Task 会先到 CANCELED；已完成的 Task 不受影响',
+        tone: 'warn',
+      })
+      setPendingCancel(null)
+      setRefreshToken((token) => token + 1)
+      onReload()
+    } catch (e) {
+      const error = toApiError(e)
+      toast({ title: '取消失败', description: `${error.code}：${error.message}`, tone: 'err' })
+    } finally {
+      setCancelling(false)
+    }
+  }
 
   return (
     <Card>
@@ -409,11 +439,13 @@ function TaskPanels({ run }: { run: Run }) {
                 <TH>Attempt</TH>
                 <TH>排队原因</TH>
                 <TH>错误</TH>
+                <TH className="text-right">操作</TH>
               </TR>
             </THead>
             <TBody>
               {tasks.map((task, index) => {
                 const isActive = selected?.id === task.id
+                const cancellable = CANCELLABLE.has(task.status)
                 return (
                   <TR
                     key={task.id}
@@ -441,6 +473,26 @@ function TaskPanels({ run }: { run: Run }) {
                         <span className="text-fg-3">—</span>
                       )}
                     </TD>
+                    <TD className="text-right">
+                      {cancellable ? (
+                        <Button
+                          size="sm"
+                          variant="dangerGhost"
+                          data-testid="cancel-task"
+                          disabled={Boolean(blocked)}
+                          title={blocked ?? '取消这个 Task（已完成的 Task 不受影响）'}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            setSelectedTaskId(task.id)
+                            setPendingCancel(task)
+                          }}
+                        >
+                          取消 Task
+                        </Button>
+                      ) : (
+                        <span className="text-2xs text-fg-3">—</span>
+                      )}
+                    </TD>
                   </TR>
                 )
               })}
@@ -449,7 +501,31 @@ function TaskPanels({ run }: { run: Run }) {
         </TableWrap>
       )}
 
-      {selected ? <TaskAttemptsPanel key={selected.id} summary={selected} /> : null}
+      {selected ? <TaskAttemptsPanel key={selected.id} summary={selected} version={refreshToken} /> : null}
+
+      <Dialog
+        open={pendingCancel !== null}
+        onClose={() => setPendingCancel(null)}
+        title={`取消 Task：${pendingCancel?.name ?? ''}`}
+        description="取消后该 Task 置为 CANCELED（正在跑的会被终止）；已完成的 Task 不受影响，也不会重排新的 Attempt。"
+        footer={
+          <>
+            <Button onClick={() => setPendingCancel(null)}>不取消</Button>
+            <Button variant="danger" loading={cancelling} onClick={() => void confirmCancel()}>
+              确认取消 Task
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-2 text-xs text-fg-2">
+          <p>
+            当前状态：<TaskStatusBadge status={pendingCancel?.status ?? 'pending'} />
+          </p>
+          <p className="text-2xs leading-relaxed text-fg-3">
+            状态以服务端推送为准：确认后本页会重新拉一次 Run 与 Task 详情，不做乐观点更新。
+          </p>
+        </div>
+      </Dialog>
     </Card>
   )
 }
@@ -693,7 +769,7 @@ export function RunDetailPage() {
           </div>
 
           <div id="task-panels">
-            <TaskPanels run={detail} />
+            <TaskPanels run={detail} onReload={run.reload} />
           </div>
 
           <Card>

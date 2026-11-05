@@ -276,6 +276,8 @@ X-Log-Coverage: 2026-11-05T01:00:00Z/2026-11-05T01:32:10Z
 
 **`/queue-status` 的语义（D-49）**：`slots` 是平台自身的槽位（endpoint 独占 / 全局并发）；`waiting` 是平台侧排队（按 `waiting_reason` 六值分组）；`volcano` 是**集群调度器视角**的队列快照，直接读 CRD，**不经 Genet**。三者必须分开展示，不能相加成"一个排队数"。`volcano.available=false` 时 `detail` 取四态之一（`crd_missing`/`rbac_forbidden`/`scheduler_unavailable`/`disabled`），且 **不可达不等于 0 排队**；多集群时 `queues[].name` 用 `"<cluster>/<queue>"`。`volcano.queues[].pending_jobs` 是该队列下 `phase=Pending` 的 PodGroup 计数（不是 `queue.status.pending`），`longest_wait_seconds` 取 `now - min(podgroup.creationTimestamp)`（phase ∈ Pending/Inqueue）。
 
+**`queues[].reason` 是自由文本，不是枚举**：取该队列里等得最久那条 PodGroup 的 `status.conditions[-1].message`（没有则 `.reason`），**原文透传**——它常是 K8s 调度器话术，硬映射成六值会丢信息也会误判。结构化分类只在 `waiting.by_reason` 的六个键上；UI 展示队列原因时原样显示（等宽、可换行）。另：`volcano.stale`（**快照层**，不是每个队列一份）表示"上一次刷新成功、本次刷新失败"，**无时间阈值**；置位时仍 `available=false` + `queues=[]`，**降级绝不回放历史队列数字**。
+
 ### 5.4 Admin
 
 | 方法 | 路径 | 说明 |

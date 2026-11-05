@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ucm-system/testplane/server/internal/domain"
 )
 
 // Store 是数据库访问的唯一入口（05 §3.2 硬规则 1：只有 store 执行 SQL）。
@@ -37,6 +39,8 @@ type Store struct {
 	clusterName string
 	// runFinishedHook 在 Run 落终态**提交之后**异步触发（报告生成；事务内不做文件 IO）。
 	runFinishedHook func(ctx context.Context, runID string)
+	// clock 是业务时间来源（05 §6.5）：写库时间戳、超窗与退避判定都走它，默认 SystemClock。
+	clock domain.Clock
 }
 
 // DBTX 是 *pgxpool.Pool 与 pgx.Tx 的公共子集：让同一个 repo 方法既能跑在
@@ -70,7 +74,7 @@ func New(ctx context.Context, dsn string, maxConns int32) (*Store, error) {
 		return nil, err
 	}
 
-	s := &Store{pool: pool, clusterName: "cluster-01"}
+	s := &Store{pool: pool, clusterName: "cluster-01", clock: domain.SystemClock}
 	s.Runs = &RunRepo{s: s}
 	s.Tasks = &TaskRepo{s: s}
 	s.Attempts = &AttemptRepo{s: s}
@@ -86,6 +90,21 @@ func New(ctx context.Context, dsn string, maxConns int32) (*Store, error) {
 
 // Pool 暴露连接池给需要自己开事务的调用方（LISTEN、报表）。
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+
+// SetClock 注入业务时钟（默认 SystemClock；测试可换成可拨时钟）。
+func (s *Store) SetClock(c domain.Clock) {
+	if c != nil {
+		s.clock = c
+	}
+}
+
+// now 返回业务时间（UTC）。**不要**在 store 里直调 time.Now()。
+func (s *Store) now() time.Time {
+	if s.clock != nil {
+		return s.clock.Now()
+	}
+	return domain.SystemClock.Now()
+}
 
 // SetNotifier 注入事件通知器：提交与 ClaimForExecution 在事务提交后推送。
 func (s *Store) SetNotifier(n *Notifier) { s.notifier = n }

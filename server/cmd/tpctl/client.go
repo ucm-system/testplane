@@ -9,8 +9,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ucm-system/testplane/server/internal/mcp"
 )
 
 // 本文件是 tpctl 自己的最小 REST 客户端：只做"拼 URL + Bearer + 超时 + 错误信封解析"。
@@ -28,6 +31,9 @@ type client struct {
 	baseURL string
 	token   string
 	http    *http.Client
+
+	// streamHTTP 专用于 SSE（无 TotalTimeout，由 ctx 的 deadline 控制）。
+	streamHTTP *http.Client
 }
 
 func newClient(baseURL, token string, timeout time.Duration) (*client, error) {
@@ -49,9 +55,10 @@ func newClient(baseURL, token string, timeout time.Duration) (*client, error) {
 		timeout = 30 * time.Second
 	}
 	return &client{
-		baseURL: strings.TrimRight(raw, "/"),
-		token:   token,
-		http:    &http.Client{Timeout: timeout},
+		baseURL:    strings.TrimRight(raw, "/"),
+		token:      token,
+		http:       &http.Client{Timeout: timeout},
+		streamHTTP: &http.Client{},
 	}, nil
 }
 
@@ -98,17 +105,52 @@ func (e *transportError) Error() string {
 func (e *transportError) Unwrap() error { return e.err }
 
 func (c *client) get(ctx context.Context, path string, query url.Values) (*apiResult, error) {
-	return c.do(ctx, http.MethodGet, path, query, nil, "")
+	return c.do(ctx, http.MethodGet, path, query, nil, "", nil)
+}
+
+// getWithHeaders 是带额外请求头的 GET（小响应，如 32 MiB 内的 MCP 摘要）。
+func (c *client) getWithHeaders(ctx context.Context, path string, query url.Values, headers map[string]string) (*apiResult, error) {
+	return c.do(ctx, http.MethodGet, path, query, nil, "", headers)
+}
+
+// getStream 打开一个不缓冲整段 body 的 GET（files 下载用：单文件可到 1 GiB）。
+// 2xx 时返回未读取的 *http.Response（调用方负责 Close）；非 2xx 转成 *apiError。
+// 用无 TotalTimeout 的 streamHTTP，超时由调用方的 ctx 控制。
+func (c *client) getStream(ctx context.Context, path string, query url.Values, headers map[string]string) (*http.Response, error) {
+	target := c.baseURL + path
+	if len(query) > 0 {
+		target += "?" + query.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, fmt.Errorf("构造请求失败: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenOrDefault(c.token))
+	req.Header.Set("User-Agent", "testplane-tpctl/"+cliVersion)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := c.streamHTTP.Do(req)
+	if err != nil {
+		return nil, &transportError{method: http.MethodGet, url: target, err: err}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		return nil, newAPIError(&apiResult{Status: resp.StatusCode, Header: resp.Header, Body: body})
+	}
+	return resp, nil
 }
 
 func (c *client) post(ctx context.Context, path string, query url.Values, body []byte, contentType string) (*apiResult, error) {
 	if contentType == "" {
 		contentType = "application/json"
 	}
-	return c.do(ctx, http.MethodPost, path, query, body, contentType)
+	return c.do(ctx, http.MethodPost, path, query, body, contentType, nil)
 }
 
-func (c *client) do(ctx context.Context, method, path string, query url.Values, body []byte, contentType string) (*apiResult, error) {
+func (c *client) do(ctx context.Context, method, path string, query url.Values, body []byte, contentType string, headers map[string]string) (*apiResult, error) {
 	target := c.baseURL + path
 	if len(query) > 0 {
 		target += "?" + query.Encode()
@@ -125,6 +167,9 @@ func (c *client) do(ctx context.Context, method, path string, query url.Values, 
 	req.Header.Set("Authorization", "Bearer "+tokenOrDefault(c.token))
 	req.Header.Set("Accept", "application/json, text/plain, text/markdown")
 	req.Header.Set("User-Agent", "testplane-tpctl/"+cliVersion)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -148,6 +193,54 @@ func (c *client) do(ctx context.Context, method, path string, query url.Values, 
 		return res, newAPIError(res)
 	}
 	return res, nil
+}
+
+// GetRun 实现 mcp.RunReader：GET /api/v1/runs/{id} 的原始 JSON。
+func (c *client) GetRun(ctx context.Context, runID string) ([]byte, error) {
+	res, err := c.get(ctx, "/api/v1/runs/"+url.PathEscape(runID), nil)
+	if err != nil {
+		return nil, err
+	}
+	return res.Body, nil
+}
+
+// OpenRunEvents 实现 mcp.RunReader：打开 SSE。不可用时返回 mcp.SSEUnavailableError，
+// 由 mcp.Wait 自动降级为轮询；401/403 返回 *apiError（致命，不降级）。
+func (c *client) OpenRunEvents(ctx context.Context, runID string, lastEventID int64) (io.ReadCloser, error) {
+	if c.streamHTTP == nil {
+		return nil, &mcp.SSEUnavailableError{Reason: "未初始化 SSE 客户端"}
+	}
+	target := c.baseURL + "/api/v1/runs/" + url.PathEscape(runID) + "/events"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, &mcp.SSEUnavailableError{Reason: "构造事件流请求失败", Err: err}
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenOrDefault(c.token))
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("User-Agent", "testplane-tpctl/"+cliVersion)
+	if lastEventID > 0 {
+		req.Header.Set("Last-Event-ID", strconv.FormatInt(lastEventID, 10))
+	}
+
+	resp, err := c.streamHTTP.Do(req)
+	if err != nil {
+		return nil, &mcp.SSEUnavailableError{Reason: "连接事件流失败", Err: err}
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		err := newAPIError(&apiResult{Status: resp.StatusCode, Header: resp.Header, Body: body})
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, err
+		}
+		return nil, &mcp.SSEUnavailableError{Reason: "事件流不可用（HTTP " + strconv.Itoa(resp.StatusCode) + "）", Err: err}
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		_ = resp.Body.Close()
+		return nil, &mcp.SSEUnavailableError{Reason: "事件流不可用（Content-Type=" + ct + "）"}
+	}
+	return resp.Body, nil
 }
 
 func newAPIError(res *apiResult) *apiError {

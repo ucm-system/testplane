@@ -8,9 +8,12 @@
 # 用法：
 #   pwsh scripts/e2e/run-local.ps1
 #   pwsh scripts/e2e/run-local.ps1 -BaseURL http://127.0.0.1:8080 -Expect succeeded
-#   pwsh scripts/e2e/run-local.ps1 -Mode deploy -MockURL http://mock-llm.testplane.svc.cluster.local:18080/v1
+#   pwsh scripts/e2e/run-local.ps1 -Mode deploy -MockURL http://mock-llm.testplane-svc.svc.cluster.local:18080/v1
 #   pwsh scripts/e2e/run-local.ps1 -KeepMock
 #
+# MockURL 不传时自动探测 kind 里的 mock-llm Service（testplane-mock / default /
+# testplane / testplane-svc），探测不到才回退本机 http://127.0.0.1:18080/v1。
+# 评审 #16 同类问题：工具默认值不该让集群场景必须带参数才通过。
 # 前置：控制面已启动（PG + 迁移 + --role=all，监听 8080；见 deploy/README 或 Lead 的启动说明），
 #       且 Registry 里能看到 endpoint-probe、存在可用的 execution profile。
 #
@@ -19,7 +22,7 @@
 [CmdletBinding()]
 param(
     [string]$BaseURL = 'http://127.0.0.1:8080',
-    [string]$MockURL = 'http://127.0.0.1:18080/v1',
+    [string]$MockURL = '',
     [string]$Expect = 'succeeded',
     [string]$Profile = 'k8s-npu',
     [ValidateSet('service', 'deploy')]
@@ -32,6 +35,22 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $tmp = [System.IO.Path]::GetTempPath()
+
+if ([string]::IsNullOrWhiteSpace($MockURL)) {
+    $MockURL = 'http://127.0.0.1:18080/v1'
+    $kubectl = Get-Command kubectl -ErrorAction SilentlyContinue
+    if ($kubectl) {
+        foreach ($ns in @('testplane-mock', 'default', 'testplane', 'testplane-svc')) {
+            $svc = & kubectl -n $ns get svc mock-llm -o name --request-timeout=3s 2>$null
+            if ($LASTEXITCODE -eq 0 -and (($svc | Out-String).Trim()) -ne '') {
+                $MockURL = "http://mock-llm.$ns.svc:18080/v1"
+                Write-Host "自动探测 mock-llm：namespace=$ns，MockURL=$MockURL"
+                break
+            }
+        }
+    }
+}
+
 
 function Wait-Healthy {
     param([string]$Url, [int]$TimeoutSeconds = 15)

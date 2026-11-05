@@ -35,7 +35,7 @@ func (s *Store) applyEffects(ctx context.Context, tx pgx.Tx, tr domain.Transitio
 				return err
 			}
 		case domain.EffectScheduleRetry:
-			if err := s.effectScheduleRetry(ctx, tx, tr); err != nil {
+			if err := s.effectScheduleRetry(ctx, tx, tr, at); err != nil {
 				return err
 			}
 		case domain.EffectWriteReportIntent:
@@ -199,15 +199,18 @@ func (s *Store) effectCloseActive(ctx context.Context, tx pgx.Tx, tr domain.Tran
 	return nil
 }
 
-// effectScheduleRetry 按 retry_policy.backoff_seconds 设置 available_at。
-func (s *Store) effectScheduleRetry(ctx context.Context, tx pgx.Tx, tr domain.Transition) error {
+// effectScheduleRetry 按 retry_policy.backoff_seconds 设置 available_at = at + backoff。
+//
+// 基准用**注入时钟**的 at（05 §6.5），不用 SQL now()：这样超窗/退避判定在单测里
+// 可以用可拨时钟精确验证，也不会因为应用与数据库时钟漂移产生跨秒抖动。
+func (s *Store) effectScheduleRetry(ctx context.Context, tx pgx.Tx, tr domain.Transition, at time.Time) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE tasks
-		   SET available_at = now() + make_interval(secs =>
+		   SET available_at = $2::timestamptz + make_interval(secs =>
 		         COALESCE((retry_policy->>'backoff_seconds')::double precision, 0)),
 		       waiting_reason = NULL,
-		       updated_at     = now()
-		 WHERE id = $1`, tr.ID); err != nil {
+		       updated_at     = $2::timestamptz
+		 WHERE id = $1`, tr.ID, at); err != nil {
 		return fmt.Errorf("store: effects: schedule retry %s: %w", tr.ID, err)
 	}
 	return nil

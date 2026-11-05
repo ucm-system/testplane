@@ -73,7 +73,7 @@ func (m *RunMachine) BeginDeploy(ctx context.Context, runID, deployID string) (d
 	deploy := map[string]any{
 		"deployment_id": deployID,
 		"state":         "queued",
-		"queued_at":     time.Now().UTC().Format(time.RFC3339),
+		"queued_at":     m.s.now().Format(time.RFC3339),
 	}
 	return m.apply(ctx, domain.Transition{
 		Entity: domain.EntityRun, ID: runID,
