@@ -641,11 +641,13 @@ func (c *Controller) resolveAttemptResult(ctx context.Context, attempt AttemptRe
 			return executor.PhaseFailed, f
 		}
 		return executor.PhaseSucceeded, nil
-	case executor.PhaseTimeout:
+		case executor.PhaseTimeout:
+		// 实例字段显式给 true：C-5.8 第 4 条把 TASK_TIMEOUT 列为"可重试的 Pre-Check 失败"，
+		// 终态判定只认实例字段（码级默认值由这里兜底填写）。
 		return executor.PhaseTimeout, &domain.Failure{
 			Code:      domain.CodeTaskTimeout,
 			Message:   o.Message,
-			Retryable: domain.Retryable(domain.CodeTaskTimeout),
+			Retryable: true,
 			Detail:    map[string]any{"phase": o.Phase, "task_id": attempt.TaskID, "attempt_id": attempt.AttemptID},
 		}
 	}
@@ -915,9 +917,9 @@ func (c *Controller) WatchdogOnce(ctx context.Context) error {
 	}
 	for _, ref := range expired {
 		f := &domain.Failure{
-			Code:      domain.CodeTaskTimeout,
+						Code:      domain.CodeTaskTimeout,
 			Message:   "Task exceeded its timeout and was terminated by the platform",
-			Retryable: domain.Retryable(domain.CodeTaskTimeout),
+			Retryable: true,
 		}
 		if _, err := c.repos.FinishAttempt(ctx, FinishInput{
 			AttemptID:  ref.AttemptID,

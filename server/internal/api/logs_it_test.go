@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -76,8 +77,9 @@ func TestAttemptLogs_ReadsStdout(t *testing.T) {
 	if rec.Header().Get("Content-Type") != "text/plain; charset=utf-8" {
 		t.Fatalf("Content-Type = %q", rec.Header().Get("Content-Type"))
 	}
-	if rec.Header().Get("X-Log-Offset") != "0" {
-		t.Fatalf("X-Log-Offset = %q, 期望 0", rec.Header().Get("X-Log-Offset"))
+	// X-Log-Offset = 本次返回的结束处偏移（openapi 语义，客户端拿它直接续读）。
+	if got, want := rec.Header().Get("X-Log-Offset"), strconv.Itoa(len("line-1\nline-2\nline-3\n")); got != want {
+		t.Fatalf("X-Log-Offset = %q, 期望 %q（结束处）", got, want)
 	}
 	if _, ok := rec.Header()["X-Log-Coverage"]; !ok {
 		t.Fatal("缺少 X-Log-Coverage 头（可为空值）")
@@ -97,8 +99,17 @@ func TestAttemptLogs_OffsetAndLimit(t *testing.T) {
 	if rec.Body.String() != "5678" {
 		t.Fatalf("body = %q, 期望 5678", rec.Body.String())
 	}
-	if rec.Header().Get("X-Log-Offset") != "5" {
-		t.Fatalf("X-Log-Offset = %q, 期望 5（本次起点）", rec.Header().Get("X-Log-Offset"))
+	// offset=5&limit=4 返回 "5678"，结束处偏移 = 5+4 = 9。
+	if got := rec.Header().Get("X-Log-Offset"); got != "9" {
+		t.Fatalf("X-Log-Offset = %q, 期望 9（本次结束处）", got)
+	}
+	// 用返回的偏移直接续读：拿到剩余部分，不重不漏（body[9:13] = "9ABC"）。
+	rec = getLogs(t, srv, taskID, "?offset=9&limit=4")
+	if rec.Code != http.StatusOK || rec.Body.String() != "9ABC" {
+		t.Fatalf("续读异常: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Log-Offset"); got != "13" {
+		t.Fatalf("续读 X-Log-Offset = %q, 期望 13", got)
 	}
 
 	// limit 超过上限被截到 64KiB（这里只断言不报错且长度受控）。
@@ -121,8 +132,9 @@ func TestAttemptLogs_Tail(t *testing.T) {
 	if got := rec.Body.String(); got != "d\ne\n" {
 		t.Fatalf("tail=2 得到 %q, 期望 \"d\\ne\\n\"", got)
 	}
-	if rec.Header().Get("X-Log-Offset") == "0" {
-		t.Fatalf("tail 应返回非 0 起点，得到 %q", rec.Header().Get("X-Log-Offset"))
+	// tail=2 返回 "d\ne\n"（从第 6 字节起），结束处偏移 = 全文件长度 10。
+	if got := rec.Header().Get("X-Log-Offset"); got != "10" {
+		t.Fatalf("tail X-Log-Offset = %q, 期望 10（结束处）", got)
 	}
 }
 

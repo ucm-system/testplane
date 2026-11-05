@@ -20,7 +20,7 @@ import (
 //   - 目录：<storage-root>/<run_id>/tasks/<task_id>/attempts/<idx>/logs/
 //   - 优先级：stdout.log（collector 落盘）→ 否则按文件名排序拼接 *.log（Tester 自写，如 probe.log）；
 //   - 参数：offset（字节）、limit（默认/上限 64KiB）、tail=N（从尾部取最后 N 行）；
-//   - 响应：text/plain；头 X-Log-Offset = 本次起点（不是终点）、X-Log-Coverage（拿不到时间区间就留空）；
+//   - 响应：text/plain；头 X-Log-Offset = 本次返回的结束处字节偏移（客户端据此续读）、`n//     X-Log-Coverage（拿不到采集时间区间就留空）；
 //   - 文件不存在：404 NOT_FOUND + detail.reason="log_not_ready"（不用 202/500）；
 //   - 路径只由 DB 里的 run_id/task_id + 整数 idx 拼出，不接受用户传路径（防穿越）。
 func (s *Server) handleAttemptLogs(w http.ResponseWriter, r *http.Request) {
@@ -82,8 +82,9 @@ func (s *Server) handleAttemptLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	// X-Log-Offset 是本次读取的**起点**（07 §5.2）。
-	w.Header().Set("X-Log-Offset", strconv.FormatInt(start, 10))
+	// X-Log-Offset = 本次返回的**结束处**字节偏移（openapi headers 定义）：
+	// 客户端下次直接用 offset= 这个值续读，不重读也不跳过。
+	w.Header().Set("X-Log-Offset", strconv.FormatInt(start+int64(len(data)), 10))
 	// 日志区间需要 collector 的采集时间；MVP 拿不到就不编，留空。
 	w.Header().Set("X-Log-Coverage", "")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))

@@ -421,10 +421,18 @@ func (s *Store) finishRunLocked(ctx context.Context, tx pgx.Tx, run *Run, at tim
 	for _, t := range tasks {
 		summary := domain.TaskSummary{Seq: t.Seq, Status: domain.TaskStatus(t.Status)}
 		if len(t.Error) > 0 {
-			var f domain.Failure
+			// 用指针接 retryable：只有实例真的带了该字段才算"实例给了值"
+			// （07-api.md §3：终态判定以实例字段为准，码级默认只做兜底）。
+			var f struct {
+				Code      string `json:"code"`
+				Retryable *bool  `json:"retryable"`
+			}
 			if err := json.Unmarshal(t.Error, &f); err == nil {
 				summary.ErrorCode = f.Code
-				summary.Retryable = f.Retryable
+				if f.Retryable != nil {
+					summary.Retryable = *f.Retryable
+					summary.HasRetryable = true
+				}
 			}
 		}
 		if t.Seq == 0 {

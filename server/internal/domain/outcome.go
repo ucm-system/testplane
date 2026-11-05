@@ -18,7 +18,11 @@ type TaskSummary struct {
 	Seq       int
 	Status    TaskStatus
 	ErrorCode string
+	// Retryable 是**实例级**取值（Failure.retryable）。
 	Retryable bool
+	// HasRetryable 表示实例里确实带了 retryable 字段。终态判定以实例为准：
+	// 有实例值时绝不拿码级默认覆盖它（07-api.md §3「Pre-Check 错误对象约定」）。
+	HasRetryable bool
 }
 
 // RunOutcomeInput 是 DecideRunOutcome 的输入。
@@ -54,13 +58,21 @@ func DecideRunOutcome(in RunOutcomeInput) RunStatus {
 	}
 
 	if in.Precheck != nil && in.Precheck.Status == TaskFailed {
-		// 实例级 retryable 优先；没有实例取值时看码级默认。
-		retryable := in.Precheck.Retryable
-		if !retryable && PrecheckRetryableCodes[in.Precheck.ErrorCode] {
-			retryable = true
-		}
-		if retryable && PrecheckRetryableCodes[in.Precheck.ErrorCode] {
-			return RunServiceUnavailable
+		// 07-api.md §3「Pre-Check 错误对象约定」：终态判定以**实例字段** retryable 为准，
+		// 不只看码级默认值。所以只有"码落在 §7.5 的窗口内"并且"实例没有明确说不可重试"
+		// 时才归 service_unavailable；401/认证失败、200-包错误这类 retryable=false 的实例
+		// 一律走 completed_with_errors，让用户去看具体失败 Task。
+		//
+		// 码表只在实例**没有给** retryable 时兜底（PrecheckRetryableCodes 的三个码默认可重试）。
+		p := in.Precheck
+		if PrecheckRetryableCodes[p.ErrorCode] {
+			retryable := p.Retryable
+			if !p.HasRetryable {
+				retryable = true // 码级兜底：窗口内的码默认可重试
+			}
+			if retryable {
+				return RunServiceUnavailable
+			}
 		}
 	}
 

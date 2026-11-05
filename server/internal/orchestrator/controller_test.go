@@ -1195,3 +1195,106 @@ func TestAttemptLogFailureDoesNotAffectStatus(t *testing.T) {
 		t.Errorf("expected an attempt_logs_failed warning")
 	}
 }
+
+// ---- C-5.8 第 4 条：只认实例 retryable（401 / 200-包错误场景）------------
+
+const failedResult401 = `{
+  "schema_version": "1.0",
+  "run_id": "r-1",
+  "task_id": "t-1",
+  "attempt_id": "t-1-a1",
+  "tester": {"name": "endpoint-probe", "version": "1.0.0", "image_ref": "img:1"},
+  "status": "failed",
+  "started_at": "2026-11-05T02:00:00Z",
+  "finished_at": "2026-11-05T02:00:05Z",
+  "metrics": [],
+  "notes": "后端返回 401",
+  "error": {
+    "code": "PRECHECK_FAILED",
+    "message": "认证失败：HTTP 401",
+    "retryable": false,
+    "detail": {"http_status": 401}
+  }
+}`
+
+// retryable=false 的 precheck 失败（401）→ completed_with_errors，而不是 service_unavailable。
+// 码表里有 PRECHECK_FAILED，但**不得**按码抬升（07 §3：终态以实例字段为准）。
+func TestPrecheckRetryableFalseGivesCompletedWithErrors(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	root := t.TempDir()
+	writeAttemptResult(t, root, failedResult401)
+
+	ex := &fakeExec{}
+	c, err := New(Options{
+		Repos: repos, Executor: ex, Validator: &report.Validator{},
+		Config: Config{StorageRoot: root},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit := int32(2)
+	if err := c.JobFinished(context.Background(), ports.JobOutcome{
+		Handle:   ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+		Phase:    executor.PhaseFailed,
+		ExitCode: &exit,
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture()
+
+	task, _ := repos.GetTask(context.Background(), "t-1")
+	if task.Failure == nil || task.Failure.Code != domain.CodePrecheckFailed {
+		t.Fatalf("failure = %+v, want PRECHECK_FAILED", task.Failure)
+	}
+	if task.Failure.Retryable {
+		t.Fatalf("retryable must stay false (Tester said so)")
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunCompletedWithErrors {
+		t.Fatalf("run status = %s, want completed_with_errors for retryable=false (C-5.8 #4)", run.Status)
+	}
+}
+
+// 同一个码、实例 retryable=true → service_unavailable（对照组，防止只改一半）。
+func TestPrecheckRetryableTrueGivesServiceUnavailable(t *testing.T) {
+	status, failure := TerminalRunStatus([]TaskView{
+		{
+			ID: "t-1", TesterRole: domain.RolePreCheck, Status: domain.TaskFailed,
+			Failure: &domain.Failure{Code: domain.CodePrecheckFailed, Retryable: true},
+		},
+	})
+	if status != domain.RunServiceUnavailable {
+		t.Fatalf("status = %s, want service_unavailable", status)
+	}
+	if failure == nil || failure.Code != domain.CodePrecheckFailed {
+		t.Fatalf("failure = %+v", failure)
+	}
+}
+
+// 表驱动覆盖：实例字段决定终态，码表不参与抬升。
+func TestTerminalRunStatusHonoursInstanceRetryable(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+		retr bool
+		want domain.RunStatus
+	}{
+		{"401 precheck", domain.CodePrecheckFailed, false, domain.RunCompletedWithErrors},
+		{"200-with-error precheck", domain.CodePrecheckFailed, false, domain.RunCompletedWithErrors},
+		{"unreachable precheck", domain.CodeEndpointUnreachable, true, domain.RunServiceUnavailable},
+		{"timeout precheck", domain.CodeTaskTimeout, true, domain.RunServiceUnavailable},
+		{"auth failure", domain.CodeUnauthenticated, false, domain.RunCompletedWithErrors},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, _ := TerminalRunStatus([]TaskView{{
+				ID: "t-0", TesterRole: domain.RolePreCheck, Status: domain.TaskFailed,
+				Failure: &domain.Failure{Code: tc.code, Retryable: tc.retr},
+			}})
+			if status != tc.want {
+				t.Fatalf("status = %s, want %s", status, tc.want)
+			}
+		})
+	}
+}
