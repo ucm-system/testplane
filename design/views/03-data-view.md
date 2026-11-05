@@ -410,17 +410,73 @@ SELECT t.id FROM tasks t JOIN runs r ON r.id = t.run_id
 
 ### 4.4 `runs.deploy`
 
-```json
+Genet **没有"部署单"**这个概念：一次部署 = 一次 Helm release，定位符只有 `namespace + release_name`，没有 `request_id` / `job_id`（`<G>/backend/internal/handlers/helm.go:2992-3000` 的 202 响应里只有 `name`）。所以平台主键只有 `deploy_id`，它同时是幂等键的来源；Genet 侧的一切查询与删除都靠 `namespace + release_name`。
+
+```jsonc
 {
+  // ---- 定位与幂等 ----
+  "deploy_id": "d-20261105-0001",           // 平台唯一主键（幂等键由 run_id+deploy_id 派生）
   "provider": "genet",
-  "deployment_id": "d-123",
-  "state": "queued",
-  "queue_position": 12,
-  "queue_reason": "quota",
-  "queued_at": "2026-11-05T01:00:00Z",
-  "parameters_sha": "…"
+  "namespace": "user-alice",                // Genet API Key 绑定，调用方不能指定
+  "release_name": "tp-3f9c1a2b7d40",        // 幂等键；namespace + release_name 才能定位 Genet 资源
+  "package_type": "stack",                  // stack | pd → POST /api/open/helm/uc-packages/{type}/releases
+  "chart": "charts/unified-cache-stack",    // 服务端配置固定，不可选
+  "chart_version": "0.0.1",
+
+  // ---- 冻结的输入（Genet 不做二次渲染，重放必须原样）----
+  "values": "servingEngineSpec:\n  enableEngine: true\n  ...",  // 最终 values.yaml 文本（也可存等价 JSON）
+  "values_digest": "sha256:…",
+  "template_path": "ascend/values-qwq-32b-single.yaml",
+  "image": "registry.dev.huawei.com/…:tag",
+  "model_path": "/mnt/model/Qwen2.5-1.5B-Instruct",
+  "model_name": "Qwen2.5-1.5B",             // 取自 callInfo.model，Pre-Check 公共参数要用
+  "set": [{"name": "servingEngineSpec.containerPort", "value": "23345", "type": "set"}],
+  "no_wait": true,                          // 恒 true，见下
+
+  // ---- 两层状态都留证（Genet 有两根互不相干的轴）----
+  "state": "deploying",                     // queued|accepted|deploying|ready|blocked（平台合成）
+  "genet_release_status": "deployed",       // helm 原值：pending-install|deployed|failed|superseded|…
+  "endpoint_status": "ready",               // callInfo.endpoint.status 原值：pending|ready|blocked
+
+  // ---- 队列：只有水位，没有位次 ----
+  "queue": {"phase": "Inqueue", "pending": 3, "inqueue": 2, "running": 12},
+
+  // ---- Endpoint（ready 后回填；Task 的 endpoint_key 由它算）----
+  "endpoint": {"url": "http://141.111.32.68:23345", "model_name": "Qwen2.5-1.5B",
+               "model_path": "/mnt/model/Qwen2.5-1.5B-Instruct", "protocol": "http"},
+
+  // ---- 时间线 ----
+  "accepted_at": "2026-11-05T01:00:02Z",
+  "queued_at": "2026-11-05T01:03:10Z",
+  "ready_at": null,
+  "last_polled_at": "2026-11-05T01:07:40Z",
+
+  // ---- 失败 / 取消 / 卸载 ----
+  "failure": {"code": "DEPLOY_BLOCKED", "message": "该实例调用入口不可用：…", "retryable": false},
+  "cancel_requested_at": null,
+  "uninstall": {"state": "pending", "verified_at": null, "force": false, "cleanup_errors": []}
 }
 ```
+
+| 字段 | 来源 / 约束 | 为什么必须落库 |
+|---|---|---|
+| `deploy_id` / `provider` | 平台生成；`provider` 恒 `genet` | 唯一的平台主键；幂等键 `run_id + deploy_id` 的输入 |
+| `namespace` / `release_name` | Key 绑定；`release_name` 由 `sha256(run_id:deploy_id)[:12]` 派生，满足 `^[a-z][a-z0-9-]{0,52}$` | 重启后必须还能 `GET` / `DELETE` 同一个 release；Genet 无 request_id 可回溯 |
+| `package_type` / `chart` / `chart_version` | 请求按包类型路由；chart 由 Genet 配置固定，回读后冻结 | 复现"部署了什么"必须能回答是 stack 还是 pd、哪个 chart |
+| `values` / `values_digest` / `template_path` / `image` / `model_path` / `set` | 提交时冻结的最终入参（合并顺序：chart 默认 → 模板/values → image/modelPath → set → overlay，`<G>/backend/internal/handlers/helm.go:2143-2196`） | Genet 侧不接受二次渲染；审计与重放只能靠这份快照，`values_digest` 供比对 |
+| `model_name` | 来自 `callInfo.model` | Pre-Check / Tester 公共参数 `--model_name` 的真实来源 |
+| `no_wait` | 恒 `true` | `helm --wait` 的 `timeoutSec` 只是安装 deadline：排队超过它 release 会被判 `failed`（Pod 仍在排队，`<G>/jenkins/Helm-Start-Service-MB.Jenkinsfile:21-26`）→ 必须 `noWait=true`，就绪改由平台轮询判（C-5.3） |
+| `state` | 平台按 C-5.3 映射表合成 | `queued` 没有 Genet 权威来源，是平台推断，必须留证便于解释"为什么卡住" |
+| `genet_release_status` / `endpoint_status` | helm / callInfo 原值 | 两层轴不一致时（`deployed` 但 `endpoint.pending`）能解释，不必猜 |
+| `queue{phase,pending,inqueue,running}` | `GET /api/open/queue/podgroups` 的 `phase` + `GET /api/open/queue` 的计数 | **没有位次**（Genet 只给计数，`<G>/backend/internal/models/volcano_views.go:13-39`）；UI 只能展示"已等待时长 + 水位"，故 `queue_position` 字段移除 |
+| `endpoint{url,model_name,model_path,protocol}` | `callInfo.endpoint`，禁止自行推导 | `runs.endpoint` 与 Task `endpoint_key` 的唯一来源（§4.3） |
+| `accepted_at` / `queued_at` / `ready_at` / `last_polled_at` | 平台在轮询中写 | 排队时长展示、`deploy_timeout_seconds` 判定、404 宽限期都以时间而非次数为准（C-5.3） |
+| `failure{code,message,retryable}` | 部署终态 blocked 时写 | 部署失败对应用户可读的原因；`error.code ∈ DEPLOY_FAILED / DEPLOY_BLOCKED / DEPLOY_TIMEOUT` |
+| `cancel_requested_at` | 用户取消时先落库 | Genet 的 DELETE 在 release 尚未出现时只回 404（`<G>/backend/internal/handlers/helm.go:2438`），取消意图必须先落库再由对账补偿 |
+| `uninstall{state,verified_at,force,cleanup_errors[]}` | 清理阶段写 | "删了"以 `GET 404 + pods.items == []` 为准（`<G>/jenkins/Helm-Start-Service-MB.Jenkinsfile:3027-3061`），`cleanup_errors` 保留 Genet 返回的失败项；卸载失败**不改 Run 终态**，只记 `CLEANUP_FAILED` |
+
+> `values` 超过 64 KiB 时仍写 JSON（Genet 请求体无已知大小限制，但反向代理可能有，调研 R11），`values_digest` 始终必填。
+> §4.2 的 `runs.resolved.precheck.injected` 判据不受本节影响：`precheck.injected` 表示"平台是否注入了 Pre-Check"，与部署无关。
 
 ### 4.5 `tasks.retry_policy`
 

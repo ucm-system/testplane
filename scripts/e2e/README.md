@@ -168,7 +168,9 @@ precheck:
 
 ```powershell
 # 0) 集群（注意：已有同名集群先删再建；extraMounts 只在建集群时生效）
-.\.tools\kind.exe create cluster --config deploy\kind\testplane.yaml
+#    集群配置是模板，先渲染出本机路径，再建集群（见 deploy/README.md §2）
+pwsh deploy\kind\render.ps1
+.\.tools\kind.exe create cluster --config .data\kind-testplane.yaml
 
 # 1) mock-llm 镜像：本地 build + load（不 push 任何仓库）
 docker build -t testplane/mock-llm:dev tools/mock-llm

@@ -186,10 +186,17 @@ func (s *Store) QueueTasksTransition(ctx context.Context, runID string, onlySeqZ
 		if _, err := s.Runs.Lock(ctx, tx, runID); err != nil {
 			return err
 		}
+		// Pre-Check 放行判据（03-data-view.md §4.2）：
+		// runs.resolved.precheck.injected == true **且** tasks.seq = 0。
+		// 不能用 seq=0 单独判定 —— precheck:"off" 时测试 Task 也从 0 开始，
+		// 会把 seq>0 的 Task 永久卡在 precheck_gate（评审 #14）。
 		rows, err := tx.Query(ctx, `
 			SELECT id FROM tasks
 			 WHERE run_id = $1 AND status = 'pending' AND endpoint_key IS NOT NULL
-			   AND ($2 = false OR seq = 0)
+			   AND ($2 = false OR (seq = 0 AND EXISTS (
+			         SELECT 1 FROM runs r
+			          WHERE r.id = $1
+			            AND COALESCE((r.resolved -> 'precheck' ->> 'injected')::boolean, false))))
 			 ORDER BY seq`, runID, onlySeqZero)
 		if err != nil {
 			return fmt.Errorf("store: queue tasks %s: %w", runID, err)

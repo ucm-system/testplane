@@ -331,55 +331,282 @@ func (v *Validator) Candidates(ctx context.Context, a AttemptRef) ([]ArtifactRec
 control-plane 据此写 `artifacts(attempt_id, path, size_bytes, sha256, kind, mtime, indexed_at)`，`(attempt_id, path)` 唯一。`result.json.artifacts[]` 与磁盘取交集：声明了但没有文件 → warning（`detail.dangling_artifact`），不判失败。
 
 ## 9 Genet 适配
-> **假定 Genet 提供 REST 接口**（`POST /deployments`、`GET /deployments/{id}`、`DELETE /deployments/{id}`）。**具体契约待与 Genet 团队确认**：字段名、状态枚举、鉴权、是否支持幂等头、Endpoint 结构均未定（E-Q1）。字段名集中在 `internal/genet/dto.go`，确认后只改该层。
+
+> **本节已按真实 Genet 后端代码重写**（调研见 `.data/research/genet-lifecycle.md`，下称 `R-G:行`；`<G>` = `.data/genet` 只读克隆）。旧版"假定 Genet 提供 `POST /deployments`、`GET /deployments/{id}`"**已被证伪**：Genet 没有"部署单"，**一次部署 = 一次 Helm release**，定位符只有 `namespace + releaseName`（`<G>/backend/internal/handlers/helm.go:2992-3000` 的 202 响应只有 `name`；全后端没有 `request_id/job_id/release_id`，`R-G:28`）。字段名集中在 `server/internal/genet/dto.go`（骨架见 §9.9），MVP 实现仍是 `internal/genet/mocks`。
+
+### 9.1 事实基线
+
+| 事实 | 对设计的约束 | 证据 |
+|---|---|---|
+| 一次部署 = 一次 Helm release；定位符 `namespace + releaseName` | 平台主键仍是 `deploy_id`，但**对外可定位键是 `(namespace, release_name)`**，必须落库 | `R-G:11`、`R-G:94` |
+| `namespace` 由 **API Key 绑定**，请求体不能指定；Key 未绑定 → 403 | 多租户隔离靠 Key，不靠调用方参数；`runs.deploy.namespace` 记调用时的绑定值 | `<G>/backend/internal/handlers/openapi_helm.go:39-56`；`R-G:75` |
+| `releaseName` 由调用方自造，正则 `^[a-z][a-z0-9-]{0,52}$`，**Genet 不加 namespace 前缀** | 幂等键由我们派生（§9.2）；`openapi.yaml:4175` 的 "adds a namespace prefix" 是过时描述 | `<G>/backend/internal/handlers/helm.go:36`、`:2696-2698`；`R-G:74`、`R-G:417` |
+| 拉起是**异步**的：202 之后后台 goroutine 跑 `helm upgrade --install`，调用方拿不到作业号 | 只能凭自己起的 `releaseName` 轮询；**POST 超时不代表没创建** | `helm.go:2981-2990`；`R-G:70`、`R-G:320` |
+| 排队**不是 Genet 状态**：排队发生在 Volcano/PodGroup 层，Genet 只给水位计数、**没有位次** | `runs.deploy` **不存位次**（§9.8）；`queue_full/gang_pending/insufficient_resources` 从 CRD 读（§11） | `R-G:98-106`、`R-G:294`；`<G>/backend/internal/models/volcano_views.go:13-39` |
+| 鉴权 `Authorization: Bearer <API Key>`（scope `read`/`write`）；无限流、无请求体大小限制（未找到） | 客户端 5s connect / 10s 总超时；`values` 控在 100KB 内并做 digest（R11） | `<G>/backend/internal/auth/apikey.go:37-49`；`R-G:239-249` |
+| `GET /api/open/helm/releases`（列表）会逐 release 富化 `helm get values` + `list pods`，后端注释自认会超时 | 任何列表/对账必须 `light=true` | `helm.go:3345-3384`；`R-G:423` |
+
+### 9.2 拉起（Deploy = Helm release install）
+
+| 项 | 值 |
+|---|---|
+| 方法 / 路径 | `POST /api/open/helm/uc-packages/{stack\|pd}/releases`（按包类型路由） |
+| 必填 | 仅 `releaseName`；`values` / `templatePath` / `templateId` 三选一 |
+| 可选 | `image`、`modelPath`（必须 `/mnt/model` 前缀）、`set[]{name,value,type}`、`noWait` |
+| 响应 | **202** + `{name, requestedName, namespace, packageType, chart, chartVersion, status:"pending-install"}` |
+| 同名再 POST | **400**（`...already has protected metadata; install cannot replace an existing release`），不是幂等成功 |
+| 并发 install 同 release | 409 `protected Helm operation is in progress` |
+| chart / version | **不可指定**，由 Genet 配置 `helm.ucPackages.{stack\|pd}` 固定 |
+| 证据 | `R-G:23-27`、`R-G:86-89`、`R-G:258`；`<G>/backend/internal/handlers/helm.go:2906-3001` |
+
+**`noWait=true` 是硬要求。** `timeoutSec` 是 helm `--wait` 的 deadline（出厂 600s），排队超过它 release 会被判 `failed` 而 Pod 还在排队（`R-G:194-196`、`R-G:299`）。平台**恒传 `noWait=true`**，就绪改由平台轮询判（C-5.3）；若传 `timeoutSec`，它只能当后台 goroutine 上限，不能当排队窗口。
+
+**values 合并顺序（"部署模板"的全部含义）**：chart 默认 values → `templateId`/`templatePath`/`values`（三选一）→ `image`/`modelPath` 覆盖 → `set` 覆盖 → chart 内 `values-genet.yaml` overlay（调度字段）→ 再覆盖一次 image/modelPath（`helm.go:2143-2196`，`R-G:76`）。平台**不做 Helm 渲染**，只把这六项原样透传并冻结（§9.8）。
+
+**幂等键**：`release_name = "tp-" + hex(sha256(run_id + ":" + deploy_id))[:12]`；同 run 同 deploy 恒等、不同 deploy 必不同，满足 `^[a-z][a-z0-9-]{0,52}$`（`R-G:319`）。调用顺序固定：
+
+1. `GET /releases/{name}` → 200：直接进入 Poll（重启/重试场景）；
+2. 404：`POST`（`noWait=true`）；**先落库 `release_name` 再 POST**（POST 超时可能已 apply，`R-G:320`）；
+3. POST 返回 400 且文案含 `already has protected metadata` → 视为已存在，回到 1；
+4. POST 403（访问时间窗 / 无可用节点 / Key 未绑 namespace）或 424（chart 仓库未配置）→ `blocked` + 原文进 `failure.message`；网络/5xx/鉴权失败 → 平台侧错误，Run `failed`（C-5.3）。
+
+### 9.3 状态合成（Poll）
+
+Genet 的就绪判定是**两根互不相干的轴**（`R-G:121-143`）：
+
+- 轴 1 `release.status`（helm 原值）：`pending-install|pending-upgrade|pending-rollback` / `deployed` / `failed` / `uninstalling|uninstalled` / `superseded`；
+- 轴 2 `callInfo.endpoint.status`：`pending`（无可用地址）/ `ready`（**地址已解析**，不代表能推理）/ `blocked`（入口不可用，终态）。
+
+**合成规则**（每次 Poll 按序判定，命中即返回；`Phase` 只用 `ports.DeployState` 的五值 `queued|accepted|deploying|ready|blocked`）：
+
+| # | Genet 观测 | `DeployState.Phase` | 平台动作 |
+|---|---|---|---|
+| 1 | `GET` 404，且 `now - accepted_at < 180s` 宽限 | `accepted` | 记 `state_detail="release not yet visible"`；继续轮询 |
+| 2 | `GET` 404，超过宽限 | `blocked` | Run → `service_unavailable`；`failure.message` 带 404 原文 |
+| 3 | `status` 以 `pending-` 开头，且 `pods[]` 为空或全部 `nodeName == ""` | `queued` | `reason` 取 `/api/open/queue/podgroups` 的 `phase` + 最新 condition（**无位次**）；队列查询失败不判 Run 失败 |
+| 4 | `status` 以 `pending-` 开头，Pod 已调度（`nodeName != ""`）或已有 `ready=false` 的 Pod | `deploying` | 记 `pods[]` 快照；开始发现 Deploy 日志 Pod（§7.2） |
+| 5 | `endpoint.status == "ready"` 且 `url` 非空 | `ready` | 写 `runs.endpoint`（URL **只取 Genet 返回值**）；**随后仍要跑 Pre-Check 才放行 Task**（§9.4） |
+| 6 | `endpoint.status == "blocked"` | `blocked` | 终态；`failure.message = endpoint.message`（自由文本，无错误码） |
+| 7 | `status ∈ {failed, superseded, uninstalling, uninstalled}` | `blocked` | 终态；`failure.message = release.description` + `operation-history?status=failed` 的 `message`（异步 install 的 helm stderr 只在这里） |
+| 8 | `status == "deployed"` 但 `endpoint.status == "pending"` | `deploying` | **不可当 ready**：`noWait` 下 `deployed` 早于地址出现（`R-G:289`） |
+| 9 | 超 `deploy_timeout_seconds` 仍非终态 | `blocked` | Run → `service_unavailable`（不是 `failed`，§7.5） |
+
+**映射时的一致性约束：**
+
+- `failed` 必须折叠成 `blocked`：**平台没有 Deploy `failed` 子态**（`ports` 五值 + C-5.3），部署失败一律由 Run 的 `error` 表达（`R-G:297`）；只有"平台调不通 Genet"（网络/5xx/鉴权/请求构造）才判 Run `failed`（C-5.3 表）。
+- Poll 里看到 `uninstalling/uninstalled`，说明有人（对账/上一次的清理）正在卸载同一 release → `blocked` + `failure.message="release is being uninstalled"`，**不要**再发起 install。
+- 状态合成是**启发式**：`accepted`/`deploying` 的分界靠"Pod 是否被调度"这一代理判据，Genet 没有"受理"事件（`R-G:295`）。这一条要写进 UI 文案与排障手册（§9.10 R3）。
+- 404 宽限用**时间窗**（`accepted_at + 180s`，现网 36×5s 的经验值，`R-G:328`），不要用"连续 N 次"——退避后次数与时间不再线性。
+
+### 9.4 ready ≠ 可用：ready 之后必须过 Pre-Check
+
+`endpoint.status=ready` **只代表地址解析完成**：优先级 router → 有 hostIP 的 master Pod → ClusterIP Service（`<G>/backend/internal/handlers/helm.go:855-928`；`<G>/docs/HELM_RELEASE_CALL_ENDPOINT.md:44`）。Pod Ready 只体现在展示字段 `external[].ready` / `pods[].ready`，**不参与** endpoint 决策（`R-G:181`）。PD/router 分离时"router 先可达、model server 后注册"是常态（`R-G:411`）。
+
+因此平台**不得**把 `deploy ready` 当作"可以跑测试"，放行判据仍是 C-4.5 的 Pre-Check 门控：`ready` → Run `deploying → testing` → 只把 `seq=0`（`resolved.precheck.injected=true` 的 Task）入队 → Pre-Check 通过后才放行其余 Task。这也是 D-32 与 R1 在实现上的唯一正确落点：**等待就绪**（平台轮询）与**确认可用**（Tester 探活）是两件事，后者必须在 Tester 里做（`R-G:435` 的现网做法：`GET /v1/models` 诊断 + `POST /v1/chat/completions` 轮询）。
+
+### 9.5 轮询与退避
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| 单飞 | 每 release 一个 poller | `Poll` 幂等但**不得并发**：Genet 后端是 helm CLI 子进程，重复打会拖垮（`R-G:249`、`R-G:325`） |
+| 节奏 | 前 30s 每 1s；之后 5s 起指数退避，上限 15s | 与 `control-plane §C-5.3` 一致；单请求 **10s** 超时 |
+| 队列查询 | 每 5 次 Poll 一次（≈75s 量级） | `/api/open/queue/podgroups` 失败**不判 Run 失败**，只影响 `reason` 展示（`R-G:327`） |
+| 总窗口 | `deploy_timeout_seconds` 默认 72h（K-6） | 排队计入窗口；取消不受此限制 |
+| 列表接口 | 必须 `light=true` | 否则每个 release 触发 `helm get values` + `list pods`（`R-G:423`） |
+| 请求超时建议 | connect 5s / 总 10s（Poll）；卸载 360s（force 后 120s） | `R-G:247` |
+
+### 9.6 取消
+
+Genet **没有 cancel 端点**，唯一手段是 `DELETE /releases/{name}`（本质是卸载，`R-G:198`）。两个竞态必须处理：
+
+1. **release 还没出现**（异步 install 尚未落 release）：DELETE 只会 404 → "取消"不能靠一次 DELETE 就算完成；
+2. **install 在飞**：DELETE 可能 409/500（metadata 操作 token 被占，`R-G:199`）。
+
+因此取消流程固定为：**先落取消意图（`runs.deploy.cancel_requested_at`），再（可失败地）发起 DELETE，由对账循环持续补偿**：
+
+| 步骤 | 动作 | 失败语义 |
+|---|---|---|
+| 1 | 写 `cancel_requested_at`（事务内，随 Run → `cancelling`） | 写库失败 = 取消失败，直接返回错误 |
+| 2 | 事务外 `DELETE ?keepHistory=false&force=true` | 404 = release 未出现或已删：**保留意图**，等第 3 步 |
+| 3 | 对账循环（每 60s）看到 `cancel_requested_at != null` 且 Run 仍 `cancelling` → 重试第 2 步 | 连续失败只记 `CLEANUP_FAILED`；Run 2 分钟兜底后仍进 `canceled`（C-6.1 第 4 条），**不悬挂** |
+| 4 | 确认"删干净"（§9.7） | 未确认干净只记事件，不改 Run 终态（§6） |
+
+### 9.7 卸载与"删干净"
+
+| 项 | 事实 |
+|---|---|
+| 接口 | `DELETE /api/open/helm/releases/{name}?keepHistory=<bool>&force=<bool>`，同步阻塞 |
+| 超时 | 常规 **10 分钟**；`force=true` **2 分钟** |
+| 响应 | `{message, forcedPods[], secretsDeleted, cleanupErrors[]}` |
+| 404 | release 不存在（先验 owner metadata）→ 视为"已删" |
+| 前置 | 会校验当前 revision 的 manifest/hooks digest；`status` 仍 `pending-*` 时应先等其脱离（否则 409/500） |
+| 证据 | `R-G:205-221`、`R-G:333-335`；`<G>/backend/internal/handlers/helm.go:3930-4131` |
+
+**"删干净"的唯一可信判据（两个条件同时满足）**：`GET /releases/{name}` 返回 404（或 `status ∈ {uninstalled, uninstalling, ""}`）**且** `GET /releases/{name}/pods` 的 `items == []`（且该请求本身成功）。**不能**用 DELETE 的 200 当成功（`R-G:218-221`）；`pods` 查询失败 ≠ pods 为空（R9）。
+
+清理顺序（对齐现网 `CLEANUP_VERIFY_TIMEOUT_SEC=300`）：常规 DELETE → 5 分钟未确认 → `force=true` 重试 → 再确认 2 分钟 → 仍不干净记 `CLEANUP_FAILED` + 告警，**不改 Run 终态**（§6、`control-plane §C-5.7`）。`cleanup.policy=never` 不调用卸载。
+
+### 9.8 落库字段（`runs.deploy`）
+
+字段的**完整形状与逐字段理由以 [`views/03-data-view.md §4.4`](../views/03-data-view.md) 为唯一权威**（已按本节结论改完）。本节只列适配层必须写入/读取的键，避免两处漂移：
+
+| 分组 | 键 | 写入时机 |
+|---|---|---|
+| 定位与幂等 | `deploy_id`、`provider`、`namespace`、`release_name` | Start 前（先落库再 POST） |
+| 包与版本 | `package_type`、`chart`、`chart_version` | 首次 Poll 回读后冻结 |
+| 冻结输入 | `values`、`values_digest`、`template_path`、`image`、`model_path`、`model_name`、`set[]`、`no_wait`（恒 `true`） | Start 前 |
+| 两层状态 | `state`（平台五值）、`genet_release_status`、`endpoint_status` | 每次 Poll |
+| 队列 | `queue{phase,pending,inqueue,running}`（**无位次**） | 队列接口取到时 |
+| Endpoint | `endpoint{url,model_name,model_path,protocol}` | `ready` 时回填；`endpoint_key` 由它算（C-8.5） |
+| 时间线 | `accepted_at`、`queued_at`、`ready_at`、`last_polled_at` | 各阶段首次进入时 |
+| 失败 / 取消 / 卸载 | `failure{code,message,retryable}`、`cancel_requested_at`、`uninstall{state,verified_at,force,cleanup_errors[]}` | 终态 / 取消 / 清理阶段 |
+
+> **与 03 §4.4 的对齐结论（截至本节重写时）**：键名一致，无冲突。唯一需要注意的差异是 **`queue_position` 已被移除**（§4.4 明确"没有位次"），`ports.DeployState` 同样没有该字段；`DeployState.Reason` 只装 `phase` 与 PodGroup 阻塞原文（展示用），**不是位次**。
+
+### 9.9 代码骨架（`internal/genet/dto.go`）
+
+接口形状保留，语义按真实接口补。`Genet` 是**外部 API 客户端**；`ports.Deployer` 是编排层看到的三个方法，映射见本节表。
 
 ```go
+// Genet 是 Genet OpenAPI 的最小客户端（execution §9）。
 type Genet interface {
-	Deploy(ctx context.Context, req DeployRequest) (DeployReceipt, error) // 幂等键 = run_id
-	Status(ctx context.Context, deployID string) (DeployStatus, error)
-	Uninstall(ctx context.Context, deployID string) error
+	// Install 发起一次 Helm release 安装（noWait=true）。幂等键 = releaseName（§9.2）。
+	// 返回 202 的精简响应；同名已存在时返回 ErrReleaseExists。
+	Install(ctx context.Context, req ReleaseInstall) (ReleaseReceipt, error)
+	// GetRelease 是主轮询：status + callInfo.endpoint + pods（§9.3）。
+	GetRelease(ctx context.Context, namespace, releaseName string) (ReleaseStatus, error)
+	// ListPods 只取 Pod 列表（日志跟随与拓扑快照；release 已删后仍可查，返回空）。
+	ListPods(ctx context.Context, namespace, releaseName string) ([]PodRef, error)
+	// Uninstall 同步卸载（10min；force 2min）。“删干净”另由 GetRelease + ListPods 判定（§9.7）。
+	Uninstall(ctx context.Context, req UninstallRequest) (UninstallResult, error)
+	// QueueSnapshot 是队列水位（只有计数，没有位次）；best-effort，失败不判 Run 失败（§9.5）。
+	QueueSnapshot(ctx context.Context) (QueueSnapshot, error)
 }
-type DeployRequest struct {
-	RunID      string            `json:"run_id"`
-	Parameters map[string]any    `json:"parameters"` // Manifest 的 deploy.parameters 原样透传
-	Labels     map[string]string `json:"labels"`
+
+type ReleaseInstall struct {
+	ReleaseName  string     `json:"releaseName"`              // 必填，^[a-z][a-z0-9-]{0,52}$
+	PackageType  string     `json:"-"`                        // stack | pd → 路径里的 {type}
+	Values       string     `json:"values,omitempty"`         // 最终 values.yaml 文本
+	TemplatePath string     `json:"templatePath,omitempty"`   // chart 内 models/*.yaml
+	Image        string     `json:"image,omitempty"`
+	ModelPath    string     `json:"modelPath,omitempty"`      // 必须 /mnt/model 前缀
+	Set          []SetValue `json:"set,omitempty"`
+	NoWait       bool       `json:"noWait"`                   // 恒 true（§9.2）
 }
-type DeployReceipt struct{ DeployID, State string } // queued | accepted | deploying | ready | blocked
-type DeployStatus struct {
-	DeployID, State, Reason string
-	QueuePosition           int   // 排队位次，Genet 提供时填
-	QueueReason             string
-	Endpoint                *Endpoint
-	UpdatedAt               time.Time
+
+type SetValue struct{ Name, Value, Type string }
+
+type ReleaseReceipt struct {
+	ReleaseName   string
+	Namespace     string
+	PackageType   string
+	Chart         string
+	ChartVersion  string
+	ReleaseStatus string // 202 响应体里恒 "pending-install"
 }
-type Endpoint struct {
-	ID, URL, ModelName, ModelPath, Protocol, Namespace string // URL 是 OpenAI 兼容 base URL
-	PodSelector map[string]string
-	Pods        []PodRef // 拓扑快照，可为空
+
+type ReleaseStatus struct {
+	ReleaseName    string
+	Namespace      string
+	PackageType    string
+	Chart          string
+	ChartVersion   string
+	ReleaseStatus  string       // helm 原值：pending-install|deployed|failed|superseded|uninstalling|uninstalled
+	Description    string       // helm 原文（失败取证）
+	Revision       int
+	Endpoint       EndpointInfo // callInfo.endpoint，权威接入点
+	EndpointStatus string       // pending|ready|blocked（callInfo.endpoint.status 原值）
+	Pods           []PodRef
+	Model          string // callInfo.model → runs.deploy.model_name
+	UpdatedAt      time.Time
 }
-type PodRef struct{ Name, Role, NodeName string; Ready bool } // Role: router|prefill|decode|server
+
+type EndpointInfo struct {
+	Status  string // pending|ready|blocked
+	Source  string // external|router|service
+	URL     string // OpenAI 兼容 base URL；平台原样使用，不解析、不改写
+	Host    string
+	Port    int
+	Message string // blocked 时的自由文本原因
+}
+
+type PodRef struct {
+	Name          string
+	Phase         string
+	DisplayStatus string
+	NodeName      string
+	PodIP         string
+	HostIP        string
+	Image         string
+	Ready         bool
+}
+
+type UninstallRequest struct {
+	Namespace   string
+	ReleaseName string
+	KeepHistory bool
+	Force       bool
+}
+
+type UninstallResult struct {
+	Message        string
+	ForcedPods     []string
+	SecretsDeleted int
+	CleanupErrors  []string
+}
+
+type QueueSnapshot struct {
+	QueueName string
+	Phase     string // PodGroup phase：Pending|Inqueue|Running|Unknown|Completed
+	Pending   int
+	Inqueue   int
+	Running   int
+	Reason    string // PodGroup conditions 最新一条的 message/reason（原文）
+	// 没有 QueuePosition：Genet 只给水位计数（R-G:106）；位次留给 Volcano CRD（§11）
+}
 ```
 
-| Genet 观测 | Run 阶段 | 平台动作 |
+**与 `ports.Deployer` 的映射**（适配层 `internal/genet/dto.go` + 客户端；MVP 用 `internal/genet/mocks`）：
+
+| `ports.Deployer` | Genet 落点 | 必须补齐的语义 |
 |---|---|---|
-| 调用失败（连接错误 / 5xx / 4xx 非 409） | `FAILED` | 平台侧问题；不自动重试部署（除非 `retry_on` 显式允许） |
-| `queued`（Genet 排队） | `DEPLOYING` | 记排队位次/原因，写 `deploy.state_changed`，展示已等待时长；**不按短超时判失败**（K-6） |
-| 受理（`accepted`/`deploying`） | `DEPLOYING` | 记 `deploy_id`，起状态轮询与日志采集发现 |
-| `ready` + Endpoint | `TESTING` | control-plane 投影 `url`/`model_name`/`model_path`；落 `pods.json`；开始 Deploy 日志采集 |
-| `blocked` | `SERVICE_UNAVAILABLE` | 终态 + 后端原因；不进入任何 Task，不下发 Endpoint（§9.1） |
-| 受理后超 `deploy_timeout_seconds` 仍未 ready | `SERVICE_UNAVAILABLE` | **不是** `FAILED`——服务没起来，不是平台调不通（§7.5） |
-| 卸载失败 | 不改 Run 终态 | `CLEANUP_FAILED` + 告警 |
+| `Start(ctx, DeployRequest{RunID, DeployID, Manifest, Timeout})` | `GET /releases/{name}` → `POST /uc-packages/{type}/releases` | 由 `DeployID` 派生确定性 `release_name`；先 GET 再 POST；把 `values/packageType/templatePath/image/modelPath/set` 从 `Manifest` 解出并冻结（§9.2） |
+| `Poll(ctx, runID)` | `GET /releases/{name}`（+ 低频 `/queue/podgroups`） | 按 §9.3 合成 `Phase`；维护 `pods` 快照、`endpoint`、`reason`、`last_polled_at`、404 宽限 |
+| `Cancel(ctx, runID)` | `DELETE /releases/{name}?keepHistory=false&force=true` | 404 视为"还没出现"→ 保留取消意图等对账补偿；409/500 退避重试（§9.6） |
 
-| 参数 | 默认 |
-|---|---|
-| 内部去重（部署） | `run_id` 作为内部幂等键（不是对外接口幂等）；对方不支持则"先 GET 再 POST" + 本地持久化 `deploy_id` |
-| 轮询 | 前 30s 每 1s，之后 5s 起指数退避、上限 15s；单请求 10s 超时 |
-| 总窗口 | `deploy_timeout_seconds` 默认 **72h（3 天）**，平台配置、Profile 可覆盖（IMPLEMENTATION K-6）；**ARCHITECTURE 未定义该字段**（E-Q1），不写进 Manifest；排队时长计入窗口，但取消不受此限制 |
-| 多 Pod | Endpoint 的 `URL` **只取 Genet 返回值**（§9.1 的权威来源）；`Pods[]`/`PodSelector` 只用于 `pods.json`、日志分页与展示，平台**不按角色推导主 URL**、不自行判定就绪。Endpoint 缺失或 Genet 报 `blocked` 时按 Genet 状态处理 |
-| Pod 发现 | 以 `PodSelector` 实时 LIST 为准，`Pods[]` 只作首帧快照与交叉校验；不一致记 `topology_drift` |
-| 卸载 | 幂等（404 视为成功）；`cleanup.policy=never` 不调用 |
+不需要的能力（与 §1 的边界一致）：Helm 渲染、chart 选择、拓扑判断、Endpoint 自行推导——`URL` 只取 Genet 返回值（§9.3 #5）。
 
-**Fake Genet：** `internal/genet/fake` 纯内存实现，脚本化场景 `accepted→deploying→ready`（可延时）/ `blocked` / `500` / `slow`（永不 ready）/ `multi-pod`（router+prefill+decode）；`httptest.Server` 提供同一套场景验证序列化与错误处理，也供 kind 内作 stub。同一场景分别跑 fake 与 httptest，断言状态序列一致。
+### 9.10 未确认与风险
+
+> 以下均来自调研（`R-G:407-425`）的原始结论，未削弱。
+
+| # | 风险 | 对平台的影响 | 应对 |
+|---|---|---|---|
+| R1 | **`ready` 不等于可服务**（`endpoint.status` 只看地址是否解析出来，`helm.go:855-928`） | 不额外探活就会把 404/5xx 派给 Tester，表现为"测试全挂" | 保留 Pre-Check 门控；Tester 侧要有 warmup 重试预算（§9.4） |
+| R2 | **无排队位次**（只有 `running/pending/inqueue` 计数，`volcano_views.go:13-39`） | `queue_position` 只能为 null；UI 承诺"第 N 位"做不出来 | `runs.deploy` 不存位次；UI 展示"已等待时长 + 水位"（§9.8） |
+| R3 | **`queued`/`accepted`/`deploying` 靠推断**（Genet 无受理事件、无队列状态） | 状态机可能"卡在 accepted"或"跳过 deploying" | 文档/UI 标注启发式；排障手册写明代理判据（§9.3 末） |
+| R4 | **每日 23:00 Genet GC 可能挂起长驻服务**：`cleanup/lifecycle.go:119-334` 扫 `user-*` namespace 的单副本 Deployment/StatefulSet 与无主 Pod，**代码里未见对 Helm release 的豁免**（该文件 `grep helm` 无命中） | 长测跨夜后服务可能消失 | **必须实测**：建一个 release 跨 23:00 观察；必要时让 Genet 侧加 `genet.io/protected-until`（`lifecycle.go:41-52`） |
+| R5 | **取消只在 DELETE 一条路上**（release 未出现时 404、install 在飞时 409/500） | 只发一次 DELETE 就认为取消成功 → 留下长驻 release | 先落取消意图 + 对账补偿（§9.6） |
+| R6 | **共享池限制在 `/open/helm` 路由上是否生效存疑**：`openapi_helm.go:17` 注释称由 `auth.RequireNonSharedPool` 完成，但 `main.go:691-738` 的路由**未挂**该中间件 | 鉴权模型与注释不一致 | 不据此设计鉴权；以"Key 的 namespace/pool 绑定 + 访问时间窗"为准，向 Genet 团队确认 |
+| R7 | **`releaseName` 无命名空间前缀**（与 `openapi.yaml:4175` 描述矛盾） | 同名 release 在不同 namespace 可共存 | `namespace + release_name` 一起当定位键（§9.1） |
+| R8 | **Helm release 的 Service 靠命名约定**（`-router-service`/`-pod0-service`/`-engine-service`/`-ray-head-svc`） | 换 chart 版本若改名，`endpoint` 会退化成 `pending` 或选错 Service | 平台只被动接受 Genet 返回值，禁止自行推导 |
+| R9 | **"已删干净"依赖两次查询的时序**（GET 404 + pods 为空；pods 查询失败 ≠ 空） | 误报清理成功 → 长驻 release 泄漏 | 区分"查询失败"与"为空"（§9.7） |
+| R10 | **Genet 没有"服务租期"概念** | Run 结束后不删就永久占卡 | 清理兜底：`cleanup.policy` 三值 + 对账补偿 + `CLEANUP_FAILED` 告警 |
+| R11 | **请求体大小/限流未知**（无 `MaxBytesReader`、无限流中间件） | 大 values（含证书）可能撞反向代理限制 | `values` 控在 100KB 内 + `values_digest` 校验 |
+| R12 | **`GET /releases` 富化开销大** | 列表/对账拖垮后端 | 一律 `light=true` |
+| R13 | **文档与实现漂移**（`docs/HELM_RELEASE_CALL_ENDPOINT.md` 未提 `noWait`/`release.status`/400-409-424 语义） | 按文档实现会错 | **以代码为准**；本节结论全部带源码行号 |
+| R14 | **Genet 同时是"个人 Pod 平台"与"服务托管平台"，但服务保障很弱**（无 SLA、无租期、无健康检查、GC 可能挂起） | 不能当"服务编排器"用 | 平台自己承担生命周期收敛与清理兜底 |
+
+### 9.11 被证伪的旧假设（回写清单）
+
+| 旧假设（本节重写前） | 现状 | 处置 |
+|---|---|---|
+| `POST /deployments`、`GET /deployments/{id}` | 不存在；拉起/查询/卸载都在 `/api/open/helm/...`（§9.2/§9.3/§9.7） | 本节重写；`internal/genet/dto.go` 按 §9.9 重建 |
+| `DeployRequest.parameters` 原样透传 | Genet 只认 `values/templatePath/image/modelPath/set`，`parameters` 会被 400 | `Manifest.deploy` 的 schema 必须含这几项；`parameters` 只在平台内部展开 |
+| 幂等键 = `run_id` | Genet 无幂等头、无 request_id；重复 POST 同名 → **400** | 幂等键 = `release_name`（`sha256(run_id:deploy_id)[:12]`）+ 先 GET 再 POST |
+| Genet 提供 `queue_position` | 只有水位计数，没有位次 | 删掉位次承诺；`runs.deploy.queue{phase,pending,inqueue,running}` |
+| 部署有 `blocked` / `failed` 两态 | 平台 Deploy 子态只有五值，`failed` 折叠成 `blocked` | Run 终态由 `error` 表达（C-5.3） |
+| "受理后超窗 → `service_unavailable`" 已足够 | 还要处理 `endpoint.status=ready` 但服务不可用 | Pre-Check 门控是必需路径（§9.4） |
 
 ## 10 Tester Registry
 | 项 | 默认 |
@@ -449,7 +676,7 @@ Pod / Node 走 `v1` 原生资源（Pod 资源请求与 conditions、节点 `allo
 ## 13 未决问题
 | 编号 | 问题 | 默认建议（未确认前按此实现） |
 |---|---|---|
-| **E-Q1** | Genet REST 契约未定：路径、字段、状态枚举、鉴权、幂等头支持、部署超时字段（ARCHITECTURE 无此字段） | 全收敛在 `genet/dto.go` + 运行配置；总窗口默认 **72h**（K-6），不进 Manifest；确认后只改 DTO 与映射 |
+| **E-Q1** | ~~Genet REST 契约未定~~ **已关闭**：真实接口是 Helm release 语义（`POST /api/open/helm/uc-packages/{stack\|pd}/releases`、`GET/DELETE /api/open/helm/releases/{name}`），无部署单、无 request_id、无位次，详见 §9 与 `.data/research/genet-lifecycle.md` | 契约收敛在 `internal/genet/dto.go`（§9.9）；幂等键 = `release_name`；`noWait=true`；总窗口默认 **72h**（K-6）不进 Manifest；残留未确认项见 §9.10 |
 | **E-Q2** | Pod 级失败原因与错误码枚举不足：`OOMKilled`/`Evicted`/`Preempted`/节点 NotReady 无专门码 | 归 `INTERNAL_ERROR` + `detail.k8s_reason` 保留原文，不自动重试；下版附录 D 增 `CONTAINER_OOM_KILLED`、`POD_EVICTED`（可重试）、`NODE_LOST` |
 | **E-Q3** | 镜像拉取 secret 来源：附录 B 无 `imagePullSecrets` | 由 Execution Profile 的 `image_pull_secrets` 提供（Profile 是平台对象，不动 Job Spec 契约）；为空则不渲染 |
 | **E-Q4** | 日志明文的安全接受 | **已拍板（K-5）**：平台不读 Secret、不做脱敏；Tester 不得主动打印凭据的契约保留，残余风险由团队接受 |

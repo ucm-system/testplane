@@ -61,7 +61,10 @@ type TaskView struct {
 	Name            string
 	TesterName      string
 	TesterVersion   string
-	TesterRole      string // test | pre_check
+	TesterRole      string // test | pre_check（仅展示/审计用，**不是**门控判据）
+	// IsPrecheck 是唯一的门控与终态判据：runs.resolved.precheck.injected == true 且 seq == 0
+	// （03-data-view.md §4.2）。由 adapter 用一条 JOIN 填好，编排层只读它。
+	IsPrecheck      bool
 	Image           string
 	Entry           string
 	Args            []string

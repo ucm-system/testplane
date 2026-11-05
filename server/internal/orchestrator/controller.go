@@ -23,6 +23,8 @@ const (
 	DefaultDeployInterval    = time.Second
 	DefaultWatchdogInterval  = 10 * time.Second
 	DefaultReconcileInterval = 60 * time.Second
+	// DefaultGCInterval 是 Job/Pod 回收周期（execution §6.3：每 10 分钟）。
+	DefaultGCInterval = 10 * time.Minute
 	DefaultMaxCandidates     = 50
 	DefaultTaskTimeout       = 4 * time.Hour
 	DefaultDeployTimeout     = 72 * time.Hour
@@ -53,6 +55,10 @@ type Config struct {
 	DeployInterval    time.Duration
 	WatchdogInterval  time.Duration
 	ReconcileInterval time.Duration
+	// GCInterval 是 Job/裸 Pod 回收周期（默认 10min，execution §6.3）。
+	GCInterval time.Duration
+	// JobGCEnabled 关闭回收（nil = 读 TESTPLANE_JOB_GC_ENABLED，默认 true）。
+	JobGCEnabled *bool
 	// MaxCandidates 是单轮候选上限（C-4.2 LIMIT 50）。
 	MaxCandidates int
 }
@@ -82,6 +88,9 @@ func (c Config) withDefaults() Config {
 	if c.ReconcileInterval <= 0 {
 		// 漏配会让 time.NewTicker panic（非正周期），这里兜住并回落到默认 60s（C-3.5）。
 		c.ReconcileInterval = DefaultReconcileInterval
+	}
+	if c.GCInterval <= 0 {
+		c.GCInterval = DefaultGCInterval
 	}
 	if c.MaxCandidates <= 0 {
 		c.MaxCandidates = DefaultMaxCandidates
@@ -124,6 +133,8 @@ type Controller struct {
 	deployer  ports.Deployer
 	validator ports.ResultValidator
 	prober    JobProber
+	// jobGC 是 Job/裸 Pod 回收开关（TESTPLANE_JOB_GC_ENABLED，默认 true）。
+	jobGC     bool
 	cfg       Config
 	logf      func(format string, args ...any)
 
@@ -157,6 +168,14 @@ func New(opts Options) (*Controller, error) {
 		logf("orchestrator: WARN reconcile disabled: Repos adapter lacks ReconcileRepos (ListActiveTasks/AttemptByTask/DeleteLeaseByTask/ListStaleLeases); stale endpoint_leases will not be reclaimed")
 	}
 	recon, _ := opts.Repos.(ReconcileRepos)
+	// 回收开关：显式配置优先，其次环境变量，默认开启（TESTPLANE_JOB_GC_ENABLED）。
+	jobGC := true
+	if v, ok := os.LookupEnv("TESTPLANE_JOB_GC_ENABLED"); ok {
+		jobGC = !(v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "no"))
+	}
+	if opts.Config.JobGCEnabled != nil {
+		jobGC = *opts.Config.JobGCEnabled
+	}
 	return &Controller{
 		repos:     opts.Repos,
 		recon:     recon,
@@ -164,6 +183,7 @@ func New(opts Options) (*Controller, error) {
 		deployer:  opts.Deployer,
 		validator: opts.Validator,
 		prober:    prober,
+		jobGC:     jobGC,
 		cfg:       opts.Config.withDefaults(),
 		logf:      logf,
 		watches:   make(map[string]context.CancelFunc),
@@ -391,8 +411,59 @@ func (c *Controller) finishReconciledAttempt(ctx context.Context, task TaskView,
 		}
 	}
 	c.logf("orchestrator: reconciled attempt %s (job %s) -> %s", attempt.AttemptID, attempt.Job(), phase)
-	c.captureLogsAsync(attempt)
+	c.finalizeAttemptAsync(attempt)
 	return c.recon.DeleteLeaseByTask(ctx, task.ID)
+}
+
+// JobGC 是可选的回收能力（*executor.Executor 满足）。
+// 单独成接口：无 K8s 的执行器实现（测试用 fake）可以没有它，回收自然跳过。
+type JobGC interface {
+	CollectGarbage(ctx context.Context, attemptState func(ctx context.Context, jobName string) (found, terminal bool, err error)) (executor.GCReport, error)
+}
+
+// GCOnce 回收"已结束但没人删"的 Job 与孤儿 Pod（execution §6.3）。
+//
+// 判据：
+//   - Job 已终态 + DB 无对应 Attempt → 删（孤儿）；
+//   - Job 已终态 + Attempt 已终态（对应 Task 终态）→ 删；
+//   - Job 还在跑 → 不动。
+func (c *Controller) GCOnce(ctx context.Context) error {
+	if !c.jobGC {
+		return nil
+	}
+	gc, ok := c.exec.(JobGC)
+	if !ok {
+		return nil
+	}
+	report, err := gc.CollectGarbage(ctx, c.attemptStateByJobName)
+	if err != nil {
+		return err
+	}
+	if report.DeletedJobs > 0 || report.DeletedPods > 0 || len(report.Errors) > 0 {
+		c.logf("orchestrator: job gc: deleted_jobs=%d deleted_pods=%d kept=%d errors=%v",
+			report.DeletedJobs, report.DeletedPods, report.KeptJobs, report.Errors)
+	}
+	return nil
+}
+
+// attemptStateByJobName 把 K8s Job 名映射成"库里有没有对应 Attempt、它是否已终态"。
+// 用 Task 状态判定 Attempt 是否终态：不变量保证"Task 终态 ⇒ 其 Attempt 已终态"。
+func (c *Controller) attemptStateByJobName(ctx context.Context, jobName string) (found, terminal bool, err error) {
+	ref, err := c.repos.AttemptByJobName(ctx, jobName)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return false, false, nil // DB 没有对应 Attempt：孤儿 Job
+		}
+		return false, false, err
+	}
+	task, err := c.repos.GetTask(ctx, ref.TaskID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return true, true, nil
+		}
+		return false, false, err
+	}
+	return true, task.Status.IsTerminal(), nil
 }
 
 // DispatchOnce 是一轮调度（C-4.1）：取候选 → 取 permit → 建 Job → 起观测。
@@ -611,7 +682,7 @@ func (c *Controller) JobFinished(ctx context.Context, o ports.JobOutcome) error 
 		c.logf("orchestrator: run %s reached terminal state", attempt.RunID)
 	}
 	// Attempt 收口后把 Pod 日志落盘（best effort，失败只 WARN）。
-	c.captureLogsAsync(attempt)
+	c.finalizeAttemptAsync(attempt)
 	_ = task
 	return nil
 }
@@ -733,21 +804,26 @@ const (
 // WaitLogCapture 等所有后台日志落盘结束（测试与优雅关闭用，不参与主循环）。
 func (c *Controller) WaitLogCapture() { c.logWG.Wait() }
 
-// captureLogsAsync 在 Attempt 收口后异步拉取 Pod 日志并落盘（best effort）。
-// 用 context.WithoutCancel：状态推进已经完成，这里不应因为请求 ctx 结束而丢日志。
-func (c *Controller) captureLogsAsync(attempt AttemptRef) {
-	if c.cfg.StorageRoot == "" {
-		return
-	}
+// finalizeAttemptAsync 在 Attempt 终态**落库之后**做两件收尾（execution §5.1 的顺序）：
+//  1. 把 Pod 日志落盘（必须在删 Job 之前，否则日志跟着 Pod 一起没了）；
+//  2. Background 删除 Job（§6：正常结束 → 删 Job；Pod 由 Job controller 级联回收）。
+//
+// 全程 best effort：失败只 WARN，绝不改状态（多留一个 Job 比丢一份结论便宜）。
+func (c *Controller) finalizeAttemptAsync(attempt AttemptRef) {
+	h := ports.JobHandle{Namespace: c.cfg.Namespace, JobName: attempt.Job()}
 	c.logWG.Add(1)
 	go func() {
 		defer c.logWG.Done()
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), attemptLogTimeout)
 		defer cancel()
-		if err := c.writeAttemptLogs(ctx, attempt); err != nil {
-			// 写失败只 WARN，不影响状态（execution §7 的"允许丢日志，不允许伪造连续"）。
-			c.logf("orchestrator: WARN attempt_logs_failed: attempt %s: %v", attempt.AttemptID, err)
-			return
+		if c.cfg.StorageRoot != "" {
+			if err := c.writeAttemptLogs(ctx, attempt); err != nil {
+				// 写失败只 WARN（execution §7 的"允许丢日志，不允许伪造连续"）。
+				c.logf("orchestrator: WARN attempt_logs_failed: attempt %s: %v", attempt.AttemptID, err)
+			}
+		}
+		if err := c.exec.Delete(ctx, h, ports.DeleteBackground); err != nil {
+			c.logf("orchestrator: WARN job_delete_failed: attempt %s job %s: %v", attempt.AttemptID, h.JobName, err)
 		}
 	}()
 }
@@ -921,13 +997,9 @@ func (c *Controller) queueAfterTesting(ctx context.Context, runID string) error 
 	if err != nil {
 		return err
 	}
-	hasPrecheck := false
-	for _, t := range tasks {
-		if t.TesterRole == domain.RolePreCheck {
-			hasPrecheck = true
-			break
-		}
-	}
+	// 判据唯一：IsPrecheck（resolved.precheck.injected=true 且 seq=0），
+	// 不看 tester.yaml 的 role（03-data-view §4.2）。
+	hasPrecheck := HasPrecheck(tasks)
 	_, err = c.repos.QueueTasks(ctx, runID, hasPrecheck)
 	return err
 }

@@ -70,8 +70,8 @@ subjects:
     name: testplane
     namespace: testplane
 ---
-# 集群级**只读**：看板节点状态 + Volcano 队列/PodGroup/Job（E-11）。
-# Volcano 未安装时这些 resource 只是"查不到"，不影响授权本身。
+# 集群级**只读**：看板节点状态（`insufficient_resources` 判定的数据源）。
+# Volcano 相关权限单独拆到下面的 testplane-volcano-view —— 见 design/views/06 §2.1。
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -82,9 +82,6 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["scheduling.volcano.sh"]
-    resources: ["queues", "podgroups", "jobs"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -98,6 +95,44 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: testplane-view
+subjects:
+  - kind: ServiceAccount
+    name: testplane
+    namespace: testplane
+---
+# Volcano 队列快照（E-11、design/views/06 §2.1）：`queues` 与 `podgroups` 都是
+# **cluster-scoped**，上面的 namespace 级 Role 绑不到，所以必须 ClusterRole。
+#
+# 只给 get/list，**不给 watch**：实现是"轮询 + 15s TTL + 单飞"，不用 informer；
+# 给 watch 等于允许无限长连接，只扩大权限面（而且看板量级 < 50 队列，watch 没有收益）。
+# 不授 `queues/status` / `podgroups/status` 的写权限：读 status 随主资源 get/list 一起返回，
+# 不需要额外的 subresource 规则。也**不授 secrets、不授 pods/exec**（06 §4.4）。
+#
+# Volcano 未安装时不报错：ClusterRole 只声明 apiGroups/resources，**不做 discovery**，
+# 集群里没有这些 CRD 也能 apply。真无权限时是 List 阶段 IsForbidden → 降级 rbac_forbidden。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: testplane-volcano-view
+  labels:
+    app.kubernetes.io/name: testplane
+    app.kubernetes.io/part-of: testplane
+rules:
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["queues", "podgroups"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: testplane-volcano-view
+  labels:
+    app.kubernetes.io/name: testplane
+    app.kubernetes.io/part-of: testplane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: testplane-volcano-view
 subjects:
   - kind: ServiceAccount
     name: testplane

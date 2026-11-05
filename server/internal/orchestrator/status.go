@@ -41,7 +41,7 @@ func TerminalRunStatus(tasks []TaskView) (domain.RunStatus, *domain.Failure) {
 	}
 	// 第 4 条：只看 Pre-Check 的失败，且只认实例级 retryable。
 	for _, t := range tasks {
-		if t.TesterRole != domain.RolePreCheck || t.Status != domain.TaskFailed {
+		if !t.IsPrecheck || t.Status != domain.TaskFailed {
 			continue
 		}
 		if t.Failure == nil {
@@ -56,10 +56,15 @@ func TerminalRunStatus(tasks []TaskView) (domain.RunStatus, *domain.Failure) {
 	return domain.RunCompletedWithErrors, failure
 }
 
-// HasPrecheck 报告该 Run 是否包含 Pre-Check Task。
+// HasPrecheck 报告该 Run 是否注入了 Pre-Check Task。
+//
+// 判据唯一：`runs.resolved.precheck.injected = true` 且 `seq = 0`
+// （03-data-view.md §4.2），由 adapter 投影成 TaskView.IsPrecheck。
+// **不能**用 tester.yaml 的 `role: pre_check`：显式写在 tests[] 里的 pre_check Tester
+// 是普通 Task，而 `precheck: off` 时即使 Tester 是 pre_check 也不该门控。
 func HasPrecheck(tasks []TaskView) bool {
 	for _, t := range tasks {
-		if t.TesterRole == domain.RolePreCheck {
+		if t.IsPrecheck {
 			return true
 		}
 	}

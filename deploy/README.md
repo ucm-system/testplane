@@ -48,9 +48,16 @@ Invoke-WebRequest -Uri 'https://kind.sigs.k8s.io/dl/v0.29.0/kind-windows-amd64' 
 
 ## 2 建集群 `testplane`
 
+**两步：先渲染，再建。** `deploy/kind/testplane.yaml` 是**模板**（含 `__STORAGE_HOST_PATH__` 占位符），
+渲染产物 `.data\kind-testplane.yaml` 才给 kind 用——这样换台机器/换盘只需一个参数，不用改仓库文件。
+
 ```powershell
-New-Item -ItemType Directory -Force -Path .data\storage | Out-Null
-& .\.tools\kind.exe create cluster --config deploy\kind\testplane.yaml --wait 180s
+# 渲染：默认宿主存储路径 = <仓库根>\.data\storage，产物 .data\kind-testplane.yaml
+pwsh deploy\kind\render.ps1
+# 换到别的盘/目录（不存在会自动创建）：
+# pwsh deploy\kind\render.ps1 -StoragePath D:\data\tp-storage
+
+& .\.tools\kind.exe create cluster --config .data\kind-testplane.yaml --wait 180s
 kubectl --context kind-testplane get nodes
 ```
 
@@ -61,12 +68,13 @@ NAME                      STATUS   ROLES           AGE   VERSION
 testplane-control-plane   Ready    control-plane   ...   v1.33.1
 ```
 
-关键点（配置写在 [`deploy/kind/testplane.yaml`](kind/testplane.yaml)）：
+关键点（模板在 [`deploy/kind/testplane.yaml`](kind/testplane.yaml)，渲染脚本 [`deploy/kind/render.ps1`](kind/render.ps1)）：
 
 - 集群名 `testplane`，1 个 control-plane 就够。
-- `extraMounts` 把宿主 `D:\Project\TestPalne\.data\storage` 挂成节点里的 `/storage-root`。
-  这就是 dev 的「RWX 存储」（见第 4 步）。
-- **`extraMounts` 只在建集群时生效**。改了 yaml 要 `kind delete cluster --name testplane` 再建。
+- `extraMounts` 把**渲染进去的宿主目录**挂成节点里的 `/storage-root`（默认 `.data\storage`）。
+  这就是 dev 的「RWX 存储」（见第 4 步）。`render.ps1` 负责：建目录、把 `\` 换成 `/`（Docker Desktop 只认正斜杠）、
+  含空格/引号的路径直接报错（kind 的 `-v` 不支持）。
+- **`extraMounts` 只在建集群时生效**。改模板或换路径后必须 `kind delete cluster --name testplane` 再建。
 - 想验证挂载真的通了：
 
   ```powershell
@@ -329,7 +337,8 @@ deploy/
 ├── README.md                    # 本文件
 ├── .env.example                 # 环境变量样例（deploy/.env 被 .gitignore 忽略）
 ├── kind/
-│   └── testplane.yaml           # kind 集群定义（含 extraMounts → /storage-root）
+│   ├── testplane.yaml           # kind 集群**模板**（含 __STORAGE_HOST_PATH__ 占位符）
+│   └── render.ps1               # 渲染模板 → .data\kind-testplane.yaml（宿主路径参数化）
 ├── k8s/                         # 基础设施层（不含控制面）
 │   ├── kustomization.yaml       #   kubectl apply -k deploy/k8s
 │   ├── namespace.yaml           #   Namespace + PSA restricted

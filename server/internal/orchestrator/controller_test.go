@@ -25,13 +25,33 @@ import (
 
 // fakeExec 记录 Submit 并允许测试直接驱动终态回调。
 type fakeExec struct {
-	mu        sync.Mutex
+	mu         sync.Mutex
 	logContent string
 	logErr     error
-	submitted []ports.JobSpec
-	handles   []ports.JobHandle
-	canceled  []ports.JobHandle
-	submitErr error
+	submitted  []ports.JobSpec
+	handles    []ports.JobHandle
+	canceled   []ports.JobHandle
+	deleted    []ports.JobHandle
+	deleteErr  error
+	submitErr  error
+}
+
+// Delete 记录正常结束后的回收调用（execution §6）。
+func (f *fakeExec) Delete(ctx context.Context, h ports.JobHandle, policy ports.DeletePolicy) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deleted = append(f.deleted, h)
+	return nil
+}
+
+// deleteCount 返回 Delete 的调用次数（测试断言"正常结束后 Job 被删"）。
+func (f *fakeExec) deleteCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.deleted)
 }
 
 func (f *fakeExec) Submit(ctx context.Context, spec ports.JobSpec) (ports.JobHandle, error) {
@@ -153,7 +173,7 @@ func TestPrecheckGateBlocksOtherTasksThenReleases(t *testing.T) {
 	seedRunTesting(repos, "r-1",
 		TaskView{
 			ID: "t-0", Seq: 0, Name: "precheck", TesterName: "endpoint-probe", TesterVersion: "1.0.0",
-			TesterRole: domain.RolePreCheck, Image: "registry/probe:1.0.0", Entry: "/tester/run.sh",
+			TesterRole: domain.RolePreCheck, IsPrecheck: true, Image: "registry/probe:1.0.0", Entry: "/tester/run.sh",
 			OnFailure: domain.OnFailureAbortRun, Status: domain.TaskQueued,
 			EndpointKey: "http://ep:8000", Exclusive: true, TimeoutSeconds: 900,
 		},
@@ -337,7 +357,7 @@ func TestPrecheckFailureAbortsRunAsServiceUnavailable(t *testing.T) {
 	seedRunTesting(repos, "r-1",
 		TaskView{
 			ID: "t-0", Seq: 0, Name: "precheck", TesterName: "endpoint-probe", TesterVersion: "1.0.0",
-			TesterRole: domain.RolePreCheck, Image: "i:1", Entry: "/tester/run.sh",
+			TesterRole: domain.RolePreCheck, IsPrecheck: true, Image: "i:1", Entry: "/tester/run.sh",
 			OnFailure: domain.OnFailureAbortRun, Status: domain.TaskQueued,
 			EndpointKey: "http://ep:8000", Exclusive: true, TimeoutSeconds: 900,
 		},
@@ -367,7 +387,7 @@ func TestPrecheckFailureAbortsRunAsServiceUnavailable(t *testing.T) {
 	exec2 := &fakeExec{}
 	seedRunTesting(repos2, "r-2", TaskView{
 		ID: "t-0", Seq: 0, Name: "precheck", TesterName: "endpoint-probe", TesterVersion: "1.0.0",
-		TesterRole: domain.RolePreCheck, Image: "i:1", Entry: "/tester/run.sh",
+		TesterRole: domain.RolePreCheck, IsPrecheck: true, Image: "i:1", Entry: "/tester/run.sh",
 		OnFailure: domain.OnFailureAbortRun, Status: domain.TaskQueued,
 		EndpointKey: "http://ep:8000", Exclusive: true, TimeoutSeconds: 900,
 	})
@@ -396,7 +416,7 @@ func TestDeployMockBringsRunToTesting(t *testing.T) {
 	})
 	repos.SeedTask(TaskView{
 		ID: "t-0", RunID: "r-1", Seq: 0, Name: "precheck", TesterName: "endpoint-probe",
-		TesterVersion: "1.0.0", TesterRole: domain.RolePreCheck, Image: "i:1", Entry: "/tester/run.sh",
+		TesterVersion: "1.0.0", TesterRole: domain.RolePreCheck, IsPrecheck: true, Image: "i:1", Entry: "/tester/run.sh",
 		OnFailure: domain.OnFailureAbortRun, Status: domain.TaskPending, Exclusive: true, TimeoutSeconds: 900,
 	})
 	repos.SeedTask(TaskView{
@@ -527,7 +547,7 @@ func TestFullHappyPathFinishesRun(t *testing.T) {
 	seedRunTesting(repos, "r-1",
 		TaskView{
 			ID: "t-0", Seq: 0, Name: "precheck", TesterName: "endpoint-probe", TesterVersion: "1.0.0",
-			TesterRole: domain.RolePreCheck, Image: "i:1", Entry: "/tester/run.sh",
+			TesterRole: domain.RolePreCheck, IsPrecheck: true, Image: "i:1", Entry: "/tester/run.sh",
 			OnFailure: domain.OnFailureAbortRun, Status: domain.TaskQueued,
 			EndpointKey: "http://ep:8000", Exclusive: true, TimeoutSeconds: 900,
 		},
@@ -601,7 +621,7 @@ func seedReconcileFixture(repos *MemoryRepos, runID, taskID, endpointKey string)
 	}
 	repos.SeedActiveTask(TaskView{
 		ID: taskID, RunID: runID, Seq: 0, Name: "precheck",
-		TesterName: "endpoint-probe", TesterVersion: "1.0.0", TesterRole: domain.RolePreCheck,
+		TesterName: "endpoint-probe", TesterVersion: "1.0.0", TesterRole: domain.RolePreCheck, IsPrecheck: true,
 		Image: "i:1", Entry: "/tester/run.sh", OnFailure: domain.OnFailureAbortRun,
 		Status: domain.TaskRunning, EndpointKey: endpointKey, Exclusive: true, TimeoutSeconds: 900,
 	}, ref, endpointKey, time.Now())
@@ -1260,7 +1280,7 @@ func TestPrecheckRetryableFalseGivesCompletedWithErrors(t *testing.T) {
 func TestPrecheckRetryableTrueGivesServiceUnavailable(t *testing.T) {
 	status, failure := TerminalRunStatus([]TaskView{
 		{
-			ID: "t-1", TesterRole: domain.RolePreCheck, Status: domain.TaskFailed,
+			ID: "t-1", TesterRole: domain.RolePreCheck, IsPrecheck: true, Status: domain.TaskFailed,
 			Failure: &domain.Failure{Code: domain.CodePrecheckFailed, Retryable: true},
 		},
 	})
@@ -1289,7 +1309,7 @@ func TestTerminalRunStatusHonoursInstanceRetryable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			status, _ := TerminalRunStatus([]TaskView{{
-				ID: "t-0", TesterRole: domain.RolePreCheck, Status: domain.TaskFailed,
+				ID: "t-0", TesterRole: domain.RolePreCheck, IsPrecheck: true, Status: domain.TaskFailed,
 				Failure: &domain.Failure{Code: tc.code, Retryable: tc.retr},
 			}})
 			if status != tc.want {
@@ -1308,7 +1328,7 @@ func TestCancelQueuedRunFinishesCanceled(t *testing.T) {
 	seedRunTesting(repos, "r-1",
 		TaskView{
 			ID: "t-0", Seq: 0, Name: "precheck", TesterName: "probe", TesterVersion: "1.0.0",
-			TesterRole: domain.RolePreCheck, Image: "i:1", Entry: "/tester/run.sh",
+			TesterRole: domain.RolePreCheck, IsPrecheck: true, Image: "i:1", Entry: "/tester/run.sh",
 			OnFailure: domain.OnFailureAbortRun, Status: domain.TaskQueued,
 			EndpointKey: "http://ep:8000", Exclusive: true, TimeoutSeconds: 900,
 		},
@@ -1382,7 +1402,7 @@ func TestReconcileFinishesStuckCancellingRun(t *testing.T) {
 	repos := NewMemoryRepos()
 	repos.SeedRun(RunView{ID: "r-legacy", Status: domain.RunCancelling, SubmittedAt: time.Now()})
 	repos.SeedTask(TaskView{
-		ID: "t-0", RunID: "r-legacy", Seq: 0, Name: "precheck", TesterRole: domain.RolePreCheck,
+		ID: "t-0", RunID: "r-legacy", Seq: 0, Name: "precheck", TesterRole: domain.RolePreCheck, IsPrecheck: true,
 		Status: domain.TaskSkipped, StatusReason: domain.SkipUpstreamAbort,
 	})
 	repos.SeedTask(TaskView{
@@ -1455,5 +1475,188 @@ func TestCancelTaskWithoutActiveAttemptFinishesCanceled(t *testing.T) {
 	}
 	if task.CancelRequested {
 		t.Fatalf("cancel_requested must not be left behind")
+	}
+}
+
+// ---- #15：正常结束后回收 Job + 孤儿 GC -----------------------------------
+
+// 成功终态落库后，Job 必须被 Delete(Background) 掉（且日志先落盘）。
+func TestFinishedAttemptDeletesJob(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase string
+	}{
+		{"succeeded", executor.PhaseSucceeded},
+		{"failed", executor.PhaseFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repos := NewMemoryRepos()
+			ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+			exec := &fakeExec{}
+			c, err := New(Options{Repos: repos, Executor: exec, Config: Config{StorageRoot: t.TempDir()}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			exit := int32(0)
+			if tc.phase == executor.PhaseFailed {
+				exit = 1
+			}
+			if err := c.JobFinished(context.Background(), ports.JobOutcome{
+				Handle:   ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+				Phase:    tc.phase,
+				ExitCode: &exit,
+			}); err != nil {
+				t.Fatalf("JobFinished: %v", err)
+			}
+			c.WaitLogCapture()
+			if got := exec.deleteCount(); got != 1 {
+				t.Fatalf("Delete calls = %d, want 1 (normal completion must reclaim the Job)", got)
+			}
+			exec.mu.Lock()
+			defer exec.mu.Unlock()
+			if exec.deleted[0].JobName != ref.JobName {
+				t.Errorf("deleted job = %q, want %q", exec.deleted[0].JobName, ref.JobName)
+			}
+		})
+	}
+}
+
+// Delete 失败只 WARN，不改状态。
+func TestDeleteFailureDoesNotAffectStatus(t *testing.T) {
+	repos := NewMemoryRepos()
+	ref := seedReconcileFixture(repos, "r-1", "t-1", "http://ep:8000")
+	exec := &fakeExec{deleteErr: errors.New("apiserver down")}
+	var warned bool
+	c, err := New(Options{
+		Repos: repos, Executor: exec, Config: Config{StorageRoot: t.TempDir()},
+		Logf: func(format string, args ...any) {
+			if strings.Contains(format, "job_delete_failed") {
+				warned = true
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.JobFinished(context.Background(), ports.JobOutcome{
+		Handle: ports.JobHandle{Namespace: "testplane", JobName: ref.JobName},
+		Phase:  executor.PhaseSucceeded,
+	}); err != nil {
+		t.Fatalf("JobFinished: %v", err)
+	}
+	c.WaitLogCapture()
+	task, _ := repos.GetTask(context.Background(), "t-1")
+	if task.Status != domain.TaskSucceeded {
+		t.Fatalf("task status = %s, delete failure must not change it", task.Status)
+	}
+	if !warned {
+		t.Errorf("expected a job_delete_failed warning")
+	}
+}
+
+// GC 开关：JobGCEnabled=false 时一次都不扫。
+func TestGCOnceDisabledByConfig(t *testing.T) {
+	off := false
+	c, err := New(Options{
+		Repos: NewMemoryRepos(), Executor: &fakeExec{},
+		Config: Config{JobGCEnabled: &off},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.jobGC {
+		t.Fatalf("jobGC must be off")
+	}
+	if err := c.GCOnce(context.Background()); err != nil {
+		t.Fatalf("GCOnce: %v", err)
+	}
+}
+
+// GC 默认开启，且默认周期 10min（execution §6.3）。
+func TestGCDefaults(t *testing.T) {
+	c, err := New(Options{Repos: NewMemoryRepos(), Executor: &fakeExec{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.jobGC {
+		t.Errorf("job GC must be enabled by default")
+	}
+	if got := c.Config().GCInterval; got != DefaultGCInterval {
+		t.Errorf("GCInterval = %v, want %v", got, DefaultGCInterval)
+	}
+}
+
+// ---- #14：Pre-Check 判据只用 IsPrecheck（resolved.precheck.injected && seq==0）----
+
+// precheck: off 时门控不生效：所有 Task 直接放行。
+func TestQueueAfterTestingWithoutPrecheckQueuesAll(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{ID: "r-1", Status: domain.RunTesting})
+	repos.SeedTask(TaskView{ID: "t-0", RunID: "r-1", Seq: 0, Name: "a", TesterRole: domain.RoleTest,
+		Status: domain.TaskPending, EndpointKey: "http://ep:8000"})
+	repos.SeedTask(TaskView{ID: "t-1", RunID: "r-1", Seq: 1, Name: "b", TesterRole: domain.RoleTest,
+		Status: domain.TaskPending, EndpointKey: "http://ep:8000"})
+	c := newTestController(t, repos, &fakeExec{}, Config{}, nil, nil)
+
+	if err := c.queueAfterTesting(context.Background(), "r-1"); err != nil {
+		t.Fatalf("queueAfterTesting: %v", err)
+	}
+	for _, id := range []string{"t-0", "t-1"} {
+		task, _ := repos.GetTask(context.Background(), id)
+		if task.Status != domain.TaskQueued {
+			t.Errorf("%s status = %s, want queued (precheck off ⇒ no gate)", id, task.Status)
+		}
+	}
+}
+
+// 显式在 tests[] 里写了 role: pre_check 但没有注入 precheck → 仍然不是门控。
+func TestQueueAfterTestingIgnoresTesterRole(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{ID: "r-1", Status: domain.RunTesting})
+	repos.SeedTask(TaskView{ID: "t-0", RunID: "r-1", Seq: 0, Name: "explicit",
+		TesterRole: domain.RolePreCheck, IsPrecheck: false, // 没注入
+		Status: domain.TaskPending, EndpointKey: "http://ep:8000"})
+	repos.SeedTask(TaskView{ID: "t-1", RunID: "r-1", Seq: 1, Name: "b", TesterRole: domain.RoleTest,
+		Status: domain.TaskPending, EndpointKey: "http://ep:8000"})
+	c := newTestController(t, repos, &fakeExec{}, Config{}, nil, nil)
+	if err := c.queueAfterTesting(context.Background(), "r-1"); err != nil {
+		t.Fatal(err)
+	}
+	task, _ := repos.GetTask(context.Background(), "t-1")
+	if task.Status != domain.TaskQueued {
+		t.Fatalf("t-1 = %s, want queued (no injected precheck ⇒ no gate)", task.Status)
+	}
+}
+
+// injected=true 且有 seq=0：只放 seq=0，其余保持 pending（等门控）。
+func TestQueueAfterTestingWithInjectedPrecheckQueuesOnlySeqZero(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{ID: "r-1", Status: domain.RunTesting})
+	repos.SeedTask(TaskView{ID: "t-0", RunID: "r-1", Seq: 0, Name: "precheck",
+		TesterRole: domain.RolePreCheck, IsPrecheck: true,
+		Status: domain.TaskPending, EndpointKey: "http://ep:8000"})
+	repos.SeedTask(TaskView{ID: "t-1", RunID: "r-1", Seq: 1, Name: "load", TesterRole: domain.RoleTest,
+		Status: domain.TaskPending, EndpointKey: "http://ep:8000"})
+	c := newTestController(t, repos, &fakeExec{}, Config{}, nil, nil)
+	if err := c.queueAfterTesting(context.Background(), "r-1"); err != nil {
+		t.Fatal(err)
+	}
+	t0, _ := repos.GetTask(context.Background(), "t-0")
+	if t0.Status != domain.TaskQueued {
+		t.Errorf("precheck = %s, want queued", t0.Status)
+	}
+	t1, _ := repos.GetTask(context.Background(), "t-1")
+	if t1.Status != domain.TaskPending {
+		t.Errorf("t-1 = %s, want pending (gated by injected precheck)", t1.Status)
+	}
+}
+
+// HasPrecheck 只看 IsPrecheck。
+func TestHasPrecheckUsesIsPrecheck(t *testing.T) {
+	if HasPrecheck([]TaskView{{TesterRole: domain.RolePreCheck}}) {
+		t.Errorf("tester.yaml role must not be the criterion")
+	}
+	if !HasPrecheck([]TaskView{{IsPrecheck: true}}) {
+		t.Errorf("IsPrecheck=true must be detected")
 	}
 }

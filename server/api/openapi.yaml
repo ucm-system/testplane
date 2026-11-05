@@ -2080,17 +2080,26 @@ components:
           example: genet
         deployment_id:
           type: [string, 'null']
-          description: 部署方返回的部署 ID（内部幂等键 = `run_id`）
+          description: |
+            部署定位符。**真实 Genet 下没有部署单 ID**：一次部署 = 一次 Helm release，
+            定位靠 `namespace + release_name`（D-44，见 `impl/execution.md §9`）。
+            MVP 的 mock 仍返回一个占位 ID；换成真实 Genet 后该字段语义变为 `release_name`，
+            完整字段集（`release_name`/`package_type`/`chart`/`values_digest`/`uninstall`…）见
+            `03-data-view.md §4.4`，随真实适配一起进契约。
           example: d-123
         state:
           $ref: '#/components/schemas/DeployState'
         queue_position:
           type: [integer, 'null']
-          description: 排队位次（部署方提供时）
-          example: 12
+          description: |
+            **恒为 null，保留字段只为向后兼容**（D-46）：排队发生在 Volcano 层，Genet 只给
+            「pending/inqueue/running」水位计数，**没有位次**。前端不得展示「第 N 位」，
+            改为展示 `queue_reason` + `queued_at`（已等待时长）。多集群/队列水位见
+            `GET /api/v1/queue-status` 的 `volcano` 块。
+          example: null
         queue_reason:
           type: [string, 'null']
-          description: 排队/阻塞原因（给人看）
+          description: 排队/阻塞原因（给人看；来源是 PodGroup 的 `phase` 或 `conditions[-1].reason/message` 原文，不做翻译）
           example: quota
         queued_at:
           $ref: '#/components/schemas/NullDateTime'

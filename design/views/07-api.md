@@ -35,6 +35,12 @@
 
 无匿名端点（`/healthz`、`/metrics` 除外，按部署要求限制）。
 
+**与 Genet 的边界（D-48，2026-11-05 调研结论）**：Genet 只有两类身份——浏览器侧的企业 OAuth 会话 Cookie，与机器侧的 `Authorization: Bearer <Open API Key>`（打 `/api/open/*`，key 绑定唯一 namespace）。它**没有** client-credentials / PAT，其 OIDC Provider 默认 `enabled:false` 且只有两个硬编码 client。因此：
+
+- **TestPlane 的 Web 用户**复用团队统一身份源，TestPlane 自建 OIDC client 与 `tp_session` / CSRF（上表形态不变），**不复用 Genet 会话、不把 Genet 当 IdP**；
+- **TestPlane → Genet 的机器调用**（部署/轮询/卸载）用 `TESTPLANE_GENET_API_KEY`（Bearer，存 Secret），**不**使用 Tester/Job 的身份，也不进日志；
+- Genet 的 API Key 与 namespace 1:1（同 namespace 同时只允许一个活跃写 key），因此一个 TestPlane 实例需要**独占一组 namespace 或独占一把 key**，这一点必须在部署文档里写明。
+
 ### 2.2 角色
 
 | 角色 | 能力 |
@@ -244,6 +250,8 @@ X-Log-Coverage: 2026-11-05T01:00:00Z/2026-11-05T01:32:10Z
 | `GET` | `/secrets` | Secret 名称与说明（operator） |
 | `GET` | `/queue-status` | 平台槽位 + Volcano 等待原因 |
 | `GET` | `/meta` | `{version, api_version, features}` |
+
+**`/queue-status` 的语义（D-49）**：`slots` 是平台自身的槽位（endpoint 独占 / 全局并发）；`waiting` 是平台侧排队（按 `waiting_reason` 六值分组）；`volcano` 是**集群调度器视角**的队列快照，直接读 CRD，**不经 Genet**。三者必须分开展示，不能相加成"一个排队数"。`volcano.available=false` 时 `detail` 取四态之一（`crd_missing`/`rbac_forbidden`/`scheduler_unavailable`/`disabled`），且 **不可达不等于 0 排队**；多集群时 `queues[].name` 用 `"<cluster>/<queue>"`。`volcano.queues[].pending_jobs` 是该队列下 `phase=Pending` 的 PodGroup 计数（不是 `queue.status.pending`），`longest_wait_seconds` 取 `now - min(podgroup.creationTimestamp)`（phase ∈ Pending/Inqueue）。
 
 ### 5.4 Admin
 

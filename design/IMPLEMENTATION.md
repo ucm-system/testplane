@@ -413,7 +413,7 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | REST + SSE（25 operations） | ✅ `/api/v1` 全量；SSE 断点续传 + `events/history` | `server/internal/api`、`server/api/openapi.yaml` |
 | 调度（门控 / 独占 / 全局并发 / 公平性） | ✅ 门控与两类并发上限、`waiting_reason` 六值；公平性仅"按提交时间" | `server/internal/orchestrator` |
 | K8s Job 执行器 | ✅ 真集群跑通（渲染/提交/观测/取消/日志/digest） | `server/internal/executor` |
-| Deploy 阶段（Genet） | 🟡 **mock**：`queued→deploying→ready/blocked`，不发真实 Genet 请求 | `server/internal/genet/mocks` |
+| Deploy 阶段（Genet） | 🟡 **mock**；**适配设计已按 Genet 真实实现定稿**（Helm release 为部署单元、`noWait=true`、ready≠可用、位次不可得，见 D-44～D-48 与 `impl/execution.md §9`），实现待 P1 | `server/internal/genet/mocks` |
 | Tester 注册（自发现） | ✅ 启动扫描 + 周期重扫 + 15 条校验 + 版本钉死 + orphan | `server/internal/registry` |
 | 报告与产物 | ✅ `report.json` / `report.md` / `events.jsonl` / 产物索引，终态后异步写 | `server/internal/report` |
 | Web UI | ✅ 6 路由（概览/列表/详情/提交/Tester/集群），SSE 实时 | `web/` |
@@ -449,6 +449,8 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 7 | 未采用 `oapi-codegen` / `sqlc` 生成物，handler 与 DTO 手写 | 05 §5.2 的"重生成 diff 为空"门禁暂不适用；P1 再引入 |
 | 8 | `task_counts` 为 MVP 新增的 Run 投影字段 | 已写入 `server/api/openapi.yaml`；`03/07` 待回写 |
 | 9 | 架构表实为 **11 张**（文档曾按 12 表述） | 以 `03-data-view.md §3.2` 实际 DDL 为准 |
+| 10 | Pre-Check 判别曾有 4 处实现，其中门控（`orchestrator/controller.go`）、放行 SQL（`store/control.go`）、终态判定（`orchestrator/status.go`）误用 `TesterRole` / 单看 `seq=0` | 唯一判据 = `runs.resolved->'precheck'->>'injected' = true` **且** `tasks.seq = 0`（`03-data-view.md §4.2`）；`endpoint-probe` 本身 `role=pre_check`，用户可在 `precheck:"off"` 下把它当普通测试提交，故角色不可作判据。评审 #14 已修：`store.PrecheckTaskIDs`/`PrecheckFlags` + `orchestrator.TaskView.IsPrecheck` |
+| 11 | Job/Pod 正常结束后**没有回收路径**（只有取消才删 Job），也没有孤儿 GC goroutine；评审时集群已积压 53 个已终态 Job | 已按 `execution.md §6` 补齐（PR #14/#15）：`ports.Executor` 增 `Delete(ctx, h, DeletePolicy)`（`Background`/`Foreground`，404 幂等），Attempt 终态**落库之后**异步 `Delete(Background)`；新增 GC 循环（`Config.GCInterval` 默认 10min，`TESTPLANE_JOB_GC_ENABLED` 默认 true）回收"Job 已终态且 Attempt 已终态/无对应 Attempt"的 Job 与孤儿 Pod |
 
 ### 15.4 P1 优先项（按投入产出排序）
 

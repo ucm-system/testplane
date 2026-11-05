@@ -102,7 +102,22 @@ type Executor interface {
 	Cancel(ctx context.Context, h JobHandle) error
 	// Logs 返回 Tester 的 stdout/stderr 流（明文，不做脱敏，K-5）。
 	Logs(ctx context.Context, h JobHandle) (io.ReadCloser, error)
+	// Delete 删除 Job（Pod 由 Job controller 级联删除）：正常结束后的回收与孤儿 GC
+	// （execution §6）。调用方必须保证"Attempt 终态已落库"（§5.1 的顺序）；404 视为成功。
+	Delete(ctx context.Context, h JobHandle, policy DeletePolicy) error
 }
+
+// DeletePolicy 是 Job 删除的级联策略（对应 K8s propagationPolicy）。
+type DeletePolicy string
+
+const (
+	// DeleteBackground 让 Job controller 异步回收 Pod：正常结束后的清理用它
+	// （此时不再需要 Pod 的实时状态，execution §6 的正常结束路径）。
+	DeleteBackground DeletePolicy = "Background"
+	// DeleteForeground 等 Pod 真正消失再返回：取消/超时收口用它，
+	// 避免容器进程继续写 NFS（§5.2）。
+	DeleteForeground DeletePolicy = "Foreground"
+)
 
 // ---- Deploy 阶段（MVP mock）------------------------------------------------
 

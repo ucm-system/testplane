@@ -62,8 +62,16 @@ spec:
           type: RuntimeDefault
       containers:
         - name: testplaned
-          # 本地 dev 镜像：kind load docker-image testplane-server:dev 灌进来的
-          # 生产用 registry.internal/testplane/testplaned:<git-sha>@sha256:<digest>（W-8）
+          # ⚠️ 这里用可变标签 `:dev` **只是为了本地 kind**（kind load docker-image 灌进去）。
+          # **生产必须钉 digest**：`image: registry.internal/testplane/testplaned@sha256:<64 位>`
+          # 或至少 `:git-<short-sha>`——`:dev`/`:latest` 这类可变标签会让"回滚到底跑了哪份代码"
+          # 无从回答（W-8：tag 与 digest 二选一，release 环境强制 digest）。
+          # 换 digest 的两种做法：
+          #   1) 改本文件；
+          #   2) 不改清单，直接打补丁验收：
+          #      kubectl -n testplane set image deploy/testplaned \
+          #        testplaned=registry.internal/testplane/testplaned@sha256:<digest>
+          # 用 digest 时记得把 imagePullPolicy 设成 IfNotPresent（digest 不可变，Always 只是多余拉取）。
           image: testplane-server:dev
           imagePullPolicy: IfNotPresent
           args: ["--role=all"]

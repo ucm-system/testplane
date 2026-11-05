@@ -29,19 +29,21 @@ type resultJSON struct {
 
 // Options 是契约校验器的命令行参数。
 type Options struct {
-	SpecPath string
-	BaseURL  string
-	User     string
-	Token    string
-	NoAuth   bool
-	Mode     string // spec | live | all
-	Manifest string
-	MockURL  string
-	Profile  string
-	RunName  string
-	Timeout  time.Duration
-	JSONOut  string
-	Verbose  bool
+	SpecPath     string
+	DesignPath   string
+	AllowMissing string
+	BaseURL      string
+	User         string
+	Token        string
+	NoAuth       bool
+	Mode         string // spec | live | all
+	Manifest     string
+	MockURL      string
+	Profile      string
+	RunName      string
+	Timeout      time.Duration
+	JSONOut      string
+	Verbose      bool
 }
 
 func main() {
@@ -74,6 +76,21 @@ func runCLI(argv []string) int {
 		checks, warns := spec.StaticChecks()
 		res.Checks = append(res.Checks, checks...)
 		warnings = append(warnings, warns...)
+
+		// 端点集合：以 07-api.md §5（+ §2.4 认证表）为期望，与 openapi 做双向差集。
+		design, derr := LoadDesign(opts.DesignPath)
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "contract: %v\n", derr)
+			return 2
+		}
+		allow, aerr := LoadAllowMissing(opts.AllowMissing)
+		if aerr != nil {
+			fmt.Fprintf(os.Stderr, "contract: %v\n", aerr)
+			return 2
+		}
+		dc, dw := spec.DesignChecks(design, allow)
+		res.Checks = append(res.Checks, dc...)
+		warnings = append(warnings, dw...)
 	}
 
 	var runErr error

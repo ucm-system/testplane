@@ -93,7 +93,7 @@ func (m *MemoryRepos) SeedTask(t TaskView) {
 		t.OnFailure = domain.OnFailureContinue
 	}
 	cp := t
-	precheck := t.TesterRole == domain.RolePreCheck
+	precheck := t.IsPrecheck
 	m.tasks[t.ID] = &memTask{TaskView: cp, Precheck: precheck}
 }
 
@@ -317,7 +317,7 @@ func (m *MemoryRepos) SeedActiveTask(t TaskView, attempt AttemptRef, leaseKey st
 	cp := t
 	cp.Status = domain.TaskRunning
 	cp.AttemptNo = attempt.AttemptNo
-	m.tasks[t.ID] = &memTask{TaskView: cp, Precheck: t.TesterRole == domain.RolePreCheck}
+	m.tasks[t.ID] = &memTask{TaskView: cp, Precheck: cp.IsPrecheck}
 	m.attempts[attempt.AttemptID] = &memAttempt{
 		AttemptRef: attempt,
 		Status:     domain.AttemptRunning,

@@ -85,11 +85,16 @@ func (r *storeRepos) runView(run *store.Run) orchestrator.RunView {
 }
 
 // buildTaskView 把 store.Task 投影成编排层快照（Args 已是含注入的完整 argv）。
-func (r *storeRepos) taskView(t *store.Task) orchestrator.TaskView {
+//
+// isPrecheck 必须由调用方给出：唯一判据是 runs.resolved.precheck.injected == true
+// 且 tasks.seq == 0（03-data-view.md §4.2），**不能**看 Tester 角色 ——
+// endpoint-probe 本身就是 role=pre_check，但用户可以在 precheck:"off" 下把它当普通测试提交。
+func (r *storeRepos) taskView(t *store.Task, isPrecheck bool) orchestrator.TaskView {
 	v := orchestrator.TaskView{
 		ID: t.ID, RunID: t.RunID, Seq: t.Seq, Name: t.Name,
 		TesterName: t.TesterName, TesterVersion: t.TesterVersion,
-		Image: t.ImageRef, OnFailure: t.OnFailure,
+		IsPrecheck: isPrecheck,
+		Image:      t.ImageRef, OnFailure: t.OnFailure,
 		TimeoutSeconds: t.TimeoutSeconds,
 		Status:         domain.TaskStatus(t.Status),
 		EndpointKey:    store.DerefStr(t.EndpointKey),
@@ -158,7 +163,11 @@ func (r *storeRepos) GetTask(ctx context.Context, taskID string) (orchestrator.T
 	if err != nil {
 		return orchestrator.TaskView{}, err
 	}
-	return r.taskView(t), nil
+	flags, err := r.st.PrecheckFlags(ctx, []string{t.ID})
+	if err != nil {
+		return orchestrator.TaskView{}, err
+	}
+	return r.taskView(t, flags[t.ID]), nil
 }
 
 func (r *storeRepos) ListTasks(ctx context.Context, runID string) ([]orchestrator.TaskView, error) {
@@ -169,8 +178,17 @@ func (r *storeRepos) ListTasks(ctx context.Context, runID string) ([]orchestrato
 		if err != nil {
 			return nil, err
 		}
+		// 每页一次 JOIN 判定（批量），不是每个 Task 一次查询。
+		ids := make([]string, 0, len(batch))
 		for i := range batch {
-			out = append(out, r.taskView(&batch[i]))
+			ids = append(ids, batch[i].ID)
+		}
+		flags, err := r.st.PrecheckFlags(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		for i := range batch {
+			out = append(out, r.taskView(&batch[i], flags[batch[i].ID]))
 		}
 		if next == "" {
 			return out, nil
@@ -270,9 +288,17 @@ func (r *storeRepos) ListActiveTasks(ctx context.Context, limit int) ([]orchestr
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]string, 0, len(rows))
+	for i := range rows {
+		ids = append(ids, rows[i].ID)
+	}
+	flags, err := r.st.PrecheckFlags(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]orchestrator.TaskView, 0, len(rows))
 	for i := range rows {
-		out = append(out, r.taskView(&rows[i]))
+		out = append(out, r.taskView(&rows[i], flags[rows[i].ID]))
 	}
 	return out, nil
 }
