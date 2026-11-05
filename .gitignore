@@ -37,6 +37,11 @@ Desktop.ini
 # 截图/校验用的临时变体文件（如 .__shot-nodeploy.html、.__shots.ps1）
 .__*
 
+# ---------- 本地工具与运行数据（不入库） ----------
+# .tools/：宿主机本地工具（如 kind.exe）；.data/：Kind 挂载用的存储目录
+.tools/
+.data/
+
 # ---------- 凭据与密钥（绝不入库） ----------
 .env
 .env.*
