@@ -63,6 +63,8 @@ const (
 	IssueCodeConflict       = "CONFLICT"
 	IssueCodeUnsupported    = "UNSUPPORTED"
 	IssueCodePublicRequired = "PUBLIC_PARAM_REQUIRED"
+	// IssueCodeTooLong 用于"长度超过设计上限"（D-58：run.name / task.name / tests[].name ≤ 200 字符）。
+	IssueCodeTooLong = "TOO_LONG"
 )
 
 // retryableByCode 是附录 D "可重试" 列的机器版本。

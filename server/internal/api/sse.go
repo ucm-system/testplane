@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -49,6 +50,12 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
+	// 立刻 flush：否则响应头一直留在 bufio 里，要等到第一条事件（或 15s 心跳）才发出，
+	// 客户端在这段时间看到的是"未连接"（实测 /events 响应头 +15s 才到）。
+	if _, err := io.WriteString(w, ": connected\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
 
 	// 回放窗口：起点早于窗口下界 → 先让客户端整页重建（不静默截断）。
 	if lastSeq > 0 {
