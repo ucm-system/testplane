@@ -1,0 +1,3337 @@
+# TestPlane 控制面 REST 契约（OpenAPI 3.1）
+#
+# 权威来源（本文件只做机器可读表达，不新增设计）：
+#   - design/views/07-api.md          —— 约定 §1、鉴权 §2、错误 §3、提交 §4、端点目录 §5、分页 §6、SSE §7、取消/重试 §8
+#   - design/impl/control-plane.md    —— §C-8.2 端点表、§C-5.1 提交校验顺序、§C-9.2 SSE 实现
+#   - design/views/03-data-view.md    —— §3.1 列语义、§3.2 CHECK 约束、§4.1–4.8 JSONB 形状
+#   - design/ARCHITECTURE.md          —— 附录 C（tester.yaml）、附录 D（错误码）、§8.4（Run 报告）
+#
+# 三条硬约束写在这里，避免实现时四处找：
+#   1) 提交不做幂等（D-37、07 §4.4、03 §4.9）：每次 POST 都建新资源；本文件**不声明**任何幂等键，
+#      也没有任何提交指纹 / 去重字段。重复提交 = 多个 Run，由提交者自行取消多余的那个。
+#   2) 字段名 snake_case，时间 RFC3339 且服务端统一 UTC（`Z`）；ID 不透明，客户端不得解析（07 §1）。
+#   3) 响应允许新增字段（07 §1）：客户端不得因未知字段失败，故响应 schema 一律 additionalProperties: true。
+
+openapi: 3.1.0
+
+info:
+  title: TestPlane Control Plane API
+  version: 0.1.0
+  summary: LLM 测试编排平台的控制面 REST API（MVP）
+  description: |
+    # 范围
+
+    MVP 端点集，共 25 个操作：健康检查（`/healthz`、`/readyz`）；身份与元信息（`/me`、`/meta`）；
+    Run 提交/列表/详情/Task 列表/取消/事件流/事件历史/报告/`report.md`/Manifest 快照/部署快照；
+    跨 Run 的 Task 列表/详情/取消/Attempt 列表/Attempt 结果/Attempt 日志；Tester 读取；集群概要；队列状态。
+
+    **不在本契约内**（07 §5 列出，但不在 MVP 裁决内）：`POST /tasks`、`POST /runs/{id}/retry`、
+    `GET /runs/{id}/retry-plan`、`POST /tasks/{id}/retry`、`GET /testers/{name}/versions/{v}`、`/profiles`、
+    `/secrets`、`/admin/*`、`GET /runs/{id}/deploy/logs`、`GET /runs/{id}/artifacts`、`GET /runs/{id}/files`。
+
+    # 路径前缀
+
+    07 §1 与 C-8.1 规定：版本化端点统一前缀 `/api/v1`；`/healthz`、`/readyz`、`/metrics` 不带版本。
+    因此本文件的 path key 写全量路径（例如 `/api/v1/runs`），`servers` 只给 origin，不做前缀拼接魔法——
+    这样 codegen 出来的路由与设计表逐字一致。
+
+    # 鉴权
+
+    - 服务调用（Jenkins / Agent / CLI）：`Authorization: Bearer <JWT>`，JWKS 校验，`aud == clientId`，
+      `exp/nbf` 容差 60s（07 §2.1）。
+    - Web UI：OIDC authorization code + PKCE → 会话 Cookie；写操作要求 `X-CSRF-Token`（双提交，值来自
+      `GET /api/v1/me`）。本文件只把 Bearer 建模为 securityScheme，Cookie 会话不是 OpenAPI 能表达的
+      头/参数形态，CSRF 以可选请求头出现。
+    - 无匿名端点，`/healthz`、`/readyz` 除外（07 §2.1）。开发模式是服务端开关（`--auth=dev`，C-10），
+      不是请求头，故不建模。
+    - RBAC：`viewer` 读、`operator` 提交/取消、`admin` 另加维护类操作（07 §2.2）。403 由服务端统一判定。
+
+    # 错误
+
+    统一信封 `{code, message, detail, retryable, trace_id}`（07 §3、C-8.1），`code` 只取附录 D 的枚举，
+    HTTP 状态按 07 §3 的映射表；校验失败的 `detail.issues[] = [{path, code, message}]`，`path` 形如
+    `tests[2].args`。**设计里没有 422**：结构与引用类校验一律 400 `VALIDATION_ERROR`，故本文件不声明 422。
+
+    # 分页
+
+    游标分页，`{items, next_cursor, has_more}`（07 §6）：`limit` 默认 50、上限 200；`cursor` 不透明；
+    排序固定——Run 按 `submitted_at DESC, id DESC`，Task 按 `run_id, seq`。多值过滤用逗号（OpenAPI 表达为
+    `style: form, explode: false` 的数组参数）。
+
+    # SSE
+
+    `GET /api/v1/runs/{run_id}/events` 返回 `text/event-stream`：`id` 为事件 `seq`，客户端带
+    `Last-Event-ID` 从 `seq+1` 回放；窗口 24h、单次 ≤1000 条，越窗先发 `resync_required`；心跳 15s 一行
+    `: ping`；60s 无事件即断开（07 §7、C-9.2）。
+
+  license:
+    name: 内部项目（见 CONTRIBUTING.md）
+    identifier: LicenseRef-Internal
+
+servers:
+  - url: https://{host}
+    description: 生产入口（Ingress 终结 TLS；版本化端点的完整路径已含 `/api/v1`）
+    variables:
+      host:
+        default: testplane.example.internal
+        description: 控制面域名
+  - url: http://127.0.0.1:8080
+    description: 本地开发（C-11 `TESTPLANE_LISTEN` 默认 `:8080`，明文）
+
+tags:
+  - name: health
+    description: 运维探针（07 §5.5）
+  - name: auth
+    description: 当前身份（07 §2.4）
+  - name: meta
+    description: 平台元信息与特性开关（C-8.2 `GET /meta`，前端版本对齐用）
+  - name: runs
+    description: Run 提交、列表、详情、取消、报告、事件流、Manifest/部署快照（07 §5.1、§8）
+  - name: tasks
+    description: Task 列表、详情与取消（07 §5.2、§8）
+  - name: attempts
+    description: Attempt 只读查询、结果与日志（07 §5.2、C-7.5）
+  - name: testers
+    description: Tester 目录（07 §5.3、ARCHITECTURE 附录 C）
+  - name: clusters
+    description: 集群概要（07 §5.3，不返回凭据）
+  - name: queue
+    description: 队列与槽位可见性（07 §5.3、C-4.7，不读凭据）
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ======================================================================
+  # 运维探针（不带版本前缀，无鉴权）
+  # ======================================================================
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: 进程存活探针
+      description: |
+        07 §5.5：进程存活。返回纯文本，K8s liveness 探针直接读状态码。
+        开发模式（`--auth=dev`）下会在应答里打印警告（C-10），因此不固定正文内容。
+      tags: [health]
+      security: []
+      responses:
+        '200':
+          description: 进程存活
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: 纯文本，内容不作为契约（示例仅示意）
+              example: ok
+
+  /readyz:
+    get:
+      operationId: getReadyz
+      summary: 就绪探针（DB + 存储可写 + 迁移版本）
+      description: |
+        07 §5.5：检查 DB 连接、存储可写、迁移版本一致；**不含 K8s**（K8s 不可达不该摘掉 API 副本）。
+        04 (process-view) §DB 不可用：`/readyz` 失败即摘流。
+      tags: [health]
+      security: []
+      responses:
+        '200':
+          description: 就绪
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: 纯文本，内容不作为契约
+              example: ok
+        '503':
+          description: 未就绪（DB 不可用 / 存储不可写 / 迁移版本不一致）；正文给出失败项，供人排查
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: storage not writable
+
+  # ======================================================================
+  # 身份与元信息
+  # ======================================================================
+  /api/v1/meta:
+    get:
+      operationId: getMeta
+      summary: 平台元信息（版本 / API 版本 / 特性开关）
+      description: |
+        C-8.2、07 §5.3：`GET /meta` 返回 `{version, api_version, features}`，供前端做版本对齐与特性开关。
+        `api_version` 是 URL 主版本（`v1`，07 §1「URL 主版本」）；`features` 是本实例开启的能力开关，
+        客户端只读、不据此推断状态（状态一律以 Run/Task 投影为准）。
+      tags: [meta]
+      responses:
+        '200':
+          description: 平台元信息
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meta'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/me:
+    get:
+      operationId: getMe
+      summary: 当前用户与角色
+      description: |
+        07 §2.4 认证端点表、C-8.2：`GET /me` 返回 `{user, role}`。本实例另带两个非核心字段：
+        `csrf_token`（UI 写操作双提交用，Bearer 调用方可忽略）与 `groups`（身份源里的组）。
+      tags: [auth]
+      responses:
+        '200':
+          description: 当前身份
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ======================================================================
+  # Run
+  # ======================================================================
+  /api/v1/runs:
+    post:
+      operationId: submitRun
+      summary: 提交 Run（YAML 或 JSON Manifest；不做幂等）
+      description: |
+        07 §4：异步编排，202 表示已受理并落库，后续状态由 SSE 或轮询获取。
+        提交校验顺序见 C-5.1（结构 → deploy XOR service → Task 数 ≤200 → Tester/Profile 命中 →
+        args 词法切分与公共参数冲突 → on_failure 不得弱化 → env/secrets 引用 → precheck 唯一性 →
+        cleanup/timeout 枚举），遇到第一个错误即返回，同一层可聚合多个 issue。
+
+        **不做幂等（D-37）**：每次 POST 都创建新 Run，客户端超时重发即两个 Run；本端点没有幂等键，
+        也没有提交指纹或判重逻辑。想避免重复请提交前查 `GET /api/v1/runs?submitter=…`。
+
+        `dry_run=true` 只校验不落库，返回 200 + `DryRunResult`。
+
+        Manifest 可传 YAML 文档或 JSON 对象，两者是同一份结构（07 §1「Manifest 可传 YAML 字符串或 JSON 对象」）。
+      tags: [runs]
+      parameters:
+        - name: dry_run
+          in: query
+          required: false
+          description: '`true` 时只校验、不落库（07 §4.1、C-5.1）'
+          schema:
+            type: boolean
+            default: false
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        description: |
+          Run Manifest（07 §4.1）。顶层是 `run:`，`deploy` 与 `service` 二选一（C-5.1 第 3 条）。
+          未知字段忽略（07 §1）；请求体 ≤ 1 MiB，超限 413。
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunManifest'
+            example:
+              run:
+                name: qwen3-32b-daily
+                deploy:
+                  provider: genet
+                  parameters:
+                    model: Qwen3-32B
+                precheck: auto
+                env:
+                  LOG_LEVEL: info
+                secrets:
+                  ENDPOINT_API_KEY: endpoint/prod-qwen
+                tests:
+                  - name: accuracy-a
+                    tester: aisbench-acc
+                    version: 1.0.0
+                    execution:
+                      profile: k8s-npu
+                    args: --dataset=/data/a
+                    on_failure: continue
+                cleanup:
+                  policy: always
+          # YAML 与 JSON 是同一份结构（YAML 1.2 是 JSON 超集），故共用同一个 example：
+          # 服务端按 Content-Type 决定用 YAML 还是 JSON 解析，字段语义完全相同。
+          application/yaml:
+            schema:
+              $ref: '#/components/schemas/RunManifest'
+            example:
+              run:
+                name: qwen3-32b-daily
+                deploy:
+                  provider: genet
+                  parameters:
+                    model: Qwen3-32B
+                precheck: auto
+                tests:
+                  - name: accuracy-a
+                    tester: aisbench-acc
+                    version: 1.0.0
+                    execution:
+                      profile: k8s-npu
+                    args: --dataset=/data/a
+                    on_failure: continue
+      responses:
+        '200':
+          description: dry-run 结果（只校验，不落库）
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DryRunResult'
+        '202':
+          description: 已受理并落库（07 §4.2）
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+    get:
+      operationId: listRuns
+      summary: Run 列表（游标分页，按提交时间倒序）
+      description: |
+        07 §5.1、§6：过滤 `status`、`kind`、`tester`、`submitter`；游标编码 `(submitted_at, id)` 倒序，
+        客户端只回传不解析；**排序固定**，没有 `sort` 参数（07 §6「排序固定为提交时间倒序」）。
+        未知过滤字段返回 400（07 §6）。多值过滤用逗号：`status=testing,deploying`。
+      tags: [runs]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: 多值，逗号分隔（`status=testing,deploying`）；取值见 `RunStatus`
+          style: form
+          explode: false
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/RunStatus'
+        - name: kind
+          in: query
+          required: false
+          description: '`run` 普通 Run；`task` 独立 Task 合成的占位 Run（03 §3.2）'
+          schema:
+            $ref: '#/components/schemas/RunKind'
+        - name: tester
+          in: query
+          required: false
+          description: Tester 名称；返回包含该 Tester Task 的 Run
+          schema:
+            type: string
+        - name: submitter
+          in: query
+          required: false
+          description: 提交者（`runs.submitted_by`，身份源 subject）
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Run 列表
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/runs/{run_id}:
+    get:
+      operationId: getRun
+      summary: Run 详情（含 Task 摘要）
+      description: |
+        07 §5.1：详情 + Task 摘要。03 §10 要求用**一条 JOIN** 取 Task 摘要，禁止 N+1，
+        故 `tasks[]` 是摘要形态（`TaskSummary`，含 `attempts` 计数），完整字段走 `GET /api/v1/tasks/{task_id}`。
+      tags: [runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Run 详情
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/runs/{run_id}/cancel:
+    post:
+      operationId: cancelRun
+      summary: 取消 Run（含 Deploy 排队阶段）
+      description: |
+        07 §5.1、§8、C-6.1：前置条件为**非终态**；CAS 到 `cancelling` 后异步收口。
+        重复调用语义（07 §8）：已是 `cancelling` / `canceled` 时返回 **200** 且状态不变，否则 **202**。
+        取消与自然结束竞态：以先落库状态为准，客户端以 SSE 推送为最终结果，不做乐观更新。
+        `If-Match` 为可选乐观锁（07 §1），版本不匹配返回 409 `CONFLICT`。
+      tags: [runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '202':
+          description: 已受理取消，状态为 `cancelling`
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelAccepted'
+        '200':
+          description: 已经是 `cancelling` / `canceled`，幂等回同一状态（07 §8）
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelAccepted'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/runs/{run_id}/report:
+    get:
+      operationId: getRunReport
+      summary: Run 汇总报告（report.json）
+      description: |
+        07 §5.1、C-7.2：返回 Run 的 `report.json`，结构见 ARCHITECTURE §8.4——只做组织与索引，
+        不对指标做聚合。报告由 `run.finished` 后异步生成；**文件尚未生成时返回 404 + `Retry-After`**（C-7.2）。
+        单 Run 报告 > 20 MiB 时返回摘要（`truncated: true` + `report_ref`）。
+      tags: [runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Run 报告
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ReportNotReady'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/runs/{run_id}/report.md:
+    get:
+      operationId: getRunReportMarkdown
+      summary: Run 报告的人可读摘要（text/markdown）
+      description: |
+        C-8.2、ARCHITECTURE §8.2：`report.md` 由平台在 `run.finished` 后与 `report.json` 一同生成，
+        是人类可读摘要。与 `report.json` 一致：**文件尚未生成时返回 404 + `Retry-After`**（C-7.2）。
+
+        正文是 Markdown 原文，平台不做 HTML 渲染——渲染在 UI 侧完成，须按不可信文本处理（Tester 自述内容）。
+      tags: [runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Markdown 报告
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            text/markdown:
+              schema:
+                type: string
+                description: Markdown 原文
+              example: |
+                # r-20261105-0001 · qwen3-32b-daily
+
+                - 状态：completed_with_errors
+                - Task：4（成功 2 / 失败 1 / 跳过 1）
+
+                ## 失败
+
+                - t-0002 accuracy-dataset-b：TESTER_NONZERO_EXIT
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ReportNotReady'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/runs/{run_id}/events:
+    get:
+      operationId: streamRunEvents
+      summary: Run 事件流（SSE，支持 Last-Event-ID 回放）
+      description: |
+        07 §7、C-9.2。客户端用 fetch + ReadableStream（不用原生 EventSource）以便带头与处理 401/429。
+
+        帧格式：
+        ```text
+        id: 43
+        event: task.state_changed
+        data: {"seq":43,"type":"task.state_changed","run_id":"r-…","task_id":"t-0002","at":"…","payload":{"from":"queued","to":"preparing"}}
+        ```
+
+        事件类型（07 §7）：`run.submitted`、`run.state_changed`、`task.state_changed`、`attempt.started`、
+        `attempt.finished`、`deploy.state_changed`、`cleanup.started`、`run.finished`、`report.written`、
+        `resync_required`。
+
+        规则：从 `Last-Event-ID + 1` 回放；窗口 24h、单次 ≤1000 条，越窗先发 `event: resync_required`
+        （客户端整页重建）；心跳 15s 一行 `: ping`；60s 无事件或客户端断开即释放；同一用户同一 Run 的
+        并发连接有上限，超限 429；只发状态事实，不发日志正文、不发凭据。
+      tags: [runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: 上一次收到的事件 `seq`；缺省表示不回放（只推实时事件）
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 事件流（长连接）
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE 帧文本；`data` 为事件对象 JSON
+              example: |
+                id: 43
+                event: task.state_changed
+                data: {"seq":43,"type":"task.state_changed","run_id":"r-20261105-0001","task_id":"t-0002","at":"2026-11-05T01:00:09Z","payload":{"from":"queued","to":"preparing"}}
+
+                : ping
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/runs/{run_id}/events/history:
+    get:
+      operationId: listRunEvents
+      summary: Run 事件历史（JSON，供时间线首屏与断线补齐）
+      description: |
+        C-8.2、07 §5.1：与 SSE 同一份事件事实流（`state_events`，03 §3.2），用 JSON 拉取，供详情页右栏
+        时间线首屏与断线补齐。`seq` 在同一 Run 内单调且唯一（`state_events_seq_uq`），客户端按 `seq` 去重。
+
+        窗口与 SSE 一致：24h（`TESTPLANE_SSE_REPLAY_HOURS`）、单次 ≤1000 条（C-9.2）。越窗不静默截断——
+        SSE 侧发 `resync_required`，本端点因 `since_seq` 明确指向序号，直接按库中现存行返回。
+      tags: [runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - name: since_seq
+          in: query
+          required: false
+          description: 只返回 `seq > since_seq` 的事件；缺省 `0`（从头取，受 24h 窗口约束）
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          description: 本次返回条数，默认 200、上限 1000（C-9.2 单次回放上限）
+          schema:
+            type: integer
+            default: 200
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: 事件历史（按 `seq` 升序）
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/runs/{run_id}/tasks:
+    get:
+      operationId: listRunTasks
+      summary: 某 Run 的 Task 列表（按 seq 升序，游标分页）
+      description: |
+        07 §5.1、§6：Task 列表按 `run_id, seq` 排序（07 §6「Task 列表按 run_id, seq」），`seq=0` 是平台
+        注入的 Pre-Check。
+      tags: [runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Task 列表
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/runs/{run_id}/manifest:
+    get:
+      operationId: getRunManifest
+      summary: Manifest 快照（提交原文 + 冻结解析结果）
+      description: |
+        C-8.2、07 §5.1：用于「照上次配置再来一次」与事后核对。`manifest` 是提交原文（03 §4.1
+        `runs.manifest`），`resolved` 是冻结的解析结果（03 §4.2 `runs.resolved`：注入的 Pre-Check、
+        切分后的 argv、默认超时、Endpoint 来源）。
+
+        两者一经落库不再变：注册表、Profile、Cluster 之后的变化都不影响这份快照，因此本端点回答的是
+        "当时提交了什么"，不是"现在会解析成什么"。`secrets` 只出现引用名，不含取值（C-10）。
+      tags: [runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Manifest 快照
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManifestSnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/runs/{run_id}/deploy:
+    get:
+      operationId: getRunDeploy
+      summary: 部署快照（状态 / 排队 / Pod 拓扑）
+      description: |
+        C-8.2、07 §5.1「部署快照（状态/排队/Endpoint/Pods）」：`runs.deploy`（03 §4.4）+
+        实际提交给 Genet 的参数快照（`deploy/manifest.yaml`，ARCHITECTURE §8.2）+ Pod 拓扑
+        （`deploy/pods.json`：名称、角色、节点、重启次数、日志区间，ARCHITECTURE §8.1）。
+
+        多 Pod 场景下 `pods[]` 是唯一能还原拓扑的地方；**Endpoint 的 `url` 只取 Genet 返回值**，
+        平台不按角色推导主 URL（execution §9.1）。没有 Deploy 的 Run（`service` 模式或独立 Task）
+        返回 `deploy: null`、`pods: []`。本端点**不含日志正文**（`/runs/{id}/deploy/logs` 不在本契约内）；
+        `deploy.state` 的 `blocked` 会让 Run 收口为 `service_unavailable`（C-5.3）。
+      tags: [runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: 部署快照
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploySnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ======================================================================
+  # Task / Attempt
+  # ======================================================================
+  /api/v1/tasks:
+    get:
+      operationId: listTasks
+      summary: 跨 Run 的 Task 列表（游标分页，按 run_id, seq）
+      description: |
+        07 §5.2、§6：跨 Run 列表，过滤 `status`、`tester`；排序固定为 `run_id, seq`（07 §6「Task 列表按
+        `run_id, seq`」），没有 `sort` 参数。多值过滤用逗号（`status=queued,running`，即 `style: form,
+        explode: false`）。`queued` 的 Task 带 `waiting_reason`，各值归属见 `GET /api/v1/queue-status`（C-4.7）。
+      tags: [tasks]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: 多值，逗号分隔（`status=queued,running`）；取值见 `TaskStatus`
+          style: form
+          explode: false
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/TaskStatus'
+        - name: tester
+          in: query
+          required: false
+          description: Tester 名称（`tasks.tester_name`，冻结快照，注册表变化不影响）
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Task 列表
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/tasks/{task_id}:
+    get:
+      operationId: getTask
+      summary: Task 详情（含 Attempt 列表）
+      description: |
+        07 §5.2、C-8.2：详情 + Attempt 列表。`args_raw` / `args_argv` / `injected_argv` 三份都返回，
+        保证事后能完整还原"当时传了什么"（03 §3.1、C-8.5）。
+      tags: [tasks]
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Task 详情
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetail'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/tasks/{task_id}/cancel:
+    post:
+      operationId: cancelTask
+      summary: 取消单个 Task
+      description: |
+        07 §5.2、§8：前置为非终态，202 表示已受理取消。重复调用语义与 Run 一致（07 §8「同上」）：
+        已处于取消中/已取消时返回 200 且状态不变。未开始的 Task 落 `skipped(status_reason=canceled)`，
+        已拿到槽位/已启动的落 `canceled`（I-13 G-1）；`cancel_requested` 置位后由 executor 异步删 Job，
+        不阻塞状态推进（03 §3.1）。`tasks` 没有 `revision` 列，故本端点不接受 `If-Match`。
+      tags: [tasks]
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '202':
+          description: 已受理取消
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskCancelAccepted'
+        '200':
+          description: 已经是取消中/已取消，幂等回同一状态（07 §8）
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskCancelAccepted'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/tasks/{task_id}/attempts:
+    get:
+      operationId: listTaskAttempts
+      summary: 某 Task 的 Attempt 列表（按 idx 升序）
+      description: |
+        07 §5.2：Attempt 列表。03 §3.1：`(task_id, idx)` 唯一，`idx` 从 1 连续；历史 Attempt 不被覆盖。
+      tags: [attempts]
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Attempt 列表
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttemptList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/tasks/{task_id}/attempts/{idx}/result:
+    get:
+      operationId: getTaskAttemptResult
+      summary: Attempt 的 result.json（Tester 产出）
+      description: |
+        07 §5.2、ARCHITECTURE 附录 A：返回该 Attempt 的 `result.json` 原文。平台只校验不收窄字段
+        （K-10「字段不限制，Tester 自维护」），故 `Result` 允许任意未知字段。
+
+        每个 Attempt 各自产出一份、历史不覆盖；`FAILED` 的 Attempt 也可能有可读结果（ARCHITECTURE §8.5
+        「部分结果必须可以单独获取」）。文件缺失或非法由平台收口时判 `RESULT_MISSING` / `RESULT_INVALID`
+        （C-7.1），此时本端点 404。
+      tags: [attempts]
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/AttemptIdx'
+      responses:
+        '200':
+          description: Attempt 的 result.json
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/tasks/{task_id}/attempts/{idx}/logs:
+    get:
+      operationId: getTaskAttemptLogs
+      summary: Attempt 日志（text/plain）
+      description: |
+        07 §5.2、C-7.5：日志明文（K-5 已拍板不做脱敏），单次返回 ≤ 64 KiB；
+        翻页用 `offset` + `limit`，同一坐标系由响应头 `X-Log-Offset`（本次结束处的字节偏移，下次从这里继续）
+        与 `X-Log-Coverage`（本次覆盖的时间段 `<start>/<end>`）交代。**日志不走 SSE**——那会把它变成
+        大流量通道（C-9.2）；超过 10k 行由前端虚拟滚动（07 §5.2）。
+      tags: [attempts]
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/AttemptIdx'
+        - name: stream
+          in: query
+          required: false
+          description: 选择 stdout 或 stderr；缺省返回合并流
+          schema:
+            type: string
+            enum: [stdout, stderr]
+        - name: offset
+          in: query
+          required: false
+          description: 起始偏移（字节）；缺省从头开始
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          description: 本次返回的字节上限，服务端再按 ≤64 KiB 收敛
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+            maximum: 65536
+      responses:
+        '200':
+          description: 日志文本
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            X-Log-Offset:
+              $ref: '#/components/headers/X-Log-Offset'
+            X-Log-Coverage:
+              $ref: '#/components/headers/X-Log-Coverage'
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                [2026-11-05T01:00:00Z] dataset loaded: /data/a
+                [2026-11-05T01:12:10Z] accuracy=0.812
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ======================================================================
+  # Tester 目录
+  # ======================================================================
+  /api/v1/testers:
+    get:
+      operationId: listTesters
+      summary: Tester 目录（含参数清单，只读）
+      description: |
+        07 §5.3：`role`、`orphaned` 过滤。`parameters` 是**文档语义**（05 §5.4），只给 Agent 与人看，
+        平台不渲染、不校验。`orphaned=true` 表示目录里已移除、但历史 Run 仍引用的 Tester（03 §8）。
+      tags: [testers]
+      parameters:
+        - name: role
+          in: query
+          required: false
+          description: 按角色过滤；`pre_check` 在注册表里必须唯一（C-5.1 第 10 条）
+          schema:
+            $ref: '#/components/schemas/TesterRole'
+        - name: orphaned
+          in: query
+          required: false
+          description: 是否包含已从目录移除的 Tester（默认 `false`，只读）
+          schema:
+            type: boolean
+            default: false
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Tester 列表
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TesterList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/testers/{name}:
+    get:
+      operationId: getTester
+      summary: Tester 最新版本详情
+      description: |
+        07 §5.3：`GET /testers/{name}` 返回最新版本。指定版本走 `/testers/{name}/versions/{version}`
+        （本契约不含，见范围说明）。版本不可覆盖：同 `name+version` 不同内容会被拒（05 §5.7）。
+      tags: [testers]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Tester 名称（`tester.yaml.name`）
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tester 详情
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tester'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ======================================================================
+  # Cluster / 队列（只读）
+  # ======================================================================
+  /api/v1/clusters:
+    get:
+      operationId: listClusters
+      summary: 集群概要（不返回凭据）
+      description: |
+        07 §5.3：集群概要，**不返回凭据**。`clusters.kubeconfig_key` 是挂载目录内的文件名（03 §3.2），
+        本投影不暴露；`last_check_result` 是最近一次连通性检查的结论（原文）。
+      tags: [clusters]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 集群列表
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClusterList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/queue-status:
+    get:
+      operationId: getQueueStatus
+      summary: 队列与槽位状态（平台槽位 + 等待原因）
+      description: |
+        07 §5.3、C-4.7：只回答一个问题——"卡在平台槽位，还是卡在 K8s 队列"（§6.9）。看板与 Run/Task
+        详情共用本端点，30s 轮询、无 SSE（web-and-delivery）。
+
+        三层分开呈现：
+
+        1. `slots`：平台自身的槽位——全局并发 permit（`TESTPLANE_CONCURRENCY_MAX`，默认 20，C-4.4）
+           与端点互斥租约（`endpoint_leases`，C-4.3）。
+        2. `waiting`：排队 Task 的计数（`by_reason`，键与 `WaitingReason` 的 6 个取值逐字一致）与明细。
+           前三个 `precheck_gate` / `slot_waiting` / `global_limit` 是平台自身的等待，后三个
+           `queue_full` / `insufficient_resources` / `gang_pending` 是 K8s/Volcano 侧的等待（C-4.7）。
+        3. `volcano`：E-11 的 Volcano 只读快照（capability / allocated / Pending Job / 最长等待）。
+           不可达时 `available: false` 且原因落 `detail`，**不新增枚举值**（C-4.7）。
+
+        平台不参与调度、不提供插队（§6.9、C-4.6）：本端点没有写操作，也没有优先级参数。
+      tags: [queue]
+      responses:
+        '200':
+          description: 队列与槽位状态
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueStatus'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        统一身份源签发的 JWT（07 §2.1）：JWKS 校验，`aud == clientId`，`exp/nbf` 容差 60s。
+        Web UI 的会话 Cookie 不是 OpenAPI 能表达的鉴权形态，未在此建模；写操作需要
+        `X-CSRF-Token`（双提交，值来自 `GET /api/v1/me`）。
+
+  parameters:
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      description: Run ID（`r-YYYYMMDD-XXXX`，不透明，客户端不得解析）
+      schema:
+        type: string
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      description: Task ID（`t-XXXXXX`，不透明）
+      schema:
+        type: string
+    AttemptIdx:
+      name: idx
+      in: path
+      required: true
+      description: Attempt 序号，从 1 开始（内部 id 仍是 `<task>-a<n>`）
+      schema:
+        type: integer
+        minimum: 1
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: 不透明游标，服务端编码上一页末位；客户端只回传不解析（07 §6）
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: 每页条数，默认 50、上限 200（07 §6）
+      schema:
+        type: integer
+        default: 50
+        minimum: 1
+        maximum: 200
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: 可选乐观锁：传 `Run.revision`；不匹配返回 409（07 §1）
+      schema:
+        type: string
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: |
+        仅 Cookie 会话的写操作需要（双提交，值来自 `GET /api/v1/me`，07 §2.1）。
+        Bearer 调用方不需要该头。
+      schema:
+        type: string
+
+  headers:
+    X-Request-Id:
+      description: 请求追踪 ID，服务端回显（07 §1）
+      schema:
+        type: string
+    Retry-After:
+      description: 建议的重试等待秒数（07 §5.1 报告未生成、04 写操作降级）
+      schema:
+        type: integer
+    X-Log-Offset:
+      description: 本次返回结束处的字节偏移，下次用 `offset=` 从这里继续（07 §5.2）
+      schema:
+        type: integer
+        format: int64
+    X-Log-Coverage:
+      description: 本次返回覆盖的日志时间段，`<start>/<end>`（RFC3339，07 §5.2）
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: |
+        请求不合法（07 §3）：`VALIDATION_ERROR`、`TESTER_NOT_FOUND`、`EXECUTION_PROFILE_NOT_FOUND`、
+        `RUN_TOO_LARGE`。校验失败的 `detail.issues[]` 逐项给出 `{path, code, message}`。
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VALIDATION_ERROR
+            message: Manifest 校验未通过
+            detail:
+              issues:
+                - path: tests[0].args
+                  code: PUBLIC_PARAM_CONFLICT
+                  message: --url 由平台注入，args 中不得出现
+            retryable: false
+            trace_id: 01J8Z0S9K4Y6N3Q2R1T0V5W8XZ
+    Unauthenticated:
+      description: 缺少或无效令牌（`UNAUTHENTICATED`，401）
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: 角色权限不足（`FORBIDDEN`，403）；由服务端统一判定，前端不推断角色（07 §2.3）
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: 对象不存在（`NOT_FOUND`，404）
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ReportNotReady:
+      description: |
+        Run 或报告不存在（`NOT_FOUND`，404）。报告为异步生成：**文件尚未生成时同样 404，但带
+        `Retry-After`**，客户端按该秒数退避重试（07 §5.1、C-7.2）。
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: NOT_FOUND
+            message: 报告尚未生成
+            detail:
+              run_id: r-20261105-0001
+              state: generating
+            retryable: true
+            trace_id: 01J8Z0S9K4Y6N3Q2R1T0V5W8XZ
+    Conflict:
+      description: |
+        状态冲突（409）：`CONFLICT`（并发修改 / 已在进行中）、`TESTER_VERSION_PINNED`（试图覆盖已发布
+        Tester 版本）、`CANCELED`（对象已取消）。
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    PayloadTooLarge:
+      description: 请求体超过 1 MiB（413 `VALIDATION_ERROR`，`detail` 说明限制，07 §9）
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VALIDATION_ERROR
+            message: 请求体超过 1 MiB 上限
+            detail:
+              limit_bytes: 1048576
+            retryable: false
+            trace_id: 01J8Z0S9K4Y6N3Q2R1T0V5W8XZ
+    TooManyRequests:
+      description: |
+        限流（429 `RESOURCE_EXHAUSTED`）：单用户写请求 10 rps、SSE 每用户 20 / 每 Run 5 连接
+        （07 §9）。并发槽位不足同样返回该码。
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: 未归类错误（500 `INTERNAL_ERROR`）；必须记录 trace，`trace_id` 用于对日志
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServiceUnavailable:
+      description: |
+        依赖不可用（503）：DB 不可用时写操作 503 + `Retry-After`，读接口降级失败；
+        `/readyz` 同时失败摘流（04 process-view）。
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    # ------------------------------------------------------------------
+    # 错误与失败
+    # ------------------------------------------------------------------
+    ErrorCode:
+      type: string
+      description: |
+        **顶层**错误码，取附录 D 的全集（24 个）。新增错误码必须先改文档（ARCHITECTURE §15），
+        再改本契约。
+
+        注意命名空间：07 §3「`code` 只用附录 D 的枚举」说的是信封顶层的 `code`；`detail.issues[].code`
+        是**另一套**字段级码（07 §4.1 的 `PUBLIC_PARAM_CONFLICT`、C-8.4 的 `ARGS_LEX_ERROR` 都不在附录 D），
+        因此 `ValidationIssue.code` 刻意不收紧成这个枚举。
+      enum:
+        - VALIDATION_ERROR
+        - UNAUTHENTICATED
+        - FORBIDDEN
+        - NOT_FOUND
+        - CONFLICT
+        - TESTER_NOT_FOUND
+        - TESTER_VERSION_PINNED
+        - TESTER_INVALID
+        - EXECUTION_PROFILE_NOT_FOUND
+        - RUN_TOO_LARGE
+        - RESOURCE_EXHAUSTED
+        - ARTIFACT_QUOTA_EXCEEDED
+        - EXECUTOR_UNAVAILABLE
+        - IMAGE_PULL_FAILED
+        - MOUNT_UNAVAILABLE
+        - ENDPOINT_UNREACHABLE
+        - PRECHECK_FAILED
+        - TASK_TIMEOUT
+        - TESTER_NONZERO_EXIT
+        - RESULT_MISSING
+        - RESULT_INVALID
+        - CLEANUP_FAILED
+        - CANCELED
+        - INTERNAL_ERROR
+
+    Error:
+      type: object
+      description: |
+        统一错误信封（07 §3、C-8.1）。HTTP 状态与 `code` 的映射按 07 §3 的表，不在此重复。
+        另见「Pre-Check 错误对象约定」：Pre-Check Task 的 `error` 必须带实例级 `retryable` 与
+        `detail.http_status`，终态判定以实例字段为准，不只看码级默认值。
+      required: [code, message, retryable, trace_id]
+      additionalProperties: true
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          description: 给人看的一句话（中文）
+        detail:
+          type: object
+          additionalProperties: true
+          description: '结构化补充；校验失败时为 `{issues: [{path, code, message}]}`'
+        retryable:
+          type: boolean
+          description: '该错误是否可重试；只有 `retryable: true` 的码才允许进 `retry_on`（附录 D）'
+        trace_id:
+          type: string
+          description: 追踪 ID，与响应头 `X-Request-Id` 同源
+
+    ValidationIssue:
+      type: object
+      description: 提交校验的字段级问题（07 §3、C-8.3）；`path` 用 `tests[2].args` 形式，供 UI 定位
+      required: [path, code, message]
+      additionalProperties: true
+      properties:
+        path:
+          type: string
+          description: 字段路径，JSON Pointer 风格（`tests[2].args`）
+          example: tests[0].args
+        code:
+          type: string
+          description: |
+            issue 级错误码，与顶层 `Error.code` 不是同一套命名空间（顶层统一 `VALIDATION_ERROR`，
+            具体原因在这里定位）。设计里出现过的取值：`PUBLIC_PARAM_CONFLICT`（07 §4.1）、
+            `ARGS_LEX_ERROR`（C-8.4，未闭合引号）；故名 free-form，不收紧成 `ErrorCode`。
+          example: PUBLIC_PARAM_CONFLICT
+        message:
+          type: string
+          description: 该字段为什么不合法
+          example: --url 由平台注入，args 中不得出现
+
+    Failure:
+      type: object
+      description: |
+        Run / Task / Attempt 同构的失败结构（03 §4.7）。与 `Error` 的区别：没有 `trace_id`，
+        多了实例级 `retryable`（终态判定以它为准）。
+      required: [code, message, retryable]
+      additionalProperties: true
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          description: 给人看的失败说明
+        detail:
+          type: object
+          additionalProperties: true
+          description: |
+            结构化细节，常见键：`task_id`、`timeout_seconds`、`k8s_reason`、`exit_code`、
+            `image_digest`、`http_status`（Pre-Check 用）。
+        retryable:
+          type: boolean
+          description: 实例级可重试判定；只有为 `true` 才允许按 `retry_policy.retry_on` 重试
+
+    # ------------------------------------------------------------------
+    # 枚举（与 03 §3.2 的 CHECK 约束逐字一致）
+    # ------------------------------------------------------------------
+    RunStatus:
+      type: string
+      description: |
+        `runs.status`（03 §3.2）：前 6 个为进行中，后 5 个为终态且不可逆。
+        终态：`succeeded` / `completed_with_errors` / `service_unavailable` / `failed` / `canceled`。
+      enum:
+        - submitted
+        - queued
+        - deploying
+        - testing
+        - cleanup
+        - cancelling
+        - succeeded
+        - completed_with_errors
+        - service_unavailable
+        - failed
+        - canceled
+
+    RunKind:
+      type: string
+      description: '`runs.kind`：`run` 普通 Run；`task` 是独立 Task 合成的占位 Run（03 §3.2）'
+      enum: [run, task]
+
+    TaskStatus:
+      type: string
+      description: |
+        `tasks.status`（03 §3.2）。终态：`succeeded` / `failed` / `canceled` / `skipped`。
+        `skipped` 必须带 `status_reason`；`queued` 必须有 `endpoint_key`。
+      enum:
+        - pending
+        - queued
+        - preparing
+        - running
+        - succeeded
+        - failed
+        - canceled
+        - skipped
+
+    AttemptStatus:
+      type: string
+      description: '`attempts.status`（03 §3.2）：终态不覆盖；同一 Task 至多一个活跃 Attempt'
+      enum: [preparing, running, succeeded, failed, canceled]
+
+    WaitingReason:
+      type: string
+      description: '`tasks.waiting_reason`（03 §3.2，仅展示）：调度器给出的排队原因，6 值枚举'
+      enum:
+        - precheck_gate
+        - slot_waiting
+        - global_limit
+        - queue_full
+        - insufficient_resources
+        - gang_pending
+
+    SkippedReason:
+      type: string
+      description: |
+        `tasks.status_reason` 在 `status = skipped` 时的取值（03 §3.2，`tasks_skipped_reason_ck`）。
+        其他状态下的 `status_reason` 不在此枚举内约束。
+      enum:
+        - upstream_abort
+        - canceled
+        - deploy_failed
+        - service_unavailable
+        - platform_error
+
+    CleanupPolicy:
+      type: string
+      description: '`runs.cleanup_policy`（03 §3.2）：只决定是否卸载被测服务，不决定保留期（G-13）'
+      enum: [always, on_failure, never]
+
+    TesterRole:
+      type: string
+      description: |
+        `testers.role`（03 §3.2）：`test` 普通测试；`pre_check` 参与服务就绪检查，
+        且**必须**同时声明 `on_failure: abort_run`（ARCHITECTURE §7.3）。
+      enum: [test, pre_check]
+
+    OnFailure:
+      type: string
+      description: |
+        `on_failure`：`continue` 不影响其他 Task（Run 终态按 §C-5.8 判 `completed_with_errors`）；
+        `abort_run` 终止同 Run 其余未完成 Task。Manifest 只能取更严者，不能弱化 Tester 声明（§7.3）。
+      enum: [continue, abort_run]
+
+    EndpointSource:
+      type: string
+      description: '`runs.endpoint.source`（03 §4.3）：`genet` 来自部署，`service` 来自 Manifest 直填'
+      enum: [genet, service]
+
+    DeployState:
+      type: string
+      description: |
+        `runs.deploy.state`（03 §4.4）。取值来自 C-5.3 的 Genet 状态映射：`queued` 排队中（可取消）、
+        `accepted`/`deploying` 保持 `deploying`、`ready` 写 Endpoint 转 `testing`、`blocked` 收口为
+        `service_unavailable`。03 没有 CHECK 约束，故本枚举以 C-5.3 为准。
+      enum: [queued, accepted, deploying, ready, blocked]
+
+    Role:
+      type: string
+      description: 平台角色（07 §2.2）：viewer 读、operator 提交/取消、admin 另加维护与审计
+      enum: [viewer, operator, admin]
+
+    # ------------------------------------------------------------------
+    # Run / Task / Attempt 投影
+    # ------------------------------------------------------------------
+    Run:
+      type: object
+      description: |
+        Run 投影（`runs` 表，03 §3.1）。列表项不带 `tasks`；详情（`GET /api/v1/runs/{run_id}`）带
+        Task 摘要。`name` 仅供展示、不唯一，不得用于定位（K-11）。
+      required: [id, name, kind, status, cleanup_policy, submitted_by, submitted_at]
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          description: '`r-YYYYMMDD-XXXX`，对外唯一标识，不透明'
+          example: r-20261105-0001
+        name:
+          type: string
+          description: 展示名，不唯一（K-11）
+        kind:
+          $ref: '#/components/schemas/RunKind'
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        cleanup_policy:
+          $ref: '#/components/schemas/CleanupPolicy'
+        submitted_by:
+          type: string
+          description: 提交者（身份源 subject），审计用
+        submitted_at:
+          type: string
+          format: date-time
+          description: 提交时间（UTC），列表排序键
+        started_at:
+          $ref: '#/components/schemas/NullDateTime'
+          description: 只由 Run 状态推进填，不可手改
+        finished_at:
+          $ref: '#/components/schemas/NullDateTime'
+        endpoint:
+          description: Deploy ready / service 提交后写入；`key` 用于端点互斥（03 §4.3）
+          anyOf:
+            - $ref: '#/components/schemas/Endpoint'
+            - type: 'null'
+        deploy:
+          description: Deploy 阶段快照；终态后只读（03 §4.4）
+          anyOf:
+            - $ref: '#/components/schemas/Deploy'
+            - type: 'null'
+        error:
+          description: Run 终态/失败时的失败结构；终态后只读
+          anyOf:
+            - $ref: '#/components/schemas/Failure'
+            - type: 'null'
+        revision:
+          type: integer
+          format: int64
+          description: 可选乐观锁（`If-Match`，03 §3.1）
+        tasks:
+          type: array
+          description: Task 摘要；仅详情响应返回（03 §10 单条 JOIN，禁止 N+1）
+          items:
+            $ref: '#/components/schemas/TaskSummary'
+
+    TaskSummary:
+      type: object
+      description: |
+        Run 详情里的 Task 摘要（07 §5.1 示例 + 03 §10 的 JOIN 查询）：`attempts` 是计数
+        （`tasks.current_attempt`），不是 Attempt 列表。
+      required: [id, name, status, attempts]
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          description: Run 内唯一（`tests[].name`，Pre-Check 固定为 `precheck`）
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        waiting_reason:
+          description: 仅展示；`queued` 时由调度器写入
+          anyOf:
+            - $ref: '#/components/schemas/WaitingReason'
+            - type: 'null'
+        attempts:
+          type: integer
+          description: 最新 Attempt 序号（`tasks.current_attempt`）；0 = 还没跑过
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/Failure'
+            - type: 'null'
+
+    Task:
+      type: object
+      description: |
+        Task 详情投影（`tasks` 表，03 §3.1）。Tester 名称/版本/镜像都是**冻结快照**，注册表变化不影响它。
+        `args_raw` / `args_argv` / `injected_argv` 三份都留，保证可还原"当时传了什么"（C-8.5）。
+      required:
+        - id
+        - run_id
+        - seq
+        - name
+        - tester_name
+        - tester_version
+        - image_ref
+        - profile
+        - args_raw
+        - args_argv
+        - injected_argv
+        - env
+        - secret_env
+        - on_failure
+        - timeout_seconds
+        - retry_policy
+        - status
+        - endpoint_exclusive
+        - current_attempt
+        - cancel_requested
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          description: '`t-XXXXXX`；Attempt ID 以它开头'
+        run_id:
+          type: string
+        seq:
+          type: integer
+          description: Run 内序号，`0` = 平台注入的 Pre-Check；`(run_id, seq)` 唯一
+        name:
+          type: string
+          description: Run 内唯一
+        tester_name:
+          type: string
+        tester_version:
+          type: string
+        image_ref:
+          type: string
+          description: 冻结的镜像引用（原样来自 tester.yaml，平台不解析 tag/digest）
+        profile:
+          type: string
+          description: 引用的 Execution Profile，之后只读
+        args_raw:
+          type: string
+          description: Manifest 里那段字符串（UI 输入框原文）
+        args_argv:
+          type: array
+          items:
+            type: string
+          description: '`args_raw` 的词法切分结果（C-8.4，不经 shell）'
+        injected_argv:
+          type: array
+          items:
+            type: string
+          description: 平台注入的公共参数 argv（`--url` / `--model_name` / `--model_path`，C-8.5）
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: Run 级明文环境变量在该 Task 上的展开；可回显（C-10）
+        secret_env:
+          type: array
+          description: 只存引用，永不返回 Secret 值（C-10）
+          items:
+            $ref: '#/components/schemas/SecretEnv'
+        on_failure:
+          $ref: '#/components/schemas/OnFailure'
+        timeout_seconds:
+          type: integer
+          description: 平台默认 + Manifest 覆盖；执行期只读（CHECK：1..86400）
+          minimum: 1
+          maximum: 86400
+        retry_policy:
+          $ref: '#/components/schemas/RetryPolicy'
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        status_reason:
+          description: 仅 `skipped` 时有值（`tasks_skipped_reason_ck`）
+          anyOf:
+            - $ref: '#/components/schemas/SkippedReason'
+            - type: 'null'
+        waiting_reason:
+          description: 仅展示；`queued` 时由调度器写入
+          anyOf:
+            - $ref: '#/components/schemas/WaitingReason'
+            - type: 'null'
+        endpoint_key:
+          type: [string, 'null']
+          description: 端点互斥键；`queued` 前必须非空（`tasks_queued_endpoint_ck`）
+        endpoint_exclusive:
+          type: boolean
+          description: 来自 Tester 的 `concurrency.endpoint_exclusive`，决定是否独占端点
+        current_attempt:
+          type: integer
+          description: 最新 Attempt 序号；历史 Attempt 不覆盖
+        available_at:
+          $ref: '#/components/schemas/NullDateTime'
+        cancel_requested:
+          type: boolean
+          description: 置位后由 executor 异步删 Job（不阻塞状态推进）
+        result_ref:
+          type: [string, 'null']
+          description: 相对 Run 目录的结果引用
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/Failure'
+            - type: 'null'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TaskDetail:
+      description: Task 详情 + Attempt 列表（C-8.2：`GET /tasks/{id}` 详情 + Attempt 列表）
+      allOf:
+        - $ref: '#/components/schemas/Task'
+        - type: object
+          required: [attempts]
+          properties:
+            attempts:
+              type: array
+              items:
+                $ref: '#/components/schemas/Attempt'
+
+    Attempt:
+      type: object
+      description: |
+        Attempt 投影（`attempts` 表，03 §3.1）。不暴露 `job_id` / `job_namespace`（内部幂等键，
+        对外用 `executor_ref.job` 定位 K8s 对象）。
+      required: [id, task_id, idx, status]
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          description: '`<task_id>-a<n>`，全局唯一'
+        task_id:
+          type: string
+        idx:
+          type: integer
+          description: 从 1 连续；`(task_id, idx)` 唯一
+          minimum: 1
+        status:
+          $ref: '#/components/schemas/AttemptStatus'
+        phase:
+          type: [string, 'null']
+          description: K8s 原值（附录 B）；只补不改状态
+        exit_code:
+          type: [integer, 'null']
+          description: 容器退出码；只在单容器、单次终止时有意义
+        image_digest:
+          type: [string, 'null']
+          description: |
+            K8s 实际拉取到的 digest（从 `imageID` 解析）；同 tag 不同代码的唯一证据（03 §4.9）。
+            缺失时记 `unknown`。
+        started_at:
+          $ref: '#/components/schemas/NullDateTime'
+        finished_at:
+          $ref: '#/components/schemas/NullDateTime'
+        log_ref:
+          type: [string, 'null']
+          description: 相对 `<run>/tasks/<task>/attempts/<n>/` 的日志引用
+        artifact_ref:
+          type: [string, 'null']
+          description: 相对路径的产物引用
+        result_ref:
+          type: [string, 'null']
+          description: 相对路径的 `result.json` 引用
+        error:
+          anyOf:
+            - $ref: '#/components/schemas/Failure'
+            - type: 'null'
+        executor_ref:
+          anyOf:
+            - $ref: '#/components/schemas/ExecutorRef'
+            - type: 'null'
+
+    ExecutorRef:
+      type: object
+      description: 外部执行体定位信息（03 §4.8），用于回查 K8s
+      required: [cluster, namespace, job]
+      additionalProperties: true
+      properties:
+        cluster:
+          type: string
+          example: cluster-01
+        namespace:
+          type: string
+          example: testplane
+        job:
+          type: string
+          example: tp-t-0001-a1
+
+    # ------------------------------------------------------------------
+    # result.json（ARCHITECTURE 附录 A）
+    # ------------------------------------------------------------------
+    Result:
+      type: object
+      description: |
+        Attempt 的 `result.json`（ARCHITECTURE 附录 A），Tester 产出、平台只校验不收窄：
+        K-10 明确"字段不限制，Tester 自维护"，故本结构允许任意未知字段，必填只到平台校验的那几项
+        （缺 `schema_version` / `task_id` / `tester` / `metrics` 即 `RESULT_INVALID`，C-7.1）。
+      required: [schema_version, task_id, tester, metrics]
+      additionalProperties: true
+      properties:
+        schema_version:
+          type: string
+          description: 当前为 `"1.0"`；不兼容变更才升版本
+          example: '1.0'
+        run_id:
+          type: string
+          description: 平台通过 `TESTPLANE_RUN_ID` 注入；独立运行时填 `local`（§5.10）
+        task_id:
+          type: string
+        attempt_id:
+          type: string
+          description: '`<task_id>-a<n>`（平台注入 `TESTPLANE_ATTEMPT_ID`）'
+        tester:
+          type: object
+          required: [name, version]
+          additionalProperties: true
+          properties:
+            name:
+              type: string
+              description: 必须与注册表一致
+            version:
+              type: string
+            image_ref:
+              type: string
+              description: 实际运行的镜像引用；Tester 不知道时可缺省
+        status:
+          type: string
+          description: Tester 视角的执行是否完成（与 Task 状态机不是同一套取值）
+          enum: [succeeded, failed]
+        started_at:
+          type: string
+          format: date-time
+          description: 允许与平台记录有毫秒级差异
+        finished_at:
+          type: string
+          format: date-time
+        duration_ms:
+          type: integer
+          format: int64
+          description: 缺失时由平台按时间戳计算
+        workload:
+          type: object
+          additionalProperties: true
+          description: 工作负载摘要（性能类 Tester 必须提供：`model_name` / `dataset` / `input_len` / `output_len` / `concurrency`）
+        metrics:
+          type: array
+          description: 允许空数组（纯探测类），但需在 `notes` 说明
+          items:
+            $ref: '#/components/schemas/ResultMetric'
+        error:
+          description: 失败时必填（结构同 `Failure`）
+          anyOf:
+            - $ref: '#/components/schemas/Failure'
+            - type: 'null'
+        artifacts:
+          type: array
+          description: '`path` 为相对 `/workspace/output` 的路径'
+          items:
+            $ref: '#/components/schemas/ResultArtifact'
+        notes:
+          type: string
+          description: 自由文本，仅用于人类排查，平台不解析
+        metadata:
+          type: object
+          additionalProperties: true
+          description: 工具名与版本等溯源信息
+
+    ResultMetric:
+      type: object
+      description: |
+        `metrics[]` 的一项（ARCHITECTURE 附录 A / §8.3）：必须带 `unit` 与 `statistic`，禁止只给裸数值；
+        同一 Task 内多组参数靠 `labels` 区分，`name` 不得编码维度。
+      required: [name, value, unit, statistic]
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+          description: '`snake_case`，不得用名字编码维度（禁止 `ttft_concurrency_8`）'
+          example: ttft
+        value:
+          type: [number, 'null']
+          description: '`null` 表示无法计算，必须在 `notes` 说明原因'
+          example: 125.6
+        unit:
+          type: string
+          description: 推荐 `ms` / `s` / `req_per_s` / `tokens_per_s` / `tokens` / `percent` / `score` / `count`
+          example: ms
+        statistic:
+          type: string
+          enum: [mean, p50, p90, p95, p99, min, max, sum, count]
+          example: mean
+        sample_size:
+          type: integer
+          description: 样本量；性能与精度指标强烈建议提供
+        labels:
+          type: object
+          additionalProperties: true
+          description: 标量值；多组参数必须靠它区分（`input_len` / `output_len` / `concurrency` 不得丢失）
+          example:
+            input_len: 1024
+            concurrency: 8
+
+    ResultArtifact:
+      type: object
+      description: '`result.json.artifacts[]` 的一项（附录 A）；平台按路径与磁盘取交集，声明了没文件只告警'
+      required: [name, path]
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+          example: raw_results
+        path:
+          type: string
+          description: 相对 `/workspace/output` 的路径
+          example: raw/perf.xlsx
+        size_bytes:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+
+    SecretEnv:
+      type: object
+      description: Task 的 Secret 环境变量**引用**（03 §4.6）；值永不进 API 响应（C-10）
+      required: [name, secret_ref]
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+          example: ENDPOINT_API_KEY
+        secret_ref:
+          type: string
+          description: Manifest 里写的引用名（`secret_refs.name`）
+          example: endpoint/prod-qwen
+
+    RetryPolicy:
+      type: object
+      description: |
+        `tasks.retry_policy`（03 §4.5）。默认空对象 = 不重试。
+        `retry_on` 只能取附录 D 中 `retryable: true` 的码。
+      additionalProperties: true
+      properties:
+        max_attempts:
+          type: integer
+          minimum: 0
+          description: 最大 Attempt 数（含首次）
+          example: 1
+        backoff_seconds:
+          type: integer
+          minimum: 0
+          description: 失败后进入 `queued` 的退避时长（写 `tasks.available_at`）
+          example: 60
+        retry_on:
+          type: array
+          description: '允许自动重试的错误码；只取 `retryable: true` 的码（附录 D）'
+          items:
+            $ref: '#/components/schemas/ErrorCode'
+
+    Deploy:
+      type: object
+      description: '`runs.deploy`（03 §4.4）：Deploy 阶段快照，终态后只读'
+      required: [provider, state]
+      additionalProperties: true
+      properties:
+        provider:
+          type: string
+          description: 部署提供方；MVP 只有 `genet`（mocks.Genet，D-14）
+          example: genet
+        deployment_id:
+          type: [string, 'null']
+          description: 部署方返回的部署 ID（内部幂等键 = `run_id`）
+          example: d-123
+        state:
+          $ref: '#/components/schemas/DeployState'
+        queue_position:
+          type: [integer, 'null']
+          description: 排队位次（部署方提供时）
+          example: 12
+        queue_reason:
+          type: [string, 'null']
+          description: 排队/阻塞原因（给人看）
+          example: quota
+        queued_at:
+          $ref: '#/components/schemas/NullDateTime'
+        parameters_sha:
+          type: [string, 'null']
+          description: 部署参数的摘要，用于事后比对
+
+    DeploySnapshot:
+      type: object
+      description: |
+        `GET /runs/{run_id}/deploy` 的投影（C-8.2「部署快照（状态/排队/Endpoint/Pods）」）：
+        `runs.deploy`（03 §4.4）+ 实际提交给 Genet 的参数快照（`deploy/manifest.yaml`，ARCHITECTURE §8.2）
+        + Pod 拓扑（`deploy/pods.json`，ARCHITECTURE §8.1）。没有 Deploy 时 `deploy: null`、`pods: []`。
+      required: [run_id, deploy, pods]
+      additionalProperties: true
+      properties:
+        run_id:
+          type: string
+        deploy:
+          description: 部署阶段快照；`service` 模式或独立 Task 为 null
+          anyOf:
+            - $ref: '#/components/schemas/Deploy'
+            - type: 'null'
+        manifest:
+          type: object
+          additionalProperties: true
+          description: |
+            实际提交给 Genet 的参数快照（原文，平台不解析拓扑，§9.1）。回答"当时到底部署了什么"。
+          example:
+            model: Qwen3-32B
+            replicas: 2
+        pods:
+          type: array
+          description: '`deploy/pods.json` 的内容；尚未产生 Pod 时为 `[]`'
+          items:
+            $ref: '#/components/schemas/DeployPod'
+        deploy_timeout_seconds:
+          type: integer
+          description: 本 Run 的部署总窗口（Profile `deploy_timeout_seconds` 覆盖，默认 72h；C-5.3、K-6）
+          example: 259200
+
+    DeployPod:
+      type: object
+      description: |
+        `deploy/pods.json` 的一项（ARCHITECTURE §8.1、§8.2）：Pod 名、角色、节点、重启次数、就绪与
+        每份日志的覆盖区间。多 Pod 场景下（PD 分离 / 主从）这是唯一能还原拓扑的地方；平台不按角色推导主 URL。
+      required: [name]
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+          description: Pod 名（同时是 `deploy/logs/<pod_name>.log` 的文件名）
+          example: genet-qwen3-32b-0
+        role:
+          type: [string, 'null']
+          description: 部署方给出的角色（例如 `router` / `prefill` / `decode` / `main`），平台只透传
+          example: decode
+        node:
+          type: [string, 'null']
+          description: 所在节点名
+        namespace:
+          type: [string, 'null']
+        phase:
+          type: [string, 'null']
+          description: K8s Pod phase 原值（附录 B 精神：只补不改状态）
+        ready:
+          type: boolean
+          description: 就绪判定取 Pod conditions，平台不自行判定"服务可用"（Endpoint 是权威结果）
+        restarts:
+          type: integer
+          minimum: 0
+          description: 容器重启次数（OOM / 探针失败 / 驱逐都会导致重启，§8.6）
+        logs:
+          type: array
+          description: 该 Pod 的日志分段（200 MiB 一段，execution §10）
+          items:
+            $ref: '#/components/schemas/LogSegment'
+
+    LogSegment:
+      type: object
+      description: 一份 Deploy 日志文件的覆盖区间（`deploy/logs/<pod>.log`，滚档后为 `<pod>.N.log`）
+      required: [file]
+      additionalProperties: true
+      properties:
+        file:
+          type: string
+          description: 相对 `deploy/` 的日志文件路径
+          example: logs/genet-qwen3-32b-0.1.log
+        start:
+          $ref: '#/components/schemas/NullDateTime'
+        end:
+          $ref: '#/components/schemas/NullDateTime'
+        restarts:
+          type: integer
+          minimum: 0
+          description: 本段内的重启次数
+        truncated:
+          type: boolean
+          description: 本段是否因滚档被截断（日志满不改变 Task 结果，06 §4）
+
+    Endpoint:
+      type: object
+      description: |
+        `runs.endpoint`（03 §4.3）：被测服务接入点。`url` / `model_name` / `model_path` 同时是注入
+        Tester argv 的三个公共保留参数（C-8.5）；`key` 是端点互斥键（协议 + host + 端口，不含路径）。
+      required: [url, key, source]
+      additionalProperties: true
+      properties:
+        url:
+          type: string
+          description: 接入 URL（OpenAI 兼容 base URL）；不做地址限制（§10.5）
+          example: http://10.0.0.10:8000/v1
+        model_name:
+          type: [string, 'null']
+          description: 服务端模型名
+          example: Qwen3-32B
+        model_path:
+          type: [string, 'null']
+          description: 本地权重路径（可为空）
+          example: /models/Qwen3-32B
+        protocol:
+          type: [string, 'null']
+          description: 协议（03 §4.3 示例为 `http`；设计未枚举取值，此处不收紧）
+          example: http
+        key:
+          type: string
+          description: 互斥键 `scheme://host:port`（C-8.5 第 5 条；解析失败用 `raw:<sha256>`）
+          example: http://10.0.0.10:8000
+        source:
+          $ref: '#/components/schemas/EndpointSource'
+        deploy_id:
+          type: [string, 'null']
+          description: 来源部署的 ID（`source=genet` 时有值）
+
+    Cluster:
+      type: object
+      description: |
+        集群概要（`clusters` 表，07 §5.3「不返回凭据」）。`kubeconfig_key` 是挂载目录内的文件名，
+        属凭据定位信息，本投影不暴露。
+      required: [name, api_server]
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+          example: cluster-01
+        api_server:
+          type: string
+          description: API Server 地址（不含凭据）
+          example: https://10.0.0.2:6443
+        description:
+          type: [string, 'null']
+        last_check_at:
+          $ref: '#/components/schemas/NullDateTime'
+        last_check_result:
+          type: [string, 'null']
+          description: 最近一次连通性检查的结论（原文）
+
+    # ------------------------------------------------------------------
+    # Manifest（提交体）：07 §4.1 + ARCHITECTURE §10.1/附录 C
+    # ------------------------------------------------------------------
+    RunManifest:
+      type: object
+      description: |
+        提交体（07 §4.1）：顶层是 `run:`。**不做幂等**（D-37）：本结构没有幂等键字段，
+        服务端也不做内容判重。
+      required: [run]
+      properties:
+        run:
+          $ref: '#/components/schemas/RunBody'
+
+    RunBody:
+      type: object
+      description: |
+        Manifest 的 `run:` 内容。`deploy` 与 `service` 二选一（C-5.1 第 3 条：两者都缺/都给 → 拒绝）。
+        未知字段忽略（07 §1）。
+      required: [name]
+      oneOf:
+        - required: [deploy]
+        - required: [service]
+      properties:
+        name:
+          type: string
+          description: Run 名称，展示用，不唯一（K-11）
+          example: qwen3-32b-daily
+        deploy:
+          $ref: '#/components/schemas/DeployManifest'
+        service:
+          $ref: '#/components/schemas/ServiceManifest'
+        precheck:
+          description: |
+            `auto`（默认）：平台取注册表里**唯一**一个 `role=pre_check` 的 Tester（0 个或多个都拒绝提交），
+            注入 `seq=0`、`name=precheck` 的 Task；`off`：不注入；
+            显式对象：提交者指定 tester/version/args/profile/timeout/retry（C-5.2）。
+          anyOf:
+            - $ref: '#/components/schemas/PrecheckMode'
+            - $ref: '#/components/schemas/PrecheckSpec'
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: Run 级明文环境变量，注入该 Run 全部 Task（§12.4）
+        secrets:
+          type: object
+          additionalProperties:
+            type: string
+          description: Run 级敏感值，**只填引用名**（`secret_refs.name`），不回显、不落明文
+          example:
+            ENDPOINT_API_KEY: endpoint/prod-qwen
+        tests:
+          type: array
+          description: Task 列表；每项 = 一个 Task（上限 200，超限 `RUN_TOO_LARGE`）
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/TestSpec'
+        cleanup:
+          $ref: '#/components/schemas/CleanupSpec'
+
+    TestSpec:
+      type: object
+      description: '`tests[]`：一个 Task 的提交意图（07 §4.1、ARCHITECTURE §10.1）'
+      required: [name, tester, version, execution]
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+          description: 必填；同 Run 内唯一（报告与 UI 展示用）
+        tester:
+          type: string
+          description: Tester 名称；必须命中已注册白名单（否则 `TESTER_NOT_FOUND`）
+        version:
+          type: string
+          description: Tester 版本；与 `tester` 一起构成注册表主键
+          example: 1.0.0
+        execution:
+          $ref: '#/components/schemas/ExecutionSpec'
+        args:
+          type: string
+          description: |
+            **一段字符串**（UI 输入框原文），平台只做词法切分，不校验、不解释（§5.4）。
+            不应出现 `--url` / `--model_name` / `--model_path`——那三个由平台注入，写重复了 400。
+            缺省按空串处理（公共参数仍会追加到 argv 末尾）。
+        on_failure:
+          $ref: '#/components/schemas/OnFailure'
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 86400
+          description: 覆盖平台默认 Task 超时；Tester 不声明时限（§6.6）
+        retry:
+          $ref: '#/components/schemas/RetryPolicy'
+
+    ExecutionSpec:
+      type: object
+      description: '`tests[].execution`：执行环境引用，只能引用已登记的 Profile（§10.5）'
+      required: [profile]
+      additionalProperties: true
+      properties:
+        profile:
+          type: string
+          description: Execution Profile 名称（未登记 → `EXECUTION_PROFILE_NOT_FOUND`）
+          example: k8s-npu
+
+    PrecheckMode:
+      type: string
+      description: '`precheck` 的两种开关值（C-5.2）'
+      enum: [auto, 'off']
+
+    PrecheckSpec:
+      type: object
+      description: |
+        `precheck` 的显式对象形态（C-5.2「显式对象」）：提交者全权指定 tester/version/args/profile/
+        timeout/retry；`on_failure` 仍不得弱化（`pre_check` 必须 `abort_run`）。
+      required: [tester, version, execution]
+      additionalProperties: true
+      properties:
+        tester:
+          type: string
+        version:
+          type: string
+        execution:
+          $ref: '#/components/schemas/ExecutionSpec'
+        args:
+          type: string
+          description: 缺省按空串处理（公共参数仍会追加到 argv 末尾）
+        on_failure:
+          $ref: '#/components/schemas/OnFailure'
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 86400
+        retry:
+          $ref: '#/components/schemas/RetryPolicy'
+
+    DeployManifest:
+      type: object
+      description: '`deploy`：交给部署方（MVP 为 genet mocks）的参数，平台不解析拓扑（§9.1）'
+      required: [provider]
+      additionalProperties: true
+      properties:
+        provider:
+          type: string
+          description: 部署提供方；MVP 只有 `genet`
+          example: genet
+        parameters:
+          type: object
+          additionalProperties: true
+          description: 原样转交部署方的参数对象（多 Pod / PD 分离由它决定，平台不解析）
+          example:
+            model: Qwen3-32B
+
+    ServiceManifest:
+      type: object
+      description: |
+        `service`：不部署，直接给出已有服务（§10.3）。平台把它当作 Endpoint 的来源，投影成三个公共参数
+        注入 Tester argv。`url` 必填；`model_name` / `model_path` 是否必填由 Tester 的三个保留参数
+        `required` 决定（C-5.1 第 11 条）。
+      required: [url]
+      additionalProperties: true
+      properties:
+        url:
+          type: string
+          example: http://10.0.0.10:8000/v1
+        model_name:
+          type: string
+          example: Qwen3-32B
+        model_path:
+          type: string
+          example: /models/Qwen3-32B
+
+    CleanupSpec:
+      type: object
+      description: '`cleanup`：只决定是否卸载被测服务（G-13）'
+      required: [policy]
+      additionalProperties: true
+      properties:
+        policy:
+          $ref: '#/components/schemas/CleanupPolicy'
+
+    # ------------------------------------------------------------------
+    # Manifest 快照（提交原文 + 冻结解析结果，03 §4.1/§4.2）
+    # ------------------------------------------------------------------
+    ManifestSnapshot:
+      type: object
+      description: |
+        `GET /runs/{run_id}/manifest` 的应答（C-8.2「照上次配置再来一次」与事后核对）。
+        `manifest` 是提交原文（03 §4.1），`resolved` 是冻结的解析结果（03 §4.2）。两者落库后不再变，
+        因此本应答回答的是"当时提交了什么"，不是"现在会解析成什么"。
+      required: [run_id, manifest]
+      additionalProperties: true
+      properties:
+        run_id:
+          type: string
+        manifest:
+          $ref: '#/components/schemas/RunManifest'
+        resolved:
+          description: 冻结解析结果；独立 Task 合成的占位 Run 也有（`kind=task`）
+          anyOf:
+            - $ref: '#/components/schemas/ResolvedSnapshot'
+            - type: 'null'
+
+    ResolvedSnapshot:
+      type: object
+      description: |
+        `runs.resolved`（03 §4.2）：注入的 Pre-Check、每个 Task 的默认超时/重试、argv 快照摘要。
+        `secrets` 只存引用名，本快照不含 Secret 值（C-10）。
+      required: [kind, tasks]
+      additionalProperties: true
+      properties:
+        kind:
+          $ref: '#/components/schemas/RunKind'
+        precheck:
+          type: object
+          additionalProperties: true
+          description: 注入结果；`injected=false` 表示提交时写的是 precheck 关闭（`off`）
+          properties:
+            injected:
+              type: boolean
+            tester:
+              type: string
+            version:
+              type: string
+            seq:
+              type: integer
+              description: 固定为 `0`（平台注入的 Pre-Check）
+          example:
+            injected: true
+            tester: endpoint-probe
+            version: 1.0.0
+            seq: 0
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResolvedTask'
+        args_snapshot_sha:
+          type: string
+          description: argv 快照的摘要（`args_raw` / `args_argv` / `injected_argv` 三份的索引，C-8.5）
+        schema_version:
+          type: string
+          example: '1.0'
+
+    ResolvedTask:
+      type: object
+      description: 冻结后的单个 Task 解析结果（03 §4.2）
+      required: [id, seq, name, profile, timeout_seconds]
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+        seq:
+          type: integer
+        name:
+          type: string
+        profile:
+          type: string
+        timeout_seconds:
+          type: integer
+        retry:
+          $ref: '#/components/schemas/RetryPolicy'
+
+    DryRunResult:
+      type: object
+      description: |
+        `?dry_run=true` 的应答（07 §4.1）：只校验不落库。`issues[]` 为字段级问题，
+        `resolved_preview` 是解析结果的预览（不是完整 `resolved` 快照）。
+      required: [valid]
+      additionalProperties: true
+      properties:
+        valid:
+          type: boolean
+        issues:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationIssue'
+        resolved_preview:
+          type: object
+          additionalProperties: true
+          description: 预览（03 §4.2 的子集），例如注入的 precheck Task
+          example:
+            precheck:
+              tester: endpoint-probe
+              seq: 0
+
+    RunAccepted:
+      type: object
+      description: 202 应答体（07 §4.2）：已受理并落库，后续状态由 SSE/轮询获取
+      required: [run, tasks]
+      additionalProperties: true
+      properties:
+        run:
+          $ref: '#/components/schemas/AcceptedRun'
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/AcceptedTask'
+
+    AcceptedRun:
+      type: object
+      description: 202 里的 Run 摘要（07 §4.2）
+      required: [id, status, kind, submitted_at]
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          example: r-20261105-0001
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        kind:
+          $ref: '#/components/schemas/RunKind'
+        submitted_at:
+          type: string
+          format: date-time
+
+    AcceptedTask:
+      type: object
+      description: 202 里的 Task 摘要（07 §4.2）
+      required: [id, name, status]
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          example: t-0001
+        name:
+          type: string
+          example: precheck
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+
+    CancelAccepted:
+      type: object
+      description: 取消应答体（07 §8）：202 与"已处于 cancelling/canceled 的 200"同构
+      required: [run_id, status]
+      additionalProperties: true
+      properties:
+        run_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/RunStatus'
+
+    TaskCancelAccepted:
+      type: object
+      description: Task 取消应答体（07 §8）：202 与"已是取消中/已取消"的 200 同构
+      required: [task_id, status]
+      additionalProperties: true
+      properties:
+        task_id:
+          type: string
+        run_id:
+          type: string
+          description: 所在 Run；Task 一定属于某个 Run（独立 Task 也有占位 Run，03 §3.2）
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+
+    # ------------------------------------------------------------------
+    # 事件（state_events，03 §3.2 + 07 §7）
+    # ------------------------------------------------------------------
+    EventType:
+      type: string
+      description: 事件类型（07 §7、C-9.1）
+      enum:
+        - run.submitted
+        - run.state_changed
+        - task.state_changed
+        - attempt.started
+        - attempt.finished
+        - deploy.state_changed
+        - cleanup.started
+        - run.finished
+        - report.written
+        - resync_required
+
+    Event:
+      type: object
+      description: |
+        一条状态事实（`state_events`，03 §3.2）：SSE 帧的 `data` 与 `events/history` 的 `items[]`
+        是同一结构。只描述事实，不携带凭据（`payload` 里禁止出现 secret 值），**不含日志正文**——
+        日志走独立端点（C-9.1、C-9.2）。
+      required: [seq, type, run_id, at]
+      additionalProperties: true
+      properties:
+        seq:
+          type: integer
+          format: int64
+          description: 每 Run 单调递增且唯一（`state_events_seq_uq`）；SSE 的 `id` 就是它
+        type:
+          $ref: '#/components/schemas/EventType'
+        run_id:
+          type: string
+        task_id:
+          type: [string, 'null']
+        attempt_id:
+          type: [string, 'null']
+        at:
+          type: string
+          format: date-time
+          description: 事件发生时间（UTC）
+        from:
+          type: [string, 'null']
+          description: 转移前状态（`state_events.from_status` 原值）
+        to:
+          type: [string, 'null']
+          description: 转移后状态（`state_events.to_status` 原值）
+        reason:
+          type: [string, 'null']
+        payload:
+          type: object
+          additionalProperties: true
+          description: 事件专属载荷（C-9.1 每类字段不同，故不收紧）
+
+    EventList:
+      type: object
+      description: |
+        事件分页信封（07 §6 的统一形状，`{items, next_cursor, has_more}`），按 `seq` 升序。
+        `next_cursor` 是本页末条 `seq` 的字符串形式；**续取时把它作为 `since_seq` 传回**——
+        本端点不接受 `cursor` 参数（编号即游标）。`has_more=false` 时 `next_cursor` 为 null。
+      required: [items, has_more]
+      additionalProperties: true
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        next_cursor:
+          type: [string, 'null']
+          description: 本页末条 `seq`，作为下一次请求的 `since_seq`
+        has_more:
+          type: boolean
+
+    # ------------------------------------------------------------------
+    # 报告（ARCHITECTURE §8.4）
+    # ------------------------------------------------------------------
+    Report:
+      type: object
+      description: |
+        Run 汇总 `report.json`（ARCHITECTURE §8.4）：只做组织与索引，**不对指标做聚合**
+        （不求和、不求平均）。单 Run 报告 >20 MiB 时返回摘要（`truncated: true` + `report_ref`）。
+      required: [run_id, status, counts, tasks, failures]
+      additionalProperties: true
+      properties:
+        run_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        counts:
+          $ref: '#/components/schemas/ReportCounts'
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReportTask'
+        failures:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReportFailure'
+        truncated:
+          type: boolean
+          description: 是否为摘要版（完整版见 `report_ref`）
+        report_ref:
+          type: string
+          description: 完整版报告的相对引用（`report.full.json`）
+
+    ReportCounts:
+      type: object
+      description: Task 状态计数（ARCHITECTURE §8.4）
+      required: [total, succeeded, failed, skipped, canceled]
+      additionalProperties: true
+      properties:
+        total:
+          type: integer
+        succeeded:
+          type: integer
+        failed:
+          type: integer
+        skipped:
+          type: integer
+        canceled:
+          type: integer
+
+    ReportTask:
+      type: object
+      description: 报告里的单 Task 条目（ARCHITECTURE §8.4）
+      required: [task_id, name, status, attempts]
+      additionalProperties: true
+      properties:
+        task_id:
+          type: string
+        name:
+          type: string
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        attempts:
+          type: integer
+          description: Attempt 数
+        result_ref:
+          type: string
+          description: 该 Task 的 `result.json` 相对引用
+        duration_ms:
+          type: integer
+          format: int64
+          description: 该 Task 的耗时（毫秒）
+
+    ReportFailure:
+      type: object
+      description: 报告里的失败清单条目（ARCHITECTURE §8.4）
+      required: [task_id, reason]
+      additionalProperties: true
+      properties:
+        task_id:
+          type: string
+        reason:
+          type: string
+          description: 失败原因（给人看；通常与 `error_code` 同值）
+        error_code:
+          $ref: '#/components/schemas/ErrorCode'
+
+    # ------------------------------------------------------------------
+    # 身份
+    # ------------------------------------------------------------------
+    Me:
+      type: object
+      description: |
+        `GET /me` 的应答（07 §2.4、C-8.2）：核心是 `{user, role}`。本实例另返回 `csrf_token`
+        （UI 写操作双提交用，Bearer 调用方可忽略）与 `groups`（身份源里的组），二者不是必填契约。
+      required: [user, role]
+      additionalProperties: true
+      properties:
+        user:
+          type: string
+          description: 身份源 subject
+        role:
+          $ref: '#/components/schemas/Role'
+        csrf_token:
+          type: string
+          description: 写操作双提交用；Bearer 调用方可忽略
+        groups:
+          type: array
+          items:
+            type: string
+          description: 身份源里的组；组到角色的映射在服务端配置（`groups:role`），不硬编码
+
+    Meta:
+      type: object
+      description: |
+        `GET /meta` 的应答（C-8.2、07 §5.3）：`{version, api_version, features}`，供前端做版本对齐
+        与特性开关。`features` 只表示本实例开启了哪些能力，**不表示数据状态**。
+      required: [version, api_version, features]
+      additionalProperties: true
+      properties:
+        version:
+          type: string
+          description: 控制面构建版本（镜像 tag 或 commit 短哈希）
+          example: 0.1.0
+        api_version:
+          type: string
+          description: URL 主版本（07 §1「URL 主版本」），当前恒为 `v1`
+          example: v1
+        features:
+          type: object
+          additionalProperties:
+            type: boolean
+          description: 能力开关（布尔），只有开启的能力可以依赖
+          example:
+            dry_run: true
+            events_history: true
+            report_md: true
+            deploy: true
+            queue_status: true
+
+    # ------------------------------------------------------------------
+    # Tester（tester.yaml，ARCHITECTURE 附录 C）
+    # ------------------------------------------------------------------
+    TesterSpec:
+      type: object
+      description: |
+        `tester.yaml` 的结构（ARCHITECTURE 附录 C）。平台**不渲染、不校验** `parameters`（05 §5.4）；
+        禁止字段 `requires` / `timeout_seconds` / `outputs` 不在此结构中，出现即拒（05 §5.3）。
+        `role=pre_check` 时必须 `on_failure=abort_run`（§7.3）。
+      required:
+        - name
+        - version
+        - display_name
+        - description
+        - role
+        - on_failure
+        - entry
+        - image
+        - resources
+        - concurrency
+        - parameters
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+          description: 全局唯一
+          example: aisbench-perf
+        version:
+          type: string
+          description: 语义化版本；发布后不可覆盖（同 name+version 不同内容 → `TESTER_VERSION_PINNED`）
+          example: 1.0.0
+        display_name:
+          type: string
+          description: 中文展示名（UI 用）
+        description:
+          type: string
+          description: 中文说明（UI 用）
+        role:
+          $ref: '#/components/schemas/TesterRole'
+        on_failure:
+          $ref: '#/components/schemas/OnFailure'
+        entry:
+          type: string
+          description: 必须为 `/tester/run.sh`（Single Entry Point，§5.2）
+          example: /tester/run.sh
+        image:
+          type: string
+          description: 镜像引用（tag 或 digest 均可）；平台不解析、不限制形态（§5.6）
+          example: registry.internal/testplane/aisbench-perf:1.0.0
+        resources:
+          $ref: '#/components/schemas/ResourceRequest'
+        concurrency:
+          $ref: '#/components/schemas/ConcurrencyPolicy'
+        mounts:
+          type: array
+          description: 向平台声明的挂载需求；Profile 供给缺失 → `MOUNT_UNAVAILABLE`（§10.4）
+          items:
+            $ref: '#/components/schemas/MountSpec'
+        k8s:
+          $ref: '#/components/schemas/TesterK8sSpec'
+        parameters:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/TesterParameter'
+          description: 参数清单（**文档语义**，只给 Agent 与人看；平台不渲染、不校验，§5.4）
+        env:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/EnvVarDecl'
+          description: 声明本 Tester 读取哪些环境变量；值由 Run 级 `env` / `secrets` 提供（§12.4）
+        placeholder:
+          type: string
+          description: 一段示例命令行（不含程序名），UI 输入框占位；文档语义，平台不解析
+
+    Tester:
+      description: |
+        Tester 投影：`tester.yaml` 的结构（`TesterSpec`）+ 注册表元数据（`testers` 表，03 §3.2）。
+        注册表只读，`orphaned` 表示已从目录移除但仍被历史 Run 引用。
+      allOf:
+        - $ref: '#/components/schemas/TesterSpec'
+        - type: object
+          required: [content_sha, source_file, orphaned, registered_at, registered_by]
+          properties:
+            content_sha:
+              type: string
+              description: 规范化 `tester.yaml` + `run.sh` 字节的 sha256（版本可追溯性，§5.7）
+            source_file:
+              type: string
+              description: 目录内相对路径（`testers/<name>/tester.yaml`）
+            orphaned:
+              type: boolean
+              description: 目录里已移除；不删行，只标记（03 §8）
+            removed_at:
+              $ref: '#/components/schemas/NullDateTime'
+            registered_at:
+              type: string
+              format: date-time
+            registered_by:
+              type: string
+
+    ResourceRequest:
+      type: object
+      description: 单次 Attempt 的资源需求（附录 C）；可被 Manifest 提高、不可降低（§10.1）
+      required: [cpu, memory]
+      additionalProperties: true
+      properties:
+        cpu:
+          type: string
+          description: K8s quantity 字符串
+          example: '4'
+        memory:
+          type: string
+          description: K8s quantity 字符串
+          example: 16Gi
+        gpu:
+          $ref: '#/components/schemas/GPURequest'
+
+    GPURequest:
+      type: object
+      description: 'GPU 资源需求；`count: 0` 表示不需要 GPU'
+      additionalProperties: true
+      properties:
+        resource:
+          type: string
+          description: 资源名
+          example: nvidia.com/gpu
+        count:
+          type: integer
+          minimum: 0
+          description: GPU 数量；缺省为 0（表示不需要 GPU）
+
+    ConcurrencyPolicy:
+      type: object
+      description: Tester 对并发的显式声明（K-12）；性能类与 Pre-Check 必须独占（§6.7）
+      required: [endpoint_exclusive]
+      additionalProperties: true
+      properties:
+        endpoint_exclusive:
+          type: boolean
+          description: 执行期间独占该 Endpoint；同 Endpoint 上其他 Task 必须排队
+
+    MountSpec:
+      type: object
+      description: 'Tester 声明的挂载需求（§10.4）：`name` / `path` / `required`'
+      required: [name, path]
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+          description: 挂载名；Profile 提供同名供给
+          example: dataset
+        path:
+          type: string
+          description: 容器内绝对路径；不得与 `/workspace/output`、`/tmp`、`/tester` 冲突
+          example: /data
+        required:
+          type: boolean
+          description: '缺省 `true`；为 `false` 时供给缺失跳过并记 `mount_skipped`'
+
+    TesterK8sSpec:
+      type: object
+      description: |
+        受限 K8s 需求（附录 C），白名单字段。禁止完整清单与 `privileged` / `hostPath` / `hostNetwork`，
+        平台字段优先且不可覆盖（§6.8）。
+      additionalProperties: true
+      properties:
+        node_selector:
+          type: object
+          additionalProperties:
+            type: string
+          example:
+            accelerator: npu
+        tolerations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Toleration'
+        annotations:
+          type: object
+          additionalProperties:
+            type: string
+        security_context:
+          $ref: '#/components/schemas/SecurityContext'
+
+    Toleration:
+      type: object
+      additionalProperties: true
+      properties:
+        key:
+          type: string
+        operator:
+          type: string
+          example: Exists
+        effect:
+          type: string
+          example: NoSchedule
+
+    SecurityContext:
+      type: object
+      description: 只允许 `run_as_user` 与 `fs_group`（附录 C）
+      additionalProperties: true
+      properties:
+        run_as_user:
+          type: integer
+          format: int64
+          example: 10001
+        fs_group:
+          type: integer
+          format: int64
+          example: 10001
+
+    TesterParameter:
+      type: object
+      description: |
+        参数清单的一项（附录 C 示例）。**只给 Agent 与人阅读**，平台不渲染、不校验、不据此生成表单
+        （§5.4、D-21）。
+      additionalProperties: true
+      properties:
+        type:
+          type: string
+          example: string
+        description:
+          type: string
+        example:
+          type: string
+        required_for:
+          type: string
+          description: 哪类 Tester 需要它（文档说明，不是校验条件）
+          example: 精度类 Tester
+
+    EnvVarDecl:
+      type: object
+      description: Tester 对某个环境变量的**读取声明**（附录 C）；值由 Run 级 `env` / `secrets` 提供
+      additionalProperties: true
+      properties:
+        required:
+          type: boolean
+          description: '缺省 `false`；为 `true` 时提交校验要求有来源（C-5.1 第 9 条）'
+        secret:
+          type: boolean
+          description: '缺省 `false`；为 `true` 表示由 Secret 注入（值不回显）'
+        description:
+          type: string
+
+    # ------------------------------------------------------------------
+    # 通用
+    # ------------------------------------------------------------------
+    NullDateTime:
+      type: [string, 'null']
+      format: date-time
+      description: RFC3339，服务端统一 UTC（`Z`）；null 表示尚未发生
+
+    # ------------------------------------------------------------------
+    # 分页信封（07 §6：{items, next_cursor, has_more}）
+    # ------------------------------------------------------------------
+    RunList:
+      type: object
+      description: Run 分页信封；游标编码 `(submitted_at, id)` 倒序（07 §6）
+      required: [items, has_more]
+      additionalProperties: true
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Run'
+        next_cursor:
+          type: [string, 'null']
+          description: 下一页游标；`has_more=false` 时为 null
+        has_more:
+          type: boolean
+
+    TaskList:
+      type: object
+      description: Task 分页信封；按 `run_id, seq` 排序（07 §6）
+      required: [items, has_more]
+      additionalProperties: true
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Task'
+        next_cursor:
+          type: [string, 'null']
+        has_more:
+          type: boolean
+
+    AttemptList:
+      type: object
+      description: Attempt 分页信封；按 `idx` 升序
+      required: [items, has_more]
+      additionalProperties: true
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attempt'
+        next_cursor:
+          type: [string, 'null']
+        has_more:
+          type: boolean
+
+    TesterList:
+      type: object
+      description: Tester 分页信封
+      required: [items, has_more]
+      additionalProperties: true
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tester'
+        next_cursor:
+          type: [string, 'null']
+        has_more:
+          type: boolean
+
+    ClusterList:
+      type: object
+      description: 集群分页信封
+      required: [items, has_more]
+      additionalProperties: true
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Cluster'
+        next_cursor:
+          type: [string, 'null']
+        has_more:
+          type: boolean
+
+    # ------------------------------------------------------------------
+    # 队列与槽位（C-4.3/C-4.4/C-4.7、03 §3.2、execution §11）
+    # ------------------------------------------------------------------
+    QueueStatus:
+      type: object
+      description: |
+        `GET /queue-status` 的应答（C-4.7）：平台槽位 + 等待原因 + Volcano 只读快照。
+        只呈现事实，不含调度决策——平台没有调度决策权（§6.9），也不提供插队。
+      required: [slots, waiting]
+      additionalProperties: true
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+          description: 快照生成时间（UTC）；Volcano 部分缓存 15s（execution §11）
+        slots:
+          $ref: '#/components/schemas/PlatformSlots'
+        waiting:
+          $ref: '#/components/schemas/WaitingSummary'
+        volcano:
+          $ref: '#/components/schemas/VolcanoSnapshot'
+
+    PlatformSlots:
+      type: object
+      description: 平台自身的槽位：全局并发 permit（C-4.4）+ 端点互斥租约（C-4.3）
+      required: [concurrency_max, active, available]
+      additionalProperties: true
+      properties:
+        concurrency_max:
+          type: integer
+          minimum: 0
+          description: 全局并发上限（`TESTPLANE_CONCURRENCY_MAX`，默认 20，C-11）
+          example: 20
+        active:
+          type: integer
+          minimum: 0
+          description: '当前活跃 Attempt 数（`attempts.status IN (''preparing'',''running'')`，C-4.4）'
+          example: 7
+        available:
+          type: integer
+          minimum: 0
+          description: 剩余 permit = `concurrency_max - active`
+          example: 13
+        endpoints:
+          type: array
+          description: 端点互斥槽位的当前持有者（`endpoint_leases`，03 §3.2）
+          items:
+            $ref: '#/components/schemas/EndpointSlot'
+
+    EndpointSlot:
+      type: object
+      description: |
+        一个 `endpoint_key` 上的租约（03 §3.2：至多 1 个独占，或 N 个共享）。
+        独占型在"任何持有者存在"时拒绝新的申请，共享型在"存在独占持有者"时拒绝（C-4.3）。
+      required: [endpoint_key, holders]
+      additionalProperties: true
+      properties:
+        endpoint_key:
+          type: string
+          description: 互斥键 `scheme://host:port`（不含路径，C-8.5 第 5 条）
+          example: http://10.0.0.10:8000
+        exclusive:
+          type: boolean
+          description: 当前是否被独占持有（独占期间同端点其他 Task 一律排队，C-4.5）
+        holders:
+          type: array
+          description: 持有该端点的 Task ID
+          items:
+            type: string
+
+    WaitingSummary:
+      type: object
+      description: |
+        排队 Task 的计数与明细。C-4.7 要求把"平台自身的等待"与"K8s/Volcano 的等待"分开呈现，
+        用户才知道该找谁；本结构按 `waiting_reason` 分桶，语义归属见 `WaitingReason`。
+      required: [total, by_reason]
+      additionalProperties: true
+      properties:
+        total:
+          type: integer
+          minimum: 0
+          description: 排队中的 Task 总数（`queued` 以及等待 Pre-Check 的 `pending`）
+          example: 5
+        by_reason:
+          $ref: '#/components/schemas/WaitingReasonCounts'
+        tasks:
+          type: array
+          description: 排队明细，按 `(run.submitted_at, seq)` 升序（即调度 FIFO 顺序，C-4.6）
+          items:
+            $ref: '#/components/schemas/WaitingTask'
+
+    WaitingReasonCounts:
+      type: object
+      description: |
+        `waiting_reason` 的 6 个取值的计数，键与 `WaitingReason`（03 §3.2 CHECK 约束）逐字一致。
+        没有排队的取值记 0，**不省略键**——前端据此渲染固定列，也避免"未知原因"被静默吞掉。
+      required:
+        - precheck_gate
+        - slot_waiting
+        - global_limit
+        - queue_full
+        - insufficient_resources
+        - gang_pending
+      additionalProperties: false
+      properties:
+        precheck_gate:
+          type: integer
+          minimum: 0
+          description: 平台：等待 Pre-Check 通过（C-4.5）
+        slot_waiting:
+          type: integer
+          minimum: 0
+          description: 平台：端点被其他 Task 独占/持有（C-4.3）
+        global_limit:
+          type: integer
+          minimum: 0
+          description: 平台：端点空闲但全局并发已满（C-4.4）
+        queue_full:
+          type: integer
+          minimum: 0
+          description: K8s/Volcano：队列已满（execution §11）
+        insufficient_resources:
+          type: integer
+          minimum: 0
+          description: K8s：Pod `Unschedulable` 且资源不足（execution §11）
+        gang_pending:
+          type: integer
+          minimum: 0
+          description: K8s/Volcano：PodGroup Pending 且 `minMember > running`（execution §11）
+
+    WaitingTask:
+      type: object
+      description: 排队中的一个 Task（C-4.7：`QUEUED` 必须有原因，不给空）
+      required: [task_id, run_id, name, status, waiting_reason]
+      additionalProperties: true
+      properties:
+        task_id:
+          type: string
+        run_id:
+          type: string
+        name:
+          type: string
+        seq:
+          type: integer
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        waiting_reason:
+          $ref: '#/components/schemas/WaitingReason'
+        endpoint_key:
+          type: [string, 'null']
+          description: 端点互斥键；`deploy` 模式下 Run 进入 `testing` 前才回填（C-5.1）
+        since:
+          $ref: '#/components/schemas/NullDateTime'
+        detail:
+          type: object
+          additionalProperties: true
+          description: |
+            判定不了时的原始依据（C-4.7：`unknown` 落 `detail` 而不是新增枚举值），
+            例如 Volcano message 截断 256B 后的原文。
+
+    VolcanoSnapshot:
+      type: object
+      description: |
+        Volcano 只读快照（E-11、execution §11）。不可达时只降级本块：`available: false` + `detail`，
+        不影响 `slots` / `waiting`，也不阻塞页面（execution §11「返回 scheduler_unavailable」）。
+      required: [available]
+      additionalProperties: true
+      properties:
+        available:
+          type: boolean
+        detail:
+          type: [string, 'null']
+          description: 不可达或无法判定时的说明（例如 `scheduler_unavailable`）
+        queues:
+          type: array
+          description: 已登记的 Volcano Queue 概要；不可达时为 `[]`
+          items:
+            $ref: '#/components/schemas/VolcanoQueue'
+
+    VolcanoQueue:
+      type: object
+      description: 一个 Volcano Queue 的概要（execution §11 只读三类资源，缓存 15s）
+      required: [name]
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+          example: default
+        state:
+          type: [string, 'null']
+          description: '`status.state`（`Open` / `Closed`）；`Closed` 会让排队 Task 落 `queue_full`'
+          example: Open
+        capability:
+          type: object
+          additionalProperties: true
+          description: '`spec.capability` 原文（队列配额，平台不换算单位）'
+        allocated:
+          type: object
+          additionalProperties: true
+          description: '`status.allocated` 原文（已分配）'
+        pending_jobs:
+          type: integer
+          minimum: 0
+          description: 该 queue 下 `PodGroup.phase=Pending` 的数量
+        longest_wait_seconds:
+          type: integer
+          minimum: 0
+          description: '`now - min(podgroup.creationTimestamp)`，即队列里最久的等待'
+        reason:
+          $ref: '#/components/schemas/WaitingReason'
+          description: 该队列造成排队的主要等待原因（K8s/Volcano 侧的三个取值之一）
