@@ -417,7 +417,15 @@ func (s *Store) finishRunLocked(ctx context.Context, tx pgx.Tx, run *Run, at tim
 	if err != nil {
 		return cur
 	}
+	// Pre-Check 的判别用 Tester 角色，**不能用 seq==0**：`precheck: "off"` 时唯一的
+	// 测试 Task 也从 seq=0 开始，误判会把它的 TASK_TIMEOUT 当成 Pre-Check 可重试失败，
+	// 把本该 failed 的 Run 判成 service_unavailable（QA 的 r-20261105-3J4R）。
+	precheckIDs, err := s.PrecheckTaskIDs(ctx, tx, run.ID)
+	if err != nil {
+		return cur
+	}
 	input := domain.RunOutcomeInput{}
+	var platformTimeout bool
 	for _, t := range tasks {
 		summary := domain.TaskSummary{Seq: t.Seq, Status: domain.TaskStatus(t.Status)}
 		if len(t.Error) > 0 {
@@ -435,12 +443,19 @@ func (s *Store) finishRunLocked(ctx context.Context, tx pgx.Tx, run *Run, at tim
 				}
 			}
 		}
-		if t.Seq == 0 {
+		isPrecheck := precheckIDs[t.ID]
+		if isPrecheck {
 			pre := summary
 			input.Precheck = &pre
 		}
+		// TASK_TIMEOUT 属 C-5.8 #3 的平台侧错误 → Run failed；但 Pre-Check 的超时
+		// 仍走 #4（可重试 → service_unavailable），不能被这里的平台错误抢走。
+		if !isPrecheck && summary.Status == domain.TaskFailed && summary.ErrorCode == domain.CodeTaskTimeout {
+			platformTimeout = true
+		}
 		input.Tasks = append(input.Tasks, summary)
 	}
+	input.PlatformError = platformTimeout
 	status := domain.DecideRunOutcome(input)
 	payload := map[string]any{}
 	if run.Endpoint != nil && len(run.Endpoint) > 0 {
@@ -449,7 +464,7 @@ func (s *Store) finishRunLocked(ctx context.Context, tx pgx.Tx, run *Run, at tim
 	// Run 终态要带 error（03 §3.1「终态/失败」）：取第一个失败的 Task 的 Failure，
 	// Pre-Check 失败时优先用它（它决定 service_unavailable 的语义）。
 	if status != domain.RunSucceeded && status != domain.RunCanceled {
-		if f := firstTaskFailure(tasks); f != nil {
+		if f := firstTaskFailure(tasks, precheckIDs); f != nil {
 			payload["error"] = *f
 		}
 	}
@@ -464,8 +479,8 @@ func (s *Store) finishRunLocked(ctx context.Context, tx pgx.Tx, run *Run, at tim
 	return status
 }
 
-// firstTaskFailure 取第一个可解释失败原因的 Task Failure（Pre-Check 优先）。
-func firstTaskFailure(tasks []Task) *domain.Failure {
+// firstTaskFailure 取第一个可解释失败原因的 Task Failure（Pre-Check 优先，按角色判别）。
+func firstTaskFailure(tasks []Task, precheckIDs map[string]bool) *domain.Failure {
 	var precheck *domain.Failure
 	var any *domain.Failure
 	for i := range tasks {
@@ -477,7 +492,7 @@ func firstTaskFailure(tasks []Task) *domain.Failure {
 		if err := json.Unmarshal(t.Error, &f); err != nil || f.Code == "" {
 			continue
 		}
-		if t.Seq == 0 && precheck == nil {
+		if precheckIDs[t.ID] && precheck == nil {
 			precheck = &f
 		}
 		if any == nil {
@@ -490,7 +505,7 @@ func firstTaskFailure(tasks []Task) *domain.Failure {
 	return any
 }
 
-// abortOthers 把同 Run 其余未完成的 Task 收口（C-5.5）。'
+// abortOthers 把同 Run 其余未完成的 Task 收口（C-5.5）。
 func (s *Store) abortOthers(ctx context.Context, tx pgx.Tx, runID, failedTaskID, reason string,
 	at time.Time) (skipped []string, activeAttempts []string, err error) {
 	rows, err := tx.Query(ctx, `

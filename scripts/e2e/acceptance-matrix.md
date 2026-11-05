@@ -13,11 +13,11 @@
 | 5 | Registry 发现与校验 | 做过（发现）/ 未做（非法 tester.yaml 单测） | `GET /testers` 返回 endpoint-probe；`tools/contract` 校验 required 字段 |
 | 6 | Tester 契约（入口/argv/输出/result.json） | 做过 | 真实 `testers/endpoint-probe/run.sh` 在容器里对 mock-llm 跑通 5 种判定；`result.json` 11 字段通过校验 |
 | 7 | Tester 独立运行 | 做过 | `scripts/e2e/probe-check.ps1`：5/5 场景 exit code 与 result.json 均符合设计 |
-| 8 | K8s Executor（超时/取消） | 部分 | 真 Job 创建/完成/产物/logs 已通（`r-EPRN` 7s）；超时/取消与重启恢复待补 |
-| 9 | 状态机与重启恢复 | 部分 | 已见启动对账收口僵尸租约（Lead 实测 8QGE）；脚本化杀 Job 对账待补 |
+| 8 | K8s Executor（超时/取消） | 做过 | 取消 8/8：`r-HX8M` 立即 cancel → `cancelling` → 49.6s 后 `canceled`（60s reconcile tick），Task 全 skipped、租约 0、Pod 0。超时 14/14：`r-04K3` `timeout_seconds=5` → Run `failed`、Task/Attempt `TASK_TIMEOUT retryable=true`、attempt 14.96s ≤ timeout+30s、Pod/Job 删除、租约 0、16.9s 终态 |
+| 9 | 状态机与重启恢复 | 部分 | 已见启动对账收口僵尸租约（Lead 实测 8QGE）；历史 4 条 cancelling 启动后收口为 canceled（Lead 实测）；脚本化杀 Job 对账待补 |
 | 10 | Attempt 与重试 | 未做 | 需要 `retry_on` 命中与失败注入 |
 | 11 | 失败策略（abort_run） | 做过 | 失败注入中 precheck 失败后其余 Task 全部 `skipped(upstream_abort)` ✅ |
-| 12 | Run 编排全链路 | 做过 | success + 4 类失败全链路：失败注入 5/5，终态与 C-5.8 一致 |
+| 12 | Run 编排全链路 | 做过 | success / service_unavailable / completed_with_errors / canceled / failed（平台超时）五类终态均实测 |
 | 13 | 报告结构 | 做过 | `r-EPRN` report 662B / report.md 780B，终态后 ≤2s 出现 ✅ |
 | 14 | 产物持久化 | 部分 | `result.json`、`raw/`、`logs/` 均落 PVC；`/logs` 返回 200 + X-Log-Offset；删 Pod 后下载待测 |
 | 15 | 失败隔离 | 未做 | 两 Task 一失败一成功的 Run 待构造（需要第二个可执行 Tester） |
@@ -48,3 +48,29 @@ pwsh scripts/e2e/failure-injection.ps1          # 需要控制面 + kind executo
   | slow-ready | `r-Z47Q` | service_unavailable | PRECHECK_FAILED retryable=true |
 
 严格断言，无 report/logs 豁免。
+
+## 取消收口补充（2026-11-05 11:40，镜像 `0162d0c6…` / 8093）
+
+- `contract --mode all`：**44/44 PASS**（确认取消改动未碰契约）。
+- e2e 生命周期：`r-20261105-ZTBF` **31/31 PASS**，succeeded 7.1s。
+- 取消场景 `scripts/e2e/cancel-check.ps1`：`r-20261105-HX8M` 立即 `POST /cancel` → `cancelling` → **49.6s** 后 `canceled`，**8/8 断言全绿**：
+  - Run 终态 canceled、≤60s；
+  - Task 全 skipped，reason=`upstream_abort`；
+  - 无 Attempt 残留；
+  - `endpoint_leases` 0 行；
+  - `job-name=tp-t-*` Pod 0 个。
+- DB 状态分布（收口后）：`succeeded 9 / canceled 8 / service_unavailable 6 / completed_with_errors 4`，**无 cancelling/queued/running 残留**。
+
+取消时延说明：`cancelling → canceled` 走 C-3.5 对账循环（`ReconcileInterval=60s`），最坏约 60s；本次 49.6s 属 tick 相位，不是卡死。若产品要求更快，需要把取消收口挪到 watchdog 或调小 ReconcileInterval。
+
+## 超时路径补充（2026-11-05 11:48，镜像 `0eade6b9…` 后续修复版 / 8095）
+
+- `scripts/e2e/timeout-check.ps1`：**14/14 PASS**。
+- `r-20261105-04K3`：`precheck:"off"` + `timeout_seconds=5` + mock-llm-slow。
+  - Run 终态 **`failed`**（平台 C 类），16.9s ≤ 30s；
+  - Task `t-9DSH8Z`：`failed`，`error.code=TASK_TIMEOUT`，`retryable=true`；
+  - Attempt `t-9DSH8Z-a1`：`failed/phase=timeout`，span **14.96s ≤ timeout+30s**；
+  - 事件：`task.state_changed#9` `running→failed` + `payload.error.code=TASK_TIMEOUT`（无 `task.timeout`，按口径接受）；
+  - Job/Pod 已删除，`endpoint_leases` 0。
+- DB 状态分布（收口后）：`service_unavailable 9 / succeeded 9 / canceled 8 / completed_with_errors 4 / failed 1`，无 `cancelling/queued/running` 残留。
+- 判据：`resolved.precheck.injected` 为唯一依据（`precheck:"off"` → false → 全部 Task 走测试语义）；`seq==0` 与 tester role 都不能单独判 Pre-Check。

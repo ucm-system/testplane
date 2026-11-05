@@ -46,7 +46,11 @@ docker run -d --name testplane-pg --restart unless-stopped `
 kubectl --context kind-testplane apply -k deploy/k8s
 
 # 2. 构建镜像并灌进集群（kind 节点看不到宿主镜像库，必须 kind load）
-make build                                  # 前端产物 + CGO_ENABLED=0 静态二进制
+#    有 make 时用 `make build`；Windows 原生没有 make 时用下面两行等价命令
+pnpm --dir web install; pnpm --dir web build
+Remove-Item -Recurse -Force server\internal\webui\dist -ErrorAction SilentlyContinue
+Copy-Item -Recurse web\dist server\internal\webui\dist
+Push-Location server; $env:CGO_ENABLED=0; go build -trimpath -o ..\bin\testplaned.exe ./cmd/testplaned; Pop-Location
 docker build -f deploy/docker/server.Dockerfile -t testplane-server:dev .
 & .\.tools\kind.exe load docker-image testplane-server:dev --name testplane
 

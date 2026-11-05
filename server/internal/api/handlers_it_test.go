@@ -220,6 +220,70 @@ run:
 	if len(resp.Tasks) != 2 || resp.Tasks[0].Name != "precheck" {
 		t.Fatalf("precheck 未注入: %+v", resp.Tasks)
 	}
+	// 冻结的解析快照必须记下"注入了 Pre-Check"：JSON 路径 resolved.precheck.injected == true。
+	// 终态判定（store.PrecheckTaskIDs）依赖这个字段，不是 Tester 角色。
+	assertResolvedPrecheckInjected(t, srv, resp.Run.ID, true)
+}
+
+// TestSubmitRun_PrecheckOffResolvedFlag precheck:"off" 时必须落 resolved.precheck.injected=false，
+// 即使测试用的是 role=pre_check 的 Tester（QA r-20261105-TA6M 的场景）。
+func TestSubmitRun_PrecheckOffResolvedFlag(t *testing.T) {
+	srv, _, cleanup := integrationServer(t)
+	defer cleanup()
+
+	body := `
+run:
+  name: precheck-off
+  precheck: "off"
+  service:
+    url: http://127.0.0.1:8000/v1
+  tests:
+    - name: probe-as-test
+      tester: endpoint-probe
+      version: "1.0.0"
+      execution:
+        profile: k8s-npu
+`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/yaml")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析 202: %v", err)
+	}
+	assertResolvedPrecheckInjected(t, srv, resp.Run.ID, false)
+}
+
+// assertResolvedPrecheckInjected 读 runs.resolved 并断言 precheck.injected 的值。
+func assertResolvedPrecheckInjected(t *testing.T, srv *Server, runID string, want bool) {
+	t.Helper()
+	run, err := srv.st.Runs.Get(context.Background(), nil, runID)
+	if err != nil {
+		t.Fatalf("读 run %s: %v", runID, err)
+	}
+	var resolved struct {
+		Precheck struct {
+			Injected *bool `json:"injected"`
+		} `json:"precheck"`
+	}
+	if err := json.Unmarshal(run.Resolved, &resolved); err != nil {
+		t.Fatalf("解析 resolved: %v (%s)", err, string(run.Resolved))
+	}
+	if resolved.Precheck.Injected == nil {
+		t.Fatalf("resolved.precheck.injected 缺失: %s", string(run.Resolved))
+	}
+	if *resolved.Precheck.Injected != want {
+		t.Fatalf("resolved.precheck.injected = %v, 期望 %v (%s)",
+			*resolved.Precheck.Injected, want, string(run.Resolved))
+	}
 }
 
 // TestSubmitRun_FlatManifestCompat 旧平级写法仍被接受（兼容旧脚本）。

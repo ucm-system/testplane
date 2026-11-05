@@ -116,6 +116,23 @@ pwsh scripts/e2e/failure-injection.ps1 -DryRun            # 只生成 Manifest/�
 pwsh scripts/e2e/failure-injection.ps1 -AllowKnownGaps    # 仅修复期临时豁免 report/logs
 ```
 
+取消场景单独验证（严格断言 Run/Task/租约/Pod）：
+
+```powershell
+pwsh scripts/e2e/cancel-check.ps1 -BaseUrl http://127.0.0.1:8093
+```
+
+`cancelling → canceled` 由 60s 对账循环收口，最坏约 60s；脚本默认超时 60s。
+
+超时路径（平台 watchdog 超时）同样有独立脚本：
+
+```powershell
+pwsh scripts/e2e/timeout-check.ps1 -BaseUrl http://127.0.0.1:8095
+```
+
+期望：`precheck:"off"` + 单个 test Task 超时 → Run `failed`（TASK_TIMEOUT 属平台 C 类）；
+Attempt 容差 `timeout + 30s`；事件接受 `task.state_changed + payload.error.code=TASK_TIMEOUT`。
+
 默认**严格**：report 必现（终态后 ≤2s，30s 等待足够）、`/logs` 必非空；只有显式
 `-AllowKnownGaps` 才把当前已知的 report/logs 缺口从失败项里剔除，修复后不要带这个开关。
 

@@ -384,6 +384,14 @@ CREATE INDEX audit_object_idx ON audit_log (object_type, object_id);
 }
 ```
 
+`precheck.injected` 是"这个 Run 到底有没有平台注入的 Pre-Check"的**唯一判据**（`precheck: "off"` 时为 `{"injected": false}`，只有这一个键）。判定某个 Task 是不是 Pre-Check 必须用它，**不能**用 `tasks.seq == 0`、也不能用 Tester 的 `role='pre_check'`：`precheck: "off"` 时首个测试 Task 的 seq 同样是 0，而 `endpoint-probe` 这类 Tester 既可是 Pre-Check 也可是普通测试。落地 SQL 形如：
+
+```sql
+SELECT t.id FROM tasks t JOIN runs r ON r.id = t.run_id
+ WHERE t.run_id = $1 AND t.seq = 0
+   AND COALESCE((r.resolved -> 'precheck' ->> 'injected')::boolean, false);
+```
+
 ### 4.3 `runs.endpoint`
 
 ```json
