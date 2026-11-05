@@ -36,14 +36,13 @@ export function DashboardPage() {
     <>
       <RightRail>
         <RailCard title="快捷操作" tone="muted">
+          {/* T42：概览不放"产品级操作"（新建 Run 已在左侧导航），这里只留查看类入口 */}
           <div className="flex flex-col gap-2">
-            <Link to="/submit" className="block">
-              <Button variant="primary" className="w-full">
-                新建 Run
-              </Button>
-            </Link>
             <Link to="/runs" className="block">
               <Button className="w-full">查看运行列表</Button>
+            </Link>
+            <Link to="/clusters" className="block">
+              <Button className="w-full">看集群与队列</Button>
             </Link>
           </div>
         </RailCard>

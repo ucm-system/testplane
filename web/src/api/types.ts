@@ -160,6 +160,61 @@ export interface DeploySnapshot {
   deploy_timeout_seconds?: number
 }
 
+/* ================================================================ Deploy 日志（契约内） */
+
+/** `DeployLogPod` schema：Deploy 日志的 Pod 页签。 */
+export interface DeployLogPod {
+  name: string
+  /** 至少一个容器 Ready */
+  ready: boolean
+  /** 容器最大重启次数（>0 会产生 gap） */
+  restarts: number
+  started_at?: string | null
+  last_seen_at?: string | null
+}
+
+/** `DeployLogEntry` schema：一个 Pod 的一段连续日志行。 */
+export interface DeployLogEntry {
+  pod: string
+  container: string
+  /** 该段在本 Pod 日志流里的起始行号 */
+  offset: number
+  line_count: number
+  /** 多行正文，行间 `\n` */
+  text: string
+}
+
+/** `DeployLogGap` schema：事实缺口（Pod 重启 / 晚于 accepted_at 启动），平台不假装连续。 */
+export interface DeployLogGap {
+  pod: string
+  from: string
+  to: string
+  /** `pod restarted` | `pod started after deploy accepted` */
+  reason: string
+}
+
+/** `DeployLogs` schema：`GET /runs/{id}/deploy/logs`。 */
+export interface DeployLogs {
+  run_id: string
+  pods: DeployLogPod[]
+  entries: DeployLogEntry[]
+  gaps: DeployLogGap[]
+  truncated: boolean
+  /** 下一次请求的 offset；0 表示没有更多 */
+  next_offset: number
+  /** 排队中 / 无 Deploy 阶段 / 无 Pod 时的说明 */
+  message?: string
+}
+
+export interface DeployLogQuery {
+  /** 只看这个 Pod（页签） */
+  pod?: string
+  offset?: number
+  limit?: number
+  /** 只取每个 Pod 末尾 N 行（先看最新） */
+  tail_lines?: number
+}
+
 /* ================================================================ Run */
 
 /** `Run.task_counts`：`failed` 含 canceled、`pending` 含 queued（契约只必填 total/succeeded/failed）。 */
@@ -190,6 +245,8 @@ export interface Run {
   revision?: number
   /** 仅详情返回（TaskSummary） */
   tasks?: TaskSummary[]
+  /** P1：本 Run 由哪个 Run 重试而来（`POST /runs/{id}/retry` 创建的 Run 才有） */
+  retry_of?: string | null
 }
 
 /** 列表项的别名（同一个 `Run`，只是不带 tasks）。 */
@@ -644,4 +701,174 @@ export interface DashboardStats {
   success_rate: number | null
   total_runs: number
   tester_count: number
+}
+
+/* ================================================================ 报告（契约内） */
+
+/** `ReportCounts` schema。 */
+export interface ReportCounts {
+  total: number
+  succeeded: number
+  failed: number
+  skipped: number
+  canceled: number
+}
+
+/** `ReportTask` schema：报告里的单 Task 条目。 */
+export interface ReportTask {
+  task_id: string
+  name: string
+  status: TaskStatus
+  attempts: number
+  result_ref?: string | null
+  duration_ms?: number | null
+}
+
+/** `ReportFailure` schema。 */
+export interface ReportFailure {
+  task_id: string
+  reason: string
+  error_code?: string | null
+}
+
+/** `Report` schema：`GET /runs/{id}/report`（`report.json`，只做组织不做聚合）。 */
+export interface Report {
+  run_id: string
+  status: RunStatus
+  counts: ReportCounts
+  tasks: ReportTask[]
+  failures: ReportFailure[]
+  truncated?: boolean
+  report_ref?: string
+}
+
+/* ================================================================ Execution Profile（契约内，只读） */
+
+export interface ProfileMount {
+  name: string
+  pvc: string
+  sub_path?: string | null
+  kind?: string | null
+}
+
+/** `ExecutionProfile` schema：执行环境（提交时 `execution.profile` 必须命中）。 */
+export interface ExecutionProfile {
+  name: string
+  cluster: string
+  namespace: string
+  mounts?: ProfileMount[]
+  scheduler: string
+  queue?: string | null
+  image_pull_secrets?: string[]
+  resource_defaults?: Record<string, unknown>
+  deploy_timeout_seconds: number
+}
+
+/* ================================================================ P1：重试 / 管理（openapi 未收录） */
+
+/*
+ * 下面这几组端点**不在 `server/api/openapi.yaml` 的 MVP 契约内**（契约开头明确把
+ * `POST /runs/{id}/retry`、`GET /runs/{id}/retry-plan`、`POST /tasks/{id}/retry`、`/admin/*`
+ * 列为 P1）。这里按 Lead 指定的路径与字段先落地，后端实现后以 openapi 为准对齐。
+ */
+
+/** `GET /runs/{id}/retry-plan`：重试预览。 */
+export interface RetryPlan {
+  run_id: string
+  /** 整个 Run 是否可重试（false 时 UI 禁用按钮并显示 `reason`） */
+  retryable: boolean
+  reason?: string | null
+  /** 将复用（已成功）的 Task */
+  reuse: RetryTaskRef[]
+  /** 将重跑（失败 / 跳过）的 Task */
+  rerun: RetryTaskRef[]
+}
+
+export interface RetryTaskRef {
+  task_id: string
+  name: string
+  status: TaskStatus
+  error_code?: string | null
+}
+
+/** `POST /runs/{id}/retry` 的应答。 */
+export interface RetryAccepted {
+  new_run_id: string
+  retry_of: string
+  /** 复用的 Task 在新 Run 里的 id（可选） */
+  reused_task_ids?: string[]
+}
+
+/** `POST /tasks/{id}/retry` 的应答：只为刷新 Attempt 列表。 */
+export interface TaskRetryAccepted {
+  task_id: string
+  run_id?: string
+  new_attempt_idx?: number
+}
+
+/* ---------------------------------------------------------------- /admin/* */
+
+/** `/admin/clusters` 的一行（含 kubeconfig_key：admin 可见凭据定位名）。 */
+export interface AdminCluster {
+  name: string
+  api_server: string
+  kubeconfig_key?: string | null
+  namespace?: string | null
+  description?: string | null
+  last_check_at?: Timestamp | null
+  last_check_result?: string | null
+}
+
+/** `/admin/secrets` 的一行：**只存引用，不返回值**。 */
+export interface AdminSecret {
+  name: string
+  namespace: string
+  secret_name: string
+  key: string
+  description?: string | null
+}
+
+/** `/admin/audit` 的一行。 */
+export interface AuditEntry {
+  id: string
+  at: Timestamp
+  actor: string
+  role: string
+  action: string
+  object_type: string
+  object_id: string
+  detail?: Record<string, unknown> | null
+}
+
+export interface AuditQuery {
+  action?: string
+  cursor?: string | null
+  limit?: number
+}
+
+/** 新建/编辑 Profile 的写体（`POST/PUT /admin/profiles`）。 */
+export interface ProfileWrite {
+  name: string
+  cluster: string
+  namespace: string
+  scheduler: string
+  queue?: string | null
+  deploy_timeout_seconds: number
+}
+
+/** 新建/编辑 Cluster 的写体（`POST/PUT /admin/clusters`）。 */
+export interface ClusterWrite {
+  name: string
+  api_server: string
+  kubeconfig_key?: string | null
+  description?: string | null
+}
+
+/** 登记 Secret 引用的写体（`POST /admin/secrets`）。 */
+export interface SecretWrite {
+  name: string
+  namespace: string
+  secret_name: string
+  key: string
+  description?: string | null
 }

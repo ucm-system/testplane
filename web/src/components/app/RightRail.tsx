@@ -41,12 +41,12 @@ export function RailCard({
   } as const
   return (
     <section className={cn('min-w-0 rounded-lg border border-line-soft bg-surface p-5 shadow-card', className)}>
-      <h2 className="flex items-center text-sm font-semibold text-fg">
+      <h2 className="flex items-center text-[15px] font-semibold text-fg">
         {tone ? <span className={cn('mr-2 inline-block size-1.5 rounded-full', DOT[tone])} aria-hidden /> : null}
         {title}
       </h2>
-      {sub ? <p className="mt-0.5 text-2xs text-fg-3">{sub}</p> : null}
-      <div className="mt-3 text-xs leading-relaxed text-fg-2">{children}</div>
+      {sub ? <p className="mt-0.5 text-[12.5px] text-fg-3">{sub}</p> : null}
+      <div className="mt-3 text-[13px] leading-relaxed text-fg-2">{children}</div>
     </section>
   )
 }

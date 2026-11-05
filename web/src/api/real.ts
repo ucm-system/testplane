@@ -7,26 +7,40 @@ import { qs, request, requestText } from './client'
 import { asArray, asPage, normalizeTester } from './normalize'
 import { applyIdentity, clearAuth } from './auth'
 import type {
+  AdminCluster,
+  AdminSecret,
   Attempt,
+  AuditEntry,
+  AuditQuery,
   CancelResult,
   Cluster,
+  ClusterWrite,
   DashboardStats,
+  DeployLogQuery,
+  DeployLogs,
   DeploySnapshot,
   DryRunResult,
+  ExecutionProfile,
   Identity,
   Meta,
   Page,
+  ProfileWrite,
   QueueStatus,
+  Report,
+  RetryAccepted,
+  RetryPlan,
   Run,
   RunEvent,
   RunListQuery,
   RunManifest,
   RunSummary,
+  SecretWrite,
   SubmitResult,
   Task,
   TaskCancelResult,
   TaskDetail,
   TaskListQuery,
+  TaskRetryAccepted,
   Tester,
   TesterListQuery,
   WaitingReasonCounts,
@@ -182,6 +196,99 @@ export const realApi: Api = {
       method: 'POST',
       body: JSON.stringify(manifest),
     })
+  },
+
+  getDeployLogs(runId: string, query: DeployLogQuery = {}): Promise<DeployLogs> {
+    return request<DeployLogs>(
+      `/runs/${encodeURIComponent(runId)}/deploy/logs${qs({
+        pod: query.pod,
+        offset: query.offset,
+        limit: query.limit,
+        tail_lines: query.tail_lines,
+      })}`,
+    )
+  },
+  /* 报告（契约内） */
+  getReport(runId: string): Promise<Report> {
+    return request<Report>(`/runs/${encodeURIComponent(runId)}/report`)
+  },
+
+  async getReportMd(runId: string): Promise<string> {
+    const text = await requestText(`/runs/${encodeURIComponent(runId)}/report.md`, {
+      headers: { Accept: 'text/markdown' },
+    })
+    return text.text
+  },
+
+  /* Profile（契约内只读） */
+  async listProfiles(): Promise<ExecutionProfile[]> {
+    const data = await request<unknown>('/profiles')
+    return asArray<ExecutionProfile>(data)
+  },
+
+  /* 重试（P1：按 Lead 约定路径实现） */
+  getRetryPlan(runId: string): Promise<RetryPlan> {
+    return request<RetryPlan>(`/runs/${encodeURIComponent(runId)}/retry-plan`)
+  },
+
+  retryRun(runId: string): Promise<RetryAccepted> {
+    return request<RetryAccepted>(`/runs/${encodeURIComponent(runId)}/retry`, { method: 'POST' })
+  },
+
+  retryTask(taskId: string): Promise<TaskRetryAccepted> {
+    return request<TaskRetryAccepted>(`/tasks/${encodeURIComponent(taskId)}/retry`, { method: 'POST' })
+  },
+
+  /* 管理（P1：仅 admin） */
+  async listAdminClusters(): Promise<AdminCluster[]> {
+    const data = await request<unknown>('/admin/clusters')
+    return asArray<AdminCluster>(data)
+  },
+
+  createAdminCluster(body: ClusterWrite): Promise<AdminCluster> {
+    return request<AdminCluster>('/admin/clusters', { method: 'POST', body: JSON.stringify(body) })
+  },
+
+  updateAdminCluster(name: string, body: ClusterWrite): Promise<AdminCluster> {
+    return request<AdminCluster>(`/admin/clusters/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    })
+  },
+
+  async deleteAdminCluster(name: string): Promise<void> {
+    await request<unknown>(`/admin/clusters/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  },
+
+  createProfile(body: ProfileWrite): Promise<ExecutionProfile> {
+    return request<ExecutionProfile>('/admin/profiles', { method: 'POST', body: JSON.stringify(body) })
+  },
+
+  updateProfile(name: string, body: ProfileWrite): Promise<ExecutionProfile> {
+    return request<ExecutionProfile>(`/admin/profiles/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    })
+  },
+
+  async deleteProfile(name: string): Promise<void> {
+    await request<unknown>(`/admin/profiles/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  },
+
+  async listAdminSecrets(): Promise<AdminSecret[]> {
+    const data = await request<unknown>('/admin/secrets')
+    return asArray<AdminSecret>(data)
+  },
+
+  createAdminSecret(body: SecretWrite): Promise<AdminSecret> {
+    return request<AdminSecret>('/admin/secrets', { method: 'POST', body: JSON.stringify(body) })
+  },
+
+  async listAudit(query: AuditQuery = {}): Promise<Page<AuditEntry>> {
+    const data = await request<unknown>(
+      `/admin/audit${qs({ action: query.action, cursor: query.cursor ?? undefined, limit: query.limit })}`,
+    )
+    return asPage<AuditEntry>(data)
   },
 
   async getDashboardStats(): Promise<DashboardStats> {

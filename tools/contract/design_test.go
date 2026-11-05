@@ -166,24 +166,14 @@ func TestWhitelistImplementedFails(t *testing.T) {
 	t.Fatal("缺少 spec.allow_missing_not_implemented 检查")
 }
 
-// 真实 openapi 与真实设计 + 真实白名单比对必须通过（当前 MVP 基线）。
+// 真实 openapi 与真实设计 + 真实白名单比对必须通过（当前设计端点已全部实现，白名单为空）。
 func TestRealSpecDesignChecksPass(t *testing.T) {
 	spec := loadRealSpec(t)
-	checks, warnings := spec.DesignChecks(loadRealDesign(t), loadRealAllow(t))
+	checks, _ := spec.DesignChecks(loadRealDesign(t), loadRealAllow(t))
 	for _, c := range checks {
 		if !c.OK {
 			t.Errorf("设计端点检查失败：%s —— %s", c.Name, c.Detail)
 		}
-	}
-	// 差集报告必须输出（白名单放行的 25 条）。
-	found := false
-	for _, w := range warnings {
-		if strings.Contains(w, "设计有、openapi 无") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("缺少设计/openapi 差集报告；warnings=%v", warnings)
 	}
 }
 

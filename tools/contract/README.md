@@ -97,21 +97,24 @@ fixture Manifest 默认是 `service` 模式 + `endpoint-probe` + `profile: k8s-n
 
 stdout 一行 JSON（`checks[]` 逐项给 detail），stderr 人类摘要；`--json-out` 另存缩进 JSON。
 
-## 当前状态（2026-11-05，PR #18）
+## 当前状态（2026-11-05，P1 端点收口）
 
-- 规格侧：**17/17 通过**（`go run . --mode spec`）；设计 50 个端点，openapi **34** 个，
-  白名单登记 **16** 条“设计有、实现无”（每条带理由 + `IMPLEMENTATION.md:439` 指针），实现有设计无 0；
-  `design-baseline.txt` 同时锁 count=50 与端点集合 sha256，白名单里已实现的死条目也判红。
-- 实现侧：**43/43 通过**，覆盖全部 34 个 operation、任务列表完整性（seq=0 precheck）、
-  SSE 连通性、404/400 错误体、取消语义；fixture A **等终态**后再探 `/report`，终态 404 必红。
-- 合计 `--mode all`：**60/60 通过**。
+- 规格侧：**17/17 通过**（`go run . --mode spec`）；设计 50 个端点，openapi **50** 个，
+  白名单 **0** 条（设计端点全部实现），实现有设计无 0；`design-baseline.txt` 同时锁 count=50 与端点集合 sha256。
+- 实现侧：**63/63 通过**，覆盖全部 **50** 个 operation；新增 retry-plan/retry-run/retry-task、deploy/logs、
+  `GET /secrets`、`/admin/*` 12 个 operation 全部被探针命中。
+- 合计 `--mode all`：**80/80 通过**（spec 17/17 + live 63/63；总检查数由实际 operation/探针推导）。
 - `/files` live 同时探两种 path 形态：run 相对与 artifacts 原始带 `<run_id>/` 前缀；
   fixture 到终态后两者均 200（artifact drill 另证 shell 删除 Pod/重启后 sha256 一致）。
 - openapi 的 `/auth/callback` 404（dev 模式）已补 `application/json` + `Error`；
   文件下载 200/206 允许多种媒体类型（json/plain/markdown/octet-stream）。
+- **admin 写端点取舍**：契约 live **不创建** profile/cluster/secret，只断言 400/404/409/409
+  错误契约（`{}` 触发校验、未知 name 触发 404、删除被引用对象触发 409）；避免污染环境。
+- **RBAC 已知限制**：dev 模式固定 admin，live 无法构造 viewer；`GET /secrets` 是 operator
+  下界、viewer 403 的负向由 OIDC 集成测试/`admin-check.ps1` 在可切换角色的环境补验。
 - 负向证据：`--allow-missing none` 时未登记缺失端点全部判红（不再自证）；
   单测 `TestProbeRunReportTerminal404Fails` / `TestLoadDesignRejectsMalformedTable` /
-  `TestDesignEndpointBaselineCatchesShrink` 覆盖门禁可失败性。
+  `TestDesignEndpointBaselineCatchesShrink` / `TestWhitelistImplementedFails` 覆盖门禁可失败性。
 
 ## 设计取舍
 
@@ -124,3 +127,4 @@ stdout 一行 JSON（`checks[]` 逐项给 detail），stderr 人类摘要；`--j
 - **为什么允许状态相关 404 要区分状态**：`/report` 在 Run 未结束前按 07 §5.1 就是
   404 + `Retry-After`；但终态 Run 还 404 就是 bug。因此只在非终态 fixture 上放行 404，
   终态必须 200；404 本身仍要过 Error 形状校验。
+

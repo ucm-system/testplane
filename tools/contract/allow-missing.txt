@@ -1,27 +1,7 @@
-# 设计（design/views/07-api.md §5）有、MVP openapi.yaml 没有的端点。
-# 格式：METHOD PATH  # 理由 → 记录位置（IMPLEMENTATION.md:行号 或 issue #号；记录位置必填）
-# 说明：white-list 只放行“设计有、实现无”；openapi 多出来的端点永远判红。
+# 设计（design/views/07-api.md §5）有、openapi.yaml 没有的端点。
+# 格式（非空时必须遵守）：METHOD PATH  # 理由 → 记录位置（IMPLEMENTATION.md:行号 或 issue #号）
+# 说明：白名单只放行“设计有、实现无”；openapi 多出来的端点永远判红。
 # PATH 用归一化模板参数 {}（如 {run_id}/{id}/{idx} 都写成 {}）。
-# 记录位置指向 IMPLEMENTATION.md 的 P1 明确延后段（§15.2 末段，line 439）。
-
-# ---- P1 失败续跑（IMPLEMENTATION §15.2 末段 / :439）----
-POST /api/v1/runs/{}/retry  # P1 失败续跑未在 P0 实现 → IMPLEMENTATION.md:439
-GET /api/v1/runs/{}/retry-plan  # P1 失败续跑预览未在 P0 实现 → IMPLEMENTATION.md:439
-POST /api/v1/tasks/{}/retry  # P1 单 Task 重跑未在 P0 实现 → IMPLEMENTATION.md:439
-
-# ---- P1 Deploy / Secret（IMPLEMENTATION §15.2 末段 / :439）----
-GET /api/v1/runs/{}/deploy/logs  # P1 Deploy Pod 日志分段依赖 collector → IMPLEMENTATION.md:439
-GET /api/v1/secrets  # P1 Secret 管理属 Admin/RBAC → IMPLEMENTATION.md:439
-
-# ---- Admin（07 §5.4；P0 不做 OIDC/RBAC/Admin，IMPLEMENTATION §15.1 / :439）----
-POST /api/v1/admin/profiles  # P1 Admin：Profile 维护 → IMPLEMENTATION.md:439
-PUT /api/v1/admin/profiles  # P1 Admin：Profile 维护 → IMPLEMENTATION.md:439
-DELETE /api/v1/admin/profiles  # P1 Admin：Profile 维护 → IMPLEMENTATION.md:439
-POST /api/v1/admin/clusters  # P1 Admin：集群登记 → IMPLEMENTATION.md:439
-PUT /api/v1/admin/clusters  # P1 Admin：集群登记 → IMPLEMENTATION.md:439
-DELETE /api/v1/admin/clusters  # P1 Admin：集群登记 → IMPLEMENTATION.md:439
-GET /api/v1/admin/secrets  # P1 Admin：Secret 引用列表 → IMPLEMENTATION.md:439
-POST /api/v1/admin/secrets  # P1 Admin：Secret 登记 → IMPLEMENTATION.md:439
-POST /api/v1/admin/secrets/{}/rotate  # P1 Admin：Secret 轮换 → IMPLEMENTATION.md:439
-GET /api/v1/admin/audit  # P1 Admin：审计 → IMPLEMENTATION.md:439
-DELETE /api/v1/admin/runs/{}/artifacts  # P1 Admin：人工清理产物 → IMPLEMENTATION.md:439
+#
+# 当前状态（2026-11-05，P1 端点收口）：设计 50 个端点全部在 openapi 实现，
+# 本文件故意保持为空。新增设计端点后，要么实现，要么按上面的格式登记并给出记录指针。

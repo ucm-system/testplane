@@ -221,6 +221,31 @@ result 数、路径集合、sha256 **完全一致**，再 `rollout restart testp
 同时验 attempt artifacts、`Range: bytes=0-9` → 206+10B、不存在 path 404、
 `../../etc/passwd` 400；两种 `/files` path 形态（artifacts 原始 `r-xxx/...` 与 run 相对）都要 200 且 sha 一致；带前缀 `r-xxx/../../etc/passwd` 也要 400。实跑 `r-20261105-GEEX` **44/44 PASS**；Job/Pod 删前按名记录并断言存在，删后按名复查，hold-until 期间不被删。
 
+## 3.6 失败续跑（P1 retry）
+
+```powershell
+pwsh scripts/e2e/retry-check.ps1 -BaseUrl http://127.0.0.1:8093
+```
+
+脚本在 host `:18181` 起一个临时 mock-llm（`ready-after=4s`），提交 auto precheck + 一个
+`retry-a` Task。等 precheck succeeded 后**立刻停 mock**，让 `retry-a` 失败；Run 终态后重启 mock，
+再取 plan / retry。断言：precheck 进 `reuse`、`retry-a` 进 `rerun`；retry 202 + `new_run_id` +
+`retry_of`；新 Run 成功、新 precheck `attempts=0`（复用）、`retry-a` 新 Attempt 成功；
+新 Run 再取 plan 为 `retryable=false, reason=nothing_to_retry`；重复 POST retry → 409；
+旧 failed Task 单 Task retry 202 且 `attempt_no>=2`。mock 进程按 host.docker.internal
+暴露给 kind，所以 Run 的 service URL 用 `http://host.docker.internal:18181/v1`。
+
+## 3.7 管理面（P1 admin）
+
+```powershell
+pwsh scripts/e2e/admin-check.ps1 -BaseUrl http://127.0.0.1:8093
+```
+
+覆盖 profiles/clusters CRUD、Secret 引用登记、`GET /secrets`（operator 下界）、rotate 不存在目标 → **404 或 RBAC 未就绪时的 503 `EXECUTOR_UNAVAILABLE`**（生产需 D-55 的 `resourceNames` Role 才得到 404）、
+audit 有 `register`/`secret_rotated`（含 rejected）、删除被引用 cluster → 409、终态 Run 人工清理产物 →
+200 且 `/artifacts` 清空、非终态清理 → 409。dev 模式固定 admin，viewer 403 需 OIDC 环境，
+见 `tools/contract/README.md` 的“RBAC 已知限制”。
+
 默认**严格**：report 必现（终态后 ≤2s，30s 等待足够）、`/logs` 必非空；只有显式
 `-AllowKnownGaps` 才把当前已知的 report/logs 缺口从失败项里剔除，修复后不要带这个开关。
 
@@ -326,3 +351,4 @@ error-in-200   True    1 failed    PRECHECK_FAILED False            1    0.50
 2. 经平台的失败注入：跑上面第 3 节的五行，记录实际终态与耗时。
 3. 前端冒烟：`web/` 的 `pnpm build` 通过；`GET /` 返回 HTML。
 4. 验收矩阵 17 项填「做过 / mock / 未做」，结论交 infra 写 `docs/runbook/acceptance.md`。
+

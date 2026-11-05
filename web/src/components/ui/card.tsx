@@ -12,11 +12,22 @@ const DOT: Record<Tone, string> = {
   muted: 'bg-fg-3',
 }
 
+/** 卡头浅染底（原型 `.fde-card-hd.hg-*` 的 6–8% 语义色），让版面有冷暖而不是一片白 */
+const HEADER_TONE: Record<Tone, string> = {
+  ok: 'bg-success-weak',
+  warn: 'bg-warn-weak',
+  err: 'bg-danger-weak',
+  info: 'bg-primary-weak',
+  primary: 'bg-primary-weak',
+  muted: 'bg-surface-2',
+}
+
 export function Card({ className, ...rest }: HTMLAttributes<HTMLElement>) {
   return (
     <section
       className={cn(
-        'min-w-0 rounded-lg border border-line-soft bg-surface shadow-card',
+        // overflow-hidden：染底卡头 / 表头底色 / 行 hover 都是直角矩形，必须裁在 12px 圆角里（T39）
+        'min-w-0 overflow-hidden rounded-lg border border-line-soft bg-surface shadow-card',
         'transition-shadow duration-150 ease-out',
         className,
       )}
@@ -41,15 +52,16 @@ export function CardHeader({ title, sub, tone, actions, className, id }: CardHea
   return (
     <header
       className={cn(
-        'flex flex-wrap items-center gap-x-2 gap-y-2 border-b border-line-soft px-5 py-3.5',
+        'flex flex-wrap items-center gap-x-2 gap-y-2 border-b border-line-soft px-6 py-4',
+        tone ? HEADER_TONE[tone] : undefined,
         className,
       )}
     >
-      <h2 id={id} className="flex items-center text-sm font-semibold leading-tight text-fg">
+      <h2 id={id} className="flex items-center text-[15px] font-semibold leading-tight text-fg">
         {tone ? <span className={cn('mr-2 inline-block size-1.5 rounded-full', DOT[tone])} aria-hidden /> : null}
         {title}
       </h2>
-      {sub ? <span className="text-2xs leading-snug text-fg-3">{sub}</span> : null}
+      {sub ? <span className="text-[12.5px] leading-snug text-fg-3">{sub}</span> : null}
       {actions ? <div className="ml-auto flex flex-wrap items-center gap-2">{actions}</div> : null}
     </header>
   )
@@ -62,7 +74,7 @@ export function CardBody({ className, ...rest }: HTMLAttributes<HTMLDivElement>)
 export function CardFooter({ className, ...rest }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn('flex flex-wrap items-center gap-2 border-t border-line-soft px-5 py-3 text-2xs text-fg-3', className)}
+      className={cn('flex flex-wrap items-center gap-2 border-t border-line-soft px-6 py-3 text-[12.5px] text-fg-3', className)}
       {...rest}
     />
   )

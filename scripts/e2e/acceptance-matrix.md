@@ -97,3 +97,12 @@ pwsh scripts/e2e/failure-injection.ps1          # 需要控制面 + kind executo
   - fake `kubectl`（exit 1）时 `k8s.pods_query`/`pod.gone` **FAIL**，脚本 exit 1，不再“查询失败反而 PASS”；
   - 基线 hash 被改成 `deadbeef` 时 spec **16/17 FAIL**；白名单塞入已实现 `GET /api/v1/runs` 时 `spec.allow_missing_not_implemented` **FAIL**；
   - Playwright 真实后端 `tests/real-api.spec.ts`（`VITE_USE_MOCK=0`）**1 passed**：`/healthz` 200、`/api/v1/runs` 200 且非空、`/runs` 列表渲染非空。
+
+## P1 端点收口（2026-11-05 16:39，镜像 `df0be9d4…`）
+
+- `allow-missing.txt` **16 → 0**；openapi **50** operation，设计 50 / openapi-only 0；`spec.design_endpoints_present` = “0 个（已登记 0）”，`spec.operation_count` 从实际推导 50。
+- 契约 `--mode all`：**80/80 PASS**（spec 17/17 + live 63/63）；retry 3、deploy/logs（终态 + 排队）、`GET /secrets`、`/admin/*` 12 个 operation 全部被 live 覆盖；admin 写只验 400/404/409 错误契约。
+- 新增 `retry-check.ps1`：**17/17 PASS**（Run `r-20261105-CC2Q` → retry `r-20261105-7SEC`；新 Run 再取 plan 为 `retryable=false, reason=nothing_to_retry`）。
+- 新增 `admin-check.ps1`：**23/23 PASS**；rotate 在无 Secret get RBAC 时接受 503 `EXECUTOR_UNAVAILABLE`（生产 D-55 resourceNames Role 下为 404）。
+- 老回归：run-local 31/31、probe 5/5、failure-injection 5/5、cancel 10/10、timeout 17/17、mixed 11/11；deploy 正常 9/9 / blocked 7/7 / failure 4/4；artifact 44/44；restart 13/13；Playwright 6 passed（1 skipped）。
+

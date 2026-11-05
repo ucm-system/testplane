@@ -1,4 +1,12 @@
-import type { InputHTMLAttributes, LabelHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react'
+import { cloneElement, isValidElement, useId } from 'react'
+import type {
+  InputHTMLAttributes,
+  LabelHTMLAttributes,
+  ReactElement,
+  ReactNode,
+  SelectHTMLAttributes,
+  TextareaHTMLAttributes,
+} from 'react'
 import { cn } from '@/lib/utils'
 
 /** 输入控件的公共外观（原型 .fde-input / .fde-select / .fde-textarea）。 */
@@ -44,15 +52,24 @@ export interface FieldProps {
 }
 
 export function Field({ label, hint, error, required, className, children, htmlFor }: FieldProps) {
+  // 没显式给 htmlFor 时自动生成 id 注入到唯一子控件：label ↔ 控件真正关联
+  // （点 label 能聚焦、读屏与 Playwright 的 getByLabel 都能用）
+  const autoId = useId()
+  const controlId = htmlFor ?? autoId
+  const control =
+    label && isValidElement(children) && (children as ReactElement<{ id?: string }>).props.id == null
+      ? cloneElement(children as ReactElement<{ id?: string }>, { id: controlId })
+      : children
+
   return (
     <div className={cn('flex flex-col gap-1.5', className)}>
       {label ? (
-        <Label htmlFor={htmlFor}>
+        <Label htmlFor={controlId}>
           {label}
           {required ? <span className="ml-0.5 text-danger">*</span> : null}
         </Label>
       ) : null}
-      {children}
+      {control}
       {error ? (
         <p role="alert" className="text-2xs text-danger-text">
           {error}

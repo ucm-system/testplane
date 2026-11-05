@@ -39,12 +39,12 @@ export function KpiCard({ label, value, hint, tone = 'muted', className }: KpiCa
     >
       <div className="flex items-center gap-1.5">
         <span className={cn('inline-block size-1.5 rounded-sm', DOT_TONE[tone])} aria-hidden />
-        <span className="text-xs text-fg-2">{label}</span>
+        <span className="text-[13px] font-medium text-fg-2">{label}</span>
       </div>
-      <p className={cn('mt-2 text-2xl font-semibold tabular-nums leading-none tracking-tight', VALUE_TONE[tone])}>
+      <p className={cn('mt-2 text-[30px] font-semibold tabular-nums leading-none tracking-[-0.03em]', VALUE_TONE[tone])}>
         {value}
       </p>
-      {hint ? <p className="mt-1.5 text-2xs leading-snug text-fg-3">{hint}</p> : null}
+      {hint ? <p className="mt-1.5 text-[12.5px] leading-snug text-fg-3">{hint}</p> : null}
     </div>
   )
 }
