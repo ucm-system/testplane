@@ -386,7 +386,7 @@ parameters:
    所以参数清单里**不写**"来源"字段（`provided_by` 之类），只在 `description` 说明这三条路径。
 4. **注入与冲突判定**：
 
-   - 平台把有值的公共参数**追加到 argv 末尾**（`--key=value`）。若 `args` 里已出现同名参数，**拒绝提交**（`VALIDATION_ERROR`，子串粗筛，不做语义解析），避免两份值打架。
+   - 平台把有值的公共参数**追加到 argv 末尾**（`--key=value`）。若 `args` 里已出现同名参数，**拒绝提交**（`VALIDATION_ERROR`，按词法切分后的 token **精确匹配**（`--url=` 形式或独立 token `--url`；`--url_extra=` 不算同名），不做语义解析），避免两份值打架。
    - 因此 `tests[].args` **不应该**出现这三个参数：它们由平台统一注入，位置固定在末尾。
    - `service` 只填了部分参数（比如有 `url` 没 `model_path`）时：Tester 声明为 `required: true` 而没值的，**提交阶段拒绝**；`required: false` 的就不注入，由 Tester 用默认行为兜底。
 
@@ -606,7 +606,7 @@ Executor 是平台提供的通用任务执行适配层。它**只负责**：
 
 ### 6.5 Execution Profile
 
-Execution Profile 描述一个可供 Task 使用的 K8s 执行环境：
+Execution Profile 描述一个可供 Task 使用的 K8s 执行环境。Profile 通过 `cluster` 字段引用**已登记的集群对象**（`clusters`：`name` / `api_server` / `kubeconfig_key` / `last_check_at` / `last_check_result`）；kubeconfig 由 Secret 挂载到 `CLUSTERS_DIR`，**不入库、不进日志**（G-10、W-10）。
 
 ```text
 Execution Profiles
@@ -933,6 +933,8 @@ Pre-Check 以**不可重试**错误失败（4xx、认证失败）时，说明"�
 - **不受 `cleanup.policy` 删除影响**：Deploy 日志随 Run 产物保留，不随 Pod 一起回收。
 
 **`attempts/<n>/` 就是 Executor 挂给容器的 `/workspace/output`**（§6.8）：Tester 直接写最终位置，平台不做搬运。因此 `<storage-root>` 必须对所有执行节点可见；"收集产物"退化为校验 `result.json` 并补齐上层的 `report.json`。
+
+`events.jsonl` 是**派生文件**：库里的 `state_events` 才是权威，由单 writer 追加，重启后按 `seq` 幂等补齐，可整份重建（G-8）。
 
 ### 8.2 报告分工
 
@@ -1265,7 +1267,7 @@ task:
 ### 11.4 技术约束
 
 - 前端为 SPA，直连同一套 REST API，**不引入独立 BFF**。
-- 状态推送使用 SSE 订阅 `/runs/{id}/events`，避免轮询。
+- 状态推送使用 SSE 订阅 `/runs/{id}/events`，避免轮询。事件类型、信封与回放语义以 `impl/control-plane.md §C-9` 与 `07-api.md §7` 为准：`seq` 单调、`Last-Event-ID` 续传、**不是日志通道**（G-14）。
 - 新 Tester 上线无需改前端：提交框永远是一个文本输入框，参数说明由 `tester.yaml.parameters` 只读展示，指标展示由 `result.json` 结构驱动。若新增 Tester 需要改前端，视为契约设计缺陷。
 - 鉴权与 API 完全一致，UI 不自行判断权限，以后端返回为准。
 
@@ -1433,7 +1435,7 @@ K8s Secret，由 `admin` 登记与轮换；Manifest 里只有**引用**（如 `e
 | 单 Task 最大执行时长 | 默认 4 小时，配置上限 24 小时 |
 | 报告写入 | 单 Run 报告 ≤ 20 MB，超出则产物外置 |
 | 单次日志读取 | 分页返回，避免整文件加载 |
-| 单次 Attempt 产物上限 | 默认 10 GiB；超出判失败（`ARTIFACT_QUOTA_EXCEEDED`），避免单个 Task 打满共享存储 |
+| 单次 Attempt 产物上限 | 默认 10 GiB；超出判失败（`ARTIFACT_QUOTA_EXCEEDED`），避免单个 Task 打满共享存储。**执行方式**：collector 每 60s 对 `<run>/tasks/<task>/attempts/<n>` 做 `du` 扫描，超限即删 Job 并判该 Attempt 失败（G-7） |
 | 状态查询延迟 | P95 < 300 ms（非日志类接口） |
 
 ---
@@ -1482,7 +1484,7 @@ K8s Secret，由 `admin` 登记与轮换；Manifest 里只有**引用**（如 `e
 | Run 提交 | Manifest 提交后，Run 按 §7.4 走完整状态链，终态正确 |
 | Task 提交 | 已有服务可独立提交 Task（`url` / `model_name` 作为公共参数给出），产物结构与非独立 Task 一致 |
 | Genet 适配 | 部署、状态查询、Endpoint 获取三项可用；部署失败与未就绪可区分 |
-| Pre-Check | `precheck: auto` 时平台注入 Task#1（`role: pre_check`）；它独占该 Endpoint，未通过时按 `abort_run` 终止其余 Task，Run 终态 `SERVICE_UNAVAILABLE` |
+| Pre-Check | `precheck: auto` 时平台注入 Task#1（`role: pre_check`）；它独占该 Endpoint，未通过时按 `abort_run` 终止其余 Task，Run 终态 `SERVICE_UNAVAILABLE`。注入时该 Task 的 `args` 为空，`url`/`model_name`/`model_path` 按 §5.4.1 在末尾注入（G-11）；判别某个 Task 是不是 Pre-Check 的唯一依据是 `runs.resolved.precheck.injected`（`03-data-view.md §4.2`） |
 | Tester Registry | 目录自动发现并通过校验；非法 `tester.yaml` 被拒绝并给出字段级错误 |
 | Tester 契约 | 唯一入口、argv 参数传递、输出目录、`result.json` 全部可校验 |
 | **Tester 独立运行** | 不依赖平台：`docker run <image> --p1=1 --p2=2` 即可跑通并产出符合附录 A 的 `result.json`（§5.10） |
@@ -1777,6 +1779,7 @@ env:                          # 运行期环境变量声明（§12.4）
 | `EXECUTOR_UNAVAILABLE` | 503 | 执行 | 是 | K8s API 不可达 |
 | `IMAGE_PULL_FAILED` | 502 | 执行 | 是 | 镜像拉取失败 |
 | `MOUNT_UNAVAILABLE` | 502 | 执行 | 否 | Profile 未提供声明的挂载 |
+| `EXECUTOR_POD_ERROR` | 502 | 执行 | 是 | Pod 异常终止（`detail.k8s_reason` 保留原文，如 `Evicted`）；`Unschedulable` 不算失败，按 §6.9 留在排队态 |
 | `ENDPOINT_UNREACHABLE` | 502 | Pre-Check | 是 | 网络不可达或连接被拒 |
 | `PRECHECK_FAILED` | 502 | Pre-Check | 是 | 探测返回非预期状态 |
 | `TASK_TIMEOUT` | 504 | 执行 | 按策略 | 超过 `timeout_seconds` |

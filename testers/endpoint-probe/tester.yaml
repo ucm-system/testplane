@@ -38,10 +38,7 @@ mounts: []
 #
 # 本 Tester 不声明超时与产物：超时由平台/调用方决定，产物契约全局统一（§5.3、§6.6）。
 
-placeholder: |
-  --url=http://10.0.0.10:8000/v1 --model_name=Qwen3-32B
-  url 是 OpenAI 兼容的 base URL：形如 http://host:8000/v1；不带 /v1 会自动补。
-  探活路径由 Tester 自行拼 /chat/completions 与 /models，不单独暴露 path 参数。
+placeholder: "--url=http://10.0.0.10:8000/v1 --model_name=Qwen3-32B"
 
 parameters:
 
@@ -52,7 +49,7 @@ parameters:
       OpenAI 兼容的 base URL，形如 http://host:8000/v1；不带 /v1 会自动补，末尾斜杠忽略。
       Tester 从它推导 /chat/completions 与 /models 两个端点。
       谁给值取决于场景：Run 里有 deploy 时平台注入；跑已有服务（不拉服务）时由调用方填写；
-      脱离平台独立运行时由调用方填写。三种场景下都必须有一个有效值，没有则本 Tester 退出码 2。
+      脱离平台独立运行时由调用方填写。三种场景下都必须有一个有效值，没有则以非 0 退出码失败（平台只区分 0 / 非 0）。
 
   model_name:
     type: string
