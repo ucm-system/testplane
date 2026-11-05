@@ -48,6 +48,19 @@ func (f *fakeGenet) server(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/open/helm/releases/", func(w http.ResponseWriter, r *http.Request) {
+		// /api/open/helm/releases/{name}/pods：VerifyUninstalled 用。
+		if strings.HasSuffix(r.URL.Path, "/pods") {
+			f.mu.Lock()
+			rel := f.release
+			f.mu.Unlock()
+			if rel == nil {
+				http.Error(w, `{"message":"helm release not found"}`, http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": rel.Pods})
+			return
+		}
 		f.mu.Lock()
 		f.lastAuth = r.Header.Get("Authorization")
 		switch r.Method {
@@ -71,6 +84,8 @@ func (f *fakeGenet) server(t *testing.T) *httptest.Server {
 				http.Error(w, `{"message":"helm release not found"}`, http.StatusNotFound)
 			case "409":
 				http.Error(w, `{"message":"protected Helm operation is in progress"}`, http.StatusConflict)
+			case "502":
+				http.Error(w, `{"message":"helm uninstall failed: storage is managed by Genet"}`, http.StatusBadGateway)
 			default:
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"message":"uninstalled","forcedPods":["p1"],"secretsDeleted":2,"cleanupErrors":[]}`))
@@ -713,5 +728,46 @@ func TestStartPrefersFrozenValues(t *testing.T) {
 	f.mu.Unlock()
 	if values, _ := body["values"].(string); values != "frozen: yes" {
 		t.Fatalf("values = %q, want the frozen values untouched", values)
+	}
+}
+// ---- "删干净"校验（§9.7）-----------------------------------------------------
+
+func TestVerifyUninstalled(t *testing.T) {
+	f := &fakeGenet{}
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	c, _ := newTestClient(t, f, clock)
+
+	// release 不存在 → 干净。
+	gone, err := c.VerifyUninstalled(context.Background(), "r-1")
+	if err != nil {
+		t.Fatalf("VerifyUninstalled: %v", err)
+	}
+	if !gone {
+		t.Fatalf("gone = false, want true (404 即已删)")
+	}
+
+	// release 还能 GET 到 → 不算干净（即使 Pod 已空）。
+	f.setRelease(&Release{Name: ReleaseName("r-1", "d-r-1"), Status: ReleaseUninstalling})
+	gone, err = c.VerifyUninstalled(context.Background(), "r-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gone {
+		t.Fatalf("gone = true, want false (release 仍在)")
+	}
+}
+
+// DELETE 失败（真 Genet 里 helm uninstall 会被 webhook 拒绝 → 502）→ Cancel 返回错误，
+// 编排层据此记 uninstall.state=failed 并留给对账重试。
+func TestCancelSurfacesServerError(t *testing.T) {
+	f := &fakeGenet{deleteBehavior: "502"}
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	c, _ := newTestClient(t, f, clock)
+	err := c.Cancel(context.Background(), "r-1")
+	if err == nil {
+		t.Fatal("expected an error for DELETE 502")
+	}
+	if errors.Is(err, ErrCancelNotYetApplied) {
+		t.Errorf("502 不是 '尚未创建'，不能退化成可重试的 ErrCancelNotYetApplied")
 	}
 }

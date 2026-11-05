@@ -309,7 +309,33 @@ func (c *Client) fetchState(ctx context.Context, d *deployState, releaseName str
 }
 
 // synthesize 是 §9.3 的九行映射（纯函数，便于单测）。
+//
+// 除了 Phase/Ready/Endpoint/Failure/Reason，还把 Genet 的两根轴原值（release status /
+// endpoint status）与队列水位一并带回给编排层落库（runs.deploy §4.4）。
 func (c *Client) synthesize(rel *Release, acceptedAt time.Time, queue *QueueSnapshot) ports.DeployState {
+	st := c.synthesizePhase(rel, acceptedAt, queue)
+	st.ReleaseStatus = strings.TrimSpace(rel.Status)
+	if rel.CallInfo != nil && rel.CallInfo.Endpoint != nil {
+		st.EndpointStatus = strings.ToLower(strings.TrimSpace(rel.CallInfo.Endpoint.Status))
+	}
+	if queue != nil {
+		q := &domain.DeployQueue{}
+		if queue.Queue != nil {
+			q.Pending = queue.Queue.Pending
+			q.Inqueue = queue.Queue.Inqueue
+			q.Running = queue.Queue.Running
+		}
+		if len(queue.PodGroups) > 0 {
+			q.Phase = queue.PodGroups[len(queue.PodGroups)-1].Phase
+		}
+		st.Queue = q
+	}
+	st.ObservedAt = c.opts.Now()
+	return st
+}
+
+// synthesizePhase 是纯映射本体（不含落库附带字段）。
+func (c *Client) synthesizePhase(rel *Release, acceptedAt time.Time, queue *QueueSnapshot) ports.DeployState {
 	now := c.opts.Now()
 
 	// #9 总窗口：超窗一律 blocked(timeout)，优先于其它判断。
@@ -407,6 +433,13 @@ func (c *Client) synthesize(rel *Release, acceptedAt time.Time, queue *QueueSnap
 
 // synthesizeNotFound 处理 GET 404（#1 / #2）。
 func (c *Client) synthesizeNotFound(acceptedAt time.Time) ports.DeployState {
+	st := c.synthesizeNotFoundPhase(acceptedAt)
+	st.EndpointStatus = "pending"
+	st.ObservedAt = c.opts.Now()
+	return st
+}
+
+func (c *Client) synthesizeNotFoundPhase(acceptedAt time.Time) ports.DeployState {
 	now := c.opts.Now()
 	// 超窗优先：即使 release 一直没出现，也要按 timeout 收口（§9.3 #9）。
 	if !acceptedAt.IsZero() && now.Sub(acceptedAt) > c.opts.DeployTimeout {
@@ -493,6 +526,42 @@ func (c *Client) Cancel(ctx context.Context, runID string) error {
 		return fmt.Errorf("%w: %v", ErrCancelNotYetApplied, err)
 	}
 	return fmt.Errorf("genet: cancel %s: %w", releaseName, err)
+}
+
+// VerifyUninstalled 校验"删干净"（§9.7）：release 已不存在**且**它的 Pod 列表为空。
+//
+// 这是卸载收口的唯一可信判据：DELETE 返回 200 不等于干净（Genet 的异步清理可能还在跑），
+// 而 Pod 查询失败 ≠ Pod 为空（R9），所以查询失败一律返回 false + error。
+func (c *Client) VerifyUninstalled(ctx context.Context, runID string) (bool, error) {
+	d := c.stateFor(runID, "")
+	d.mu.Lock()
+	releaseName := d.releaseName
+	d.mu.Unlock()
+	if releaseName == "" {
+		releaseName = ReleaseName(runID, DefaultDeployID(runID))
+	}
+
+	var rel Release
+	err := c.tr.getJSON(ctx, releasePath(releaseName), nil, &rel)
+	switch {
+	case errors.Is(err, ErrReleaseNotFound):
+		// release 已消失；继续确认 Pod 为空。
+	case err != nil:
+		return false, fmt.Errorf("genet: verify %s: %w", releaseName, err)
+	default:
+		// 还能 GET 到 → 没删干净。
+		return false, nil
+	}
+
+	var pods PodList
+	err = c.tr.getJSON(ctx, releasePath(releaseName)+"/pods", nil, &pods)
+	switch {
+	case errors.Is(err, ErrReleaseNotFound):
+		return true, nil // release 都没了，Pod 自然不存在
+	case err != nil:
+		return false, fmt.Errorf("genet: verify pods %s: %w", releaseName, err)
+	}
+	return len(pods.Items) == 0, nil
 }
 
 // Queue 返回最近一次队列快照（诊断/测试用；可能为 nil）。

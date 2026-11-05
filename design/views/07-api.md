@@ -48,6 +48,22 @@
 - 服务间（Jenkins / Agent / `tpctl` / MCP）：用**同一个身份源签发的 JWT**，平台用 JWKS 校验（`aud == clientId`、`exp/nbf` 容差 60s），RBAC 与人类用户同一套，不设后门；
 - 本地开发仍用 `TESTPLANE_AUTH_MODE=dev`（默认角色 `admin`、`Authorization: Bearer <subject>` 即身份），生产镜像必须显式切 `oidc` 并在 `/healthz` 打警告（`impl/control-plane.md §C-10`）。
 
+**`oidc` 模式的 Cookie / CSRF / 登录细节（实现口径，2026-11-05 落定）**
+
+| 项 | 取值 / 行为 |
+|---|---|
+| 会话 Cookie | `tp_session`；`HttpOnly; Secure; SameSite=Lax; Path=/`（纯内网 http 部署可用 `TESTPLANE_SESSION_SECURE=false` 关 Secure） |
+| 会话值 | **HMAC-SHA256 签名令牌**（`base64url(payload).base64url(sig)`，密钥 `TESTPLANE_SESSION_SECRET` ≥32B）。payload = `{sub, email, role, groups, csrf, exp}`；不做 JWT、不用库 |
+| 会话 TTL | `TESTPLANE_SESSION_TTL`（默认 `8h`）；过期或签名不符 → 401 `UNAUTHENTICATED`，前端跳 `/auth/login` |
+| 角色 | claims 的 `groups` 经 `TESTPLANE_ROLE_MAP`（`tp-admins=admin,tp-ops=operator`）映射，取**最高**命中；未命中 → `viewer`；`sub` 为空 → 401 |
+| 登录中间态 | `tp_auth_tx`：`{state, nonce, code_verifier, return_to, exp}` 的签名 Cookie，`Path=/auth`、10 分钟；服务端不存任何会话态（多副本天然一致） |
+| CSRF | 双提交：`X-CSRF-Token` 必须等于 `GET /me` 返回的 `csrf_token`（由 `HMAC(secret, "csrf|sub|exp")` 派生，与会话绑定）。**只对 Cookie 会话的写操作生效**；Bearer 调用方不需要该头 |
+| 缺 CSRF | 403 `FORBIDDEN`（不是 401——身份是有效的，缺的是防伪令牌） |
+| 登出 | `POST /auth/logout` 清 `tp_session`（`Max-Age=0`）；IdP 侧会话不主动登出（无 end_session 依赖） |
+| `dev` 模式 | `TESTPLANE_AUTH_MODE=dev` 时 `/auth/*` 返回 404，`Authorization: Bearer <subject>` 直接作为身份、角色固定 `admin`；`TESTPLANE_ENV != dev` 时启动打 WARN |
+
+`/auth/login`、`/auth/callback`、`/auth/logout` 与 `/healthz`、`/readyz`、`/metrics` 一样**不带 `/api/v1` 前缀**，且 `/auth/login|callback` 匿名（登录前不可能有凭据）。
+
 ### 2.2 角色
 
 | 角色 | 能力 |

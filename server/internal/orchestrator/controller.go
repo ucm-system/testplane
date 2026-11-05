@@ -211,12 +211,17 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	// 启动即对账：controller 重启后先按 K8s 事实收口"进程死掉的 Attempt"，
 	// 否则旧 Task 会永久占着 endpoint_leases（C-3.5）。
+	// 成功路径也要打一条 INFO：重启演练的脚本靠它断言"启动即对账"。
 	if err := c.ReconcileOnce(ctx); err != nil {
 		c.logf("orchestrator: startup reconcile: %v", err)
+	} else {
+		c.logf("orchestrator: startup reconcile done")
 	}
 	// 启动也先回收一次：把停机期间累积的已终态 Job / 孤儿 Pod 收掉（execution §6.3）。
 	if err := c.GCOnce(ctx); err != nil {
 		c.logf("orchestrator: startup gc: %v", err)
+	} else {
+		c.logf("orchestrator: startup gc done")
 	}
 
 	for {
@@ -262,6 +267,9 @@ func (c *Controller) Run(ctx context.Context) error {
 // 关键点：**每一条收口路径都必须释放租约**，否则同 endpoint 的后续任务会永远
 // `waiting_reason=slot_waiting`（本次 P0 缺陷的根因）。
 func (c *Controller) ReconcileOnce(ctx context.Context) error {
+	// 收口补偿先做：它只依赖 Repos + Deployer，不该被 prober/recon 的可用性挡住
+	// （否则"平台重启后没人卸载 release"永远修不好，§9.7）。
+	c.cleanupPendingDeploys(ctx)
 	if c.prober == nil {
 		return nil
 	}
@@ -290,11 +298,7 @@ func (c *Controller) ReconcileOnce(ctx context.Context) error {
 				continue
 			}
 			// 取消补偿：deploy 的卸载可能因 release 未出现而 404，这里每轮重试一次（§9.6）。
-			if c.deployer != nil {
-				if derr := c.deployer.Cancel(ctx, run.ID); derr != nil {
-					c.logf("orchestrator: WARN deploy_cancel_pending: run %s: %v", run.ID, derr)
-				}
-			}
+			c.cleanupDeploy(ctx, run.ID)
 			if !stopped {
 				continue
 			}
@@ -305,6 +309,9 @@ func (c *Controller) ReconcileOnce(ctx context.Context) error {
 			c.logf("orchestrator: run %s reconciled as canceled (no active attempt)", run.ID)
 		}
 	}
+
+	// 兜底 1.5：已终态但 deploy 还没卸载干净的 Run（正常收口 + 重启/抖动后的补偿，§9.7）。
+	c.cleanupPendingDeploys(ctx)
 
 	// 兜底 2：历史遗留的僵尸租约（Task 已终态/已不存在，租约还在）。
 	stale, err := c.recon.ListStaleLeases(ctx, reconcileBatchLimit)
@@ -947,9 +954,30 @@ func (c *Controller) beginRun(ctx context.Context, run RunView) error {
 				Retryable: false,
 			})
 		}
-		// 顺序不能反：先 BeginDeploy 把 runs.deploy 冻结落库（含 release_name / accepted_at），
+		// 先 BeginDeploy 把 runs.deploy 冻结落库（含 release_name / accepted_at），
 		// 再调 Start。Genet 的 POST 超时不代表没创建，重启后只能靠库里的冻结值找回 release（§9.2）。
 		if err := c.repos.BeginDeploy(ctx, run.ID, "d-"+run.ID); err != nil {
+			return err
+		}
+		// 冻结信息落库：这些键之后每次轮询都只做增量合并，不会被冲掉（§4.4）。
+		now := time.Now().UTC()
+		base := DeployManifestFields(run.DeployJSON)
+		snap := domain.DeploySnapshot{
+			DeployID:     "d-" + run.ID,
+			Provider:     firstNonEmpty(base.Provider, "genet"),
+			Namespace:    base.Namespace,
+			ReleaseName:  DeployReleaseName(run.ID, "d-"+run.ID),
+			PackageType:  firstNonEmpty(base.PackageType, "stack"),
+			Chart:        base.Chart,
+			ChartVersion: base.ChartVersion,
+			ValuesDigest: base.ValuesDigest,
+			ModelName:    base.ModelName,
+			State:        "accepted",
+			AcceptedAt:   &now,
+			QueuedAt:     &now,
+			LastPolledAt: &now,
+		}
+		if err := c.repos.RecordDeployState(ctx, run.ID, snap); err != nil {
 			return err
 		}
 		// 事务外调用 Genet（C-2.5）；Manifest = 冻结后的 runs.deploy 原样快照。
@@ -960,11 +988,9 @@ func (c *Controller) beginRun(ctx context.Context, run RunView) error {
 			Timeout:  c.cfg.DeployTimeout,
 		}); err != nil {
 			// 平台侧调不通 Genet（网络/5xx/鉴权/请求构造）→ DEPLOY_FAILED（不可重试，Run failed，D-47）。
-			return c.repos.FinishDeployAsFailed(ctx, run.ID, &domain.Failure{
-				Code:      domain.CodeDeployFailed,
-				Message:   err.Error(),
-				Retryable: false,
-			})
+			f := &domain.Failure{Code: domain.CodeDeployFailed, Message: err.Error(), Retryable: false}
+			_ = c.repos.RecordDeployState(ctx, run.ID, domain.DeploySnapshot{State: "blocked", Failure: f})
+			return c.repos.FinishDeployAsFailed(ctx, run.ID, f)
 		}
 		return nil
 	}
@@ -975,37 +1001,61 @@ func (c *Controller) beginRun(ctx context.Context, run RunView) error {
 }
 
 func (c *Controller) pollDeploy(ctx context.Context, run RunView) error {
+	now := time.Now().UTC()
 	// 总窗口判定（K-6）：排队 + 部署超窗 → service_unavailable，不是 failed。
 	if !run.SubmittedAt.IsZero() && time.Since(run.SubmittedAt) > c.cfg.DeployTimeout {
-		return c.repos.DeployBlocked(ctx, run.ID, "deploy window exceeded", &domain.Failure{
+		f := &domain.Failure{
 			Code:      domain.CodeDeployBlocked,
 			Message:   fmt.Sprintf("deploy did not become ready within %s", c.cfg.DeployTimeout),
 			Retryable: true,
 			Detail:    map[string]any{"reason": "timeout"},
+		}
+		_ = c.repos.RecordDeployState(ctx, run.ID, domain.DeploySnapshot{
+			State: "blocked", QueueReason: "timeout", Failure: f, LastPolledAt: &now,
 		})
+		return c.repos.DeployBlocked(ctx, run.ID, "deploy window exceeded", f)
 	}
 	st, err := c.deployer.Poll(ctx, run.ID)
 	if err != nil {
 		// 平台调不通（网络/5xx/鉴权）→ DEPLOY_FAILED（不可重试）→ Run failed（C-5.3、D-47）。
-		return c.repos.FinishDeployAsFailed(ctx, run.ID, &domain.Failure{
-			Code:      domain.CodeDeployFailed,
-			Message:   err.Error(),
-			Retryable: false,
+		f := &domain.Failure{Code: domain.CodeDeployFailed, Message: err.Error(), Retryable: false}
+		_ = c.repos.RecordDeployState(ctx, run.ID, domain.DeploySnapshot{
+			State: "blocked", Failure: f, LastPolledAt: &now,
 		})
+		return c.repos.FinishDeployAsFailed(ctx, run.ID, f)
 	}
-	if err := c.repos.RecordDeployState(ctx, run.ID, st); err != nil {
+	// 每次 Poll 回写：状态、两根轴原值、队列水位、时间线（§4.4）。
+	snap := domain.DeploySnapshot{
+		State:          st.Phase,
+		QueueReason:    st.Reason,
+		ReleaseStatus:  st.ReleaseStatus,
+		EndpointStatus: st.EndpointStatus,
+		Queue:          st.Queue,
+		LastPolledAt:   &now,
+	}
+	if st.Phase == "ready" {
+		ep := st.Endpoint
+		snap.ReadyAt = &now
+		snap.Endpoint = &ep
+	}
+	if st.Failure != nil {
+		snap.Failure = st.Failure
+	}
+	if err := c.repos.RecordDeployState(ctx, run.ID, snap); err != nil {
 		return err
 	}
 	switch st.Phase {
 	case "ready":
 		if st.Endpoint.BaseURL == "" {
 			// 说 ready 却没地址：部署侧问题，不是平台调不通 → DEPLOY_BLOCKED（可重试）。
-			return c.repos.DeployBlocked(ctx, run.ID, "ready without endpoint", &domain.Failure{
+			f := &domain.Failure{
 				Code:      domain.CodeDeployBlocked,
 				Message:   "Genet reported ready but returned no endpoint",
 				Retryable: true,
 				Detail:    map[string]any{"reason": "blocked"},
-			})
+			}
+			_ = c.repos.RecordDeployState(ctx, run.ID, domain.DeploySnapshot{State: "blocked", Failure: f})
+			return c.repos.DeployBlocked(ctx, run.ID, "ready without endpoint", f)
 		}
 		if _, err := c.repos.DeployReady(ctx, run.ID, st.Endpoint); err != nil {
 			return err
@@ -1076,12 +1126,12 @@ func (c *Controller) CancelRun(ctx context.Context, runID, actor string) error {
 	if err != nil {
 		return err
 	}
-	// deploying 阶段取消：先请求 Genet 取消排队/卸载（C-6.1 第 2 条）。
-	// 404/409 = release 尚未出现或正忙 → 只 WARN；取消意图已在库，由对账补偿（§9.6）。
+	// deploying 阶段取消：先落取消意图，再请求 Genet 卸载（C-6.1 第 2 条、§9.6）。
+	// 404/409 = release 尚未出现或正忙 → 只 WARN；取消意图已在库，由对账补偿。
 	if c.deployer != nil {
-		if derr := c.deployer.Cancel(ctx, runID); derr != nil {
-			c.logf("orchestrator: WARN deploy_cancel_pending: run %s: %v", runID, derr)
-		}
+		now := time.Now().UTC()
+		_ = c.repos.RecordDeployState(ctx, runID, domain.DeploySnapshot{CancelRequestedAt: &now})
+		c.cleanupDeploy(ctx, runID)
 	}
 	for _, ref := range out.CancelJobs {
 		c.cancelJobAsync(ctx, ref)
@@ -1124,4 +1174,30 @@ func (c *Controller) CancelTask(ctx context.Context, taskID, actor string) error
 		c.cancelJobAsync(ctx, ref)
 	}
 	return nil
+}
+// cleanupDeployIfTerminal 在 Run 已终态且仍是 deploy 形态时收口 Genet 资源。
+func (c *Controller) cleanupDeployIfTerminal(ctx context.Context, runID string) {
+	if c.deployer == nil || runID == "" {
+		return
+	}
+	run, err := c.repos.GetRun(ctx, runID)
+	if err != nil || !run.HasDeploy || !run.Status.IsTerminal() {
+		return
+	}
+	c.cleanupDeploy(ctx, runID)
+}
+
+// cleanupPendingDeploys 是对账的一轮：把"已终态但 uninstall.state != verified"的 Run 重试卸载。
+func (c *Controller) cleanupPendingDeploys(ctx context.Context) {
+	if c.deployer == nil {
+		return
+	}
+	pending, err := c.repos.ListDeployCleanupPending(ctx, reconcileBatchLimit)
+	if err != nil {
+		c.logf("orchestrator: list deploy cleanup pending: %v", err)
+		return
+	}
+	for _, run := range pending {
+		c.cleanupDeploy(ctx, run.ID)
+	}
 }

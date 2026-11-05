@@ -150,9 +150,16 @@ func (r *RunRepo) SetEndpoint(ctx context.Context, tx pgx.Tx, id string, endpoin
 	return nil
 }
 
-// SetDeploy 写入 runs.deploy 快照（排队位次/状态）。
+// SetDeploy 把 runs.deploy 快照**深合并**进已有 JSON（03-data-view §4.4）。
+//
+// 必须是合并而不是整段覆盖：release_name / provider / values_digest 等在 BeginDeploy
+// 时写一次，之后每次状态推进只带"变化的键"；覆盖会把冻结信息冲掉，重启后就无法靠
+// release_name 找回 Genet 侧的 release（execution §9.2）。
 func (r *RunRepo) SetDeploy(ctx context.Context, tx pgx.Tx, id string, deploy []byte) error {
-	_, err := r.s.db(tx).Exec(ctx, `UPDATE runs SET deploy = $2 WHERE id = $1`, id, deploy)
+	_, err := r.s.db(tx).Exec(ctx, `
+		UPDATE runs
+		   SET deploy = COALESCE(deploy, '{}'::jsonb) || $2::jsonb
+		 WHERE id = $1`, id, deploy)
 	if err != nil {
 		return fmt.Errorf("store: set deploy %s: %w", id, err)
 	}

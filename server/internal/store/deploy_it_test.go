@@ -34,7 +34,10 @@ func TestRecordDeployState_QueuePositionAlwaysNull(t *testing.T) {
 	}
 
 	// 即使调用方传了位次，也不能落库。
-	if err := st.RecordDeployState(ctx, runID, "queued", "queue genet-shared: Insufficient Ascend910", 12); err != nil {
+	if err := st.RecordDeployState(ctx, runID, domain.DeploySnapshot{
+		State:       "queued",
+		QueueReason: "queue genet-shared: Insufficient Ascend910",
+	}); err != nil {
 		t.Fatalf("RecordDeployState: %v", err)
 	}
 

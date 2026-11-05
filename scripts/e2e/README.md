@@ -14,6 +14,9 @@
 | 契约测试（`tools/contract`） | ✅ 规格 15/15 + 实现 32/32 = **47/47**（设计端点差集 + 白名单） |
 | 前端冒烟（`pnpm build`、`GET /`） | ✅ build 通过、`GET /` 200 text/html |
 | 失败注入（经平台，`service_unavailable` 路径） | ✅ 5/5（success/500/401/200包错误/slow-ready） |
+| 一成一败混合结果（#15） | ✅ `mixed-result-check.ps1` 11/11 |
+| 重启恢复演练（#9） | 🟡 `restart-drill.ps1` 11/13：对账读结果路径的 backend bug 待修 |
+| Web UI Playwright 冒烟（#16） | ✅ `web/tests/ui-smoke.spec.ts` 1 passed |
 | 验收矩阵 17 项结论 | ✅ 见 [`acceptance-matrix.md`](acceptance-matrix.md) |
 
 ## 目录
@@ -140,6 +143,45 @@ Attempt 容差 `timeout + 30s`（独立于轮询变量）；事件接受
 
 `mock-llm-slow` 用 `-ready-after=86400s`（24h）而不是 1h：否则跑满 1h 后会真的就绪，
 超时用例会“意外成功”。
+
+## 3.1 重启恢复演练（#9）
+
+```powershell
+pwsh scripts/e2e/restart-drill.ps1 -BaseUrl http://127.0.0.1:8098 -DryRun
+pwsh scripts/e2e/restart-drill.ps1 -BaseUrl http://127.0.0.1:8098
+pwsh scripts/e2e/restart-drill.ps1 -RecoveryTimeoutSeconds 1   # 负向：必须 FAIL
+```
+
+- 先用 `kind/mock-llm-delayed.yaml`（15s 后才就绪）制造 running 窗口；
+- 提交 2 个 test，等 testing + Attempt running，然后
+  `kubectl delete pod -l app.kubernetes.io/name=testplaned --grace-period=0 --force`；
+- 脚本自己管理 port-forward（8100 → 恢复后 8101），断言新 Pod Ready、Run 终态、
+  租约/Job 清空、`attempt.finished` 有对账痕迹；`-RecoveryTimeoutSeconds 1` 时
+  必须 exit 1（验证不会把“没恢复”当 PASS）。
+
+## 3.2 一成一败混合结果（#15）
+
+```powershell
+pwsh scripts/e2e/mixed-result-check.ps1 -BaseUrl http://127.0.0.1:8096 -DryRun
+pwsh scripts/e2e/mixed-result-check.ps1 -BaseUrl http://127.0.0.1:8096 -SkipApply
+```
+
+- `kind/mixed-router.yaml` 按 `Authorization` 分流：Task A `ENDPOINT_API_KEY=ok` →
+  mock-llm（成功），Task B `ENDPOINT_API_KEY=fail` → mock-llm-500（失败）；
+- 首次用 `kind load docker-image python:3.12-alpine --name testplane` 把 router 镜像装进集群；
+- 断言 Run `completed_with_errors`、A succeeded/B failed、report counts 1/1、
+  failures 非空、Run.error 取首个失败 Task（Pre-Check 优先）。
+
+## 3.3 Web UI Playwright 冒烟（#16）
+
+```powershell
+cd web
+pnpm add -D @playwright/test    # 仅首次
+pnpm exec playwright test       # 自动起 dev server（5173），system Chrome
+```
+
+也可以先起服务再跑：`$env:PLAYWRIGHT_BASE_URL='http://127.0.0.1:8098'; pnpm exec playwright test`。
+Spec 覆盖 `/runs` → 第一条 → 详情 Task 表 → `/submit` dry-run 报错可见。
 
 默认**严格**：report 必现（终态后 ≤2s，30s 等待足够）、`/logs` 必非空；只有显式
 `-AllowKnownGaps` 才把当前已知的 report/logs 缺口从失败项里剔除，修复后不要带这个开关。

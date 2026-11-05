@@ -82,7 +82,7 @@ tags:
   - name: health
     description: 运维探针（07 §5.5）
   - name: auth
-    description: 当前身份（07 §2.4）
+    description: 当前身份与认证流程（07 §2.4）：`GET /me`、`/auth/login|callback|logout`（认证端点匿名、不带 /api/v1 前缀）
   - name: meta
     description: 平台元信息与特性开关（C-8.2 `GET /meta`，前端版本对齐用）
   - name: runs
@@ -105,7 +105,9 @@ tags:
     description: 产物下载（07 §5.1，支持 Range，不越出 Run 目录）
 
 security:
+  # 两种凭据二选一：Cookie 会话（浏览器）或 Bearer JWT（服务间）；RBAC 同一套（07 §2.1）。
   - bearerAuth: []
+  - cookieAuth: []
 
 paths:
   # ======================================================================
@@ -1405,6 +1407,124 @@ paths:
               schema:
                 type: string
 
+  # ======================================================================
+  # 认证端点（07 §2.4）：匿名、不带 /api/v1 前缀
+  # ======================================================================
+  /auth/login:
+    get:
+      operationId: authLogin
+      summary: 跳转统一身份源（OIDC authorization code + PKCE）
+      description: |
+        07 §2.4：302 到 IdP 的 `authorization_endpoint`，带 `response_type=code`、`code_challenge`
+        （S256）、`state`、`nonce`、`redirect_uri`。`return` 只接受站内相对路径（防开放重定向），
+        非法值回退 `/`。同时下发 `tp_auth_tx` 中间态 Cookie（HttpOnly、10 分钟）。
+        `TESTPLANE_AUTH_MODE=dev` 时本端点返回 404（dev 没有登录流程）。
+      tags: [auth]
+      security: []
+      parameters:
+        - name: return
+          in: query
+          required: false
+          description: 登录成功后回跳的站内路径（如 `/runs/r-20261105-0001`）
+          schema:
+            type: string
+      responses:
+        '302':
+          description: 跳转到 IdP 授权端点（`Location` 头）
+          headers:
+            Location:
+              description: IdP 授权地址
+              schema:
+                type: string
+            Set-Cookie:
+              description: '`tp_auth_tx=<签名令牌>; Path=/auth; HttpOnly; SameSite=Lax`'
+              schema:
+                type: string
+        '404':
+          description: 当前是 dev 鉴权模式（无登录流程）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/callback:
+    get:
+      operationId: authCallback
+      summary: 授权码回调：换会话 Cookie 并回跳前端
+      description: |
+        07 §2.4：校验 `state`（与 `tp_auth_tx` 里的一致）→ 用 `code` + PKCE verifier 调
+        `token_endpoint`（支持 `client_secret_basic` 与 `client_secret_post`）→ 校验 ID token
+        签名/`iss`/`aud`/`exp`/`nonce` → 下发签名会话 Cookie（`tp_session`）→ 302 回 `return`。
+        `state` 或 `nonce` 不匹配、token 过期、`aud` 不含本 client → 401 `UNAUTHENTICATED`。
+      tags: [auth]
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          description: IdP 返回的授权码
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          description: 与登录时下发的一致（防 CSRF）
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          description: IdP 返回的错误码（如 `access_denied`）
+          schema:
+            type: string
+      responses:
+        '302':
+          description: 登录成功，回跳前端路径
+          headers:
+            Location:
+              description: 站内路径（`return` 参数，非法则 `/`）
+              schema:
+                type: string
+            Set-Cookie:
+              description: '`tp_session=<签名令牌>; Path=/; HttpOnly; Secure; SameSite=Lax`（并清除 `tp_auth_tx`）'
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /auth/logout:
+    post:
+      operationId: authLogout
+      summary: 清会话 Cookie
+      description: |
+        07 §2.4：清 `tp_session`（`Max-Age=0`）。Cookie 会话调用时需要 `X-CSRF-Token`
+        （与其他写操作一致）；Bearer 调用方直接调用即可。
+      tags: [auth]
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '200':
+          description: 已登出
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Set-Cookie:
+              description: '`tp_session=; Path=/; Max-Age=0`'
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1412,9 +1532,19 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: |
-        统一身份源签发的 JWT（07 §2.1）：JWKS 校验，`aud == clientId`，`exp/nbf` 容差 60s。
-        Web UI 的会话 Cookie 不是 OpenAPI 能表达的鉴权形态，未在此建模；写操作需要
-        `X-CSRF-Token`（双提交，值来自 `GET /api/v1/me`）。
+        统一身份源签发的 JWT（07 §2.1、D-51）：平台用 JWKS 校验，`RS256`、`aud == clientId`、
+        `iss` 严格匹配、`exp/nbf` 容差 60s；claims 里的 groups 经 `TESTPLANE_ROLE_MAP` 映射成
+        角色（未命中 → viewer），与浏览器会话走**同一套** RBAC。服务间调用（Jenkins/Agent/CLI）
+        用这种方式，不需要 CSRF 头。
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: tp_session
+      description: |
+        浏览器会话（07 §2.1）：OIDC authorization code + PKCE 换取，值为 HMAC-SHA256 签名令牌
+        （`HttpOnly; Secure; SameSite=Lax; Path=/`，TTL 默认 8h）。**Cookie 会话的写操作必须带
+        `X-CSRF-Token`（双提交，值来自 `GET /api/v1/me`）**，否则 403 `FORBIDDEN`；
+        会话过期或签名无效 → 401 `UNAUTHENTICATED`。
 
   parameters:
     RunId:

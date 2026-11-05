@@ -227,11 +227,14 @@ type Repos interface {
 
 	// ---- Deploy（C-5.3）----
 	BeginDeploy(ctx context.Context, runID, deployID string) error
-	RecordDeployState(ctx context.Context, runID string, st ports.DeployState) error
+	// RecordDeployState 把一次增量快照合并进 runs.deploy（键名见 03-data-view §4.4）。
+	RecordDeployState(ctx context.Context, runID string, snap domain.DeploySnapshot) error
 	DeployReady(ctx context.Context, runID string, ep domain.Endpoint) (int, error)
 	DeployBlocked(ctx context.Context, runID string, reason string, f *domain.Failure) error
 	// FinishDeployAsFailed 处理"平台调不通 Genet"（Run → failed）。
 	FinishDeployAsFailed(ctx context.Context, runID string, f *domain.Failure) error
+	// ListDeployCleanupPending 返回"已终态但 deploy 还没卸载干净"的 Run（收口补偿用）。
+	ListDeployCleanupPending(ctx context.Context, limit int) ([]RunView, error)
 
 	// ---- 收口 ----
 	BeginCleanup(ctx context.Context, runID, reason string) error

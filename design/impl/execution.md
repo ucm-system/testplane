@@ -363,6 +363,11 @@ control-plane 据此写 `artifacts(attempt_id, path, size_bytes, sha256, kind, m
 
 **values 合并顺序（"部署模板"的全部含义）**：chart 默认 values → `templateId`/`templatePath`/`values`（三选一）→ `image`/`modelPath` 覆盖 → `set` 覆盖 → chart 内 `values-genet.yaml` overlay（调度字段）→ 再覆盖一次 image/modelPath（`helm.go:2143-2196`，`R-G:76`）。平台**不做 Helm 渲染**，只把这六项原样透传并冻结（§9.8）。
 
+**两条本地实测出来的硬约束（2026-11-05，kind + 源码构建的 Genet + 我们的 mock chart）**：
+
+1. **`values` / `templatePath` / `templateId` 三者不能全空**——全空时 Genet 返 400 `templatePath 或 values 不能为空`。所以平台至少要给一行非空 values（实测 `replicaCount: 1` 即可；镜像沿用 chart 默认）。这也解释了为什么 `genet.Start` 拒绝空 manifest：编排层必须在 `BeginDeploy` 冻结 `runs.deploy` 之后再调 §9.2。
+2. **`package_type` 决定装哪个固定 chart**：`stack` → `helm.ucPackages.stack.chart`（本地冒充件 `charts/unified-cache-stack`，实测 202 → `deployed` → `endpoint.status=ready`）；`pd` → `helm.ucPackages.pd.chart`（本地 404，且 `pd` 还带 `routerDiscovery{namespace: kthena-system, accessMode: nodePort}`，endpoint 解析要 kthena router 参与）。**本地/CI 一律 `stack`**，`pd` 只在有 PD 拓扑的环境才有意义（D-53）。
+
 **幂等键**：`release_name = "tp-" + hex(sha256(run_id + ":" + deploy_id))[:12]`；同 run 同 deploy 恒等、不同 deploy 必不同，满足 `^[a-z][a-z0-9-]{0,52}$`（`R-G:319`）。调用顺序固定：
 
 1. `GET /releases/{name}` → 200：直接进入 Poll（重启/重试场景）；

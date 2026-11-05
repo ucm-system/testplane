@@ -97,8 +97,29 @@ type Config struct {
 	SSEHeartbeat time.Duration
 	// SSEReplayWindow 是 SSE 回放窗口（TESTPLANE_SSE_REPLAY_HOURS，默认 24h）。
 	SSEReplayWindow time.Duration
-	// AuthMode 是鉴权模式（TESTPLANE_AUTH_MODE，MVP 只有 dev）。
+	// AuthMode 是鉴权模式（TESTPLANE_AUTH_MODE）：dev | oidc（07 §2）。
 	AuthMode string
+	// Env 是部署环境（TESTPLANE_ENV，默认 dev）：用于"dev 鉴权用在非本地就打警告"。
+	Env string
+
+	// ---- OIDC（07 §2.1、D-51：独立 client，不把 Genet 当 IdP） ----
+	OIDCIssuer         string   // TESTPLANE_OIDC_ISSUER
+	OIDCClientID       string   // TESTPLANE_OIDC_CLIENT_ID
+	OIDCClientSecret   string   // TESTPLANE_OIDC_CLIENT_SECRET
+	OIDCClientAuth     string   // TESTPLANE_OIDC_CLIENT_AUTH：basic | post（默认 basic）
+	OIDCRedirectURL    string   // TESTPLANE_OIDC_REDIRECT_URL，如 http://127.0.0.1:8080/auth/callback
+	OIDCScopes         []string // TESTPLANE_OIDC_SCOPES，默认 openid profile email groups
+	OIDCRoleClaim      string   // TESTPLANE_OIDC_ROLE_CLAIM，默认 groups
+
+	// ---- 会话与 CSRF ----
+	SessionSecret []byte        // TESTPLANE_SESSION_SECRET（HMAC 密钥，≥32 字节）
+	SessionCookie string        // TESTPLANE_SESSION_COOKIE，默认 tp_session
+	SessionTTL    time.Duration // TESTPLANE_SESSION_TTL，默认 8h
+	SessionSecure bool          // TESTPLANE_SESSION_SECURE，默认 true（纯内网 http 部署可关）
+
+	// RoleMap 是 groups → 角色 的映射（TESTPLANE_ROLE_MAP，形如 tp-admins=admin,tp-ops=operator）。
+	RoleMap map[string]string
+
 	// APIPrefix 是业务端点前缀，固定 /api/v1（07 §1）。
 	APIPrefix string
 }
@@ -128,7 +149,28 @@ func Load() (*Config, error) {
 		SSEHeartbeat:         15 * time.Second,
 		SSEReplayWindow:      24 * time.Hour,
 		AuthMode:             strings.ToLower(env("TESTPLANE_AUTH_MODE", "dev")),
+		Env:                  strings.ToLower(env("TESTPLANE_ENV", "dev")),
+		OIDCIssuer:           strings.TrimRight(env("TESTPLANE_OIDC_ISSUER", ""), "/"),
+		OIDCClientID:         env("TESTPLANE_OIDC_CLIENT_ID", ""),
+		OIDCClientSecret:     env("TESTPLANE_OIDC_CLIENT_SECRET", ""),
+		OIDCClientAuth:       strings.ToLower(env("TESTPLANE_OIDC_CLIENT_AUTH", "basic")),
+		OIDCRedirectURL:      env("TESTPLANE_OIDC_REDIRECT_URL", ""),
+		OIDCScopes:           splitList(env("TESTPLANE_OIDC_SCOPES", "openid profile email groups")),
+		OIDCRoleClaim:        env("TESTPLANE_OIDC_ROLE_CLAIM", "groups"),
+		SessionSecret:        []byte(env("TESTPLANE_SESSION_SECRET", "")),
+		SessionCookie:        env("TESTPLANE_SESSION_COOKIE", "tp_session"),
+		SessionTTL:           8 * time.Hour, // 下面按 TESTPLANE_SESSION_TTL 覆盖
+		SessionSecure:        envBool("TESTPLANE_SESSION_SECURE", true),
+		RoleMap:              parseRoleMap(env("TESTPLANE_ROLE_MAP", "")),
 		APIPrefix:            "/api/v1",
+	}
+
+	if raw := env("TESTPLANE_SESSION_TTL", ""); raw != "" {
+		d, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("config: TESTPLANE_SESSION_TTL=%q 非法（如 8h）", raw)
+		}
+		c.SessionTTL = d
 	}
 
 	if c.Role == "" {
@@ -204,6 +246,28 @@ func Load() (*Config, error) {
 	default:
 		return nil, fmt.Errorf("config: TESTPLANE_LOG_LEVEL=%q 非法，允许 debug|info|warn|error", c.LogLevel)
 	}
+	if c.OIDCClientAuth != "basic" && c.OIDCClientAuth != "post" {
+		return nil, fmt.Errorf("config: TESTPLANE_OIDC_CLIENT_AUTH=%q 非法，允许 basic|post", c.OIDCClientAuth)
+	}
+	if c.AuthMode == "oidc" {
+		var missing []string
+		if c.OIDCIssuer == "" {
+			missing = append(missing, "TESTPLANE_OIDC_ISSUER")
+		}
+		if c.OIDCClientID == "" {
+			missing = append(missing, "TESTPLANE_OIDC_CLIENT_ID")
+		}
+		if c.OIDCRedirectURL == "" {
+			missing = append(missing, "TESTPLANE_OIDC_REDIRECT_URL")
+		}
+		if len(c.SessionSecret) < 32 {
+			missing = append(missing, "TESTPLANE_SESSION_SECRET(≥32 字节)")
+		}
+		if len(missing) > 0 {
+			return nil, fmt.Errorf("config: TESTPLANE_AUTH_MODE=oidc 缺少必需配置: %s", strings.Join(missing, ", "))
+		}
+	}
+
 	switch c.AuthMode {
 	case "dev", "oidc":
 	default:
@@ -250,6 +314,46 @@ func joinStorage(root string, parts ...string) string {
 	out := strings.TrimRight(root, `/\`)
 	for _, p := range parts {
 		out += "/" + p
+	}
+	return out
+}
+
+
+// splitList 把逗号/空白分隔的字符串切成切片（OIDC scopes 用）。
+func splitList(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// parseRoleMap 解析 TESTPLANE_ROLE_MAP（`tp-admins=admin,tp-ops=operator`）。
+// 非法条目直接忽略（宁可少给权限，不给错权限）。
+func parseRoleMap(raw string) map[string]string {
+	out := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		group, role, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		group = strings.TrimSpace(group)
+		role = strings.ToLower(strings.TrimSpace(role))
+		switch role {
+		case "viewer", "operator", "admin":
+			if group != "" {
+				out[group] = role
+			}
+		}
 	}
 	return out
 }

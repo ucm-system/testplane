@@ -32,6 +32,22 @@ type storeRepos struct {
 
 var _ orchestrator.Repos = (*storeRepos)(nil)
 
+
+// attemptRefs 把一批 attempt id 转成 AttemptRef，并尽力补齐 TaskID/RunID。
+// 删 Job 只需要 AttemptID，但带上归属能在日志与对账里定位到具体 Run/Task
+// （也避免下游任何"用 ref 拼 subPath"的路径拿到空 RunID）。
+func (r *storeRepos) attemptRefs(ctx context.Context, ids []string) []orchestrator.AttemptRef {
+	out := make([]orchestrator.AttemptRef, 0, len(ids))
+	for _, id := range ids {
+		ref := orchestrator.AttemptRef{AttemptID: id}
+		if taskID, runID, err := r.st.Attempts.Owner(ctx, nil, id); err == nil {
+			ref.TaskID, ref.RunID = taskID, runID
+		}
+		out = append(out, ref)
+	}
+	return out
+}
+
 // buildRunView 把 store.Run 投影成编排层看到的快照。
 func (r *storeRepos) runView(run *store.Run) orchestrator.RunView {
 	v := orchestrator.RunView{
@@ -308,13 +324,21 @@ func (r *storeRepos) ListActiveTasks(ctx context.Context, limit int) ([]orchestr
 }
 
 // AttemptByTask 读该 Task 当前进行中的 Attempt（含 executor_ref 里的 Job 名）。
+//
+// **RunID 必填**：对账/结算路径用它拼产物 subPath（`<run>/tasks/<task>/attempts/<n>`），
+// 漏填会让 result.json 被读成 `<storage-root>/result.json`（QA 的 restart-drill 现场）。
 func (r *storeRepos) AttemptByTask(ctx context.Context, taskID string) (orchestrator.AttemptRef, error) {
 	a, jobName, err := r.st.ActiveAttemptOfTask(ctx, taskID)
 	if err != nil {
 		return orchestrator.AttemptRef{}, err
 	}
+	runID, err := r.st.Tasks.RunIDOf(ctx, nil, taskID)
+	if err != nil {
+		return orchestrator.AttemptRef{}, err
+	}
 	return orchestrator.AttemptRef{
-		AttemptID: a.ID, TaskID: a.TaskID, AttemptNo: a.Idx, JobName: jobName,
+		AttemptID: a.ID, TaskID: a.TaskID, RunID: runID,
+		AttemptNo: a.Idx, JobName: jobName,
 	}, nil
 }
 
@@ -390,9 +414,7 @@ func (r *storeRepos) FinishAttempt(ctx context.Context, in orchestrator.FinishIn
 		AbortTriggered:      res.AbortTriggered,
 		NeedsQueueUnblocked: res.PreCheckPassed && res.TaskTerminal,
 	}
-	for _, attemptID := range res.CancelAttempts {
-		out.CancelJobs = append(out.CancelJobs, orchestrator.AttemptRef{AttemptID: attemptID})
-	}
+	out.CancelJobs = append(out.CancelJobs, r.attemptRefs(ctx, res.CancelAttempts)...)
 	return out, nil
 }
 
@@ -402,9 +424,7 @@ func (r *storeRepos) AbortRun(ctx context.Context, in orchestrator.AbortInput) (
 		return orchestrator.AbortOutcome{}, err
 	}
 	out := orchestrator.AbortOutcome{Skipped: skipped}
-	for _, id := range attempts {
-		out.CancelJobs = append(out.CancelJobs, orchestrator.AttemptRef{AttemptID: id})
-	}
+	out.CancelJobs = append(out.CancelJobs, r.attemptRefs(ctx, attempts)...)
 	return out, nil
 }
 
@@ -413,8 +433,21 @@ func (r *storeRepos) BeginDeploy(ctx context.Context, runID, deployID string) er
 	return err
 }
 
-func (r *storeRepos) RecordDeployState(ctx context.Context, runID string, st ports.DeployState) error {
-	return r.st.RecordDeployState(ctx, runID, st.Phase, st.Reason, 0)
+func (r *storeRepos) RecordDeployState(ctx context.Context, runID string, snap domain.DeploySnapshot) error {
+	return r.st.RecordDeployState(ctx, runID, snap)
+}
+
+// ListDeployCleanupPending 返回"已终态但 deploy 还没卸载干净"的 Run（收口补偿输入）。
+func (r *storeRepos) ListDeployCleanupPending(ctx context.Context, limit int) ([]orchestrator.RunView, error) {
+	runs, err := r.st.ListDeployCleanupPending(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]orchestrator.RunView, 0, len(runs))
+	for i := range runs {
+		out = append(out, r.runView(&runs[i]))
+	}
+	return out, nil
 }
 
 func (r *storeRepos) DeployReady(ctx context.Context, runID string, ep domain.Endpoint) (int, error) {
@@ -466,9 +499,7 @@ func (r *storeRepos) RequestCancelRun(ctx context.Context, runID, actor string) 
 		return orchestrator.CancelOutcome{}, err
 	}
 	out := orchestrator.CancelOutcome{Skipped: skipped, AllStopped: len(attempts) == 0}
-	for _, id := range attempts {
-		out.CancelJobs = append(out.CancelJobs, orchestrator.AttemptRef{AttemptID: id})
-	}
+	out.CancelJobs = append(out.CancelJobs, r.attemptRefs(ctx, attempts)...)
 	return out, nil
 }
 
@@ -478,9 +509,7 @@ func (r *storeRepos) RequestCancelTask(ctx context.Context, taskID, actor string
 		return orchestrator.CancelOutcome{}, err
 	}
 	out := orchestrator.CancelOutcome{Skipped: skipped, AllStopped: len(attempts) == 0}
-	for _, id := range attempts {
-		out.CancelJobs = append(out.CancelJobs, orchestrator.AttemptRef{AttemptID: id})
-	}
+	out.CancelJobs = append(out.CancelJobs, r.attemptRefs(ctx, attempts)...)
 	return out, nil
 }
 

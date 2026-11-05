@@ -19,6 +19,7 @@ import (
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/executor"
+	"github.com/ucm-system/testplane/server/internal/genet"
 	"github.com/ucm-system/testplane/server/internal/genet/mocks"
 	"github.com/ucm-system/testplane/server/internal/ports"
 	"github.com/ucm-system/testplane/server/internal/report"
@@ -1672,6 +1673,12 @@ type fakeDeployer struct {
 	startErr  error
 	recordReq bool
 	lastReq   ports.DeployRequest
+	// pollState 是 Poll 的返回值（Phase 为空时默认 deploying）。
+	pollState ports.DeployState
+	// verifyGone / verifyErr 控制 VerifyUninstalled；verifies 计数。
+	verifyGone *bool
+	verifyErr  error
+	verifies   int
 }
 
 func (f *fakeDeployer) Start(ctx context.Context, req ports.DeployRequest) error {
@@ -1688,6 +1695,9 @@ func (f *fakeDeployer) Poll(ctx context.Context, runID string) (ports.DeployStat
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.polls++
+	if f.pollState.Phase != "" {
+		return f.pollState, nil
+	}
 	return ports.DeployState{Phase: "deploying"}, nil
 }
 
@@ -1799,5 +1809,265 @@ func TestDeployTimeoutUsesDeployBlockedCode(t *testing.T) {
 	}
 	if !run.Failure.Retryable {
 		t.Errorf("DEPLOY_BLOCKED must be retryable")
+	}
+}
+
+// ---- ports.DeployCleaner 支撑 -------------------------------------------------
+
+// VerifyUninstalled 假实现：默认 true（已删干净），可注入 false / error。
+func (f *fakeDeployer) VerifyUninstalled(ctx context.Context, runID string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.verifies++
+	if f.verifyErr != nil {
+		return false, f.verifyErr
+	}
+	if f.verifyGone != nil {
+		return *f.verifyGone, nil
+	}
+	return true, nil
+}
+
+// 收口：Run 已终态且 HasDeploy 时，对账必须发 DELETE 并把 uninstall 记成 verified（§9.7）。
+func TestTerminalDeployRunIsUninstalledOnReconcile(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunSucceeded, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now().Add(-time.Minute),
+		DeployJSON:  json.RawMessage(`{"release_name":"tp-abc123456789","state":"ready"}`),
+	})
+	dep := &fakeDeployer{}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	dep.mu.Lock()
+	cancels, verifies := dep.cancels, dep.verifies
+	dep.mu.Unlock()
+	if cancels != 1 {
+		t.Fatalf("deployer.Cancel calls = %d, want 1（终态必须卸载）", cancels)
+	}
+	if verifies != 1 {
+		t.Errorf("VerifyUninstalled calls = %d, want 1", verifies)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunSucceeded {
+		t.Errorf("run status = %s, want succeeded（卸载不改终态）", run.Status)
+	}
+	doc := deployDoc(t, run)
+	u, _ := doc["uninstall"].(map[string]any)
+	if u == nil || u["state"] != "verified" {
+		t.Fatalf("uninstall = %v, want state=verified", doc["uninstall"])
+	}
+	if _, ok := u["verified_at"]; !ok {
+		t.Errorf("uninstall.verified_at missing: %v", u)
+	}
+	if v, ok := u["force"].(bool); !ok || !v {
+		t.Errorf("uninstall.force = %v, want true", u["force"])
+	}
+	// 冻结字段不能被卸载覆盖掉。
+	if doc["release_name"] != "tp-abc123456789" {
+		t.Errorf("release_name = %v, want preserved", doc["release_name"])
+	}
+}
+
+// DELETE 502：Run 仍 succeeded，uninstall.state=failed；下一轮对账重试成功后 verified。
+func TestCleanupFailureKeepsRunSucceededThenRetries(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunSucceeded, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now().Add(-time.Minute),
+		DeployJSON:  json.RawMessage(`{"release_name":"tp-x","state":"ready"}`),
+	})
+	dep := &fakeDeployer{cancelErr: errors.New("genet: server error: DELETE 502")}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunSucceeded {
+		t.Fatalf("run status = %s, want succeeded（卸载失败不改终态）", run.Status)
+	}
+	doc := deployDoc(t, run)
+	u, _ := doc["uninstall"].(map[string]any)
+	if u == nil || u["state"] != "failed" {
+		t.Fatalf("uninstall = %v, want state=failed", doc["uninstall"])
+	}
+	if errs, _ := u["cleanup_errors"].([]any); len(errs) == 0 {
+		t.Errorf("cleanup_errors must carry the failure: %v", u)
+	}
+
+	// 下一轮：Genet 恢复 → verified。
+	dep.mu.Lock()
+	dep.cancelErr = nil
+	dep.mu.Unlock()
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce(2): %v", err)
+	}
+	run, _ = repos.GetRun(context.Background(), "r-1")
+	doc = deployDoc(t, run)
+	u, _ = doc["uninstall"].(map[string]any)
+	if u == nil || u["state"] != "verified" {
+		t.Fatalf("uninstall = %v, want verified after retry", doc["uninstall"])
+	}
+}
+
+// DELETE 成功但 "删干净" 校验未过（release 还能 GET 到）→ uninstall.state=failed，且会重试。
+func TestCleanupVerifyStillPresentMarksFailed(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunSucceeded, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now().Add(-time.Minute),
+		DeployJSON:  json.RawMessage(`{"release_name":"tp-y","state":"ready"}`),
+	})
+	gone := false
+	dep := &fakeDeployer{verifyGone: &gone}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	doc := deployDoc(t, run)
+	u, _ := doc["uninstall"].(map[string]any)
+	if u == nil || u["state"] != "failed" {
+		t.Fatalf("uninstall = %v, want failed（GET 200 不算删干净）", doc["uninstall"])
+	}
+	// 又在待收口列表里 → 下一轮会再试。
+	pending, err := repos.ListDeployCleanupPending(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Errorf("pending = %d, want 1（未 verified 的必须进补偿列表）", len(pending))
+	}
+}
+
+// cleanup_policy=never 的 Run 不卸载。
+func TestCleanupNeverPolicySkipsUninstall(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunSucceeded, HasDeploy: true, CleanupPolicy: "never",
+		SubmittedAt: time.Now().Add(-time.Minute),
+		DeployJSON:  json.RawMessage(`{"release_name":"tp-z","state":"ready"}`),
+	})
+	dep := &fakeDeployer{}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+	if err := c.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	dep.mu.Lock()
+	defer dep.mu.Unlock()
+	if dep.cancels != 0 {
+		t.Errorf("deployer.Cancel calls = %d, want 0（cleanup.policy=never）", dep.cancels)
+	}
+}
+
+// ---- §4.4 落库 ---------------------------------------------------------------
+
+// deployDoc 取 Run 的 runs.deploy 快照（内存实现里是 RunView.DeployJSON）。
+func deployDoc(t *testing.T, run RunView) map[string]any {
+	t.Helper()
+	doc := map[string]any{}
+	if len(run.DeployJSON) == 0 {
+		return doc
+	}
+	if err := json.Unmarshal(run.DeployJSON, &doc); err != nil {
+		t.Fatalf("decode deploy: %v", err)
+	}
+	return doc
+}
+
+// beginRun 必须落冻结字段：release_name / provider / package_type / accepted_at（§4.4）。
+func TestBeginRunRecordsFrozenDeploySnapshot(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunQueued, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now(),
+		DeployJSON:  json.RawMessage(`{"provider":"genet","package_type":"stack","parameters":{"model_name":"mock-llm"}}`),
+	})
+	dep := &fakeDeployer{}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+	ctx := context.Background()
+	if err := c.DeployOnce(ctx); err != nil {
+		t.Fatalf("DeployOnce: %v", err)
+	}
+	run, _ := repos.GetRun(ctx, "r-1")
+	doc := deployDoc(t, run)
+	// release_name = tp-<sha12(run:deploy)>
+	want := DeployReleaseName("r-1", "d-r-1")
+	if doc["release_name"] != want {
+		t.Errorf("release_name = %v, want %s", doc["release_name"], want)
+	}
+	if doc["provider"] != "genet" {
+		t.Errorf("provider = %v", doc["provider"])
+	}
+	if doc["package_type"] != "stack" {
+		t.Errorf("package_type = %v", doc["package_type"])
+	}
+	for _, key := range []string{"accepted_at", "queued_at", "last_polled_at"} {
+		if _, ok := doc[key]; !ok {
+			t.Errorf("%s missing: %v", key, doc)
+		}
+	}
+	if v, ok := doc["queue_position"]; !ok || v != nil {
+		t.Errorf("queue_position = %v (present=%v), want null", v, ok)
+	}
+}
+
+// Poll 必须回写两根轴原值 + 队列水位 + 时间线（§4.4）。
+func TestPollRecordsBothAxesAndQueue(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{
+		ID: "r-1", Status: domain.RunDeploying, HasDeploy: true, CleanupPolicy: "always",
+		SubmittedAt: time.Now(),
+		DeployJSON:  json.RawMessage(`{"release_name":"tp-q","provider":"genet","package_type":"stack"}`),
+	})
+	dep := &fakeDeployer{pollState: ports.DeployState{
+		Phase:          "queued",
+		Reason:         "PodGroup Inqueue: insufficient Ascend910",
+		ReleaseStatus:  "pending-install",
+		EndpointStatus: "pending",
+		Queue:          &domain.DeployQueue{Phase: "Inqueue", Pending: 3, Inqueue: 2, Running: 7},
+	}}
+	c := newTestController(t, repos, &fakeExec{}, Config{}, dep, nil)
+	ctx := context.Background()
+	if err := c.DeployOnce(ctx); err != nil {
+		t.Fatalf("DeployOnce: %v", err)
+	}
+	run, _ := repos.GetRun(ctx, "r-1")
+	doc := deployDoc(t, run)
+	if doc["genet_release_status"] != "pending-install" {
+		t.Errorf("genet_release_status = %v", doc["genet_release_status"])
+	}
+	if doc["endpoint_status"] != "pending" {
+		t.Errorf("endpoint_status = %v", doc["endpoint_status"])
+	}
+	q, _ := doc["queue"].(map[string]any)
+	if q == nil || q["phase"] != "Inqueue" {
+		t.Errorf("queue = %v", doc["queue"])
+	}
+	if doc["state"] != "queued" {
+		t.Errorf("state = %v", doc["state"])
+	}
+	if _, ok := doc["last_polled_at"]; !ok {
+		t.Errorf("last_polled_at missing")
+	}
+	// 冻结字段在轮询后仍然存在（合并而不是覆盖）。
+	if doc["release_name"] != "tp-q" {
+		t.Errorf("release_name lost after poll: %v", doc["release_name"])
+	}
+}
+
+// 编排层的 release 名必须与 genet 客户端逐字一致（两处实现，交叉校验）。
+func TestDeployReleaseNameMatchesGenet(t *testing.T) {
+	for _, tc := range [][2]string{{"r-20261105-0001", "d-r-20261105-0001"}, {"r-1", "d-r-1"}} {
+		got := DeployReleaseName(tc[0], tc[1])
+		want := genet.ReleaseName(tc[0], tc[1])
+		if got != want {
+			t.Errorf("DeployReleaseName(%s,%s) = %s, genet = %s", tc[0], tc[1], got, want)
+		}
 	}
 }

@@ -408,7 +408,7 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 能力 | MVP 状态 | 代码位置 |
 |---|---|---|
 | 三角色单二进制（`--role=api\|controller\|collector\|all`） | ✅ `api`/`controller`/`all` 可用；`collector` 未拆（日志由 executor 采、报告由终态 hook 写） | `server/cmd/testplaned` |
-| 状态机内核（Run/Task/Attempt/Tester + Deploy 子状态） | ✅ 转移表 R1–R10 / T1–T11，`Kernel.Apply` 8 步、CAS、事件 seq | `server/internal/domain`、`server/internal/store` |
+| 状态机内核（Run/Task/Attempt/Tester + Deploy 子状态） | 🟡 转移表 R1–R10 / T1–T11，`Kernel.Apply` 8 步、CAS、事件 seq | `server/internal/domain`、`server/internal/store` |
 | 存储与迁移 | ✅ 11 张表 + 15 索引，启动自动迁移（`migrate up` 子命令亦可） | `server/migrations`、`server/internal/store` |
 | REST + SSE（25 operations） | ✅ `/api/v1` 全量；SSE 断点续传 + `events/history` | `server/internal/api`、`server/api/openapi.yaml` |
 | 调度（门控 / 独占 / 全局并发 / 公平性） | ✅ 门控与两类并发上限、`waiting_reason` 六值；公平性仅"按提交时间" | `server/internal/orchestrator` |

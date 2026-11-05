@@ -145,6 +145,31 @@ rules:
    只声明 `apiGroups`/`resources`，**不做 discovery**，所以集群里没有那些 CRD 也能建。真正无权限时
    是 List 阶段返回 `IsForbidden` → 走 `rbac_forbidden` 降级，而不是启动失败。
 
+### 2.2 命名空间划分与 Genet 侧资产（D-52/D-53）
+
+接入 Genet 之后，一套环境里有**五个** namespace，职责不同、不能混用。混用会在两个地方炸：Genet 的
+Helm release 存量和它自己的 OpenAPI 控制态冲突（启动 FATAL），以及"被部署的服务"与"跑测试的 Job"
+落在同一 ns 时清理边界不清。
+
+| namespace | 归属 | 里面放什么 | 谁创建 |
+|---|---|---|---|
+| `testplane` | TestPlane 平台 | 控制面 Deployment、Tester Job、产物 PVC | 平台清单/kustomize |
+| `testplane-mock` | 本地联调 | 假 Genet 装的 mock 服务、跨 ns 网络策略 | 平台清单（仅 dev/kind） |
+| `testplane-svc` | 真 Genet 部署 | **被 Genet 拉起的服务**（Helm release 的实际落地 ns） | **Genet**（API Key 绑定，必须事先不存在） |
+| `genet` | Genet 自身 | `genet-backend` 等 Genet 控制面组件 | Genet 的 Helm chart |
+| `genet-open-api` | Genet OpenAPI 控制态 | `genet-openapi-keys` Secret 与 key 记录 | Genet（`openAPI.namespace`） |
+
+四条硬约束：
+
+1. **API Key 与 namespace 1:1**，且该 namespace **必须事先不存在**——Genet 创建它时会打身份标签，已存在会 409；
+2. 真 Genet 的 release **只能由 Genet 自己卸载**：直接 `helm uninstall` 会被 admission webhook 拒绝
+   （`Helm release storage is managed exclusively by the Genet backend`），平台因此**只能**走
+   `DELETE /api/open/helm/releases/{name}`（D-50）；
+3. 独占池（D-52）：TestPlane 的 key 落在独占池里，其 namespace 内的服务不受 Genet 每日 23:00 回收影响；
+4. 跨 namespace **不能共享 PVC**（PVC 是 namespaced）：Tester 在 `testplane`、被测服务在 `testplane-svc`，
+   两者只能通过 Service DNS（`<svc>.<ns>.svc.cluster.local`）通信，这也是"服务模式/部署模式"都只依赖 URL 的原因。
+
+
 ## 3 存储布局
 
 ### 3.1 目录树

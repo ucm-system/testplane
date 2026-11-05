@@ -27,9 +27,14 @@ $helm = Join-Path $RepoRoot '.tools\helm.exe'
 if (-not (Test-Path -LiteralPath $helm)) { throw "找不到 $helm（先按 deploy/README.md 第 1 步装 helm）" }
 
 $chartDirs = @(
-    (Join-Path $RepoRoot 'deploy\charts\mock-llm'),
-    (Join-Path $RepoRoot '.data\packages\unified-cache-stack')
+    (Join-Path $RepoRoot 'deploy\charts\mock-llm')
 )
+# `.data/packages/*` 是 make-chartrepo.ps1 生成的「冒充件」（Genet 固定 chart 的替身）；
+# 目录里有什么就打包什么，脚本不写死具体名字，换冒充目标不用改这里。
+$pkgRoot = Join-Path $RepoRoot '.data\packages'
+if (Test-Path -LiteralPath $pkgRoot) {
+    $chartDirs += @(Get-ChildItem -LiteralPath $pkgRoot -Directory | ForEach-Object { $_.FullName })
+}
 $outDir = Join-Path $RepoRoot '.data\chartrepo'
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 Get-ChildItem $outDir -Filter '*.tgz' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue

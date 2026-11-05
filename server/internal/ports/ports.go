@@ -141,6 +141,23 @@ type DeployState struct {
 	Endpoint domain.Endpoint
 	Failure  *domain.Failure
 	Reason   string // 排队位次、阻塞原因等给人看的一句话
+
+	// ---- 落库用（runs.deploy §4.4）：适配层把 Genet 的原始观测一并带回，编排层只转存 ----
+	// ReleaseStatus 是 helm 原值（pending-install|deployed|failed|superseded|…）。
+	ReleaseStatus string
+	// EndpointStatus 是 callInfo.endpoint.status 原值（pending|ready|blocked）。
+	EndpointStatus string
+	// Queue 是队列水位（只有计数，没有位次）。
+	Queue *domain.DeployQueue
+	// ObservedAt 是该观测的时间（写 last_polled_at）。
+	ObservedAt time.Time
+}
+
+// DeployCleaner 是 Deployer 的**可选**能力：卸载后校验"删干净"（execution §9.7）。
+// 编排层用类型断言取用；不实现它的适配层（如老 mock）按"DELETE 成功即 verified"退化。
+type DeployCleaner interface {
+	// VerifyUninstalled 返回 true 表示 release 已不存在且其 Pod 列表为空。
+	VerifyUninstalled(ctx context.Context, runID string) (bool, error)
 }
 
 // Deployer 是 Genet 适配层接口。MVP：mocks.Genet。
