@@ -423,7 +423,20 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 独立 Task（`POST /tasks`） | ⬜ 未做 | — |
 | 失败续跑（`POST /runs/{id}/retry`）、`/report` 富指标 | ⬜ 未做（P1） | — |
 
-### 15.2 与设计文档的偏差（已由 ARCHITECTURE v0.6 / D-38…D-43 裁决）
+### 15.2 P0 延后项（`07-api.md §5` 有、MVP 未实现）
+
+| 端点 | 状态 | 理由 | 归属 |
+|---|---|---|---|
+| `GET /runs/{id}/artifacts` | 未实现 | `artifacts` 表有行，但无路由；产物只能按 Task/Attempt 取（`/tasks/{id}/attempts/{idx}/result` + `/logs`） | §15.4 第 1 项（与 `/files` 一起补，验收 §14.1 #14「原始产物可获取」才完整） |
+| `GET /runs/{id}/files?path=` | 未实现 | 需要 Range 下载与路径白名单（`impl/execution.md §8.5`），MVP 只做了日志直读 | 同 `/artifacts` |
+| `GET /tasks/{id}/attempts/{idx}/artifacts` | 未实现 | 同上，产物索引未对外 | 同 `/artifacts` |
+| `GET /profiles` | 未实现 | 提交期用「表为空则放行任意 profile 名」的引导期例外兜住；前端 profile 是自由文本框 | P1 首批（去掉例外需要它） |
+| `GET /testers/{name}/versions/{version}` | 未实现 | 只做了 `GET /testers/{name}`（取最新版本） | P1，与 Tester 版本对比一起做 |
+| `GET /metrics` | 未实现 | Prometheus 指标未接入（`05-development-view` 的观测项） | P1 |
+
+> 这张表是评审 [PR #13](https://github.com/ucm-system/testplane/pull/13) 指出的「API 面比设计少、且没有延后说明」的补记。**未列入本表的端点都按 `openapi.yaml` 实现完毕**（25 operation）。
+
+### 15.3 与设计文档的偏差（已由 ARCHITECTURE v0.6 / D-38…D-43 裁决）
 
 | # | 偏差 | 处置 |
 |---|---|---|
@@ -437,7 +450,7 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 8 | `task_counts` 为 MVP 新增的 Run 投影字段 | 已写入 `server/api/openapi.yaml`；`03/07` 待回写 |
 | 9 | 架构表实为 **11 张**（文档曾按 12 表述） | 以 `03-data-view.md §3.2` 实际 DDL 为准 |
 
-### 15.3 P1 优先项（按投入产出排序）
+### 15.4 P1 优先项（按投入产出排序）
 
 1. 真实 Genet 适配（替换 `internal/genet/mocks`，接口不变）。
 2. OIDC + 会话 + CSRF + RBAC（`TESTPLANE_AUTH_MODE=oidc`）。

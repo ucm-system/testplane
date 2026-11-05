@@ -65,4 +65,6 @@ dev: dev-db migrate
 	cd server && TESTPLANE_ROLE=all TESTPLANE_DATABASE_URL='$(DSN)' go run ./cmd/testplaned --role=all
 
 clean:
-	rm -rf bin web/dist server/internal/webui/dist
+	rm -rf bin web/dist
+	# 保留占位 index.html：webui 用 //go:embed all:dist，删掉目录会让 go build / make test 直接失败
+	@git checkout -- server/internal/webui/dist/index.html 2>/dev/null || true

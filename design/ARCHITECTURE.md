@@ -1836,7 +1836,7 @@ env:                          # 运行期环境变量声明（§12.4）
 | D-37 | **不做提交幂等**：`POST /runs` / `POST /tasks` 每次都创建新资源，重复提交产生多个 Run/Task；平台不判断两次提交是否等价——硬件、驱动、HDK 版本等环境因素对平台透明，相同 Manifest 也可能不是同一测试条件。内部操作（Job 创建、Genet 部署）仍须可重试安全，但不属于接口幂等 | §9.2、§11.4、附录 D |
 | D-38 | **Tester 只做镜像内发现，不做运行时注册**：注册表来自镜像内的 `tester.yaml`，启动扫描 + 周期重扫入库；不提供 `POST /testers` 之类的写入端点（与 K-3 一致）。「自发现注册」指的是平台发现，不是提交方上传 | §5.6、`IMPLEMENTATION.md §15` |
 | D-39 | **对外错误体是扁平的**：`{code,message,detail,retryable,trace_id}`，不套 `{error:{…}}` 外壳；`code` 取附录 D 枚举，校验类错误用 `detail.issues[]` | `07-api.md §3` |
-| D-40 | **提交 Manifest 的唯一形态是嵌套 `run:`**：`run:` 内承载 `name`/`deploy`/`service`/`precheck`/`env`/`secrets`/`tests`/`cleanup`；`runs.manifest` 原样保存该形态。`03-data-view.md §4.1` 的平级示例按文档缺陷处理（属实现期发现的回写项） | `07-api.md §4.1` |
+| D-40 | **提交 Manifest 的唯一形态是嵌套 `run:`**：`run:` 内承载 `name`/`deploy`/`service`/`precheck`/`env`/`secrets`/`tests`/`cleanup`；`runs.manifest` 原样保存该形态。`03-data-view.md §4.1` 原示例是平级写法，与 `07-api.md §4.1` 冲突；**v0.6 已把 §4.1 示例改为嵌套形态并注明唯一性**（文档已一致，不再是待修缺陷） | `07-api.md §4.1`、`03-data-view.md §4.1` |
 | D-41 | **产物 PVC 名统一 `testplane-storage`**：`06-physical-view.md §2`（`testplane-storage-root`）与 `impl/execution.md §2.2`（`testplane-artifacts`）属文档不一致，以实现与清单为准回写 | §6.8、附录 B |
 | D-42 | **开发/验收环境的种子由进程启动补齐**：`cluster-01` 与 `k8s-npu`（namespace `testplane`）在表为空时插入；生产仍走 Helm values 首次 seed。种子名沿用全文档示例（`k8s-npu`），不另起名字 | §6.11、`03-data-view.md §9` |
 | D-43 | **MVP 执行环境 = 宿主 Kind + `kind load docker-image`**：不引入镜像仓库，镜像以本地 tag 灌入节点；Deploy 阶段由 mock 顶替 Genet（状态与字段真实，副作用为空），P1 换真实实现时接口不变 | §6.8、§7.4、`impl/execution.md §9` |
