@@ -1660,3 +1660,57 @@ func TestHasPrecheckUsesIsPrecheck(t *testing.T) {
 		t.Errorf("IsPrecheck=true must be detected")
 	}
 }
+
+// fakeDeployer 记录 Genet 取消调用。
+type fakeDeployer struct {
+	mu      sync.Mutex
+	starts  int
+	polls   int
+	cancels int
+	cancelErr error
+}
+
+func (f *fakeDeployer) Start(ctx context.Context, req ports.DeployRequest) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.starts++
+	return nil
+}
+
+func (f *fakeDeployer) Poll(ctx context.Context, runID string) (ports.DeployState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.polls++
+	return ports.DeployState{Phase: "deploying"}, nil
+}
+
+func (f *fakeDeployer) Cancel(ctx context.Context, runID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancels++
+	return f.cancelErr
+}
+
+// 取消 deploying 的 Run 时，必须先请求 Genet 卸载（C-6.1 第 2 条）。
+func TestCancelRunRequestsGenetUninstall(t *testing.T) {
+	repos := NewMemoryRepos()
+	repos.SeedRun(RunView{ID: "r-1", Status: domain.RunDeploying, HasDeploy: true, SubmittedAt: time.Now()})
+	dep := &fakeDeployer{cancelErr: errors.New("genet: cancel not applied yet")}
+	c, err := New(Options{Repos: repos, Executor: &fakeExec{}, Deployer: dep, Config: Config{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 卸载失败（release 未出现）不应让 CancelRun 失败：意图已落库，交给对账补偿。
+	if err := c.CancelRun(context.Background(), "r-1", "user:1"); err != nil {
+		t.Fatalf("CancelRun: %v", err)
+	}
+	dep.mu.Lock()
+	defer dep.mu.Unlock()
+	if dep.cancels != 1 {
+		t.Fatalf("deployer.Cancel calls = %d, want 1", dep.cancels)
+	}
+	run, _ := repos.GetRun(context.Background(), "r-1")
+	if run.Status != domain.RunCanceled {
+		t.Errorf("run status = %s, want canceled", run.Status)
+	}
+}

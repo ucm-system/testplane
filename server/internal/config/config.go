@@ -69,6 +69,17 @@ type Config struct {
 	DeployTimeout time.Duration
 	// Kubeconfig 透传给 executor（TESTPLANE_KUBECONFIG），平台本身不读。
 	Kubeconfig string
+	// DeployProvider 是 Deploy 阶段实现（TESTPLANE_DEPLOY_PROVIDER）：mock（默认）| genet。
+	DeployProvider string
+	// GenetBaseURL 是 Genet OpenAPI 根地址（TESTPLANE_GENET_BASE_URL），形如 https://genet.dev.huawei.com。
+	GenetBaseURL string
+	// GenetAPIKey 是 Genet OpenAPI 的 Bearer Key（TESTPLANE_GENET_API_KEY）；
+	// 生产用 Secret 注入，本文件只读环境变量名，不落明文。
+	GenetAPIKey string
+	// GenetCAFile 是自签 CA 的 PEM 路径（TESTPLANE_GENET_CA_FILE），空则用系统根证书。
+	GenetCAFile string
+	// GenetInsecure 跳过 Genet 的 TLS 校验（TESTPLANE_GENET_INSECURE，默认 false，仅开发环境）。
+	GenetInsecure bool
 
 	// ---- 以下为实现细节配置，默认值即设计值 ----
 
@@ -104,6 +115,11 @@ func Load() (*Config, error) {
 		LogLevel:             strings.ToLower(env("TESTPLANE_LOG_LEVEL", "info")),
 		TestersDir:           env("TESTPLANE_TESTERS_DIR", "./testers"),
 		Kubeconfig:           env("TESTPLANE_KUBECONFIG", ""),
+		DeployProvider:       strings.ToLower(env("TESTPLANE_DEPLOY_PROVIDER", "mock")),
+		GenetBaseURL:         strings.TrimRight(env("TESTPLANE_GENET_BASE_URL", ""), "/"),
+		GenetAPIKey:          env("TESTPLANE_GENET_API_KEY", ""),
+		GenetCAFile:          env("TESTPLANE_GENET_CA_FILE", ""),
+		GenetInsecure:        envBool("TESTPLANE_GENET_INSECURE", false),
 		DBMaxConns:           20,
 		RunMaxTasks:          200,
 		TaskTimeoutDefault:   4 * time.Hour,
@@ -192,6 +208,26 @@ func Load() (*Config, error) {
 	case "dev", "oidc":
 	default:
 		return nil, fmt.Errorf("config: TESTPLANE_AUTH_MODE=%q 非法，允许 dev|oidc", c.AuthMode)
+	}
+	// Deploy 阶段：genet 需要完整接入配置；mock 不校验（kind E2E 用）。
+	switch c.DeployProvider {
+	case "mock":
+	case "genet":
+		if c.GenetBaseURL == "" {
+			return nil, errors.New("config: TESTPLANE_DEPLOY_PROVIDER=genet 需要 TESTPLANE_GENET_BASE_URL")
+		}
+		if _, err := url.Parse(c.GenetBaseURL); err != nil {
+			return nil, fmt.Errorf("config: TESTPLANE_GENET_BASE_URL=%q 非法: %w", c.GenetBaseURL, err)
+		}
+		if c.GenetAPIKey == "" {
+			return nil, errors.New("config: TESTPLANE_DEPLOY_PROVIDER=genet 需要 TESTPLANE_GENET_API_KEY（生产用 Secret 注入）")
+		}
+		if c.GenetInsecure {
+			// 不阻止启动（开发环境常见自签），但必须在日志里看得见。
+			fmt.Fprintln(os.Stderr, "warning: TESTPLANE_GENET_INSECURE=true —— Genet TLS 校验已关闭，仅限开发环境")
+		}
+	default:
+		return nil, fmt.Errorf("config: TESTPLANE_DEPLOY_PROVIDER=%q 非法，允许 mock|genet", c.DeployProvider)
 	}
 	return c, nil
 }
@@ -325,4 +361,19 @@ func envBytes(primary string, def int64) (int64, error) {
 		return 0, fmt.Errorf("config: %s=%q 不是合法字节数", primary, raw)
 	}
 	return int64(n * float64(mult)), nil
+}
+// envBool 解析布尔型环境变量（1/true/yes 为真，0/false/no 为假，其余取默认）。
+func envBool(name string, def bool) bool {
+	raw, ok := os.LookupEnv(name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
 }

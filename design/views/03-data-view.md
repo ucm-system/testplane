@@ -469,7 +469,7 @@ Genet **没有"部署单"**这个概念：一次部署 = 一次 Helm release，�
 | `no_wait` | 恒 `true` | `helm --wait` 的 `timeoutSec` 只是安装 deadline：排队超过它 release 会被判 `failed`（Pod 仍在排队，`<G>/jenkins/Helm-Start-Service-MB.Jenkinsfile:21-26`）→ 必须 `noWait=true`，就绪改由平台轮询判（C-5.3） |
 | `state` | 平台按 C-5.3 映射表合成 | `queued` 没有 Genet 权威来源，是平台推断，必须留证便于解释"为什么卡住" |
 | `genet_release_status` / `endpoint_status` | helm / callInfo 原值 | 两层轴不一致时（`deployed` 但 `endpoint.pending`）能解释，不必猜 |
-| `queue{phase,pending,inqueue,running}` | `GET /api/open/queue/podgroups` 的 `phase` + `GET /api/open/queue` 的计数 | **没有位次**（Genet 只给计数，`<G>/backend/internal/models/volcano_views.go:13-39`）；UI 只能展示"已等待时长 + 水位"，故 `queue_position` 字段移除 |
+| `queue{phase,pending,inqueue,running}` | `GET /api/open/queue/podgroups` 的 `phase` + `GET /api/open/queue` 的计数 | **没有位次**（Genet 只给计数，`<G>/backend/internal/models/volcano_views.go:13-39`）；UI 只能展示"已等待时长 + 水位"。`position` 一律 **null**（D-46：键保留仅为兼容前端与 openapi，不是漏算） |
 | `endpoint{url,model_name,model_path,protocol}` | `callInfo.endpoint`，禁止自行推导 | `runs.endpoint` 与 Task `endpoint_key` 的唯一来源（§4.3） |
 | `accepted_at` / `queued_at` / `ready_at` / `last_polled_at` | 平台在轮询中写 | 排队时长展示、`deploy_timeout_seconds` 判定、404 宽限期都以时间而非次数为准（C-5.3） |
 | `failure{code,message,retryable}` | 部署终态 blocked 时写 | 只有两个码（附录 D）：`DEPLOY_FAILED`（不可重试，平台侧调 Genet 失败）→ Run `failed`；`DEPLOY_BLOCKED`（可重试，Genet `blocked` 或超 72h 窗口）→ Run `service_unavailable`；细分靠 `detail.reason ∈ {blocked,timeout,superseded,uninstalling,uninstalled}`（D-47） |

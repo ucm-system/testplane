@@ -1,0 +1,99 @@
+# TestPlane · mock-llm chart values
+#
+# 这个 chart 只服务 **测试**：把 tools/mock-llm 变成一个可以 `helm install` 的「被测服务」。
+# 真实被测服务（任意外部服务）当然也可以用 Genet 装，这里只是给 E2E 一个可控的靶子。
+#
+# 安装：
+#   helm install mock-llm deploy/charts/mock-llm -n testplane-mock --create-namespace
+# 卸载：
+#   helm uninstall mock-llm -n testplane-mock
+
+replicaCount: 1
+
+image:
+  # 本地构建（tools/mock-llm/Dockerfile）：
+  #   docker build -t testplane/mock-llm:dev tools/mock-llm
+  #   .\.tools\kind.exe load docker-image testplane/mock-llm:dev --name testplane
+  # kind 节点看不到宿主镜像库，所以必须先 load；tag 不是 :latest → pullPolicy IfNotPresent。
+  repository: testplane/mock-llm
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# 镜像内固定监听 :18080（tools/mock-llm/main.go 的 -addr 默认值）
+service:
+  type: ClusterIP
+  port: 18080
+
+# 探针走 /healthz：它**永远 200**，不受 readyAfter 影响（ready_after 只影响 /v1/*），
+# 所以"模拟慢就绪"时 Pod 也是 Ready —— 这正是我们要的：
+# 平台看到的是"服务在，但业务端点还没就绪"，而不是"Pod 没起来"。
+readinessProbe:
+  path: /healthz
+  initialDelaySeconds: 2
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+livenessProbe:
+  path: /healthz
+  initialDelaySeconds: 10
+  periodSeconds: 20
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+# 用的就是 P0 控制面的规格（requests 小一档：mock 不耗资源）
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# 模型名：响应体里没带 model 时用它兜底（MOCK_LLM_MODEL）
+model: mock-llm
+
+# ---------------------------------------------------------------------------
+# 故障注入（可选）：空值 = 正常服务。取值会渲染成容器 **env**，所以对整条链路生效
+# （不需要在 URL 上带查询参数）。
+#
+# ⚠️ 键名以 tools/mock-llm/main.go 实际读取的环境变量为准，**不是**通用名：
+#      failMode   "" | "500" | "401" | "403" | "429"  ->  MOCK_LLM_FAIL（0/空 = 不注入）
+#      readyAfter "15s" | "3s"  （进程启动后前 N 秒 /v1/* 返回 503）  ->  MOCK_LLM_READY_AFTER
+#      slowMs     2000          （响应前延迟毫秒）                     ->  MOCK_LLM_SLOW_MS
+#      errorIn200 true          （HTTP 200 但正文是 {"error":...}，且无 data: 帧） -> MOCK_LLM_ERROR_IN_200
+#    写成 FAIL_MODE / READY_AFTER 这类通用名，二进制不认，会静默变成"正常服务"——
+#    这正是我们踩过的坑（功能没生效先查 env 有没有真的被读）。
+# ---------------------------------------------------------------------------
+faultInjection:
+  failMode: ""
+  readyAfter: ""
+  slowMs: 0
+  errorIn200: false
+
+# 与平台一致的安全上下文（namespace testplane-mock 不强制 PSA，但这个 chart 本身守规矩）
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# 只读根：只给 /tmp 一个可写面（Go 二进制其实不写，留着是为了将来加 debug 工具不炸）
+tmpSizeLimit: 16Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podAnnotations: {}
+podLabels: {}
+
+# 额外 env（键值对，原样注入；同名覆盖上面的渲染结果）
+extraEnv: {}

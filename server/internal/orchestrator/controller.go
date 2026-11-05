@@ -289,6 +289,12 @@ func (c *Controller) ReconcileOnce(ctx context.Context) error {
 				c.logf("orchestrator: reconcile cancelling run %s: %v", run.ID, serr)
 				continue
 			}
+			// 取消补偿：deploy 的卸载可能因 release 未出现而 404，这里每轮重试一次（§9.6）。
+			if c.deployer != nil {
+				if derr := c.deployer.Cancel(ctx, run.ID); derr != nil {
+					c.logf("orchestrator: WARN deploy_cancel_pending: run %s: %v", run.ID, derr)
+				}
+			}
 			if !stopped {
 				continue
 			}
@@ -1057,6 +1063,13 @@ func (c *Controller) CancelRun(ctx context.Context, runID, actor string) error {
 	out, err := c.repos.RequestCancelRun(ctx, runID, actor)
 	if err != nil {
 		return err
+	}
+	// deploying 阶段取消：先请求 Genet 取消排队/卸载（C-6.1 第 2 条）。
+	// 404/409 = release 尚未出现或正忙 → 只 WARN；取消意图已在库，由对账补偿（§9.6）。
+	if c.deployer != nil {
+		if derr := c.deployer.Cancel(ctx, runID); derr != nil {
+			c.logf("orchestrator: WARN deploy_cancel_pending: run %s: %v", runID, derr)
+		}
 	}
 	for _, ref := range out.CancelJobs {
 		c.cancelJobAsync(ctx, ref)

@@ -279,6 +279,7 @@ cd server && go build -trimpath -o ../bin/testplaned ./cmd/testplaned
 | envtest | 真实 apiserver+etcd | Job 渲染字段、`unknown` 不判失败、取消删 Job、Lease 选主 | 每次 push | 是 |
 | kind e2e | kind + 桩 Genet/OpenAI + 集群内 NFS | 提交→Deploy→PreCheck→Task→报告→清理；四终态；排队中取消 | PR 标签 / 夜间 | 发版前 |
 | 契约 | golden + `-update` | 附录 A/B/C/D 四份契约、OpenAPI 重生成 diff 为空 | 每次 push | 是 |
+| 契约（双向差集） | `tools/contract`（`make contract`） | **设计端点 vs `server/api/openapi.yaml` 双向差集**（设计有实现无 / 实现有设计无都要报）+ live 探针对已实现端点做一次真实调用（`TESTPLANE_LIVE_URL` 设置时）；门禁口径见 PR #13 评审后的 #16 变更 | 每次 push | 是 |
 | 前端 | Vitest + MSW；Playwright | Query 失效粒度、SSE 去重/回放、错误码→呈现、提交两形态 | 每次 push | e2e 夜间 |
 | 压测 / 故障注入 | k6 / chaos 脚本 | P95 < 300ms、1k SSE 长连接；删 Job、`kill -9` 控制面、NFS 抖动 30s | 发版前 / 里程碑 | 发版前 |
 

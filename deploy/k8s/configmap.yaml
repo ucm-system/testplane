@@ -84,5 +84,21 @@ data:
   #   TESTPLANE_ARTIFACT_MAX_BYTES: "10GiB"    # 单 Attempt 产物上限（E-8.3）
   #   TESTPLANE_LOG_SEGMENT_MAX_BYTES: "200MiB"# Deploy 日志分段（E-7.2）
   #   TESTPLANE_CLUSTERS_DIR: "/etc/testplane/clusters"  # 多集群 kubeconfig 目录（P1，W-10）
-  #   TESTPLANE_GENET_BASE_URL / _TOKEN_FILE / _TIMEOUT   # Genet 适配（E-9）
+  #   TESTPLANE_GENET_CA_FILE / TESTPLANE_GENET_INSECURE  # 自签 CA（见下方 Genet 段，已实现）
+  # ------------------------------------------------------------------------
+
+  # ------------------------------------------------------------------------
+  # Deploy 阶段：mock ⇄ 真实 Genet（execution §9）
+  #
+  # 默认 mock（kind E2E 用，不联网）。**切真实 Genet 时**取消下面注释并配好
+  # base_url / key；key 建议从 Secret 注入（envFrom/secretKeyRef），不要写进本文件。
+  #
+  #   TESTPLANE_DEPLOY_PROVIDER: "genet"        # mock（默认）| genet
+  #   TESTPLANE_GENET_BASE_URL: "https://genet.dev.huawei.com"
+  #   TESTPLANE_GENET_API_KEY:  "<从 Secret 注入，勿提交>"   # 若改走 Secret，用 secretKeyRef 覆盖
+  #   TESTPLANE_GENET_CA_FILE:  "/etc/testplane/genet-ca/ca.pem"  # 自签 CA（可选，空则用系统根证书）
+  #   TESTPLANE_GENET_INSECURE: "false"         # true = 跳过 TLS 校验，仅开发环境
+  #
+  # 行为表（观测 → Deploy 子状态）见 design/impl/execution.md §9.3；
+  # 注意：Genet 的 endpoint.ready 只代表"地址解析完成"，可用性仍由 Pre-Check 判定。
   # ------------------------------------------------------------------------

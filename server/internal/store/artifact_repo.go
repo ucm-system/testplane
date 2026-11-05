@@ -71,6 +71,31 @@ func (r *ArtifactRepo) ListByRun(ctx context.Context, tx pgx.Tx, runID string) (
 	return out, rows.Err()
 }
 
+// ListByAttempt 返回某个 Attempt 的产物（07 §5.2）。attemptID 为空时只按 task 过滤。
+// 用一次索引查询，避免在 API 层把整 Run 的产物拉回来再过滤。
+func (r *ArtifactRepo) ListByAttempt(ctx context.Context, tx pgx.Tx, runID, taskID, attemptID string) ([]Artifact, error) {
+	rows, err := r.s.db(tx).Query(ctx, `
+		SELECT run_id, task_id, attempt_id, path, size_bytes, sha256, kind, mtime, indexed_at
+		  FROM artifacts
+		 WHERE run_id = $1 AND task_id = $2
+		   AND ($3 = '' OR attempt_id = $3)
+		 ORDER BY path`, runID, taskID, attemptID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list attempt artifacts %s/%s: %w", taskID, attemptID, err)
+	}
+	defer rows.Close()
+	out := make([]Artifact, 0, 8)
+	for rows.Next() {
+		var a Artifact
+		if err := rows.Scan(&a.RunID, &a.TaskID, &a.AttemptID, &a.Path, &a.SizeBytes,
+			&a.SHA256, &a.Kind, &a.MTime, &a.IndexedAt); err != nil {
+			return nil, fmt.Errorf("store: scan artifact: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // RunBundle 是一次报告生成需要的全部库内事实。
 type RunBundle struct {
 	Run      *Run

@@ -163,3 +163,59 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// Deploy 阶段配置：provider=mock 不校验 Genet 细节；provider=genet 必须给全。
+func TestLoadDeployProvider(t *testing.T) {
+	t.Run("mock 默认", func(t *testing.T) {
+		t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/db")
+		t.Setenv("TESTPLANE_DEPLOY_PROVIDER", "")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.DeployProvider != "mock" {
+			t.Errorf("provider = %q, want mock", c.DeployProvider)
+		}
+	})
+	t.Run("genet 缺 base url", func(t *testing.T) {
+		t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/db")
+		t.Setenv("TESTPLANE_DEPLOY_PROVIDER", "genet")
+		t.Setenv("TESTPLANE_GENET_BASE_URL", "")
+		if _, err := Load(); err == nil {
+			t.Fatal("expected error for missing TESTPLANE_GENET_BASE_URL")
+		}
+	})
+	t.Run("genet 缺 api key", func(t *testing.T) {
+		t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/db")
+		t.Setenv("TESTPLANE_DEPLOY_PROVIDER", "genet")
+		t.Setenv("TESTPLANE_GENET_BASE_URL", "https://genet.example")
+		t.Setenv("TESTPLANE_GENET_API_KEY", "")
+		if _, err := Load(); err == nil {
+			t.Fatal("expected error for missing TESTPLANE_GENET_API_KEY")
+		}
+	})
+	t.Run("genet 配置齐全", func(t *testing.T) {
+		t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/db")
+		t.Setenv("TESTPLANE_DEPLOY_PROVIDER", "genet")
+		t.Setenv("TESTPLANE_GENET_BASE_URL", "https://genet.example/")
+		t.Setenv("TESTPLANE_GENET_API_KEY", "k")
+		t.Setenv("TESTPLANE_GENET_INSECURE", "false")
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.DeployProvider != "genet" || c.GenetBaseURL != "https://genet.example" || c.GenetAPIKey != "k" {
+			t.Errorf("config = %+v", c)
+		}
+		if c.GenetInsecure {
+			t.Errorf("insecure must default to false")
+		}
+	})
+	t.Run("非法 provider", func(t *testing.T) {
+		t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/db")
+		t.Setenv("TESTPLANE_DEPLOY_PROVIDER", "bogus")
+		if _, err := Load(); err == nil {
+			t.Fatal("expected error for unknown provider")
+		}
+	})
+}

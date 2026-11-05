@@ -23,9 +23,11 @@ import (
 	"github.com/ucm-system/testplane/server/internal/config"
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/executor"
+	"github.com/ucm-system/testplane/server/internal/genet"
 	"github.com/ucm-system/testplane/server/internal/genet/mocks"
 	"github.com/ucm-system/testplane/server/internal/k8s"
 	"github.com/ucm-system/testplane/server/internal/orchestrator"
+	"github.com/ucm-system/testplane/server/internal/ports"
 	"github.com/ucm-system/testplane/server/internal/registry"
 	"github.com/ucm-system/testplane/server/internal/report"
 	"github.com/ucm-system/testplane/server/internal/store"
@@ -223,10 +225,14 @@ func buildController(ctx context.Context, cfg *config.Config, st *store.Store,
 	exec := executor.NewWithNamespace(client, namespace, executor.Options{})
 
 	repos := &storeRepos{st: st, machines: machines, reg: reg}
+	deployer, err := buildDeployer(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
 	c, err := orchestrator.New(orchestrator.Options{
 		Repos:     repos,
 		Executor:  exec,
-		Deployer:  mocks.FromEnv(), // MVP：Genet mocks（D-14）
+		Deployer:  deployer,
 		Validator: validator,
 		Config: orchestrator.Config{
 			Namespace:            namespace,
@@ -333,4 +339,29 @@ func newLogger(level string) *slog.Logger {
 	}
 	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lv})
 	return slog.New(h)
+}
+// buildDeployer 按 TESTPLANE_DEPLOY_PROVIDER 选 Deploy 阶段实现：
+//   - mock（默认）：internal/genet/mocks，kind E2E 用，不联网；
+//   - genet：真实 Genet OpenAPI 客户端（execution §9），凭据/端点全部来自配置。
+func buildDeployer(cfg *config.Config, logger *slog.Logger) (ports.Deployer, error) {
+	switch strings.ToLower(strings.TrimSpace(cfg.DeployProvider)) {
+	case "", "mock":
+		logger.Info("Deploy 阶段使用 mock Genet", "provider", "mock")
+		return mocks.FromEnv(), nil
+	case "genet":
+		client, err := genet.New(genet.Options{
+			BaseURL:       cfg.GenetBaseURL,
+			APIKey:        cfg.GenetAPIKey,
+			CAFile:        cfg.GenetCAFile,
+			Insecure:      cfg.GenetInsecure,
+			DeployTimeout: cfg.DeployTimeout,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("genet: %w", err)
+		}
+		logger.Info("Deploy 阶段使用真实 Genet", "base_url", cfg.GenetBaseURL, "insecure", cfg.GenetInsecure)
+		return client, nil
+	default:
+		return nil, fmt.Errorf("config: 未知的 Deploy provider %q（允许 mock|genet）", cfg.DeployProvider)
+	}
 }

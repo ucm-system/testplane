@@ -1,6 +1,6 @@
 # TestPlane · 基础设施层 kustomization（不含控制面）
 #
-# 只搭环境：namespace / SA / RBAC / PV+PVC / ConfigMap。
+# 只搭环境：namespace / SA / RBAC / PV+PVC / ConfigMap / 被测服务 namespace。
 # 应用：kubectl apply -k deploy/k8s
 # 预览：kubectl kustomize deploy/k8s
 # 删除：kubectl delete -k deploy/k8s
@@ -20,3 +20,5 @@ resources:
   - rbac.yaml
   - storage.yaml
   - configmap.yaml
+  # 被测服务（Genet 装的服务 / mock-llm chart）专用 namespace + 网络边界
+  - mock-namespace.yaml

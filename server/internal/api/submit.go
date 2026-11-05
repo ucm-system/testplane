@@ -652,10 +652,10 @@ func validateEnv(m *Manifest, specs []domain.TesterSpec, kind string) *domain.Va
 	return ve
 }
 
-// validateProfiles 校验 execution.profile 已登记。
+// validateProfiles 校验 execution.profile 已登记（严格：未登记一律 `EXECUTION_PROFILE_NOT_FOUND`）。
 //
-// MVP 引导期例外：execution_profiles 表为空（尚未 seed）时放行并告警，
-// 否则全新部署无法提交任何 Run。表非空后恢复严格校验。
+// 早期实现的「表为空就放行任意 profile」引导期例外已移除：种子（`SeedDefaults`）保证
+// `k8s-npu` 始终存在，因此不需要也不允许用空表绕过校验（07 §5.3、C-5.1 第 6 条）。
 func (s *Submitter) validateProfiles(ctx context.Context, m *Manifest, kind string) *domain.ValidationError {
 	names := map[string]string{} // profile -> path
 	if kind == "task" {
@@ -690,17 +690,11 @@ func profileOrDefault(p string) string {
 	return p
 }
 
-// profileExists 检查 Profile 是否登记；引导期（表为空）放行。
+// profileExists 检查 Profile 是否登记（严格模式，无引导期例外）。
+// 未装配 ProfileRepo 时同样判为不存在，避免半装配环境静默放行。
 func (s *Submitter) profileExists(ctx context.Context, name string) (bool, error) {
 	if s.profiles == nil {
-		return true, nil
-	}
-	list, err := s.profiles.List(ctx, nil)
-	if err != nil {
-		return true, err
-	}
-	if len(list) == 0 {
-		return true, nil
+		return false, nil
 	}
 	return s.profiles.Exists(ctx, nil, name)
 }

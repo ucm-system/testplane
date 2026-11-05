@@ -97,6 +97,12 @@ tags:
     description: 集群概要（07 §5.3，不返回凭据）
   - name: queue
     description: 队列与槽位可见性（07 §5.3、C-4.7，不读凭据）
+  - name: profiles
+    description: Execution Profile 与挂载能力（07 §5.3、06 §3，只读）
+  - name: artifacts
+    description: Run / Attempt 级产物清单（07 §5.1、§5.2、C-7.5）
+  - name: files
+    description: 产物下载（07 §5.1，支持 Range，不越出 Run 目录）
 
 security:
   - bearerAuth: []
@@ -1051,8 +1057,8 @@ paths:
       operationId: getTester
       summary: Tester 最新版本详情
       description: |
-        07 §5.3：`GET /testers/{name}` 返回最新版本。指定版本走 `/testers/{name}/versions/{version}`
-        （本契约不含，见范围说明）。版本不可覆盖：同 `name+version` 不同内容会被拒（05 §5.7）。
+        07 §5.3：`GET /testers/{name}` 返回最新版本。指定版本走
+        `/testers/{name}/versions/{version}`。版本不可覆盖：同 `name+version` 不同内容会被拒（05 §5.7）。
       tags: [testers]
       parameters:
         - name: name
@@ -1149,6 +1155,255 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
+
+  # ======================================================================
+  # P0 剩余端点：Profile / Tester 版本 / 产物清单 / 文件下载 / 指标
+  # ======================================================================
+  /api/v1/profiles:
+    get:
+      operationId: listProfiles
+      summary: Execution Profile 与挂载能力（只读）
+      description: |
+        07 §5.3：返回已登记的 Execution Profile（`execution_profiles` 表）及其挂载能力。
+        `mounts[]` 的 `{name, pvc, sub_path, kind}` 供前端提交页渲染可选挂载。
+        提交 Run 时 `execution.profile` 必须命中这里：未登记一律
+        `EXECUTION_PROFILE_NOT_FOUND`（已移除"表为空就放行"的引导期例外，种子保证 `k8s-npu` 存在）。
+      tags: [profiles]
+      responses:
+        '200':
+          description: Profile 列表（数量为个位数，不分页）
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionProfileList'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/testers/{name}/versions/{version}:
+    get:
+      operationId: getTesterVersion
+      summary: Tester 指定版本详情
+      description: |
+        07 §5.3：返回 `name + version` 精确命中的 Tester（含 `parameters` / `env` 声明）。
+        版本不存在 → `TESTER_NOT_FOUND`（404）。版本不可覆盖语义同 `/testers/{name}`。
+      tags: [testers]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: Tester 名称（`tester.yaml.name`）
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          description: Tester 版本（`tester.yaml.version`）
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 指定版本的 Tester 详情
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tester'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/runs/{run_id}/artifacts:
+    get:
+      operationId: listRunArtifacts
+      summary: Run 级产物清单
+      description: |
+        07 §5.1：读 `artifacts` 表返回该 Run 的全部产物，`by_kind` 按
+        `result|raw|log|report|other` 分组。`sha256` 是惰性字段：未计算就是 `null`
+        （平台不在读取路径上现算，C-7.5）。路径相对 `<storage-root>/<run_id>/`，
+        可直接拼到 `/runs/{run_id}/files?path=` 下载。
+      tags: [artifacts]
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          description: Run ID（`r-YYYYMMDD-XXXX`）
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 产物清单
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactList'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/tasks/{task_id}/attempts/{idx}/artifacts:
+    get:
+      operationId: listAttemptArtifacts
+      summary: Attempt 级产物清单
+      description: |
+        07 §5.2：该 Attempt 的产物清单（形状同 Run 级）。`idx` 从 1 开始；
+        找不到对应 Attempt 时退化为"该 Task 全部 Attempt 的产物"。
+      tags: [artifacts]
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          description: Task ID（`t-XXXXXX`）
+          schema:
+            type: string
+        - name: idx
+          in: path
+          required: true
+          description: Attempt 序号（从 1 开始）
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: 产物清单
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/runs/{run_id}/files:
+    get:
+      operationId: downloadRunFile
+      summary: 产物下载（支持 HTTP Range）
+      description: |
+        07 §5.1：`?path=` 下载 `<storage-root>/<run_id>/` 下的产物。`path` 必须是相对路径：
+        绝对路径、Windows 盘符、`..`、空段一律 400（路径只由 Run 目录 + 校验后的相对路径拼出）。
+        支持 `Range`（206，越界 416）；单文件超过 1 GiB 且未带 `Range` 时返回 413，请分段下载。
+      tags: [files]
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          description: Run ID（`r-YYYYMMDD-XXXX`）
+          schema:
+            type: string
+        - name: path
+          in: query
+          required: true
+          description: 相对 `<storage-root>/<run_id>/` 的文件路径（如 `tasks/t-0002/attempts/1/logs/stdout.log`）
+          schema:
+            type: string
+        - name: Range
+          in: header
+          required: false
+          description: 标准 HTTP Range（如 `bytes=0-1048575`），用于大文件分段读取
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 完整文件
+          headers:
+            Accept-Ranges:
+              description: 恒为 `bytes`
+              schema:
+                type: string
+            Content-Disposition:
+              description: 'inline; filename="..."（不暴露绝对路径）'
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: 部分内容（`Range` 命中）
+          headers:
+            Content-Range:
+              description: '`bytes <start>-<end>/<total>`'
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          description: 文件超过 1 GiB 且未使用 Range
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '416':
+          description: Range 越界（`http.ServeContent` 语义）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus 指标（不带 /api/v1 前缀）
+      description: |
+        07 §5.5：Prometheus 文本格式（`text/plain; version=0.0.4`）。**不带 `/api/v1` 前缀**，
+        且不参与前端静态站点 fallback。至少包含：`testplane_runs_total{status}`、
+        `testplane_tasks_total{status}`、`testplane_attempts_active`、`testplane_queue_waiting{reason}`、
+        `testplane_endpoint_leases`、`testplane_http_requests_total{method,code}`。
+        数据库采样失败时只跳过 DB 类指标，本端点仍返回 200。
+      tags: [health]
+      security: []
+      responses:
+        '200':
+          description: Prometheus 文本 exposition
+          content:
+            text/plain:
+              schema:
+                type: string
 
 components:
   securitySchemes:
@@ -3375,3 +3630,111 @@ components:
         reason:
           $ref: '#/components/schemas/WaitingReason'
           description: 该队列造成排队的主要等待原因（K8s/Volcano 侧的三个取值之一）
+
+    ExecutionProfile:
+      type: object
+      description: |
+        执行环境（`execution_profiles` 表，03 §3.2 / 06 §3）。只读；
+        维护走 P1 的 `/admin/profiles`。
+      required: [name, cluster, namespace, scheduler, deploy_timeout_seconds]
+      additionalProperties: true
+      properties:
+        name:
+          type: string
+        cluster:
+          type: string
+          description: 对应 `clusters.name`
+        namespace:
+          type: string
+          description: Job 与 PVC 所在命名空间
+        mounts:
+          type: array
+          description: 挂载能力；前端提交页据此渲染可选项
+          items:
+            type: object
+            required: [name, pvc]
+            additionalProperties: true
+            properties:
+              name:
+                type: string
+                description: 挂载名（Manifest 里引用）
+              pvc:
+                type: string
+              sub_path:
+                type: [string, 'null']
+              kind:
+                type: [string, 'null']
+                description: 挂载类型（如 model / dataset）
+        scheduler:
+          type: string
+          description: '`default` 或 `volcano`'
+        queue:
+          type: [string, 'null']
+          description: Volcano 队列名（`scheduler=volcano` 时）
+        image_pull_secrets:
+          type: array
+          items:
+            type: string
+        resource_defaults:
+          type: object
+          additionalProperties: true
+        deploy_timeout_seconds:
+          type: integer
+          minimum: 3600
+          maximum: 604800
+          description: 部署排队+部署总窗口（K-6）
+
+    ExecutionProfileList:
+      type: object
+      description: Profile 列表信封（不分页：数量为个位数）
+      required: [items]
+      additionalProperties: true
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExecutionProfile'
+
+    Artifact:
+      type: object
+      description: |
+        产物条目（`artifacts` 表，03 §3.2）。`path` 相对 `<storage-root>/<run_id>/`，
+        可直接用于 `/runs/{run_id}/files?path=`。`sha256` 惰性：未计算为 `null`（C-7.5）。
+      required: [path, kind, size_bytes]
+      additionalProperties: true
+      properties:
+        path:
+          type: string
+        kind:
+          type: string
+          enum: [result, raw, log, report, other]
+        size_bytes:
+          type: integer
+          minimum: 0
+        sha256:
+          type: [string, 'null']
+        task_id:
+          type: [string, 'null']
+        attempt_id:
+          type: [string, 'null']
+
+    ArtifactList:
+      type: object
+      description: Run / Attempt 两级产物清单的统一信封
+      required: [items, total_size_bytes]
+      additionalProperties: true
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Artifact'
+        by_kind:
+          type: object
+          description: 按 `kind` 分组的同一批条目
+          additionalProperties:
+            type: array
+            items:
+              $ref: '#/components/schemas/Artifact'
+        total_size_bytes:
+          type: integer
+          minimum: 0

@@ -41,6 +41,13 @@
 - **TestPlane → Genet 的机器调用**（部署/轮询/卸载）用 `TESTPLANE_GENET_API_KEY`（Bearer，存 Secret），**不**使用 Tester/Job 的身份，也不进日志；
 - Genet 的 API Key 与 namespace 1:1（同 namespace 同时只允许一个活跃写 key），因此一个 TestPlane 实例需要**独占一组 namespace 或独占一把 key**，这一点必须在部署文档里写明。
 
+**部署形态与身份（D-51，2026-11-05 用户确认）**：TestPlane **纯内网部署**，与 Genet 共用**同一个企业统一身份源**。边界是「同一 IdP，不同 client」：
+
+- TestPlane 是该 IdP 的**独立 OIDC client**（自己的 `client_id`/回调/scope），**不是** Genet 的 client，也不共享 Genet 的会话；
+- Web：authorization code + PKCE → `tp_session`（`HttpOnly; Secure; SameSite=Lax`）+ `X-CSRF-Token` 双提交；
+- 服务间（Jenkins / Agent / `tpctl` / MCP）：用**同一个身份源签发的 JWT**，平台用 JWKS 校验（`aud == clientId`、`exp/nbf` 容差 60s），RBAC 与人类用户同一套，不设后门；
+- 本地开发仍用 `TESTPLANE_AUTH_MODE=dev`（默认角色 `admin`、`Authorization: Bearer <subject>` 即身份），生产镜像必须显式切 `oidc` 并在 `/healthz` 打警告（`impl/control-plane.md §C-10`）。
+
 ### 2.2 角色
 
 | 角色 | 能力 |

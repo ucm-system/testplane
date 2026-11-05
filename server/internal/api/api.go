@@ -52,6 +52,7 @@ type Server struct {
 	submit   *Submitter
 	webui    fs.FS
 	volcano  VolcanoProvider
+	metrics  *metricsRegistry
 	version  string
 	now      func() time.Time
 }
@@ -72,6 +73,7 @@ func New(d Deps) *Server {
 		volcano:  d.Volcano,
 		version:  d.Version,
 		now:      func() time.Time { return time.Now().UTC() },
+		metrics:  newMetricsRegistry(),
 	}
 	s.submit = &Submitter{
 		resolver:       d.Resolver,
@@ -90,10 +92,12 @@ func (s *Server) Handler() http.Handler {
 	r.Use(s.middlewareRequestID)
 	r.Use(s.middlewareRecover)
 	r.Use(s.middlewareAccessLog)
+	r.Use(s.middlewareMetrics)
 
-	// 运维端点不带版本（07 §1）。
+	// 运维端点不带版本（07 §1）；/metrics 只读，且不参与静态 fallback。
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
+	r.Get("/metrics", s.handleMetrics)
 
 	r.Route(s.cfg.APIPrefix, func(r chi.Router) {
 		r.Use(s.middlewareAuth)
@@ -113,6 +117,8 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/runs/{id}/report.md", s.handleRunReportMarkdown)
 		r.Get("/runs/{id}/manifest", s.handleRunManifest)
 		r.Get("/runs/{id}/deploy", s.handleRunDeploy)
+		r.Get("/runs/{id}/artifacts", s.handleRunArtifacts)
+		r.Get("/runs/{id}/files", s.handleRunFile)
 
 		// Task / Attempt
 		r.Get("/tasks", s.handleListTasks)
@@ -121,11 +127,14 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/tasks/{id}/attempts", s.handleListAttempts)
 		r.Get("/tasks/{id}/attempts/{idx}/result", s.handleAttemptResult)
 		r.Get("/tasks/{id}/attempts/{idx}/logs", s.handleAttemptLogs)
+		r.Get("/tasks/{id}/attempts/{idx}/artifacts", s.handleAttemptArtifacts)
 
 		// Tester 目录（只读；Tester 随镜像发布，不做运行时注册，K-3）
 		r.Get("/testers", s.handleListTesters)
 		r.Get("/testers/{name}", s.handleGetTester)
+		r.Get("/testers/{name}/versions/{version}", s.handleGetTesterVersion)
 
+		r.Get("/profiles", s.handleListProfiles)
 		r.Get("/clusters", s.handleListClusters)
 		r.Get("/queue-status", s.handleQueueStatus)
 	})

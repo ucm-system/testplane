@@ -1,0 +1,86 @@
+# TestPlane · 「被测服务」namespace（testplane-mock）
+#
+# 用途：Genet 部署的被测服务、以及我们自己的 mock-llm chart 都装在这里。
+# **与 TestPlane 自己的 `testplane` 分开**：
+#   1) 被测服务是"别人的 chart"（Genet 装），不该和控制面/Tester Job 混在同一个 namespace；
+#   2) 拆除被测服务时 `helm uninstall` / `kubectl delete ns` 不会误伤平台对象；
+#   3) NetworkPolicy 可以按 namespace 划一条干净的边界。
+#
+# PSA：**不强制 `restricted`**（不像 `testplane`）。原因是这里装的是任意外部 chart，
+# 强制 enforce 会让"Genet 装一个普通的第三方服务"直接失败；用 baseline 的 audit/warn
+# 记录不合规的 Pod，但不拦。我们自己写的 chart（deploy/charts/mock-llm）本来就守 restricted。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: testplane-mock
+  labels:
+    app.kubernetes.io/name: testplane-mock
+    app.kubernetes.io/part-of: testplane
+    testplane.io/role: mock-workloads
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+---
+# 默认拒绝入站：testplane-mock 里的一切 Pod 不接受任何来源
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: testplane-mock
+  labels:
+    app.kubernetes.io/name: testplane-mock
+    app.kubernetes.io/part-of: testplane
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# 唯一放行：TestPlane（namespace `testplane`）的 Tester Pod / 控制面 → 被测服务 18080。
+# 端口写 18080 是因为 mock-llm 固定监听它；接新服务时按实际端口复制一条（或以 named port 匹配）。
+#
+# ⚠️ kind 默认 CNI（kindnet）**不实现 NetworkPolicy**，所以本地 apply 只是声明式，
+#    不产生实际拦截；它有意义的场景是 staging/prod 的真 CNI（Calico/Cilium）。
+#    本地验证"到底通不通"仍以 Tester Job 能否访问为准。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-testplane-ingress-18080
+  namespace: testplane-mock
+  labels:
+    app.kubernetes.io/name: testplane-mock
+    app.kubernetes.io/part-of: testplane
+spec:
+  podSelector: {}          # 该 namespace 下所有被测服务
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: testplane
+      ports:
+        - port: 18080
+          protocol: TCP
+---
+# 出站默认拒绝，只放行 DNS：被测服务没有理由主动访问互联网或其他 namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: testplane-mock
+  labels:
+    app.kubernetes.io/name: testplane-mock
+    app.kubernetes.io/part-of: testplane
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
