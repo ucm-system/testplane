@@ -19,10 +19,19 @@
     ctr -n k8s.io images import`（不依赖 buildx 的本地镜像导出）。
 
 .PARAMETER Registry
-    镜像仓库前缀，默认 ccr.ccs.tencentyun.com/keriko。
+    镜像仓库前缀，默认 ghcr.io/ucm-system（GitHub Container Registry）。
+    其它 registry 也支持，例如 `-Registry ccr.ccs.tencentyun.com/keriko`（腾讯云 CCR）。
+
+    登录：
+      GHCR（CI，repo 为 public 时用内置 token）：
+        docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+      GHCR（本地）：
+        gh auth token | docker login ghcr.io -u <你的 GitHub 用户名> --password-stdin
+        （token 需 `write:packages`）
+      CCR（可选）：docker login ccr.ccs.tencentyun.com
 
 .PARAMETER Image
-    镜像名，默认 testplane-server。
+    镜像名。默认按 -Component 推导：testplane-server / testplane-web / testplane-tester-<name>。
 
 .PARAMETER Tag
     主 tag；默认 `git describe --tags --always --dirty`，取不到时 `dev-<yyyymmdd>`。
@@ -43,6 +52,12 @@
     pwsh deploy/docker/build-push.ps1 -Push
 
 .EXAMPLE
+    pwsh deploy/docker/build-push.ps1 -Component web -Tag v0.2.0 -Push
+
+.EXAMPLE
+    pwsh deploy/docker/build-push.ps1 -Component tester:endpoint-probe
+
+.EXAMPLE
     pwsh deploy/docker/build-push.ps1 -Platforms linux/amd64,linux/arm64 -Push -Tag v0.2.0
 
 .EXAMPLE
@@ -51,7 +66,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Registry = 'ccr.ccs.tencentyun.com/keriko',
+    [string]$Registry = 'ghcr.io/ucm-system',
     [string]$Image = '',
     [string]$Component = 'server',
     [string]$Tag = '',

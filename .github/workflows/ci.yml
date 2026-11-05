@@ -174,4 +174,5 @@ jobs:
       - run: kubectl kustomize deploy/k8s > /tmp/k8s.yaml
       - run: kubectl kustomize deploy/overlays/local-dev > /tmp/dev.yaml
       - name: 本地 overlay 必须是 dev 鉴权（防误配）
-        run: grep -q 'TESTPLANE_AUTH_MODE: dev' /tmp/dev.yaml
+        run: |
+          grep -q 'TESTPLANE_AUTH_MODE: dev' /tmp/dev.yaml

@@ -57,6 +57,43 @@ RUN set -eux; \
     # 保留默认 conf.d 目录但不放 default.conf（模板渲染到 default.conf）。
     rm -f /etc/nginx/conf.d/default.conf
 
+# 自定义**主配置**：官方 nginx.conf 里有 `user nginx;` 与 `pid /run/nginx.pid;`，
+# 非 root + 只读根下会直接 `open() "/run/nginx.pid" failed (13: Permission denied)` 起不来
+# （本机实测踩到）。这里把 pid/日志/临时目录全部指到可写位置。
+RUN cat > /etc/nginx/nginx.conf <<'NGINX_MAIN'
+worker_processes auto;
+pid /tmp/nginx.pid;
+error_log /dev/stderr warn;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    access_log /dev/stdout;
+
+    # 只读根：nginx 自己要写的目录全在空挂 /tmp 下
+    client_body_temp_path /tmp/client_body;
+    proxy_temp_path       /tmp/proxy;
+    fastcgi_temp_path     /tmp/fastcgi;
+    uwsgi_temp_path       /tmp/uwsgi;
+    scgi_temp_path        /tmp/scgi;
+
+    sendfile        on;
+    tcp_nopush      on;
+    keepalive_timeout 65;
+    server_tokens   off;
+
+    # 入口脚本渲染的站点配置放 /tmp（只读根下 /etc 不可写；/tmp 必须是可写空挂）。
+    # 通配符 include 匹配不到文件不报错，所以两种模式都能起来。
+    include /tmp/nginx/conf.d/*.conf;
+    include /etc/nginx/conf.d/*.conf;
+}
+NGINX_MAIN
+
 # SPA 静态资源 + 可选 /api 反代模板（由入口脚本 envsubst 渲染）
 COPY web/nginx.conf /etc/nginx/templates/default.conf.template
 COPY deploy/docker/web-entrypoint.sh /usr/local/bin/web-entrypoint.sh

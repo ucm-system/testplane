@@ -14,16 +14,19 @@
 set -eu
 
 TEMPLATE=/etc/nginx/templates/default.conf.template
-OUT=/etc/nginx/conf.d/default.conf
-RUNTIME=/tmp/default.conf
+# 渲染结果必须写到可写位置：只读根（readOnlyRootFilesystem）下 /etc 不可写，
+# /tmp 由编排挂成 emptyDir（k8s）或 --tmpfs（docker run），是唯一稳的落点。
+OUT=/tmp/nginx/conf.d/default.conf
+RUNTIME=/tmp/nginx-site.conf
 
 if [ ! -f "$TEMPLATE" ]; then
     echo "web-entrypoint: 模板不存在：$TEMPLATE" >&2
     exit 1
 fi
 
-# 只读根的兜底：/tmp 一般是空挂；这里再确保 conf.d 可写（有些编排只挂 /tmp）。
-mkdir -p /etc/nginx/conf.d /var/cache/nginx /var/run 2>/dev/null || true
+# 只读根：/tmp 是唯一保证可写的地方（k8s 里是 emptyDir，docker 里是 --tmpfs）。
+# 起不来时这里会明确报错，而不是留个"起来但 502"的容器。
+mkdir -p /tmp/nginx/conf.d /tmp/client_body /tmp/proxy /var/cache/nginx 2>/dev/null || true
 
 # 1) 按上游配置决定 /api/ 反代块是否保留
 if [ -n "${TESTPLANE_API_UPSTREAM:-}" ]; then
