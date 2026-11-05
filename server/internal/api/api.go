@@ -95,6 +95,10 @@ func (s *Server) Handler() http.Handler {
 	r.Use(s.middlewareMetrics)
 
 	// 运维端点不带版本（07 §1）；/metrics 只读，且不参与静态 fallback。
+	//
+	// **免鉴权是有意的**：这三个端点注册在根路由上，而 middlewareAuth 只挂在
+	// `Route(APIPrefix)` 组内（见下方），所以切到 OIDC 模式后 /metrics 依然公开，
+	// 供 Prometheus 无需令牌抓取。改动路由结构时注意别把它挪进鉴权组。
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
 	r.Get("/metrics", s.handleMetrics)

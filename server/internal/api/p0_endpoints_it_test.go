@@ -360,3 +360,23 @@ run:
 		t.Fatalf("错误码应为 EXECUTION_PROFILE_NOT_FOUND: %s", rec.Body.String())
 	}
 }
+
+// TestMetrics_NoAuthRequiredEvenInOIDCMode 锁住"运维端点免鉴权"：
+// /metrics 注册在根路由、不在 middlewareAuth 组内，切 OIDC 后仍必须公开（Prometheus 不带令牌）。
+func TestMetrics_NoAuthRequiredEvenInOIDCMode(t *testing.T) {
+	srv, _, cleanup := integrationServer(t)
+	defer cleanup()
+	// 模拟切到 OIDC 模式（当前实现仍按 dev 放行，但路由分组不能变）。
+	srv.cfg.AuthMode = "oidc"
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	// 故意不带 Authorization 头。
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/metrics 在 OIDC 模式下必须免鉴权，得到 %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "testplane_up 1") {
+		t.Fatalf("/metrics 内容异常: %s", rec.Body.String())
+	}
+}

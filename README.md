@@ -87,6 +87,8 @@ testers/              Tester 实现，一个目录一个 Tester（已有）
   endpoint-probe/     Pre-Check；契约的参考实现，也是新 Tester 的模板
 
 server/               规划：控制面（API / 状态机 / 编排 / 调度 / 存储）
+  cmd/tpctl/          P1：Agent 亲和 CLI（submit / wait / report / logs / cancel）
+  internal/mcp/       P1：MCP Server（stdio + JSON-RPC 2.0）
 web/                  规划：Web UI，按 design/prototype 落地
 deploy/               规划：镜像构建、K8s 清单、配置
 ```

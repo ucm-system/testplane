@@ -467,6 +467,14 @@ func (c *Client) Cancel(ctx context.Context, runID string) error {
 		"force":       {"true"},
 	}, &result)
 	if err == nil {
+		// 卸载成功：作废缓存并把宽限计时重置到现在，否则后续 Poll 会
+		//   ① 命中 ready 缓存（假象），② 用很久以前的 acceptedAt 直接判 blocked。
+		d.mu.Lock()
+		d.hasLast = false
+		d.nextPollAt = time.Time{}
+		d.interval = c.opts.PollInitialInterval
+		d.acceptedAt = c.opts.Now()
+		d.mu.Unlock()
 		c.opts.Logf("genet: uninstalled release %s (forced=%d)", releaseName, len(result.ForcedPods))
 		return nil
 	}
@@ -514,7 +522,9 @@ func (c *Client) stateFor(runID, releaseName string) *deployState {
 		c.deploys[runID] = d
 		return d
 	}
-	if d.releaseName == "" && releaseName != "" {
+	// Start 传入的 releaseName 是权威值（由 run_id + deploy_id 派生或来自冻结的 runs.deploy），
+	// 必须覆盖 Poll/Cancel 在"还没 Start 过"时按默认 deploy_id 推出的临时值，否则会查到别的 release。
+	if releaseName != "" {
 		d.releaseName = releaseName
 	}
 	return d

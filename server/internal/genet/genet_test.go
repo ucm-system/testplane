@@ -597,3 +597,71 @@ func TestFailureCodes(t *testing.T) {
 	}
 	_ = fmt.Sprintf("%v", st)
 }
+
+// 回归：Start 的 releaseName 必须覆盖"Poll/Cancel 在未 Start 时按默认 deploy_id 推出的临时值"。
+func TestStartOverridesDerivedReleaseName(t *testing.T) {
+	f := &fakeGenet{}
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	c, _ := newTestClient(t, f, clock)
+
+	// 先 Cancel（此时还没有 Start）：会用默认 deploy_id 推一个临时 release 名。
+	_ = c.Cancel(context.Background(), "r-1")
+	tmp := c.ReleaseNameFor("r-1")
+	if tmp == "" {
+		t.Fatal("expected a derived release name")
+	}
+
+	// Start 带真正的 deploy_id + 冻结的 release_name。
+	want := "tp-frozen0002"
+	if err := c.Start(context.Background(), ports.DeployRequest{
+		RunID: "r-1", DeployID: "d-real",
+		Manifest: manifestJSON(t, DeployManifest{PackageType: "stack", ReleaseName: want}),
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := c.ReleaseNameFor("r-1"); got != want {
+		t.Fatalf("release name = %q, want %q (Start 必须覆盖临时推导值)", got, want)
+	}
+	// 随后的 Poll 必须查正确名字（假 Genet 里放同名 release → 200）。
+	f.setRelease(&Release{Name: want, Status: ReleaseDeployed, CallInfo: &CallInfo{Endpoint: &Endpoint{Status: EndpointReady, URL: "http://x:1/v1"}}})
+	clock.Advance(2 * time.Second)
+	st, err := c.Poll(context.Background(), "r-1")
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if st.Phase != PhaseReady {
+		t.Fatalf("phase = %s, want ready（Poll 必须用 Start 给的 release 名）", st.Phase)
+	}
+}
+
+// 回归：卸载成功后 Poll 不能命中 ready 缓存，也不能用旧的 acceptedAt 直接判 blocked。
+func TestCancelInvalidatesPollCache(t *testing.T) {
+	f := &fakeGenet{}
+	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
+	c, _ := newTestClient(t, f, clock)
+	f.setRelease(&Release{Name: ReleaseName("r-1", "d-1"), Status: ReleaseDeployed,
+		CallInfo: &CallInfo{Endpoint: &Endpoint{Status: EndpointReady, URL: "http://x:1/v1"}}})
+
+	if err := c.Start(context.Background(), ports.DeployRequest{
+		RunID: "r-1", DeployID: "d-1", Manifest: manifestJSON(t, DeployManifest{PackageType: "stack"}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := c.Poll(context.Background(), "r-1"); st.Phase != PhaseReady {
+		t.Fatalf("phase = %s, want ready", st.Phase)
+	}
+	// 让 acceptedAt 远离宽限期，然后再取消（真实场景：跑了很久的 Run 被取消）。
+	clock.Advance(30 * time.Minute)
+	if err := c.Cancel(context.Background(), "r-1"); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	// 卸载后 release 已不存在 → 必须 accepted（宽限从头算），而不是 ready 缓存或 blocked。
+	f.setRelease(nil)
+	st, err := c.Poll(context.Background(), "r-1")
+	if err != nil {
+		t.Fatalf("Poll after cancel: %v", err)
+	}
+	if st.Phase != PhaseAccepted {
+		t.Fatalf("phase = %s, want accepted (缓存作废 + 宽限重置)", st.Phase)
+	}
+}

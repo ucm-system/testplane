@@ -377,17 +377,17 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 
 ---
 
-## 13. P1 扩展点（只预留，不实现）
+## 13. P1 扩展点
 
-| P1 能力 | 预留方式 |
-|---|---|
-| MCP Server | 复用同一 OpenAPI 生成的客户端；MCP 只是另一层 adapter，无独有逻辑 |
-| CLI `tpctl` | 同上；命令与 API 一一对应 |
-| 失败续跑（跨 Run） | `runs.retry_of` 字段已在 DDL 预留；复用校验条件在 C-5.6 定义 |
-| Run 对比 | 读 `result.json` 的 UI 层能力（按指标名 + labels + workload 对齐）；P1 可依赖 MongoDB 指标集合 |
-| 指标索引（跨 Run 查询） | P0 只存 `result.json` 文件；P1 可写 **MongoDB**（`metrics` 集合：run/task/attempt/name/statistic/unit/value/labels），查询接口不变；也可先加 PostgreSQL `metrics_index` 表过渡 |
-| Matrix 展开 | 提交前的纯函数变换（`args` 展开为多个 Task），不改变调度与契约 |
-| 看板 | `GET /queue-status` + Volcano 只读快照（E-11），前端独立路由 |
+| P1 能力 | 预留方式 | 状态 |
+|---|---|---|
+| MCP Server | 复用同一 OpenAPI 生成的客户端；MCP 只是另一层 adapter，无独有逻辑 | 🟢 进行中（本轮已交付最小可用）：`server/internal/mcp`，stdio + JSON-RPC 2.0，9 个工具 |
+| CLI `tpctl` | 同上；命令与 API 一一对应 | 🟢 进行中（本轮已交付最小可用）：`server/cmd/tpctl`，10 个子命令 |
+| 失败续跑（跨 Run） | `runs.retry_of` 字段已在 DDL 预留；复用校验条件在 C-5.6 定义 | ⬜ 之后 |
+| Run 对比 | 读 `result.json` 的 UI 层能力（按指标名 + labels + workload 对齐）；P1 可依赖 MongoDB 指标集合 | ⬜ 之后 |
+| 指标索引（跨 Run 查询） | P0 只存 `result.json` 文件；P1 可写 **MongoDB**（`metrics` 集合：run/task/attempt/name/statistic/unit/value/labels），查询接口不变；也可先加 PostgreSQL `metrics_index` 表过渡 | ⬜ 之后 |
+| Matrix 展开 | 提交前的纯函数变换（`args` 展开为多个 Task），不改变调度与契约 | ⬜ 之后 |
+| 看板 | `GET /queue-status` + Volcano 只读快照（E-11），前端独立路由 | ⬜ 之后 |
 
 ---
 

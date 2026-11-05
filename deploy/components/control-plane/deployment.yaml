@@ -91,6 +91,15 @@ spec:
                   name: testplane-db
                   key: dsn
                   optional: true
+            # Genet Open API 的 Bearer key（deploy provider=genet 时必填）。
+            # 单独走 Secret，避免 key 进 ConfigMap/日志；secret 不存在时 optional 让 Pod 仍能起
+            # （provider=mock 时用不到它）。
+            - name: TESTPLANE_GENET_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: testplane-genet
+                  key: api-key
+                  optional: true
           resources:
             requests:
               cpu: 500m

@@ -93,7 +93,7 @@ function Wait-ControllerReady {
 function New-Manifest {
     param([string]$Stamp)
     return @"
-{"run":{"name":"restart-$Stamp","service":{"url":"http://mock-llm-delayed.$DefaultNamespace.svc:18080/v1","model_name":"mock-llm"},"precheck":"off","cleanup":{"policy":"never"},"tests":[{"name":"drill-a","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"args":"--wait_timeout_seconds=60 --retry_interval_seconds=1","timeout_seconds":180,"on_failure":"continue"},{"name":"drill-b","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"args":"--wait_timeout_seconds=60 --retry_interval_seconds=1","timeout_seconds":180,"on_failure":"continue"}]}}
+{"run":{"name":"restart-$Stamp","service":{"url":"http://mock-llm-delayed.$DefaultNamespace.svc:18080/v1","model_name":"mock-llm"},"precheck":"off","cleanup":{"policy":"never"},"tests":[{"name":"drill-a","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"args":"--wait_timeout_seconds=60 --retry_interval_seconds=1","timeout_seconds":180},{"name":"drill-b","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"args":"--wait_timeout_seconds=60 --retry_interval_seconds=1","timeout_seconds":180}]}}
 "@
 }
 

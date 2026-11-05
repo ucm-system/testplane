@@ -1,0 +1,116 @@
+# TestPlane infra · Genet 本地联调 values（临时，不入库；.data/ 已 gitignore）
+#
+# 目标：在 kind 单节点里把 Genet backend 跑起来，只保留"Open API + Helm 管理"两条能力，
+# 其余生产特性（OAuth / 用户 RBAC / Volcano / 前端 / webshell / 清理 CronJob / Ingress）全关。
+#
+# 安装：
+#   & .\.tools\helm.exe install genet .data\genet\helm\genet -n testplane-mock `
+#       -f .data\genet-values.local.yaml
+#
+# 说明：
+# - chart 在 Genet 仓（.data/genet），**不提交进 TestPlane 仓库**；本文件是我们的临时 overlay。
+# - 镜像 genet-backend:dev 由 .data/genet/backend/Dockerfile 本地构建（已 patch 掉内网 base/apk/GOPROXY）。
+
+backend:
+  replicas: 1
+  image:
+    # 本地 build + kind load 的镜像（上游默认 registry.dev.huawei.com/flash_stor/genet-backend）
+    repository: genet-backend
+    tag: dev
+  # 上游默认 nodeAffinity 要求 amd64 且排除 GPU/加速卡标签节点；kind 单节点没这些标签，
+  # 但显式清空能避免"因为标签判断不一致而 Pending"的排查成本。
+  affinity: {}
+  nodeSelector: {}
+
+  config:
+    # 本地没有 Volcano：关掉（否则启动即对账 Queue CRD，报错刷屏）
+    volcano:
+      enabled: false
+    # 时间窗访问控制：生产用，本地关（它需要 webhook + 周期对账）
+    accessPolicy:
+      enabled: false
+
+    # ⚠️ 两个 NFS 后端挂载必须关：默认指向内网 192.168.3.6:/private 与 /public_model，
+    # 本地 kind 挂不上 → Pod 永远 ContainerCreating（FailedMount）。
+    userWorkspaceInit:
+      enabled: false
+    modelBrowser:
+      enabled: false
+
+    # 不接企业 OAuth：用内置 dev-user 跑通 Open API
+    oauth:
+      enabled: false
+    # 用户 RBAC 自动建 namespace/RBAC：本地关掉，避免往集群里造用户命名空间
+    userRBAC:
+      enabled: false
+      autoCreate: false
+    oidcProvider:
+      enabled: false
+
+    # Open API：本次联调的主角
+    openAPI:
+      enabled: true
+      # ⚠️ 这是 **控制面 namespace**（存 genet-openapi-keys 这个 Secret），
+      # 不是被测服务落地的 namespace，也不能和 Helm release secret 混在一起
+      # （上游会 FATAL: control namespace still contains legacy user resources）。
+      # 被测服务落地的 namespace 由「创建 API Key 时传的 namespace」决定 → 我们用 testplane-mock。
+      namespace: "genet-open-api"
+      # ⚠️ 本地**不**用静态 apiKeys：上游有个迁移 bug（legacy 静态 key 迁移时
+      # "resource name may not be empty"，见 README 的已知问题），会把进程 FATAL 掉。
+      # 改为装好之后走管理 API 创建（`POST /api/admin/apikeys`，见 README「创建 API Key」）。
+      apiKeys: []
+
+    # 管理页/管理 API 的 admin 名单：dev 模式用户名是 dev-user，加进来才能调 admin 接口
+    adminUsers:
+      - "dev-user"
+
+    # Helm 管理：Genet 用它把 chart 装成"被测服务"
+    helm:
+      enabled: true
+      chartRepo:
+        # 本地 OCI registry（cluster 内的 registry:2），Genet 容器里跑 `helm pull oci://...`
+        type: "harbor-chartmuseum"
+        url: "http://genet-chartrepo"
+        projects:
+          - charts
+        username: ""
+        password: ""
+        insecure: true
+
+    # 集群信息：本地 kind（in-cluster 直连，不需要写死外部 API server 与 CA）
+    cluster:
+      name: "testplane"
+      server: "https://kubernetes.default.svc:443"
+      caData: ""
+
+# 前端本地不 build（镜像在内网 registry）：副本 0，避免 ImagePullBackOff 噪音
+frontend:
+  replicas: 0
+
+# webshell 网关本地不用（它依赖 Redis）
+webshellGateway:
+  replicas: 0
+
+# kind 没有 ingress controller，但**必须**把 ingress.enabled 打开：
+# chart 里的 cert-manager 三件套（selfsigned ClusterIssuer → genet-ca 证书 → genet-ca-issuer）
+# 只在 `ingress.enabled && ingress.certManager.enabled` 时才渲染；而 webhook 的
+# Certificate 引用 genet-ca-issuer，没有它就永远 Pending → backend 挂不上 webhook-certs 卡死。
+# Ingress 对象本身没有 controller 时不产生任何效果，tls 关掉以免再要一张证书。
+ingress:
+  enabled: true
+  tls:
+    enabled: false
+
+# 镜像/节点清理 CronJob：本地不做
+imageCleanup:
+  enabled: false
+
+# 每晚 23:00 的"删所有用户 Pod"清理 CronJob 没有 enabled 开关（chart 里 CronJob 无条件渲染）。
+# 本地把它挪到一个永远不会到来的日子（2 月 31 日），等价于关闭。
+# 想验证清理逻辑时再改回 "0 23 * * *"。
+cleanup:
+  schedule: "0 0 31 2 *"
+  image:
+    repository: genet-backend
+    tag: dev
+

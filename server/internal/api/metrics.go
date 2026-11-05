@@ -98,8 +98,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	// ---- DB 计数（采样失败只跳过这一组） ----
 	if stats, err := s.st.MetricsSnapshot(r.Context()); err == nil {
-		writeSeriesMetric(&b, "testplane_runs_total", "Run 数量（按状态）。", "status", stats.RunsByStatus, nil)
-		writeSeriesMetric(&b, "testplane_tasks_total", "Task 数量（按状态）。", "status", stats.TasksByStatus, nil)
+		writeSeriesMetric(&b, "testplane_runs_total", "Run 数量（按状态）。", "status",
+			stats.RunsByStatus, runStatusSeries)
+		writeSeriesMetric(&b, "testplane_tasks_total", "Task 数量（按状态）。", "status",
+			stats.TasksByStatus, taskStatusSeries)
 		b.WriteString("# HELP testplane_attempts_active 进行中的 Attempt 数（preparing/running）。\n")
 		b.WriteString("# TYPE testplane_attempts_active gauge\n")
 		fmt.Fprintf(&b, "testplane_attempts_active %d\n", stats.AttemptsActive)
@@ -107,10 +109,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		b.WriteString("# TYPE testplane_endpoint_leases gauge\n")
 		fmt.Fprintf(&b, "testplane_endpoint_leases %d\n", stats.Leases)
 		writeSeriesMetric(&b, "testplane_queue_waiting", "排队中的 Task 数（按 waiting_reason）。",
-			"reason", stats.WaitingByReason, []string{
-				"precheck_gate", "slot_waiting", "global_limit",
-				"queue_full", "insufficient_resources", "gang_pending",
-			})
+			"reason", stats.WaitingByReason, waitingReasonSeries)
 	} else {
 		b.WriteString("# testplane_db_metrics_error 1（采样失败，只影响 DB 类指标）\n")
 	}
@@ -126,6 +125,22 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(b.String()))
 }
+
+// 指标里的状态维度**全量预置**（即使计数为 0 也输出），让看板不必处理"序列时有时无"。
+var (
+	runStatusSeries = []string{
+		"submitted", "queued", "deploying", "testing", "cleanup", "cancelling",
+		"succeeded", "completed_with_errors", "service_unavailable", "failed", "canceled",
+	}
+	taskStatusSeries = []string{
+		"pending", "queued", "preparing", "running",
+		"succeeded", "failed", "canceled", "skipped",
+	}
+	waitingReasonSeries = []string{
+		"precheck_gate", "slot_waiting", "global_limit",
+		"queue_full", "insufficient_resources", "gang_pending",
+	}
+)
 
 // writeSeriesMetric 输出 `<name>{<label>="<v>"} n`。
 // keys 非 nil 时先按给定顺序补齐（看板要求 6 个 waiting_reason 全在）。
