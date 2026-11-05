@@ -31,18 +31,31 @@ git switch -c docs/workflow main
 - 合并后源分支**自动删除**；
 - 需要 review 时 `@Potterluo`。
 
-## 当前**没有**强制力（重要）
+## `main` 已开分支保护（服务端强制）
 
-本仓库是**私有仓库**，组织在 **GitHub Free** 计划。GitHub 的分支保护与 ruleset **对 Free 计划的私有库不开放**（实测 `GET /branches/main/protection` 与 `GET /rulesets` 均返回 403「Upgrade to GitHub Pro or make this repository public」）。
+仓库已转为 **public**，GitHub 的分支保护因此可用，**已启用**（详见 [`.github/branch-protection.md`](.github/branch-protection.md)）：
 
-所以：
+- 任何人对 `main` 都不能直接 `push`，**包括管理员**（`enforce_admins: true`）——只能走 PR；
+- 只接受 **squash / rebase**（线性历史），禁止 force push 与删除分支；
+- 评审意见必须先 **resolve** 才能合；
+- CI 的必需检查项在 [`ci.yml`](.github/workflows/ci.yml) 落地后启用（见该文件里的 job `name`）。
 
-- 「只能 PR 合入」目前是**团队约定**，服务端不拦；
-- 有写权限的人技术上可以直接 `git push origin main`——**请不要这样做**；
-- 需要真正强制时，二选一，再由管理员开启保护：
-  1. 仓库转 **public**（免费，但设计文档里的 `registry.dev.huawei.com` 等内部标识会公开，需先脱敏）；
-  2. 组织升级 **GitHub Team**（付费），保持私有。
+## 自动评审
+
+每 15 分钟轮询一次打开的 PR，有新提交就起一个独立 agent 按
+[`docs/agents/pr-review.md`](docs/agents/pr-review.md) 评审，把意见贴成 PR 评论，
+并给 head 打一个 `agent-review` 的 commit status。
+
+```bash
+pwsh scripts/agents/pr-review-dispatch.ps1 -DryRun   # 看会评哪几张
+pwsh scripts/agents/pr-review-dispatch.ps1           # 立刻评一轮
+```
+
+> 机制说明：GitHub 的 webhook 打不到本机，所以用「定时轮询 + 按 head SHA 去重」代替
+> webhook；语义相同——同一份提交只评一次。评审需要模型凭据，若 headless profile 里没有
+> （`MISSING_CREDENTIAL`），任务会落到 `.data/pr-review/pending/`，由有凭据的会话接手。
 
 ## 不要提交
 
 运行产物、日志、凭据、临时文件——见 `.gitignore`。脚本与 Dockerfile 必须 LF（`.gitattributes`），否则容器内会 `bad interpreter`。
+
