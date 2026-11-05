@@ -63,7 +63,10 @@ function Get-HelmReleases {
     $items = @(($out | ConvertFrom-Json).items)
     # 只数平台 Deploy 自己的 release：mock-llm/mock-llm-fail 是基础设施，
     # tp-demo-manual 是人工演示 release（Lead 2026-11-05），都不算平台残留。
-    $items = @($items | Where-Object { $_.name -notlike 'mock-llm*' -and $_.name -notlike 'tp-demo-*' })
+    $items = @($items | Where-Object {
+        $rel = [string]$_.metadata.labels.name
+        $rel -notlike 'mock-llm*' -and $rel -notlike 'tp-demo-*'
+    })
     return [pscustomobject]@{ source = 'k8s-secrets（helm CLI 不在 PATH）'; items = $items }
 }
 

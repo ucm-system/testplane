@@ -11,7 +11,7 @@ const RUNS = JSON.parse(process.env.DEMO_RUNS ?? '{}')
 mkdirSync(OUT, { recursive: true })
 
 const browser = await chromium.launch({ channel: 'chrome', headless: true })
-const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } })
+const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 }, recordVideo: { dir: process.env.DEMO_VIDEO ?? '.data/demo/video', size: { width: 1440, height: 1000 } } })
 // dev 鉴权：前端会自带 Bearer dev；这里只是保险
 await ctx.addInitScript(() => {
   localStorage.setItem('testplane:demo', '1')
@@ -77,6 +77,9 @@ const qs = await page.evaluate(async () => {
 })
 writeFileSync(`${OUT}/queue-status.json`, JSON.stringify(qs, null, 2))
 
+const v = page.video()
+await ctx.close()
 await browser.close()
+if (v) { const vp = await v.path(); console.log('[video] ' + vp) }
 console.log(`done in ${((Date.now() - s) / 1000).toFixed(1)}s, errors=${errors.length}`)
 if (errors.length) console.log(errors.join('\n'))

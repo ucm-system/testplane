@@ -27,6 +27,8 @@ const STEPS = [
   '08-retry-dialog',
 ]
 
+// 截图脚本不需要 trace：Windows 上 retain-on-failure 偶尔在 context 关闭时抢写 trace 文件报 ENOENT
+test.use({ trace: 'off' })
 test.describe.configure({ mode: 'serial' })
 
 test('演示：提交服务形态 Run → 详情 → 报告 → 集群 → 管理台 → 重试预览', async ({ page }) => {

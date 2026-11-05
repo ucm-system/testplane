@@ -115,12 +115,12 @@ function ProfilesTab() {
           <Table>
             <THead>
               <TR className="hover:bg-transparent">
-                <TH>name</TH>
-                <TH>cluster</TH>
-                <TH>namespace</TH>
-                <TH>scheduler</TH>
-                <TH>queue</TH>
-                <TH>deploy_timeout</TH>
+                <TH>名称</TH>
+                <TH>集群</TH>
+                <TH>命名空间</TH>
+                <TH>调度器</TH>
+                <TH>队列</TH>
+                <TH>部署窗口</TH>
                 <TH className="text-right">操作</TH>
               </TR>
             </THead>
@@ -315,9 +315,9 @@ function ClustersTab() {
           <Table>
             <THead>
               <TR className="hover:bg-transparent">
-                <TH>name</TH>
-                <TH>api_server</TH>
-                <TH>kubeconfig_key</TH>
+                <TH>名称</TH>
+                <TH>API Server</TH>
+                <TH>kubeconfig</TH>
                 <TH>上次检查</TH>
                 <TH className="text-right">操作</TH>
               </TR>
@@ -465,11 +465,11 @@ function SecretsTab() {
           <Table>
             <THead>
               <TR className="hover:bg-transparent">
-                <TH>name</TH>
-                <TH>namespace</TH>
-                <TH>secret_name</TH>
-                <TH>key</TH>
-                <TH>description</TH>
+                <TH>名称</TH>
+                <TH>命名空间</TH>
+                <TH>Secret 名</TH>
+                <TH>键</TH>
+                <TH>说明</TH>
               </TR>
             </THead>
             <TBody>
@@ -575,11 +575,11 @@ function AuditTab() {
             <THead>
               <TR className="hover:bg-transparent">
                 <TH>时间</TH>
-                <TH>actor</TH>
-                <TH>role</TH>
-                <TH>action</TH>
-                <TH>object_type</TH>
-                <TH>object_id</TH>
+                <TH>操作者</TH>
+                <TH>角色</TH>
+                <TH>动作</TH>
+                <TH>对象类型</TH>
+                <TH>对象 ID</TH>
               </TR>
             </THead>
             <TBody>

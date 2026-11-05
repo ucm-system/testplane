@@ -160,6 +160,61 @@ export interface DeploySnapshot {
   deploy_timeout_seconds?: number
 }
 
+/* ================================================================ Deploy 日志（契约内） */
+
+/** `DeployLogPod` schema：Deploy 日志的 Pod 页签。 */
+export interface DeployLogPod {
+  name: string
+  /** 至少一个容器 Ready */
+  ready: boolean
+  /** 容器最大重启次数（>0 会产生 gap） */
+  restarts: number
+  started_at?: string | null
+  last_seen_at?: string | null
+}
+
+/** `DeployLogEntry` schema：一个 Pod 的一段连续日志行。 */
+export interface DeployLogEntry {
+  pod: string
+  container: string
+  /** 该段在本 Pod 日志流里的起始行号 */
+  offset: number
+  line_count: number
+  /** 多行正文，行间 `\n` */
+  text: string
+}
+
+/** `DeployLogGap` schema：事实缺口（Pod 重启 / 晚于 accepted_at 启动），平台不假装连续。 */
+export interface DeployLogGap {
+  pod: string
+  from: string
+  to: string
+  /** `pod restarted` | `pod started after deploy accepted` */
+  reason: string
+}
+
+/** `DeployLogs` schema：`GET /runs/{id}/deploy/logs`。 */
+export interface DeployLogs {
+  run_id: string
+  pods: DeployLogPod[]
+  entries: DeployLogEntry[]
+  gaps: DeployLogGap[]
+  truncated: boolean
+  /** 下一次请求的 offset；0 表示没有更多 */
+  next_offset: number
+  /** 排队中 / 无 Deploy 阶段 / 无 Pod 时的说明 */
+  message?: string
+}
+
+export interface DeployLogQuery {
+  /** 只看这个 Pod（页签） */
+  pod?: string
+  offset?: number
+  limit?: number
+  /** 只取每个 Pod 末尾 N 行（先看最新） */
+  tail_lines?: number
+}
+
 /* ================================================================ Run */
 
 /** `Run.task_counts`：`failed` 含 canceled、`pending` 含 queued（契约只必填 total/succeeded/failed）。 */

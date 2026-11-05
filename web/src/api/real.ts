@@ -16,6 +16,8 @@ import type {
   Cluster,
   ClusterWrite,
   DashboardStats,
+  DeployLogQuery,
+  DeployLogs,
   DeploySnapshot,
   DryRunResult,
   ExecutionProfile,
@@ -196,6 +198,16 @@ export const realApi: Api = {
     })
   },
 
+  getDeployLogs(runId: string, query: DeployLogQuery = {}): Promise<DeployLogs> {
+    return request<DeployLogs>(
+      `/runs/${encodeURIComponent(runId)}/deploy/logs${qs({
+        pod: query.pod,
+        offset: query.offset,
+        limit: query.limit,
+        tail_lines: query.tail_lines,
+      })}`,
+    )
+  },
   /* 报告（契约内） */
   getReport(runId: string): Promise<Report> {
     return request<Report>(`/runs/${encodeURIComponent(runId)}/report`)

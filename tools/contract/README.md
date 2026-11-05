@@ -101,9 +101,9 @@ stdout 一行 JSON（`checks[]` 逐项给 detail），stderr 人类摘要；`--j
 
 - 规格侧：**17/17 通过**（`go run . --mode spec`）；设计 50 个端点，openapi **50** 个，
   白名单 **0** 条（设计端点全部实现），实现有设计无 0；`design-baseline.txt` 同时锁 count=50 与端点集合 sha256。
-- 实现侧：覆盖全部 **50** 个 operation；新增 retry-plan/retry-run/retry-task、deploy/logs、
+- 实现侧：**63/63 通过**，覆盖全部 **50** 个 operation；新增 retry-plan/retry-run/retry-task、deploy/logs、
   `GET /secrets`、`/admin/*` 12 个 operation 全部被探针命中。
-- 合计 `--mode all`：**通过数见下方最近一次实跑**（新增端点后总检查数从 60 增加，不再写死旧数字）。
+- 合计 `--mode all`：**80/80 通过**（spec 17/17 + live 63/63；总检查数由实际 operation/探针推导）。
 - `/files` live 同时探两种 path 形态：run 相对与 artifacts 原始带 `<run_id>/` 前缀；
   fixture 到终态后两者均 200（artifact drill 另证 shell 删除 Pod/重启后 sha256 一致）。
 - openapi 的 `/auth/callback` 404（dev 模式）已补 `application/json` + `Error`；
@@ -127,3 +127,4 @@ stdout 一行 JSON（`checks[]` 逐项给 detail），stderr 人类摘要；`--j
 - **为什么允许状态相关 404 要区分状态**：`/report` 在 Run 未结束前按 07 §5.1 就是
   404 + `Retry-After`；但终态 Run 还 404 就是 bug。因此只在非终态 fixture 上放行 404，
   终态必须 200；404 本身仍要过 Error 形状校验。
+

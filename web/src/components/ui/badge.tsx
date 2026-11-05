@@ -21,7 +21,7 @@ export function Badge({ tone = 'muted', className, children, ...rest }: BadgePro
   return (
     <span
       className={cn(
-        'inline-flex h-[22px] shrink-0 items-center rounded-full border px-2 text-2xs font-medium leading-none',
+        'inline-flex h-[22px] shrink-0 items-center rounded-full border px-2 text-[12.5px] font-medium leading-none',
         TONES[tone],
         className,
       )}
@@ -43,9 +43,9 @@ export function Tag({ mono = false, className, children, ...rest }: TagProps) {
   return (
     <span
       className={cn(
-        'inline-flex h-5 shrink-0 items-center rounded-full px-2 text-2xs leading-none',
+        'inline-flex h-[22px] shrink-0 items-center rounded-full px-2 text-[12.5px] leading-none',
         mono
-          ? 'border border-line-strong bg-transparent font-mono text-2xs text-fg-2'
+          ? 'border border-line-strong bg-transparent font-mono text-[12px] text-fg-2'
           : 'bg-line-soft font-medium text-fg-2',
         className,
       )}

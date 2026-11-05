@@ -182,7 +182,46 @@ dev 部署与 mock 模式都没有 `/auth/*`：`/me` 无 `csrf_token` → mode=d
 `text-primary-text` / `bg-success-chip` 等；圆角 6/8/12/16，字号 11–30，间距 4 的倍数，动效 150ms ease-out，只用 sm/md 两档阴影。
 业务组件里不写裸 hex（唯一例外：日志终端的 `slate-300` 一类终端配色与 `#0b1220` 底，已在 `@theme` 里定成 `bg-terminal`）。
 
-响应式：`≥1280` 三列（240 / 1fr / 288），`<1280` 隐右栏，`<768` 左栏收进抽屉（页头汉堡）。
+### 圣杯布局（对齐原型，别只改外观）
+
+- **结构**：`AppShell` 的 body 是 `grid grid-cols-[240px_minmax(0,1fr)_288px] items-stretch`，
+  **`<main>` 在 DOM 里写在两侧栏之前**，用 `col-start-2 row-start-1` 摆到中间（读屏/Tab 顺序先内容后导航）；
+  两侧栏 `sticky top-14 h-[calc(100vh-6rem)] self-start overflow-y-auto`（页头 56 + 页脚 40）。
+- **断点**：`>1024` 三列；`768–1024` 收右栏（`grid-cols-[240px_minmax(0,1fr)]`）；`<768` 单列堆叠、左栏走抽屉、页头由 grid 切成 flex 单行。
+- **页头对齐**（用户最较真的两条）：页头与 body **共用同一套列宽**，品牌列 240px 带 `border-r`、
+  用户列 288px 带 `border-l` —— 于是左分隔线落在 **x=240**（左栏右边缘）、右分隔线落在 **x=vw−288**（右栏左边缘，
+  1280 宽时 = 992）。`tests/layout.spec.ts` 与 `tests/layout-audit.mjs`（Lead 的 DOM 实测脚本，35 项）都断言这些坐标，不靠肉眼：
+  `DEMO_BASE=http://127.0.0.1:8133 node tests/layout-audit.mjs`（先 `VITE_USE_MOCK=1 pnpm build`，再 `pnpm exec vite preview --port 8133`）。
+- **根字号必须 16px**：Tailwind 的 spacing / 尺寸类都是 rem，`html{font-size:14px}` 会把 `h-14` 缩成 49px、
+  侧栏 240 缩成 210 —— "左栏差 30px / 页头高 49" 就是这个坑。正文 14px 由 `body` 给，别动根字号；
+  布局关键尺寸另用显式像素：`h-[56px]`、`top-[56px]`、`h-[calc(100vh-96px)]`、`grid-cols-[240px_minmax(0,1fr)_288px]`。
+- **等高与钉住同时成立**：两侧栏外层 `self-stretch`（撑满行高 ⇒ 三列等高），内层 `sticky top-[56px] h-[calc(100vh-96px)]`
+  （不随主内容滚走）。
+- 页头品牌是 **SVG 字标**（`components/app/Wordmark.tsx`，从原型原样搬来，`useId()` 生成渐变 id 防串色），
+  不是 `<img favicon> + 文字`；页头**不放产品级按钮**（新建 Run / 提交运行都在左导航）。
+- 页头标题 15px/600（"当前在哪"），页面内对象名用 h1 19px/600。
+
+### 字号层级（原型 README 那张表）
+
+| 位置 | 字号 / 字重 |
+|---|---|
+| 页面内 h1（对象名） | 19px / 600 |
+| 品牌字标 | 26px 高，字 17–20px / 650 |
+| 卡片标题 | 15px / 600 |
+| 表格正文 | 14px；表头 12px / 500（中文表头） |
+| 说明文字 | 12.5px；徽标 / 标签 12.5px |
+| KPI 数字 | 30px / 600 + `tabular-nums` + `-0.03em` |
+
+### 字体（自托管，不赌系统字体）
+
+`design/prototype/assets/fonts/*.woff2` → `web/public/fonts/`，`src/styles/fonts.css` 原样两个 `@font-face`
+（`font-display: swap`），`index.css` 里 `@import "./styles/fonts.css"` 且 `--font-sans` 用原型同序栈
+（Albert Sans → Noto Sans SC → 系统兜底）。运行时零外网请求。
+
+### 圆角与染底
+
+`Card` 统一 `overflow-hidden`：语义染底的卡头（`bg-primary-weak` / `bg-warn-weak` …）、表头底色、
+行 hover 都必须裁在 12px 圆角里（T39：配色是矩形、圆角是圆角，会"伸出去"）。
 
 ## 已知偏差 / TODO
 
@@ -190,11 +229,11 @@ dev 部署与 mock 模式都没有 `/auth/*`：`/me` 无 `csrf_token` → mode=d
 |---|---|---|
 | 类型来源 | `api/types.ts` **按 `server/api/openapi.yaml` 手写**（每个类型标注 schema 名） | `openapi-typescript` 生成并入库，CI 校验 diff |
 | 数据层 | 约 50 行 `useAsync`（无缓存层） | 换成 TanStack Query，query key 按 web-and-delivery §3 |
-| 字体 | 系统字体栈（`Segoe UI` / `Microsoft YaHei`） | 自托管 Albert Sans + Noto Sans SC 子集（设计 §5） |
+| 字体 | **自托管** Albert Sans + Noto Sans SC 子集（`public/fonts/` + `src/styles/fonts.css`），已在用 | — |
 | 提交页 YAML 编辑 | `textarea` + 解析校验 | CodeMirror 6（按行标错、`?from=<run>` 回填） |
 | 执行环境 | 契约已有 `GET /profiles`；提交页仍是可编辑文本框（默认 `k8s-npu`），管理台可维护 | 提交页改下拉（一行改动） |
 | 报告页 / 指标表 | 报告页**已做**（`/runs/:id/report`：counts / Task 明细 / 失败清单 / `report.md` 原文）；指标表仍不做（契约明确不聚合） | 需要聚合视图时另开票 |
-| Deploy 日志 | **不接**：`/runs/{id}/deploy/logs` 不在契约内；Pod 拓扑来自 `GET /runs/{id}/deploy`，`deploy.pods` 非空才渲染那块 | 真实 Pod 日志上线后再加页签 |
+| Deploy 日志 | **已接**：`GET /runs/{id}/deploy/logs`，按 Pod 分页签、`offset/next_offset` 加载更多、`tail_lines` 先看最新、`gaps[]` 显式标「此处不连续」 | 滚动跟随时可加 `follow` |
 | Run / Task 级重试 | **已做**（`GET /runs/{id}/retry-plan` + `POST /runs/{id}/retry` + `POST /tasks/{id}/retry`）：**这几个端点 openapi 未收录**，字段按 Lead 约定实现 | 后端落地后把 `types.ts` 的「P1」块改成按 openapi 生成 |
 | 管理台 `/admin` | **已做**（Profiles / Clusters / Secrets / Audit）；`/admin/*` 同样 openapi 未收录 | 同上；delete 409 的 `detail.profiles[]` 已按约定展示 |
 | 日志跟随 / 虚拟滚动 | 一次性读取，无 follow 流 | `?follow=1` 流式追加 + `useVirtualizer`（>10k 行） |

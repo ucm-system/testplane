@@ -89,12 +89,12 @@ export function ReportPage() {
             <Table>
               <THead>
                 <TR className="hover:bg-transparent">
-                  <TH>task_id</TH>
+                  <TH>任务 ID</TH>
                   <TH>名称</TH>
                   <TH>状态</TH>
-                  <TH>Attempt</TH>
+                  <TH>尝试次数</TH>
                   <TH>耗时</TH>
-                  <TH>result_ref</TH>
+                  <TH>结果文件</TH>
                 </TR>
               </THead>
               <TBody>
@@ -137,9 +137,9 @@ export function ReportPage() {
               <Table>
                 <THead>
                   <TR className="hover:bg-transparent">
-                    <TH>task_id</TH>
-                    <TH>reason</TH>
-                    <TH>error_code</TH>
+                    <TH>任务 ID</TH>
+                    <TH>原因</TH>
+                    <TH>错误码</TH>
                   </TR>
                 </THead>
                 <TBody>

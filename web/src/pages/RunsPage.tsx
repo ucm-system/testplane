@@ -140,9 +140,10 @@ export function RunsPage() {
                 <Input
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="搜索 Run 名称或 ID"
-                  aria-label="搜索 Run"
-                  className="h-9 w-48 pl-8"
+                  placeholder="筛选本页 Run（按名称 / ID）"
+                  aria-label="筛选本页 Run（按名称 / ID）"
+                  title="只过滤已加载的这一页，不是全局搜索"
+                  className="h-9 w-56 pl-8"
                 />
               </div>
               <Segmented<StatusFilter>

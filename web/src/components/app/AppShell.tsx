@@ -1,8 +1,9 @@
 import { Suspense, useEffect, useState } from 'react'
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import { Layers, List, Menu, PlusCircle, Server, ShieldCheck } from 'lucide-react'
 import { USE_MOCK } from '@/api'
 import { UserMenu } from '@/components/app/UserMenu'
+import { Wordmark } from '@/components/app/Wordmark'
 import { Drawer } from '@/components/ui/drawer'
 import { useIdentity } from '@/hooks/useIdentity'
 import { cn } from '@/lib/utils'
@@ -94,7 +95,15 @@ function NavList({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 
-/** 圣杯外壳：固定页头 + 左导航 + 主内容 + 右栏 + 页脚（holy-grail.css）。 */
+/**
+ * 圣杯外壳（`holy-grail.css`）：固定页头 + 固定页脚 + 三列等高网格。
+ *
+ * 两条**结构**纪律（不是外观细节，改之前先读原型）：
+ *  1. 三列用 `grid-cols-[240px_minmax(0,1fr)_288px]`，**`<main>` 在 DOM 里先于两侧栏**，
+ *     靠 `col-start-2` 摆到中间 —— 这样读屏与 Tab 顺序是"先内容后导航"；
+ *  2. 页头与 `body` 共用同一套列宽，左分隔线落在 x=240（左栏右边缘）、
+ *     右分隔线落在 x=vw−288（右栏左边缘），所以分隔线不用"随手一条"。
+ */
 export function AppShell() {
   const location = useLocation()
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
@@ -111,47 +120,43 @@ export function AppShell() {
         跳到主内容
       </a>
 
-      <header className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface px-4 md:gap-5 md:px-6">
-        <button
-          type="button"
-          className="rounded-md p-1.5 text-fg-2 hover:bg-surface-2 md:hidden"
-          onClick={() => setMobileNavOpen(true)}
-          aria-label="打开导航"
-        >
-          <Menu className="size-4" aria-hidden />
-        </button>
-
-        <div className="flex shrink-0 items-center gap-2.5">
-          <img src="/favicon.svg" alt="" className="size-7 rounded-[6px]" />
-          <span className="text-sm font-semibold tracking-tight text-fg">TestPlane</span>
+      {/* 页头：列宽与 body 完全一致，两条 1px 竖线踩在列线上 */}
+      <header className="sticky top-0 z-40 grid h-[56px] shrink-0 grid-cols-[240px_minmax(0,1fr)_288px] items-stretch border-b border-line bg-surface max-[1024px]:grid-cols-[240px_minmax(0,1fr)] max-[768px]:flex max-[768px]:items-center max-[768px]:gap-2">
+        <div className="flex min-w-0 items-center gap-3 pl-6 pr-3 max-[768px]:w-auto max-[768px]:shrink-0 max-[768px]:pl-2">
+          <button
+            type="button"
+            className="rounded-md p-1.5 text-fg-2 hover:bg-surface-2 min-[769px]:hidden"
+            onClick={() => setMobileNavOpen(true)}
+            aria-label="打开导航"
+          >
+            <Menu className="size-4" aria-hidden />
+          </button>
+          <Link to="/" aria-label="TestPlane 首页" className="flex shrink-0 items-center gap-2">
+            <Wordmark className="text-fg" />
+          </Link>
           {USE_MOCK ? (
-            <span className="hidden rounded-full border border-dashed border-line-strong px-2 py-0.5 text-2xs text-fg-3 sm:inline">
+            <span className="hidden rounded-full border border-dashed border-line-strong px-2 py-0.5 text-2xs text-fg-3 lg:inline">
               mock
             </span>
           ) : null}
         </div>
 
-        <div className="hidden h-6 w-px bg-line md:block" aria-hidden />
-
-        <div className="flex min-w-0 items-baseline gap-2.5">
-          <h1 className="whitespace-nowrap text-[15px] font-semibold tracking-tight text-fg">{title}</h1>
-          <span className="hidden truncate text-xs text-fg-3 lg:inline">{sub}</span>
+        <div className="flex min-w-0 flex-1 items-center gap-2.5 border-l border-line pl-5 max-[768px]:border-l-0 max-[768px]:pl-2">
+          <h1 className="truncate whitespace-nowrap text-[15px] font-semibold tracking-[-0.01em] text-fg">{title}</h1>
+          <span className="hidden truncate text-xs text-fg-3 md:inline">{sub}</span>
         </div>
 
-        <div className="ml-auto flex items-center gap-2">
+        <div className="flex min-w-0 items-center justify-end gap-2 border-l border-line pl-4 pr-6 max-[1024px]:border-l-0 max-[1024px]:pr-4 max-[768px]:shrink-0 max-[768px]:pl-2 max-[768px]:pr-3">
           <UserMenu />
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 items-start">
-        <aside className="sticky top-14 hidden h-[calc(100vh-6rem)] w-60 shrink-0 flex-col overflow-y-auto border-r border-line bg-surface pb-6 pt-2 md:flex">
-          <NavList />
-          <div className="mt-auto border-t border-line px-5 pb-3 pt-4 text-2xs text-fg-3">
-            {USE_MOCK ? '示例原型 · 数据为 mock' : 'TestPlane · 实时数据'}
-          </div>
-        </aside>
-
-        <main id="main" className="flex min-w-0 flex-1 flex-col gap-4 p-4 lg:p-6">
+      {/* 三列主体：main 写在最前，用 grid-column 摆到第 2 列 */}
+      <div className="grid flex-1 grid-cols-[240px_minmax(0,1fr)_288px] items-stretch max-[1024px]:grid-cols-[240px_minmax(0,1fr)] max-[768px]:grid-cols-[minmax(0,1fr)]">
+        <main
+          id="main"
+          className="col-start-2 row-start-1 flex min-w-0 flex-col gap-4 p-6 max-[768px]:col-start-1 max-[768px]:row-start-2 max-[768px]:p-4"
+        >
           <Suspense
             fallback={
               <div className="flex items-center justify-center rounded-lg border border-line-soft bg-surface py-16 text-xs text-fg-3 shadow-card">
@@ -163,14 +168,33 @@ export function AppShell() {
           </Suspense>
         </main>
 
+        {/* 左栏（col 1）：sticky，高度锁一屏（页头 56 + 页脚 40） */}
         <aside
-          id="right-rail"
+          aria-label="主导航"
+          className="col-start-1 row-start-1 self-stretch border-r border-line bg-surface max-[768px]:hidden"
+        >
+          {/* 外层撑满行高 → 三列等高；内层 sticky → 导航不随主内容滚走 */}
+          <div className="sticky top-[56px] flex h-[calc(100vh-96px)] flex-col overflow-y-auto pb-4 pt-1.5">
+            <NavList />
+            <div className="mt-auto border-t border-line px-5 pb-2 pt-4 text-2xs text-fg-3">
+              {USE_MOCK ? '示意原型 · 数据为 mock' : 'TestPlane · 实时数据'}
+            </div>
+          </div>
+        </aside>
+
+        {/* 右栏（col 3）：外层撑满行高（等高），内层 sticky 且作为 portal 目标 */}
+        <aside
           aria-label="辅助信息"
-          className="sticky top-14 hidden h-[calc(100vh-6rem)] w-72 shrink-0 overflow-y-auto border-l border-line bg-surface p-5 xl:block [&:empty]:hidden"
-        />
+          className="col-start-3 row-start-1 min-w-0 self-stretch border-l border-line bg-surface max-[1024px]:hidden"
+        >
+          <div
+            id="right-rail"
+            className="sticky top-[56px] flex h-[calc(100vh-96px)] flex-col gap-4 overflow-y-auto p-5 [&:empty]:hidden"
+          />
+        </aside>
       </div>
 
-      <footer className="sticky bottom-0 z-30 flex h-10 shrink-0 items-center gap-3 border-t border-line bg-surface px-4 text-2xs text-fg-2 md:px-6">
+      <footer className="sticky bottom-0 z-30 flex h-10 shrink-0 items-center gap-3 border-t border-line bg-surface px-6 text-xs text-fg-2 max-[768px]:px-4">
         <span>TestPlane · {USE_MOCK ? '示意原型，数据为 mock，操作不产生真实执行' : '控制台'}</span>
         <span className="ml-auto hidden text-fg-3 sm:inline">API: /api/v1</span>
       </footer>

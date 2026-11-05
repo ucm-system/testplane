@@ -19,6 +19,7 @@ import { Banner, EmptyState, ErrorState, LoadingBlock } from '@/components/ui/st
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
 import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
+import { DeployLogsPanel } from '@/components/app/DeployLogsPanel'
 import { useIdentity } from '@/hooks/useIdentity'
 import { useRunEvents } from '@/hooks/useRunEvents'
 import {
@@ -114,7 +115,23 @@ function deployStateText(deploy: Deploy): string {
   }
 }
 
-function DeploySection({ run, version }: { run: Run; version: number }) {
+/** Pod / Attempt 的 phase 是 k8s 标识符：展示用中文，原文留在 title 里 */
+const PHASE_LABEL: Record<string, string> = {
+  Pending: '等待中',
+  Preparing: '准备中',
+  Running: '运行中',
+  Succeeded: '成功',
+  Failed: '失败',
+  Unknown: '未知',
+  Canceled: '已取消',
+}
+
+function phaseLabel(phase: string | null | undefined): string {
+  if (!phase) return '—'
+  return PHASE_LABEL[phase] ?? phase
+}
+
+/** Pod / Attempt 的 phase 是 k8s 标识符：展示用中文，原文留在 title 里 */function DeploySection({ run, version }: { run: Run; version: number }) {
   const deploy = run.deploy ?? null
   const snapshot = useAsync(async () => {
     if (!deploy) return null
@@ -211,7 +228,7 @@ function DeploySection({ run, version }: { run: Run; version: number }) {
                 <TR className="hover:bg-transparent">
                   <TH>Pod</TH>
                   <TH>角色</TH>
-                  <TH>phase</TH>
+                  <TH>阶段</TH>
                   <TH>就绪</TH>
                   <TH>节点</TH>
                   <TH>重启</TH>
@@ -222,7 +239,7 @@ function DeploySection({ run, version }: { run: Run; version: number }) {
                   <TR key={pod.name}>
                     <TD className="font-mono text-2xs text-fg">{pod.name}</TD>
                     <TD>{pod.role ? <Tag mono>{pod.role}</Tag> : <span className="text-fg-3">—</span>}</TD>
-                    <TD className="text-2xs">{pod.phase ?? '—'}</TD>
+                    <TD className="text-2xs" title={pod.phase ?? undefined}>{phaseLabel(pod.phase)}</TD>
                     <TD>
                       <Badge tone={pod.ready ? 'ok' : 'warn'}>{pod.ready ? '已就绪' : '未就绪'}</Badge>
                     </TD>
@@ -233,21 +250,29 @@ function DeploySection({ run, version }: { run: Run; version: number }) {
               </TBody>
             </Table>
           </TableWrap>
-          <div className="border-t border-line-soft px-5 py-4">
-            <div className="mb-1 flex flex-wrap items-center gap-2">
-              <span className="text-sm font-semibold text-fg">Pod 日志</span>
-              <span className="text-2xs text-fg-3">按 Pod 分别落盘，不合并</span>
+          <div className="border-t border-line-soft">
+            <div className="flex flex-wrap items-center gap-2 px-5 pb-1 pt-4">
+              <span className="text-sm font-semibold text-fg">Deploy 日志</span>
+              <span className="text-2xs text-fg-3">按 Pod 分页签，不合并；断过的地方显式标 gap</span>
             </div>
-            <p className="text-2xs leading-relaxed text-fg-3">
-              MVP 的 Deploy 是 mock 阶段，日志端点不在接口契约内，前端不请求；这里只展示 Pod 拓扑与日志分段元信息。
-            </p>
+            <DeployLogsPanel runId={run.id} />
           </div>
         </div>
       ) : deploy.state === 'queued' || deploy.state === 'accepted' ? (
         <CardBody className="pt-0">
           <p className="text-2xs text-fg-3">尚未产生 Pod —— 排队 / 部署初期没有 Pod 拓扑。</p>
         </CardBody>
-      ) : null}
+      ) : (
+        /* Pod 拓扑为空（已回收 / 假部署方不落 Pod）时日志面板仍要可达：
+           后端会返回 pods=[] + message，面板原文显示，不当作错误。 */
+        <div className="border-t border-line-soft">
+          <div className="flex flex-wrap items-center gap-2 px-5 pb-1 pt-4">
+            <span className="text-sm font-semibold text-fg">Deploy 日志</span>
+            <span className="text-2xs text-fg-3">Pod 拓扑为空时仍可从后端取说明与历史日志</span>
+          </div>
+          <DeployLogsPanel runId={run.id} />
+        </div>
+      )}
     </Card>
   )
 }
@@ -415,7 +440,7 @@ function TaskAttemptsPanel({
                 <TR className="hover:bg-transparent">
                   <TH className="w-16">Attempt</TH>
                   <TH>状态</TH>
-                  <TH>phase</TH>
+                  <TH>阶段</TH>
                   <TH>退出码</TH>
                   <TH>开始</TH>
                   <TH>结束</TH>
@@ -429,7 +454,7 @@ function TaskAttemptsPanel({
                     <TD>
                       <Badge tone={attemptStatusMeta(item.status).tone}>{attemptStatusMeta(item.status).label}</Badge>
                     </TD>
-                    <TD className="text-2xs">{item.phase ?? '—'}</TD>
+                    <TD className="text-2xs" title={item.phase ?? undefined}>{phaseLabel(item.phase)}</TD>
                     <TD className="tabular-nums">{item.exit_code ?? '—'}</TD>
                     <TD className="whitespace-nowrap text-2xs">{formatClock(item.started_at)}</TD>
                     <TD className="whitespace-nowrap text-2xs">{formatClock(item.finished_at)}</TD>
@@ -786,7 +811,8 @@ export function RunDetailPage() {
               tone="muted"
               title={
                 <span className="flex flex-wrap items-center gap-2">
-                  {detail.name}
+                  {/* 页面内 h1（对象名）：19px/600，压过卡头 15px 的普通标题 */}
+                  <h1 className="text-[19px] font-semibold leading-tight tracking-[-0.02em]">{detail.name}</h1>
                   <RunStatusBadge status={detail.status} />
                   <Tag mono>{detail.id}</Tag>
                   <Tag>{detail.kind === 'run' ? 'Run' : '独立 Task'}</Tag>

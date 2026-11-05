@@ -8,6 +8,8 @@ import type {
   Cluster,
   ClusterWrite,
   DashboardStats,
+  DeployLogQuery,
+  DeployLogs,
   DeploySnapshot,
   DryRunResult,
   ExecutionProfile,
@@ -82,8 +84,10 @@ export interface Api {
   listAttempts(taskId: string): Promise<Attempt[]>
   getAttemptLogs(taskId: string, idx: number, opts?: LogOptions): Promise<LogChunk>
 
-  /* Deploy：只取快照（Pod 拓扑与 manifest），日志端点不在契约内 */
+  /* Deploy：快照（Pod 拓扑与 manifest）+ 按 Pod 分页签的日志（含 gap 标记） */
   getDeploy(runId: string): Promise<DeploySnapshot>
+  /** `GET /runs/{id}/deploy/logs`：排队期返回 `pods: []` + `message`，不是 404 */
+  getDeployLogs(runId: string, query?: DeployLogQuery): Promise<DeployLogs>
 
   /* 事件（SSE 见 api/sse.ts；这里是回放接口，也是降级轮询的来源） */
   getEventsHistory(runId: string, sinceSeq?: number): Promise<RunEvent[]>

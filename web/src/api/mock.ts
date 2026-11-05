@@ -22,6 +22,11 @@ import type {
   ClusterWrite,
   DashboardStats,
   Deploy,
+  DeployLogEntry,
+  DeployLogGap,
+  DeployLogPod,
+  DeployLogQuery,
+  DeployLogs,
   DeployPod,
   DeploySnapshot,
   DryRunResult,
@@ -871,6 +876,23 @@ function auditLog(
   ]
 }
 
+/** 造一段 Deploy 日志（多 Pod、含重启前后的断点素材）。 */
+function deployLogLines(podName: string, runName: string): string[] {
+  const lines: string[] = []
+  const t = (m: number) => new Date(Date.now() - (30 - m) * 60_000).toLocaleTimeString('zh-CN', { hour12: false })
+  lines.push(`${t(0)} [genet] deploy accepted for ${runName}, creating pod ${podName}`)
+  lines.push(`${t(1)} [kubelet] Successfully pulled image "registry.dev.huawei.com/testplane/serving:1.0.0"`)
+  lines.push(`${t(2)} [main] container started, loading model weights from /models/Qwen3-32B`)
+  lines.push(`${t(3)} [main] weights loaded in 42.3s, initializing KV cache (blocks=2048)`)
+  lines.push(`${t(4)} [main] WARNING: NPU memory usage 82% — consider reducing max_model_len`)
+  lines.push(`${t(5)} [main] server listening on 0.0.0.0:8000 (engine=vllm-ascend)`)
+  lines.push(`${t(6)} [main] health endpoint /health ready, endpoint registered`)
+  lines.push(`${t(7)} [main] serving request batch size=32, throughput=1280 tok/s`)
+  lines.push(`${t(8)} [main] ERROR: transient HCCL timeout, retrying (attempt 1/3)`)
+  lines.push(`${t(9)} [main] recovered, HCCL group re-established in 1.2s`)
+  return lines
+}
+
 function isTerminal(status: RunStatus): boolean {
   return ['succeeded', 'completed_with_errors', 'service_unavailable', 'failed', 'canceled'].includes(status)
 }
@@ -1317,6 +1339,93 @@ export const mockApi: Api = {
     await delay(90)
     findRun(runId)
     return clone(state.deploys[runId] ?? { run_id: runId, deploy: null, manifest: null, pods: [] })
+  },
+
+  /**
+   * Deploy 日志：按 Pod 分页签 + **显式 gap**（Pod 重启过就插一条，不假装连续）。
+   * 排队期没有 Pod → `pods: []` + `entries: []` + `message`（契约就是这么定的，不是 404）。
+   */
+  async getDeployLogs(runId: string, query: DeployLogQuery = {}): Promise<DeployLogs> {
+    await delay(110)
+    const run = findRun(runId)
+    const snapshot = state.deploys[runId] ?? { run_id: runId, deploy: run.deploy ?? null, manifest: null, pods: [] }
+    const deployState = snapshot.deploy?.state ?? null
+
+    if (!snapshot.deploy) {
+      return {
+        run_id: runId,
+        pods: [],
+        entries: [],
+        gaps: [],
+        truncated: false,
+        next_offset: 0,
+        message: '这个 Run 没有 Deploy 阶段（service 模式直接打已有服务），因此没有部署日志。',
+      }
+    }
+    if (snapshot.pods.length === 0) {
+      const reason =
+        deployState === 'queued'
+          ? '部署还在排队（Volcano 层），Pod 尚未创建 —— 等 Pod 起来后这里会按 Pod 分页签显示日志。'
+          : '当前还没有可用的 Pod（部署中或已卸载），因此没有日志正文。'
+      return { run_id: runId, pods: [], entries: [], gaps: [], truncated: false, next_offset: 0, message: reason }
+    }
+
+    const pods: DeployLogPod[] = snapshot.pods.map((pod, index) => ({
+      name: pod.name,
+      ready: pod.ready ?? false,
+      // 故意让最后一个 Pod 重启过：这样 gap（此处不连续）在 UI 上一定看得到
+      restarts: index === snapshot.pods.length - 1 ? 2 : 0,
+      started_at: iso(30),
+      last_seen_at: iso(0),
+    }))
+    const target = query.pod ? pods.filter((pod) => pod.name === query.pod) : pods
+
+    const entries: DeployLogEntry[] = []
+    const gaps: DeployLogGap[] = []
+    for (const pod of target) {
+      const lines = deployLogLines(pod.name, run.name)
+      const tail = query.tail_lines && query.tail_lines > 0 ? lines.slice(-query.tail_lines) : lines
+      const offset = query.offset ?? 0
+      const limit = query.limit ?? 200
+      const slice = tail.slice(offset, offset + limit)
+      if (slice.length > 0) {
+        entries.push({
+          pod: pod.name,
+          container: pod.name.includes('pd') ? 'prefill' : 'main',
+          offset,
+          line_count: slice.length,
+          text: slice.join('\n'),
+        })
+      }
+      if (pod.restarts > 0) {
+        gaps.push({
+          pod: pod.name,
+          from: iso(24),
+          to: iso(22),
+          reason: 'pod restarted',
+        })
+      }
+      const next = offset + slice.length
+      if (next < tail.length) {
+        return {
+          run_id: runId,
+          pods,
+          entries,
+          gaps,
+          truncated: true,
+          next_offset: next,
+        }
+      }
+    }
+    return {
+      run_id: runId,
+      pods,
+      entries,
+      gaps,
+      truncated: false,
+      next_offset: 0,
+      ...(target.length === 0 ? { message: `没有名为 ${query.pod} 的 Pod。` } : {}),
+    }
   },
 
   async getEventsHistory(runId: string, sinceSeq = 0): Promise<RunEvent[]> {
