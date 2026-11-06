@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { HTMLAttributes, ReactNode } from 'react'
 import { AlertTriangle, Inbox, RefreshCw } from 'lucide-react'
 import type { ApiErrorBody } from '@/api/types'
 import { detailToText } from '@/lib/utils'
@@ -8,7 +8,7 @@ import { Button } from './button'
 
 /* ---------------------------------------------------------------- 空态 */
 
-export interface EmptyStateProps {
+export interface EmptyStateProps extends Omit<HTMLAttributes<HTMLDivElement>, 'title'> {
   title: ReactNode
   description?: ReactNode
   action?: ReactNode
@@ -16,9 +16,9 @@ export interface EmptyStateProps {
   className?: string
 }
 
-export function EmptyState({ title, description, action, icon, className }: EmptyStateProps) {
+export function EmptyState({ title, description, action, icon, className, ...rest }: EmptyStateProps) {
   return (
-    <div className={cn('flex flex-col items-center justify-center gap-2 px-6 py-12 text-center', className)}>
+    <div className={cn('flex flex-col items-center justify-center gap-2 px-6 py-12 text-center', className)} {...rest}>
       <span className="grid size-9 place-items-center rounded-full bg-surface-3 text-fg-3" aria-hidden>
         {icon ?? <Inbox className="size-4" />}
       </span>

@@ -56,6 +56,9 @@ import type {
   Run,
   RunEvent,
   RunEventType,
+  FacetBucket,
+  RunFacets,
+  RunFacetsQuery,
   RunListQuery,
   RunManifest,
   RunStatus,
@@ -1250,6 +1253,32 @@ function paginate<T>(items: T[], cursor: string | null | undefined, limit: numbe
   return { items: slice, next_cursor: hasMore ? String(nextIndex) : null, has_more: hasMore }
 }
 
+/**
+ * 列表与 facets 共用的过滤：多值用逗号，空值即不过滤。
+ * 排序固定为提交时间倒序（07 §6「排序固定」）。
+ */
+function filterRuns(query: RunListQuery): Run[] {
+  const statuses = query.status?.split(',').filter(Boolean) ?? []
+  const submitters = query.submitter?.split(',').filter(Boolean) ?? []
+  const testers = query.tester?.split(',').filter(Boolean) ?? []
+  const kinds = query.kind?.split(',').filter(Boolean) ?? []
+
+  return state.runs
+    .filter((r) => (statuses.length === 0 ? true : statuses.includes(r.status)))
+    .filter((r) => (kinds.length === 0 ? true : kinds.includes(r.kind)))
+    .filter((r) => (submitters.length === 0 ? true : submitters.includes(r.submitted_by)))
+    // Tester 过滤：服务端按 Task 的 Tester 归属筛 Run（mock 从 Task 表反查）
+    .filter((r) =>
+      testers.length === 0
+        ? true
+        : Object.values(state.tasks).some(
+            (task) => task.run_id === r.id && testers.includes(task.tester_name ?? ''),
+          ),
+    )
+    .slice()
+    .sort((a, b) => b.submitted_at.localeCompare(a.submitted_at))
+}
+
 function findRun(id: string): Run {
   const run = state.runs.find((r) => r.id === id)
   if (!run) notFound(`Run ${id}`)
@@ -1410,21 +1439,62 @@ export const mockApi: Api = {
 
   async listRuns(query: RunListQuery = {}): Promise<Page<Run>> {
     await delay()
-    const statuses = query.status?.split(',').filter(Boolean) ?? []
-    const filtered = state.runs
-      .filter((r) => (statuses.length === 0 ? true : statuses.includes(r.status)))
-      .filter((r) => (query.kind ? r.kind === query.kind : true))
-      .filter((r) => (query.submitter ? r.submitted_by === query.submitter : true))
-      // Tester 过滤：服务端按 Task 的 Tester 归属筛 Run（mock 从 Task 表反查）
-      .filter((r) =>
-        query.tester
-          ? Object.values(state.tasks).some((task) => task.run_id === r.id && task.tester_name === query.tester)
-          : true,
-      )
-      .slice()
-      .sort((a, b) => b.submitted_at.localeCompare(a.submitted_at))
-      .map(summarizeRun)
+    const filtered = filterRuns(query).map(summarizeRun)
+
+    // offset 分页（UI）：回 total / page / page_size，next_cursor 恒为 null（D-61）
+    if (query.page != null) {
+      const pageSize = query.page_size ?? 20
+      const page = Math.max(1, query.page)
+      const start = (page - 1) * pageSize
+      const slice = filtered.slice(start, start + pageSize)
+      return {
+        items: slice,
+        next_cursor: null,
+        has_more: start + slice.length < filtered.length,
+        total: filtered.length,
+        page,
+        page_size: pageSize,
+      }
+    }
+
     return paginate(filtered, query.cursor, query.limit ?? 50)
+  },
+
+  /**
+   * 表头列筛选的候选值（D-61 / 07 §5.1）。
+   *
+   * facet 语义：算某一维度的计数时，只应用其它维度的过滤，不应用自己那维 ——
+   * 否则勾了 submitter=dev 之后，qa 就从候选里消失了，用户再也勾不回来。
+   */
+  async listRunFacets(query: RunFacetsQuery = {}): Promise<RunFacets> {
+    await delay(60)
+    const count = (dimension: keyof RunFacetsQuery, keyOf: (run: Run) => string[]): FacetBucket[] => {
+      const others: RunFacetsQuery = { ...query }
+      delete others[dimension]
+      const buckets = new Map<string, number>()
+      for (const run of filterRuns(others)) {
+        for (const value of keyOf(run)) buckets.set(value, (buckets.get(value) ?? 0) + 1)
+      }
+      return [...buckets.entries()]
+        .map(([value, n]) => ({ value, count: n }))
+        .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value))
+    }
+
+    return {
+      status: count('status', (run) => [run.status]),
+      submitter: count('submitter', (run) => [run.submitted_by]),
+      kind: count('kind', (run) => [run.kind]),
+      // tester 维度按 Task 归属统计：一个 Run 里几个 Tester 就各记一次
+      tester: count('tester', (run) =>
+        [
+          ...new Set(
+            Object.values(state.tasks)
+              .filter((task) => task.run_id === run.id && task.tester_name)
+              .map((task) => task.tester_name as string),
+          ),
+        ].filter(Boolean),
+      ),
+    }
   },
 
   async getRun(id: string): Promise<Run> {

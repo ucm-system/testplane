@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"gopkg.in/yaml.v3"
@@ -126,36 +128,110 @@ func precheckPreview(p *Prepared) map[string]any {
 }
 
 // handleListRuns 是 GET /api/v1/runs。
-func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
+// runListDTO 是 Run 列表信封（openapi RunList）：游标模式与 offset 模式共用。
+//
+// D-61：UI 走 offset（page/page_size，额外回 total/page/page_size），
+// agent/CLI 走 cursor；两者**互斥**，给了 page 就忽略 cursor。
+type runListDTO struct {
+	Items      []runDTO `json:"items"`
+	NextCursor *string  `json:"next_cursor"`
+	HasMore    bool     `json:"has_more"`
+	// 以下三个只在 offset 模式下非 null（游标模式为 null，避免 count 成本）。
+	Total    *int `json:"total"`
+	Page     *int `json:"page"`
+	PageSize *int `json:"page_size"`
+}
+
+// parseRunFilter 解析过滤参数（列表与 facets 共用同一份语义）。
+func parseRunFilter(r *http.Request) (store.RunFilter, int, int, bool) {
 	q := r.URL.Query()
 	f := store.RunFilter{
-		Statuses:  splitCSV(q.Get("status")),
-		Kind:      q.Get("kind"),
-		Submitter: q.Get("submitter"),
-		Tester:    q.Get("tester"),
-		Cursor:    q.Get("cursor"),
-		Limit:     atoiDefault(q.Get("limit"), 50),
+		Statuses:   splitCSV(q.Get("status")),
+		Kind:       q.Get("kind"),
+		Submitters: splitCSV(q.Get("submitter")),
+		Tester:     q.Get("tester"),
+		Cursor:     q.Get("cursor"),
+		Limit:      atoiDefault(q.Get("limit"), 50),
 	}
 	if f.Kind != "" && f.Kind != "run" && f.Kind != "task" {
+		return f, 0, 0, false
+	}
+	page := atoiDefault(q.Get("page"), 0)
+	pageSize := atoiDefault(q.Get("page_size"), 0)
+	if page < 0 || pageSize < 0 {
+		return f, 0, 0, false
+	}
+	// 默认 20、上限 100（07 §5.1）；>100 收敛到 100，避免一页拉爆。
+	if pageSize == 0 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	return f, page, pageSize, true
+}
+
+func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	f, page, pageSize, ok := parseRunFilter(r)
+	if !ok {
 		fail(w, r, http.StatusBadRequest, domain.CodeValidationError,
-			"kind 只能是 run|task", nil, false)
+			"kind 只能是 run|task；page/page_size 不能为负", nil, false)
 		return
 	}
-	items, next, err := s.st.Runs.List(r.Context(), nil, f)
-	if err != nil {
-		s.failErr(w, r, err)
-		return
+
+	out := make([]runDTO, 0, pageSize)
+	var (
+		total *int
+		next  = ""
+		more  bool
+	)
+	if page > 0 {
+		// offset 模式：忽略 cursor（互斥，D-61）。
+		f.Cursor = ""
+		items, n, err := s.st.Runs.ListPage(ctx, nil, f, page, pageSize)
+		if err != nil {
+			s.failErr(w, r, err)
+			return
+		}
+		total = &n
+		more = page*pageSize < n
+		out = s.fillRunDTOs(ctx, items, out)
+	} else {
+		// 游标模式（原行为，limit 默认 50）。
+		items, cursor, err := s.st.Runs.List(ctx, nil, f)
+		if err != nil {
+			s.failErr(w, r, err)
+			return
+		}
+		next, more = cursor, cursor != ""
+		out = s.fillRunDTOs(ctx, items, out)
+	}
+
+	resp := runListDTO{Items: out, HasMore: more}
+	if page > 0 {
+		p, ps := page, pageSize
+		resp.Total, resp.Page, resp.PageSize = total, &p, &ps
+	}
+	if next != "" {
+		resp.NextCursor = cursorPtr(next)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// fillRunDTOs 把 store 行投影成 DTO 并补 task_counts（一次批量查询，不 N+1）。
+func (s *Server) fillRunDTOs(ctx context.Context, items []store.Run, out []runDTO) []runDTO {
+	if len(items) == 0 {
+		return out
 	}
 	ids := make([]string, 0, len(items))
 	for i := range items {
 		ids = append(ids, items[i].ID)
 	}
-	counts, err := s.st.Runs.TaskCounts(r.Context(), nil, ids)
+	counts, err := s.st.Runs.TaskCounts(ctx, nil, ids)
 	if err != nil {
-		s.failErr(w, r, err)
-		return
+		s.logger.Warn("runs: task counts 查询失败（本次不展示计数）", "err", err)
 	}
-	out := make([]runDTO, 0, len(items))
 	for i := range items {
 		dto := toRunDTO(&items[i])
 		if c, ok := counts[dto.ID]; ok {
@@ -163,7 +239,31 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, dto)
 	}
-	writeJSON(w, http.StatusOK, paged[runDTO]{Items: out, NextCursor: cursorPtr(next), HasMore: next != ""})
+	return out
+}
+
+// handleRunFacets 是 GET /api/v1/runs/facets（D-61 / 07 §5.1）：
+// 返回 status/submitter/kind/tester 四个维度的取值与计数，供表头下拉（Excel 式筛选）。
+// 计数按维度独立（其它维度过滤生效、自己不生效），且与列表同一过滤参数族。
+func (s *Server) handleRunFacets(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	f, _, _, ok := parseRunFilter(r)
+	if !ok {
+		fail(w, r, http.StatusBadRequest, domain.CodeValidationError,
+			"kind 只能是 run|task；page/page_size 不能为负", nil, false)
+		return
+	}
+	// 四个维度的计数必须在同一事务快照里算，否则与列表/彼此之间可能瞬时不一致。
+	var facets store.RunFacets
+	if err := s.st.InTx(ctx, func(tx pgx.Tx) error {
+		var ferr error
+		facets, ferr = s.st.Runs.Facets(ctx, tx, f)
+		return ferr
+	}); err != nil {
+		s.failErr(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, facets)
 }
 
 // handleGetRun 是 GET /api/v1/runs/{id}：详情 + Task 摘要（一条 JOIN，禁止 N+1）。

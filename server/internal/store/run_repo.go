@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -40,10 +39,16 @@ func (r *RunRepo) Get(ctx context.Context, tx pgx.Tx, id string) (*Run, error) {
 	return run, nil
 }
 
-// RunFilter 是 Run 列表的过滤条件（07 §5.1）。
+// RunFilter 是 Run 列表的过滤条件（07 §5.1）；多值字段走 SQL 的 ANY(数组)。
+//
+// WHERE 的唯一来源是 run_query.go 的 runConds.build —— 列表/计数/facets 共用，
+// 不要在这里或调用方再拼一遍。
 type RunFilter struct {
-	Statuses  []string
-	Kind      string
+	Statuses []string
+	Kind     string
+	// Submitters 多值：命中任一提交人即算（`submitter=dev,qa`）。
+	Submitters []string
+	// Submitter 是单值兼容字段（旧调用方）；与 Submitters 合并后去重。
 	Submitter string
 	Tester    string // 命中任一 Task 的 tester_name
 	Cursor    string
@@ -53,54 +58,27 @@ type RunFilter struct {
 // List 返回按 submitted_at DESC, id DESC 的游标分页结果。
 func (r *RunRepo) List(ctx context.Context, tx pgx.Tx, f RunFilter) ([]Run, string, error) {
 	limit := normalizeLimit(f.Limit)
-	args := []any{}
-	var where []string
-	if len(f.Statuses) > 0 {
-		args = append(args, f.Statuses)
-		where = append(where, fmt.Sprintf("r.status = ANY($%d)", len(args)))
-	}
-	if f.Kind != "" {
-		args = append(args, f.Kind)
-		where = append(where, fmt.Sprintf("r.kind = $%d", len(args)))
-	}
-	if f.Submitter != "" {
-		args = append(args, f.Submitter)
-		where = append(where, fmt.Sprintf("r.submitted_by = $%d", len(args)))
-	}
-	if f.Tester != "" {
-		args = append(args, f.Tester)
-		where = append(where, fmt.Sprintf(`EXISTS (SELECT 1 FROM tasks t WHERE t.run_id = r.id AND t.tester_name = $%d)`, len(args)))
-	}
+	// 条件来自唯一来源（run_query.go）；游标条件在此追加。
+	whereSQL, args := condsOf(f).build("")
+	where := whereSQL
 	ts, id, err := DecodeCursor(f.Cursor)
 	if err != nil {
 		return nil, "", err
 	}
 	if !ts.IsZero() {
 		args = append(args, ts, id)
-		where = append(where, fmt.Sprintf("(r.submitted_at, r.id) < ($%d, $%d)", len(args)-1, len(args)))
+		sep := " WHERE "
+		if where != "" {
+			sep = " AND "
+		}
+		where += fmt.Sprintf("%s(r.submitted_at, r.id) < ($%d, $%d)", sep, len(args)-1, len(args))
 	}
 	args = append(args, limit+1)
-	q := `SELECT ` + runCols + ` FROM runs r`
-	if len(where) > 0 {
-		q += " WHERE " + strings.Join(where, " AND ")
-	}
-	q += fmt.Sprintf(" ORDER BY r.submitted_at DESC, r.id DESC LIMIT $%d", len(args))
-
-	rows, err := r.s.db(tx).Query(ctx, q, args...)
+	q := `SELECT ` + runCols + ` FROM runs r` + where +
+		fmt.Sprintf(" ORDER BY r.submitted_at DESC, r.id DESC LIMIT $%d", len(args))
+	out, err := r.queryRuns(ctx, tx, q, args...)
 	if err != nil {
-		return nil, "", fmt.Errorf("store: list runs: %w", err)
-	}
-	defer rows.Close()
-	var out []Run
-	for rows.Next() {
-		run, err := scanRun(rows)
-		if err != nil {
-			return nil, "", fmt.Errorf("store: scan run: %w", err)
-		}
-		out = append(out, *run)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("store: iterate runs: %w", err)
+		return nil, "", err
 	}
 	next := ""
 	if len(out) > limit {
