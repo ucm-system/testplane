@@ -58,15 +58,34 @@ type DeployLogCollector struct {
 	Src         ports.PodLogSource
 	Logf        func(format string, args ...any)
 	Interval    time.Duration // 默认 30s（测试可调小）
+	// MaxDuration 是采集硬上限（默认 24h，D-59 补充条款）：`cleanup: never` 的 Run 不会被卸载，
+	// 不能无限跟下去。
+	MaxDuration time.Duration
+	// OnStop 在 collector 因**自身原因**停止时回调（Pod 全消失 / 到上限），
+	// 供控制器把 map 里的条目清掉。
+	OnStop func(runID, reason string)
 
-	mu        sync.Mutex
-	cancel    context.CancelFunc
-	streaming map[string]context.CancelFunc // pod/container → 取消该流的跟随
-	lastTs    map[string]time.Time          // pod/container → 已写入的最新时间戳
+	mu         sync.Mutex
+	cancel     context.CancelFunc
+	startedAt  time.Time
+	hadPods    bool
+	stopReason string
+	collecting bool
+	lastPods   []ports.PodInfo
+	streaming  map[string]context.CancelFunc // pod/container → 取消该流的跟随
+	// followWG 跟踪所有写盘 goroutine（follow + previous 补齐），Wait 必须等它们全部结束，
+	// 否则测试/关闭时会在"文件还没写完"时去读（CI 慢的时候必现，本机快看不出来）。
+	followWG sync.WaitGroup
+	// stopFiles 是 collector 自我停止时要写 stopped 标记的文件（Pod 全消失时 lastPods 已空）。
+	stopFiles map[string]bool
+	lastTs    map[string]time.Time // pod/container → 已写入的最新时间戳
 	known     map[string]ports.ContainerInfo
 	pods      map[string]ports.PodInfo
 	done      chan struct{}
 }
+
+// deployLogMaxDuration 是默认采集上限（D-59 补充条款：Pod 不卸载时不无限跟随）。
+const deployLogMaxDuration = 24 * time.Hour
 
 // Start 启动 collector（幂等：同一个 collector 实例只启动一次）。
 func (c *DeployLogCollector) Start(parent context.Context) {
@@ -82,6 +101,9 @@ func (c *DeployLogCollector) Start(parent context.Context) {
 	c.known = map[string]ports.ContainerInfo{}
 	c.pods = map[string]ports.PodInfo{}
 	c.done = make(chan struct{})
+	c.startedAt = time.Now()
+	c.collecting = true
+	c.stopReason = ""
 	c.mu.Unlock()
 
 	go func() {
@@ -90,8 +112,55 @@ func (c *DeployLogCollector) Start(parent context.Context) {
 	}()
 }
 
-// Stop 停止 collector 并写 stopped 标记（Run 进入 CLEANUP 时调用）。
+// Stop 停止 collector 并写 stopped 标记。
+//
+// 调用时机由控制器决定（D-59 补充条款）：
+//   - Run 终态 **且** uninstall 表明真的卸载过 → 立刻停；
+//   - `cleanup: never` / skipped / 卸载失败 → **不停**，让 collector 继续跟到
+//     "所有 Pod 消失"或 24h 上限（否则 Pod 还在跑、日志却再也采不到）。
 func (c *DeployLogCollector) Stop(reason string) {
+	c.mu.Lock()
+	cancel := c.cancel
+	c.cancel = nil
+	streams := make([]context.CancelFunc, 0, len(c.streaming))
+	for _, s := range c.streaming {
+		streams = append(streams, s)
+	}
+	// 先记下"要写 stopped 标记的文件"：下面会清空 streaming，之后就没名字了。
+	files := c.fileNamesLocked()
+	for f := range c.stopFiles {
+		files = append(files, f)
+	}
+	c.stopFiles = nil
+	c.streaming = map[string]context.CancelFunc{}
+	c.collecting = false
+	if c.stopReason == "" {
+		c.stopReason = reason
+	}
+	lastPods := c.lastPods
+	stopReason := c.stopReason
+	c.mu.Unlock()
+
+	// 注意：即使没 Start 过（cancel==nil），也要写 stopped 标记 + pods.json——
+	// 否则 "期间没起来" 的 collector 停止时会静默无痕。
+	if cancel != nil {
+		cancel()
+		for _, s := range streams {
+			s()
+		}
+	}
+	for _, file := range files {
+		c.appendLine(file, fmt.Sprintf("--- [collection stopped: %s at %s] ---",
+			reason, time.Now().UTC().Format(time.RFC3339)))
+	}
+	// 收尾把 pods.json 的 collecting=false / stop_reason 落盘（UI 要显示"采集已结束"）。
+	c.writePodsJSON(lastPods, stopReason)
+}
+
+// StopQuiet 取消采集但**不写任何标记**（也不把 collecting 置 false）：
+// 用于"namespace 从配置回退值改成 Genet 真实 namespace"这种**换目标继续采**的场景，
+// 写 `collection stopped` 会让用户以为采集终止了（真机踩过一次）。
+func (c *DeployLogCollector) StopQuiet() {
 	c.mu.Lock()
 	cancel := c.cancel
 	c.cancel = nil
@@ -101,25 +170,22 @@ func (c *DeployLogCollector) Stop(reason string) {
 	}
 	c.streaming = map[string]context.CancelFunc{}
 	c.mu.Unlock()
-
-	if cancel == nil {
-		return
+	if cancel != nil {
+		cancel()
 	}
-	cancel()
 	for _, s := range streams {
 		s()
 	}
-	c.markAll("--- [collection stopped: %s at %s] ---", reason, time.Now().UTC().Format(time.RFC3339))
+	c.Wait()
 }
 
 // Wait 等 collector 退出（测试用）。
+// Wait 等**当前所有写盘 goroutine**结束（测试/关闭时保证文件已写完）。
+//
+// 注意：它**不**等发现循环（那是 Stop 的职责）。之前误等落盘循环的 done channel，
+// 在 Start 之后调用 Wait 会永久阻塞；写盘 goroutine 才是"读文件前必须等的东西"。
 func (c *DeployLogCollector) Wait() {
-	c.mu.Lock()
-	done := c.done
-	c.mu.Unlock()
-	if done != nil {
-		<-done
-	}
+	c.followWG.Wait()
 }
 
 func (c *DeployLogCollector) interval() time.Duration {
@@ -228,7 +294,73 @@ func (c *DeployLogCollector) discover(ctx context.Context) {
 			c.follow(ctx, p.Name, ct.Name)
 		}
 	}
-	c.writePodsJSON(sel)
+	c.mu.Lock()
+	prevPods := c.lastPods
+	if len(sel) > 0 {
+		c.lastPods = sel
+		c.hadPods = true
+	}
+	hadPods := c.hadPods
+	startedAt := c.startedAt
+	c.mu.Unlock()
+
+	c.writePodsJSON(sel, "")
+
+	// 停止条件（D-59 补充条款）：
+	//   1. 曾经有 Pod、现在全消失 → 收尾写 stopped（说明原因），别静默停；
+	//   2. 到达上限（默认 24h，`cleanup: never` 的 Run Pod 不会被卸载）。
+	if hadPods && len(sel) == 0 {
+		// 用"消失前那批 Pod"的文件名写收尾标记（此刻 lastPods 已经空了）。
+		c.selfStop("all pods gone", fileNameSet(prevPods))
+		return
+	}
+	maxDuration := c.MaxDuration
+	if maxDuration <= 0 {
+		maxDuration = deployLogMaxDuration
+	}
+	if !startedAt.IsZero() && time.Since(startedAt) > maxDuration {
+		c.selfStop("max duration reached", nil)
+	}
+}
+
+// fileNameSet 把一批 Pod 展开成日志文件名（去重）。
+func fileNameSet(pods []ports.PodInfo) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(pods))
+	for _, p := range pods {
+		for _, ct := range p.Containers {
+			f := fileNameOf(p.Name, ct.Name)
+			if !seen[f] {
+				seen[f] = true
+				out = append(out, f)
+			}
+		}
+	}
+	return out
+}
+
+// selfStop 是 collector 自己判定该收尾（Pod 全消失 / 到上限）。
+func (c *DeployLogCollector) selfStop(reason string, files []string) {
+	c.mu.Lock()
+	onStop := c.OnStop
+	runID := c.RunID
+	if len(files) > 0 {
+		if c.stopFiles == nil {
+			c.stopFiles = map[string]bool{}
+		}
+		for _, f := range files {
+			c.stopFiles[f] = true
+		}
+	}
+	c.mu.Unlock()
+	marker := reason
+	if reason == "max duration reached" {
+		marker = "max duration reached"
+	}
+	c.Stop(marker)
+	if onStop != nil {
+		onStop(runID, marker)
+	}
 }
 
 // follow 起一个跟随流（该 Pod/容器已终态时不再跟随，避免空转）。
@@ -245,7 +377,9 @@ func (c *DeployLogCollector) follow(ctx context.Context, pod, container string) 
 	last := c.lastTs[key]
 	c.mu.Unlock()
 
+	c.followWG.Add(1)
 	go func() {
+		defer c.followWG.Done()
 		defer func() {
 			c.mu.Lock()
 			delete(c.streaming, key)
@@ -342,6 +476,33 @@ func (c *DeployLogCollector) markPod(pod, format string, args ...any) {
 	c.appendLine(name, fmt.Sprintf(format, args...))
 }
 
+// fileNamesLocked 汇总"已知的日志文件名"（调用方保证已持锁）。
+func (c *DeployLogCollector) fileNamesLocked() []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(c.streaming))
+	for _, p := range c.lastPods {
+		for _, ct := range p.Containers {
+			f := fileNameOf(p.Name, ct.Name)
+			if !seen[f] {
+				seen[f] = true
+				out = append(out, f)
+			}
+		}
+	}
+	for key := range c.streaming {
+		parts := strings.SplitN(key, "/", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		f := fileNameOf(parts[0], parts[1])
+		if !seen[f] {
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 func (c *DeployLogCollector) markAll(format string, args ...any) {
 	c.mu.Lock()
 	names := make([]string, 0, len(c.streaming))
@@ -379,7 +540,7 @@ func (c *DeployLogCollector) appendChild(file, line string) {
 }
 
 // writePodsJSON 原子写 `deploy/pods.json`（03-data-view §4.4.1）。
-func (c *DeployLogCollector) writePodsJSON(pods []ports.PodInfo) {
+func (c *DeployLogCollector) writePodsJSON(pods []ports.PodInfo, stopReason string) {
 	type containerJSON struct {
 		Name     string `json:"name"`
 		Restarts int32  `json:"restarts"`
@@ -399,10 +560,23 @@ func (c *DeployLogCollector) writePodsJSON(pods []ports.PodInfo) {
 		Containers []containerJSON `json:"containers"`
 		Logs       []logJSON       `json:"logs"`
 	}
+	c.mu.Lock()
+	collecting := c.collecting
+	reason := c.stopReason
+	c.mu.Unlock()
+	if reason == "" {
+		reason = stopReason
+	}
 	doc := struct {
 		GeneratedAt string    `json:"generated_at"`
+		Collecting  bool      `json:"collecting"`
+		StopReason  string    `json:"stop_reason,omitempty"`
 		Pods        []podJSON `json:"pods"`
-	}{GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
+	}{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Collecting:  collecting,
+		StopReason:  reason,
+	}
 
 	for _, p := range pods {
 		pj := podJSON{Name: p.Name, Phase: p.Phase, Node: p.Node, Ready: p.Ready}
@@ -498,4 +672,11 @@ func ReadDeployLogFiles(root, runID string) []string {
 func copyStream(rc io.Reader) string {
 	raw, _ := io.ReadAll(rc)
 	return string(raw)
+}
+
+// IsCollecting 报告采集是否仍在进行（测试与状态投影用）。
+func (c *DeployLogCollector) IsCollecting() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.collecting
 }

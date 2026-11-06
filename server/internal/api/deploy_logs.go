@@ -417,7 +417,14 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 		appendMessage("日志来自落盘副本 " + diskFile)
 	} else {
 		if client == nil {
-			resp.Message = "该 Pod 的日志未落盘（collector 未运行），且当前无法连接执行集群实时读取"
+			if hasPodsDoc && !podsDoc.Collecting {
+				// 采集已结束（`cleanup: never` / Pod 全消失 / 到上限），且没有可用的实时通道。
+				resp.Message = fmt.Sprintf(
+					"该 Run 未卸载（Pod 仍在运行），但日志采集已结束（原因：%s）；盘上没有该 Pod 的副本，也无法实时读取",
+					firstNonEmptyStr(podsDoc.StopReason, "unknown"))
+			} else {
+				resp.Message = "该 Pod 的日志未落盘（collector 未运行），且当前无法连接执行集群实时读取"
+			}
 			noteFallback()
 			writeJSON(w, http.StatusOK, resp)
 			return
@@ -429,7 +436,15 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		lines = splitLogLines(raw)
-		appendMessage("这是实时窗口（pods/log），Pod 回收后不可得；该 Pod 暂无落盘副本")
+		if hasPodsDoc && !podsDoc.Collecting {
+			// 采集已结束但 Pod 还活着：这是 `cleanup: never` / skipped / 卸载失败的情形，
+			// 用户最需要知道"为什么没有日志"——说清原因，别只讲"没有落盘副本"。
+			appendMessage(fmt.Sprintf(
+				"该 Run 未卸载（Pod 仍在运行），但日志采集已结束（原因：%s）；以下内容来自实时窗口",
+				firstNonEmptyStr(podsDoc.StopReason, "unknown")))
+		} else {
+			appendMessage("这是实时窗口（pods/log），Pod 回收后不可得；该 Pod 暂无落盘副本")
+		}
 	}
 
 	// tail 窗口：取到的就是"最后 N 行"，一次性吐完，不提供续页。
@@ -585,4 +600,14 @@ func containerFromLogFile(file, pod string) string {
 		return rest
 	}
 	return deployLogDefaultContainer
+}
+
+// firstNonEmptyStr 取第一个非空字符串（提示语里的兜底）。
+func firstNonEmptyStr(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

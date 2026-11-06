@@ -1312,8 +1312,11 @@ func (c *Controller) cleanupDeployIfTerminal(ctx context.Context, runID string) 
 	if runID == "" {
 		return
 	}
-	// D-59：Run 进入 CLEANUP/终态才停日志采集（不是测试一结束就停）。
-	c.stopDeployLogCollector(runID, "run entered CLEANUP")
+	// D-59 补充条款：只有"确实卸载过"才停采集。
+	// `cleanup: never` / skipped / 卸载失败时 Pod 还在跑，停了就再也采不到它的日志。
+	if c.deployUninstalled(ctx, runID) {
+		c.stopDeployLogCollector(runID, "run terminal + deploy uninstalled")
+	}
 	if c.deployer == nil {
 		return
 	}
@@ -1410,17 +1413,26 @@ func (c *Controller) ensureDeployLogCollector(ctx context.Context, run RunView) 
 		return
 	}
 
-	c.mu.Lock()
-	if _, exists := c.deployLogs[run.ID]; exists {
-		c.mu.Unlock()
-		return
-	}
 	ns := m.Namespace
 	if ns == "" {
 		ns = c.cfg.Namespace
-	} else if ns != c.cfg.Namespace {
-		// Deploy 的 Pod 在 Genet 的 namespace 里：collector 必须去那里抓。
-		// （c.exec 的默认 namespace 是本平台 namespace，所以这里显式传 ns。）
+	}
+	// Deploy 的 Pod 在 Genet 的 namespace 里：collector 必须去那里抓。
+	// 注意 namespace 是 Poll 之后才被回填的 —— 早启动的 collector 可能先用配置 namespace 起了，
+	// 一旦真实 namespace 出现就要**换掉**它，否则会一直在错的 namespace 里发现 0 个 Pod（真机踩过）。
+	c.mu.Lock()
+	if existing, exists := c.deployLogs[run.ID]; exists {
+		if existing.Namespace == ns {
+			c.mu.Unlock()
+			return
+		}
+		c.mu.Unlock()
+		// 换目标：安静停掉旧的（不写 collection stopped，避免用户误以为采集终止），再按新 ns 起一个。
+		existing.StopQuiet()
+		c.logf("orchestrator: deploy_logs collector re-targeted: run %s %s -> %s",
+			run.ID, existing.Namespace, ns)
+		c.mu.Lock()
+		delete(c.deployLogs, run.ID)
 	}
 	collector := &DeployLogCollector{
 		RunID:       run.ID,
@@ -1429,6 +1441,12 @@ func (c *Controller) ensureDeployLogCollector(ctx context.Context, run RunView) 
 		Root:        c.cfg.StorageRoot,
 		Src:         src,
 		Logf:        c.logf,
+		OnStop: func(runID, reason string) {
+			c.mu.Lock()
+			delete(c.deployLogs, runID)
+			c.mu.Unlock()
+			c.logf("orchestrator: deploy_logs collector stopped: run %s (%s)", runID, reason)
+		},
 	}
 	c.deployLogs[run.ID] = collector
 	c.mu.Unlock()
@@ -1508,5 +1526,30 @@ func cleanStaleTmp(dir string) {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".tmp") {
 			_ = os.Remove(filepath.Join(dir, e.Name()))
 		}
+	}
+}
+
+// deployUninstalled 报告该 Run 的 deploy 是否**真的卸载过**（D-59 补充条款）。
+//
+// uninstall.state ∈ {verified, uninstalled, succeeded} 才算"Pod 不会再回来"，
+// 此时可以立刻停采集；`skipped`/`failed`/缺失（`cleanup: never`）都还要继续跟。
+func (c *Controller) deployUninstalled(ctx context.Context, runID string) bool {
+	run, err := c.repos.GetRun(ctx, runID)
+	if err != nil {
+		return false
+	}
+	var doc struct {
+		Uninstall struct {
+			State string `json:"state"`
+		} `json:"uninstall"`
+	}
+	if len(run.DeployJSON) > 0 {
+		_ = json.Unmarshal(run.DeployJSON, &doc)
+	}
+	switch doc.Uninstall.State {
+	case domain.UninstallVerified, "uninstalled", "succeeded":
+		return true
+	default:
+		return false
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/ports"
 )
 
@@ -74,11 +75,7 @@ func TestDeployLogCollector_WritesLogAndPodsJSON(t *testing.T) {
 	c.discover(context.Background())
 	c.Wait()
 
-	raw, err := os.ReadFile(filepath.Join(root, "r-1", DeployLogDir, "tp-rel-stack-1.log"))
-	if err != nil {
-		t.Fatalf("日志未落盘: %v", err)
-	}
-	got := string(raw)
+	got := waitFileNonEmpty(t, filepath.Join(root, "r-1", DeployLogDir, "tp-rel-stack-1.log"))
 	if strings.Contains(got, "2026-11-06T01:02:03") {
 		t.Errorf("时间戳没剥掉: %q", got)
 	}
@@ -125,11 +122,7 @@ func TestDeployLogCollector_RestartWritesPreviousThenMarker(t *testing.T) {
 	c.discover(context.Background())
 	c.Wait()
 
-	raw, err := os.ReadFile(filepath.Join(root, "r-1", DeployLogDir, "tp-rel-stack-1.log"))
-	if err != nil {
-		t.Fatalf("读日志: %v", err)
-	}
-	body := string(raw)
+	body := waitFileNonEmpty(t, filepath.Join(root, "r-1", DeployLogDir, "tp-rel-stack-1.log"))
 	prevIdx := strings.Index(body, "BEFORE-RESTART")
 	markerIdx := strings.Index(body, "container restarted #1")
 	if prevIdx < 0 {
@@ -166,14 +159,16 @@ func TestDeployLogCollector_TerminatedMarker(t *testing.T) {
 	c.discover(context.Background())
 	c.Wait()
 
-	raw, _ := os.ReadFile(filepath.Join(root, "r-1", DeployLogDir, "tp-rel-stack-1.log"))
-	if !strings.Contains(string(raw), "pod terminated at") {
-		t.Fatalf("没有 Pod 终止标记: %q", string(raw))
+	body := waitFileNonEmpty(t, filepath.Join(root, "r-1", DeployLogDir, "tp-rel-stack-1.log"))
+	if !strings.Contains(body, "pod terminated at") {
+		t.Fatalf("没有 Pod 终止标记: %q", body)
 	}
 }
 
 type podsDocForTest struct {
 	GeneratedAt string `json:"generated_at"`
+	Collecting  bool   `json:"collecting"`
+	StopReason  string `json:"stop_reason"`
 	Pods        []struct {
 		Name       string `json:"name"`
 		Phase      string `json:"phase"`
@@ -186,6 +181,21 @@ type podsDocForTest struct {
 			File string `json:"file"`
 		} `json:"logs"`
 	} `json:"pods"`
+}
+
+// waitFileNonEmpty 轮询等文件出现且非空（落盘是异步的；CI 慢机器上不能赌调度）。
+func waitFileNonEmpty(t *testing.T, path string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
+			return string(raw)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("等文件非空超时: %s", path)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func readPodsJSONForTest(t *testing.T, root string) (podsDocForTest, bool) {
@@ -244,11 +254,7 @@ func TestWriteAttemptLogs_RestartAddsPreviousAndMarker(t *testing.T) {
 	if err := c.writeAttemptLogs(context.Background(), ref); err != nil {
 		t.Fatalf("writeAttemptLogs: %v", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(root, "r-1", "tasks", "t-1", "attempts", "1", "logs", "stdout.log"))
-	if err != nil {
-		t.Fatalf("读 stdout.log: %v", err)
-	}
-	body := string(raw)
+	body := waitFileNonEmpty(t, filepath.Join(root, "r-1", "tasks", "t-1", "attempts", "1", "logs", "stdout.log"))
 	prevIdx := strings.Index(body, "BEFORE-RESTART-LINE")
 	markerIdx := strings.Index(body, "container restarted #1")
 	if prevIdx < 0 || markerIdx < 0 {
@@ -286,4 +292,217 @@ func TestWriteAttemptLogs_CleansStaleTmp(t *testing.T) {
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Fatalf("孤儿 .tmp 没被清理: err=%v", err)
 	}
+}
+
+// ---- D-59 补充条款：停止时机 ---------------------------------------------
+
+// 采集已停止但 Pod 还活着（cleanup: never / skipped / 卸载失败）→ 继续跟，Pod 后创建也能落盘。
+func TestDeployLogCollector_KeepsCollectingWhenUninstallSkipped(t *testing.T) {
+	root := t.TempDir()
+	src := &fakePodLogs{pods: nil}
+	c := newDeployCollector(t, root, src)
+	c.Start(context.Background())
+	defer c.Stop("test cleanup")
+
+	// 第一次发现：还没有 Pod（与真机现象一致：Run 终态时 Pod 还没起来）。
+	c.discover(context.Background())
+	c.Wait()
+	if !c.IsCollecting() {
+		t.Fatal("没有 Pod 时不该自我停止")
+	}
+
+	// Pod 后创建：应被发现并落盘。
+	src.mu.Lock()
+	src.pods = []ports.PodInfo{{
+		Name: "tp-rel-stack-1", Phase: "Running", Ready: true,
+		Containers: []ports.ContainerInfo{{Name: "server"}},
+	}}
+	src.logs = map[string]string{"tp-rel-stack-1|server": "2026-11-06T01:20:00Z late-pod-line\n"}
+	src.mu.Unlock()
+
+	c.discover(context.Background())
+	c.Wait()
+	body := waitFileNonEmpty(t, filepath.Join(root, "r-1", DeployLogDir, "tp-rel-stack-1.log"))
+	if !strings.Contains(body, "late-pod-line") {
+		t.Fatalf("后创建的 Pod 日志没落盘: %q", body)
+	}
+	if !c.IsCollecting() {
+		t.Fatal("Pod 还在时不该停")
+	}
+}
+
+// uninstall=succeeded/verified → Run 终态即停，并写 stopped 标记 + pods.json collecting=false。
+func TestDeployLogCollector_StopsWhenUninstalled(t *testing.T) {
+	root := t.TempDir()
+	src := &fakePodLogs{
+		pods: []ports.PodInfo{{
+			Name: "tp-rel-stack-1", Phase: "Running",
+			Containers: []ports.ContainerInfo{{Name: "server"}},
+		}},
+		logs: map[string]string{"tp-rel-stack-1|server": "2026-11-06T01:00:00Z x\n"},
+	}
+	c := newDeployCollector(t, root, src)
+	c.Start(context.Background())
+	c.discover(context.Background())
+	c.Wait()
+
+	c.Stop("run terminal + deploy uninstalled")
+	c.Wait()
+	if c.IsCollecting() {
+		t.Fatal("uninstall 之后应该停止采集")
+	}
+	body := waitFileNonEmpty(t, filepath.Join(root, "r-1", DeployLogDir, "tp-rel-stack-1.log"))
+	if !strings.Contains(body, "collection stopped: run terminal + deploy uninstalled") {
+		t.Fatalf("缺 stopped 标记: %q", body)
+	}
+	doc, _ := readPodsJSONForTest(t, root)
+	if doc.Collecting {
+		t.Fatal("pods.json 的 collecting 应为 false")
+	}
+	if !strings.Contains(doc.StopReason, "uninstalled") {
+		t.Errorf("pods.json stop_reason = %q", doc.StopReason)
+	}
+}
+
+// 所有 Pod 消失 → 收尾写 stopped（原因写明），不静默停。
+func TestDeployLogCollector_StopsWhenAllPodsGone(t *testing.T) {
+	root := t.TempDir()
+	src := &fakePodLogs{
+		pods: []ports.PodInfo{{
+			Name: "tp-rel-stack-1", Phase: "Running",
+			Containers: []ports.ContainerInfo{{Name: "server"}},
+		}},
+		logs: map[string]string{"tp-rel-stack-1|server": "2026-11-06T01:00:00Z x\n"},
+	}
+	c := newDeployCollector(t, root, src)
+	c.Start(context.Background())
+	c.discover(context.Background())
+	c.Wait()
+
+	src.mu.Lock()
+	src.pods = nil
+	src.mu.Unlock()
+	c.discover(context.Background())
+	c.Wait()
+
+	if c.IsCollecting() {
+		t.Fatal("Pod 全消失后应该停止采集")
+	}
+	body := waitFileNonEmpty(t, filepath.Join(root, "r-1", DeployLogDir, "tp-rel-stack-1.log"))
+	if !strings.Contains(body, "pod terminated at") {
+		t.Errorf("缺 pod terminated 标记: %q", body)
+	}
+	if !strings.Contains(body, "collection stopped: all pods gone") {
+		t.Errorf("缺 collected stopped 收尾标记: %q", body)
+	}
+}
+
+// MaxDuration 到达 → 停止并写 max duration 标记。
+func TestDeployLogCollector_StopsAtMaxDuration(t *testing.T) {
+	root := t.TempDir()
+	src := &fakePodLogs{
+		pods: []ports.PodInfo{{
+			Name: "tp-rel-stack-1", Phase: "Running",
+			Containers: []ports.ContainerInfo{{Name: "server"}},
+		}},
+		logs: map[string]string{"tp-rel-stack-1|server": "2026-11-06T01:00:00Z x\n"},
+	}
+	c := newDeployCollector(t, root, src)
+	// 不启后台循环：直接把"已经开始且远超上限"的状态摆好，discover 一次即可判定。
+	// （早先版本用 Start + 1ms 上限，在 CI/race 下会偶发绿红。）
+	c.MaxDuration = time.Millisecond
+	c.mu.Lock()
+	c.startedAt = time.Now().Add(-time.Hour)
+	c.collecting = true
+	c.mu.Unlock()
+	c.discover(context.Background())
+	c.Wait()
+	if c.IsCollecting() {
+		t.Fatal("到上限应停止采集")
+	}
+	body := waitFileNonEmpty(t, filepath.Join(root, "r-1", DeployLogDir, "tp-rel-stack-1.log"))
+	if !strings.Contains(body, "max duration reached") {
+		t.Fatalf("缺 max duration 标记: %q", body)
+	}
+}
+
+// 控制器层：Run 终态 + `cleanup: never`（uninstall.state=skipped）→ **不停**采集；
+// uninstall=verified → 立即停。这是真机 r-20261106-0D5J 的那个缺口。
+func TestControllerKeepsCollectorWhenUninstallSkipped(t *testing.T) {
+	root := t.TempDir()
+	repos := NewMemoryRepos()
+	for _, tc := range []struct {
+		name      string
+		uninstall string
+		wantStop  bool
+	}{
+		{"skipped_keeps_collecting", "skipped", false},
+		{"verified_stops", "verified", true},
+		{"failed_keeps_collecting", "failed", false},
+	} {
+		repos.SeedRun(RunView{
+			ID: "r-" + tc.name, Status: domain.RunSucceeded, HasDeploy: true,
+			CleanupPolicy: "never", SubmittedAt: time.Now(),
+			DeployJSON: json.RawMessage(`{"release_name":"tp-x","namespace":"testplane-mock","uninstall":{"state":"` + tc.uninstall + `"}}`),
+		})
+		r := repos.runs["r-"+tc.name]
+		r.DeployJSON = json.RawMessage(`{"release_name":"tp-x","namespace":"testplane-mock","uninstall":{"state":"` + tc.uninstall + `"}}`)
+
+		src := &fakePodLogs{
+			pods: []ports.PodInfo{{
+				Name: "tp-x-stack-1", Phase: "Running",
+				Containers: []ports.ContainerInfo{{Name: "server"}},
+			}},
+			logs: map[string]string{"tp-x-stack-1|server": "2026-11-06T01:00:00Z line\n"},
+		}
+		ex := &fakePodLogExec{fakeExec: &fakeExec{logContent: "x"}, pods: src.pods}
+		c := newTestController(t, repos, ex.fakeExec, Config{}, nil, nil)
+		c.cfg.StorageRoot = root
+		c.exec = &combinedExec{fakeExec: ex.fakeExec, src: src}
+
+		c.ensureDeployLogCollector(context.Background(), RunView{ID: "r-" + tc.name, DeployJSON: r.DeployJSON})
+		c.cleanupDeployIfTerminal(context.Background(), "r-"+tc.name)
+
+		c.mu.Lock()
+		collector := c.deployLogs["r-"+tc.name]
+		c.mu.Unlock()
+		if tc.wantStop && collector != nil {
+			t.Errorf("%s: 卸载后应停止采集，但 collector 还在", tc.name)
+		}
+		if !tc.wantStop {
+			if collector == nil {
+				t.Fatalf("%s: 未卸载时不该停采集（真机缺口）", tc.name)
+			}
+			collector.Stop("test cleanup")
+			collector.Wait()
+		}
+	}
+}
+
+// combinedExec 同时提供 Executor 与 PodLogSource 能力（控制器两步用不同接口）。
+type combinedExec struct {
+	fakeExec *fakeExec
+	src      *fakePodLogs
+}
+
+func (c *combinedExec) Submit(ctx context.Context, spec ports.JobSpec) (ports.JobHandle, error) {
+	return c.fakeExec.Submit(ctx, spec)
+}
+func (c *combinedExec) Watch(ctx context.Context, h ports.JobHandle, obs ports.JobObserver) error {
+	return c.fakeExec.Watch(ctx, h, obs)
+}
+func (c *combinedExec) Cancel(ctx context.Context, h ports.JobHandle) error {
+	return c.fakeExec.Cancel(ctx, h)
+}
+func (c *combinedExec) Logs(ctx context.Context, h ports.JobHandle) (io.ReadCloser, error) {
+	return c.fakeExec.Logs(ctx, h)
+}
+func (c *combinedExec) Delete(ctx context.Context, h ports.JobHandle, p ports.DeletePolicy) error {
+	return c.fakeExec.Delete(ctx, h, p)
+}
+func (c *combinedExec) ListPods(ctx context.Context, ns string) ([]ports.PodInfo, error) {
+	return c.src.ListPods(ctx, ns)
+}
+func (c *combinedExec) StreamLogs(ctx context.Context, ns, pod, ct string, o ports.LogStreamOptions) (io.ReadCloser, error) {
+	return c.src.StreamLogs(ctx, ns, pod, ct, o)
 }

@@ -30,6 +30,16 @@ type artifactListDTO struct {
 	Items          []artifactDTO            `json:"items"`
 	ByKind         map[string][]artifactDTO `json:"by_kind,omitempty"`
 	TotalSizeBytes int64                    `json:"total_size_bytes"`
+	// DeployCollection 说明"Deploy 日志采集是否还在进行"（D-59 补充条款）：
+	// `cleanup: never` 的 Run 在终态后仍会继续采集，UI 要能显示"已结束/进行中"。
+	DeployCollection *deployCollectionDTO `json:"deploy_collection,omitempty"`
+}
+
+// deployCollectionDTO 是采集状态投影（来自 pods.json 的 collecting / stop_reason）。
+type deployCollectionDTO struct {
+	Collecting bool   `json:"collecting"`
+	StopReason string `json:"stop_reason,omitempty"`
+	Message    string `json:"message,omitempty"`
 }
 
 func toArtifactDTO(a store.Artifact) artifactDTO {
@@ -87,6 +97,15 @@ func (s *Server) handleRunArtifacts(w http.ResponseWriter, r *http.Request) {
 		out.TotalSizeBytes += dto.SizeBytes
 	}
 	sort.Slice(out.Items, func(i, j int) bool { return out.Items[i].Path < out.Items[j].Path })
+	// 采集状态：盘上没有日志 + 采集已结束 → 说清"Pod 还在、采集结束了、原因是 X"。
+	if doc, ok := readDeployPodsDoc(s.cfg.StorageRoot, runID); ok {
+		col := &deployCollectionDTO{Collecting: doc.Collecting, StopReason: doc.StopReason}
+		if !doc.Collecting {
+			col.Message = "日志采集已结束（原因：" + firstNonEmptyStr(doc.StopReason, "unknown") +
+				"）；若该 Run 未卸载，Pod 可能仍在运行但不再有新日志落盘"
+		}
+		out.DeployCollection = col
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 

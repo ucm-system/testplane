@@ -239,3 +239,102 @@ func TestBundleDeployLogsFromDisk(t *testing.T) {
 		t.Fatalf("bundle 没从盘上取 deploy 日志: files=%d missing=%v", len(files), missing)
 	}
 }
+
+// D-59 补充条款：采集已停止但 Pod 还活着 → message 说清原因（不是只讲"没有落盘副本"）。
+func TestDeployLogs_MessageWhenStoppedButPodsAlive(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	root := t.TempDir()
+	srv.cfg.StorageRoot = root
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-stopped", "state": "ready",
+	})
+	// pods.json：采集已结束（all pods gone / max duration），但 Pod 实际上还活着。
+	dir := filepath.Join(root, runID, "deploy")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	doc := map[string]any{
+		"generated_at": time.Now().UTC().Format(time.RFC3339),
+		"collecting":   false,
+		"stop_reason":  "all pods gone",
+		"pods": []any{map[string]any{
+			"name": "tp-stopped-stack-1", "phase": "Running", "ready": true,
+			"containers": []any{map[string]any{"name": "server", "restarts": 0}},
+			"logs":       []any{},
+		}},
+	}
+	raw, _ := json.Marshal(doc)
+	if err := os.WriteFile(filepath.Join(dir, "pods.json"), raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// 实时窗口里 Pod 还在、日志还能读（盘上没有副本）。
+	fake := &fakeDeployLogs{
+		pods: []corev1.Pod{deployPod("tp-stopped-stack-1", true, 0, time.Now().UTC())},
+		logs: map[string]string{"tp-stopped-stack-1": "live-after-stop\n"},
+	}
+	srv.deployLogsKube = fake
+
+	rec, body := getDeployLogs(t, srv, runID, "?pod=tp-stopped-stack-1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.Contains(body.Message, "采集已结束") {
+		t.Fatalf("message = %q，应说明采集已结束", body.Message)
+	}
+	if !strings.Contains(body.Message, "all pods gone") {
+		t.Fatalf("message = %q，应带上停止原因", body.Message)
+	}
+}
+
+// /artifacts 暴露采集状态（collecting/stop_reason），UI 才能显示"采集已结束"。
+func TestRunArtifactsExposeCollectionState(t *testing.T) {
+	srv, st, cleanup := integrationServer(t)
+	defer cleanup()
+	root := t.TempDir()
+	srv.cfg.StorageRoot = root
+	runID := seedDeployRun(t, st, map[string]any{
+		"namespace": "testplane-mock", "release_name": "tp-arts", "state": "ready",
+	})
+	dir := filepath.Join(root, runID, "deploy")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"generated_at": time.Now().UTC().Format(time.RFC3339),
+		"collecting":   false,
+		"stop_reason":  "run terminal + deploy uninstalled",
+		"pods":         []any{},
+	})
+	if err := os.WriteFile(filepath.Join(dir, "pods.json"), raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID+"/artifacts", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var body struct {
+		DeployCollection *struct {
+			Collecting bool   `json:"collecting"`
+			StopReason string `json:"stop_reason"`
+			Message    string `json:"message"`
+		} `json:"deploy_collection"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.DeployCollection == nil {
+		t.Fatal("缺 deploy_collection")
+	}
+	if body.DeployCollection.Collecting {
+		t.Error("collecting 应为 false")
+	}
+	if !strings.Contains(body.DeployCollection.StopReason, "uninstalled") {
+		t.Errorf("stop_reason = %q", body.DeployCollection.StopReason)
+	}
+	if !strings.Contains(body.DeployCollection.Message, "采集已结束") {
+		t.Errorf("message = %q", body.DeployCollection.Message)
+	}
+}

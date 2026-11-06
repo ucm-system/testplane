@@ -50,8 +50,11 @@ type deployLogPodJSON struct {
 }
 
 type deployPodsDoc struct {
-	GeneratedAt string             `json:"generated_at"`
-	Pods        []deployLogPodJSON `json:"pods"`
+	GeneratedAt string `json:"generated_at"`
+	// Collecting / StopReason 让 UI 能显示"采集已结束"（D-59 补充条款）。
+	Collecting bool               `json:"collecting"`
+	StopReason string             `json:"stop_reason,omitempty"`
+	Pods       []deployLogPodJSON `json:"pods"`
 }
 
 // readDeployPodsDoc 读 `deploy/pods.json`。ok=false 表示盘上没有（→ 调用方降级并说明原因）。
