@@ -5,11 +5,12 @@
 #   transformers/datasets/requests，所以 --aisbench_cmd 的默认值 `ais_bench` 是真命令，
 #   stub 仍保留在 /tester/tool/tests/stub_aisbench.py 供离线回归用。
 #
-# 构建上下文 = **仓库根**：
-#   cd <repo-root>
-#   TAG=0.2.0
-#   docker build -f testers/aisbench-sla/build/Dockerfile.aisbench \
-#     -t ghcr.io/ucm-system/testplane-tester-aisbench-sla:${TAG} .
+# 构建上下文 = **Tester 目录**（`testers/aisbench-sla`），不是仓库根：
+#   docker build -f testers/aisbench-sla/build/Dockerfile.aisbench testers/aisbench-sla
+# 这是**发版路径**：.github/workflows/release.yml 的矩阵给每个 Tester 的 context 就是
+# `testers/<name>`，与 endpoint-probe 同一约定，所以 COPY 全部相对 Tester 目录。
+# （历史文档写的「context = 仓库根」已作废：那样会去找
+#  testers/aisbench-sla/testers/aisbench-sla/run.sh，发版时构建失败 —— 评审 #62 硬问题 3。）
 #
 # ---------------------------------------------------------------------------
 # 关键设计：为什么 ais_bench 的工作目录是 /tmp/aisbench-ws 而不是 /benchmark
@@ -65,18 +66,18 @@ RUN groupadd -g ${TESTER_GID} tester \
  && chown -R ${TESTER_UID}:${TESTER_GID} /tester /models /workspace /tmp
 
 # ---- 执行入口 ----------------------------------------------------------------
-COPY testers/aisbench-sla/run.sh /tester/run.sh
+COPY run.sh /tester/run.sh
 
-# ---- vendored 工具（只读副本，不改上游代码）----------------------------------
-COPY testers/aisbench-sla/tool /tester/tool
+# ---- vendored 工具（只读副本；本地改动见 tool/VENDORED.md）--------------------
+COPY tool /tester/tool
 
 # ---- 离线冒烟用的小数据集（8 行 × 512 字符）-----------------------------------
-COPY testers/aisbench-sla/tests/fixtures /tester/fixtures
+COPY tests/fixtures /tester/fixtures
 
 # ---- 验证用 tokenizer（**仅此验证镜像带**；生产镜像靠 Profile 挂载）-------------
 # 目录由 build/prepare-tokenizer.ps1（或手工 cp）从 D:\Models\Qwen3-0.6B 准备，
 # 不在版本库里；缺了构建会直接失败，而不是悄悄做出一个跑不了的镜像。
-COPY testers/aisbench-sla/build/models/Qwen3-0.6B /models/Qwen3-0.6B
+COPY build/models/Qwen3-0.6B /models/Qwen3-0.6B
 
 RUN chmod 0755 /tester/run.sh /tester/tool/sla_search.py /tester/tool/tests/*.py \
  && chown -R ${TESTER_UID}:${TESTER_GID} /tester /models

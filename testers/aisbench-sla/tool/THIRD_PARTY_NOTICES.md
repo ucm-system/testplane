@@ -15,10 +15,15 @@
 ## 2. AISBench_PrefixTest_Tools
 
 - 来源：本项目作者的另一仓库（AISBench 前缀复用测试器桌面工具）
-- 许可：Apache License 2.0
+- 许可：Apache License 2.0 —— 许可证全文见
+  <https://www.apache.org/licenses/LICENSE-2.0.txt>（本地未附副本，仅移植了下面列出的解析规则与搜索策略）
 - 收录范围（移植/改写）：
   - ais_bench 输出解析（传统行格式 + `│` 表格格式）→ `sla_tool/parse.py`
   - SLA 搜索策略（预检 → 指数阶梯 → 二分收敛）→ `sla_tool/search.py`
+
+> Apache-2.0 §4 要求分发衍生作品时随附许可证副本；这里给出官方全文链接作为最小满足，
+> 若要发布正式镜像，应把 `LICENSE-2.0.txt` 一并放进镜像（`THIRD_PARTY_NOTICES.md` 与 `tool/`
+> 已在镜像里，补一份文本即可）。
 
 ## 3. ClawPerf mock LLM 服务
 

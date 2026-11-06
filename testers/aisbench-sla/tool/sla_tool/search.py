@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 # 汇总/CSV 里导出的全部指标键（= ais_bench 汇总表提供的统计量）
 ALL_METRIC_KEYS = tuple(METRIC_DEFAULTS.keys())
 
+# 「并发必须是测出来的」门槛（评审 #62 硬问题 2）：判定 PASS 的点，其实测并发
+# measured_concurrency 必须达到目标并发（batch_size）的这个比例，否则该点标
+# degraded —— 此时压不满是**配置形态**（request_rate × 时延 < 目标并发、
+# data_num 太少）导致的，不是服务能力，不能拿它当「最大并发」。
+# run.sh 用同一个阈值（MEASURED_RATIO_MIN）独立复核后再决定是否输出
+# sla_max_concurrency，所以这个常量是两侧共同的口径。
+MEASURED_CONCURRENCY_MIN_RATIO = 0.8
+
 
 @dataclass
 class PointResult:
@@ -47,8 +55,17 @@ class PointResult:
     warmup_hit_rate: Optional[float] = None
     output_len: int = 0
     request_rate: float = 0.0
+    degraded: bool = False
+    degraded_reason: str = ""
 
     # ------------------------------------------------------------- SLA 判定
+    def measured_ratio(self) -> Optional[float]:
+        """实测并发 / 目标并发；日志里没有该字段时返回 None。"""
+        measured = self.metrics.get("measured_concurrency", -1)
+        if measured is None or measured < 0 or self.concurrency <= 0:
+            return None
+        return float(measured) / float(self.concurrency)
+
     def failing_keys(self, cfg) -> List[str]:
         """按配置的 SLA 规则逐条判定，返回未满足项的可读说明。"""
         bad: List[str] = []
@@ -72,6 +89,10 @@ class PointResult:
             "seed": self.seed,
             "output_len": self.output_len,
             "verdict": "PASS" if self.ok else "FAIL",
+            "degraded": bool(self.degraded),
+            "degraded_reason": self.degraded_reason,
+            "measured_concurrency_ratio": (
+                None if self.measured_ratio() is None else round(self.measured_ratio(), 3)),
             "reason": self.reason,
             "output_token_throughput": self.metrics.get("output_token_throughput", -1),
             "request_throughput_qps": self.metrics.get("request_throughput_qps", -1),
@@ -166,9 +187,21 @@ class SlaSearch:
         return result
 
     def _collect_warnings(self, result: SearchResult) -> None:
-        """命中率可比性告警。"""
+        """命中率可比性 + 并发未压满的告警。"""
         self._warn_hit_rate_saturation(result)
         self._warn_rate_capped(result)
+        self._warn_degraded(result)
+
+    def _warn_degraded(self, result: SearchResult) -> None:
+        """PASS 但并发没压满的点：结论不可用，必须让读者看到。"""
+        degraded = [p for p in result.points if p.degraded]
+        if not degraded:
+            return
+        sample = "；".join(f"c={p.concurrency}（{p.degraded_reason}）" for p in degraded[:3])
+        result.warnings.append(
+            f"{len(degraded)} 个 PASS 点的实测并发低于目标并发的 "
+            f"{MEASURED_CONCURRENCY_MIN_RATIO:.0%}，已标 degraded 且不计入最大并发："
+            f"{sample}。要测并发上限，请设 --request-rate 0 并给足 --data-num。")
 
     def _warn_rate_capped(self, result: SearchResult) -> None:
         """请求频率成为瓶颈时告警：rate × 时延 < 目标并发 → 并发阶梯压不满。
@@ -326,10 +359,14 @@ class SlaSearch:
         before = metrics.snapshot_pods(cfg.metrics_pods())
         sampler = metrics.GaugeSampler(cfg.metrics_pods())
         sampler.start()
+        # 凭据只在内存里注入子进程环境：模型配置里写的是读该变量的表达式，
+        # 所以 key 既不在 argv、也不在 <work_path> 的临时配置与日志里。
+        key_env = {"ENDPOINT_API_KEY": cfg.api_key} if cfg.api_key else None
         try:
             command_result = aisbench.run_command(
                 command, log_path, cwd=run_dir, timeout=cfg.point_timeout,
-                verbose=cfg.verbose, stream=cfg.stream_logs, all_log=all_log)
+                verbose=cfg.verbose, stream=cfg.stream_logs, all_log=all_log,
+                env_extra=key_env)
             if (not command_result.ok and cfg.num_warmups
                     and looks_like_bad_num_warmups(log_path)):
                 self.on_event("检测到 ais_bench 不识别 --num-warmups，去掉该参数重试"
@@ -339,7 +376,8 @@ class SlaSearch:
                 command = aisbench.build_command(cfg, run_dir, with_num_warmups=False)
                 command_result = aisbench.run_command(
                     command, log_path, cwd=run_dir, timeout=cfg.point_timeout,
-                    verbose=cfg.verbose, stream=cfg.stream_logs, all_log=all_log)
+                    verbose=cfg.verbose, stream=cfg.stream_logs, all_log=all_log,
+                    env_extra=key_env)
         finally:
             gauges = sampler.stop()
         after = metrics.snapshot_pods(cfg.metrics_pods())
@@ -437,7 +475,35 @@ class SlaSearch:
         if not point.ok and command_result.returncode not in (0, None):
             point.reason = (point.reason + "；日志尾部：" +
                             aisbench.tail(point.log_path, 3).strip().replace("\n", " "))[:300]
+        self._mark_degraded(point)
+        if point.degraded:
+            self.on_event(f"[c={concurrency}] 该点标 degraded：{point.degraded_reason}"
+                          "（不计入 sla_max_concurrency）")
         return point
+
+    @staticmethod
+    def _mark_degraded(point: PointResult) -> None:
+        """PASS 点必须「并发真的被压到了」：实测/目标 < 80% 或测不到，标 degraded。
+
+        这条只为 PASS 点服务：FAIL 点本来就不参与「最大并发」，
+        实测并发低只会让结论更保守，不需要额外标记。
+        """
+        if not point.ok:
+            return
+        ratio = point.measured_ratio()
+        if ratio is None:
+            point.degraded = True
+            point.degraded_reason = (
+                f"ais_bench 日志里没有可解析的实测并发，无法确认并发 {point.concurrency} "
+                "真的被压满")
+            return
+        if ratio < MEASURED_CONCURRENCY_MIN_RATIO:
+            measured = point.metrics.get("measured_concurrency", -1)
+            point.degraded = True
+            point.degraded_reason = (
+                f"实测并发 {measured:.1f} / 目标 {point.concurrency} = {ratio:.0%} "
+                f"< {MEASURED_CONCURRENCY_MIN_RATIO:.0%}：并发没被真正压满"
+                "（常见原因 request_rate × 时延 < 目标并发，或 data_num 太少）")
 
     def _record(self, result: SearchResult, point: PointResult) -> None:
         result.points.append(point)

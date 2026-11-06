@@ -13,7 +13,7 @@
 | 设计约束文档（系统边界 / 契约 / 语义） | ✅ 定稿（v0.6） | [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) |
 | 可点击原型（6 个页面 + 全状态谱） | ✅ 可交互 | [`design/prototype/`](design/prototype/) |
 | 参考 Tester：endpoint-probe（Pre-Check） | ✅ 可运行 | [`testers/endpoint-probe/`](testers/endpoint-probe/) |
-| 实际 Tester：aisbench-sla（前缀缓存 SLA 搜索） | ✅ 可运行（离线 stub 已验证；真实 SLA 需 ais_bench 镜像 + 权重） | [`testers/aisbench-sla/`](testers/aisbench-sla/)
+| 实际 Tester：aisbench-sla（前缀缓存 SLA 搜索） | ✅ 可运行（离线 stub 已验证；真实 SLA 需 ais_bench 镜像 + 权重） | [`testers/aisbench-sla/`](testers/aisbench-sla/) |
 | 实现技术方案（总览 + 三份分册） | 🟢 提案 v3（12 项决策已并入） | [`design/IMPLEMENTATION.md`](design/IMPLEMENTATION.md) |
 | 4+1 设计视图（场景 / 逻辑 / 数据 / 进程 / 开发 / 部署 / API） | 🟢 可开发基线 | [`design/views/`](design/views/) |
 | 契约：OpenAPI 3.1（25 operations） | ✅ 定稿 | [`server/api/openapi.yaml`](server/api/openapi.yaml) |
@@ -86,6 +86,8 @@ design/               设计文档与可点击原型（已有）
 
 testers/              Tester 实现，一个目录一个 Tester（已有）
   endpoint-probe/     Pre-Check；契约的参考实现，也是新 Tester 的模板
+  aisbench-sla/       实际 Tester：前缀缓存 SLA 搜索（最大并发 / 最高吞吐）；
+                      构建上下文 = Tester 目录（与发版矩阵一致）
 
 server/               规划：控制面（API / 状态机 / 编排 / 调度 / 存储）
   cmd/tpctl/          P1：Agent 亲和 CLI（submit / wait / report / logs / cancel）

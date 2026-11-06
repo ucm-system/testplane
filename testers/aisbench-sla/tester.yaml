@@ -1,5 +1,5 @@
 name: aisbench-sla
-version: 0.3.0
+version: 0.4.0
 display_name: AISBench 前缀缓存 SLA 搜索
 description: |
   用前缀缓存 SLA 搜索找出「满足延迟约束的最大并发」与「最高输出吞吐」。
@@ -10,6 +10,8 @@ description: |
   0.2.0 起镜像基于官方 AISBench benchmark 镜像（ghcr.io/aisbench/aisbench_benchmark，
   3.1.20260330 / py310），`ais_bench` 是真命令；stub 仍留在镜像里仅供离线回归
   （`--aisbench_cmd=/tester/tool/tests/stub_aisbench.py`）。
+  0.4.0 起 `sla_max_concurrency` 只取**实测并发达到目标 80%** 的 PASS 点：压不满的点标
+  degraded、不参与取值；`ENDPOINT_API_KEY` 只走环境变量（不进 argv、不落日志、不留临时配置）。
 
 role: test
 
@@ -20,8 +22,11 @@ on_failure: continue
 entry: /tester/run.sh
 
 # 镜像由 CI 构建产出（见 build/Dockerfile 与 README 的构建节）。平台与任何运行环境都不 build（§6.2）。
-# 0.2.0 = 真实 ais_bench 模式：build/Dockerfile.aisbench（基础镜像自带 ais_bench 3.1.20260330）。
-image: ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.3.0
+# 0.2.0 起 = 真实 ais_bench 模式：build/Dockerfile.aisbench（基础镜像自带 ais_bench 3.1.20260330）；
+# build/Dockerfile 是同一份 run.sh 的 stub 小镜像，两个 Dockerfile 的构建上下文都是 **Tester 目录**
+# （与 .github/workflows/release.yml 的发版矩阵一致）。
+# 0.4.0：密钥只走 env、sla_max_concurrency 需实测并发达标、指标名不再编码统计量/单位。
+image: ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0
 
 resources:
   cpu: "2"
@@ -97,7 +102,7 @@ parameters:
 
   data_num:
     type: integer
-    description: "数据集条数（每点压测的请求数）。默认 64；建议取 --max 的 2~4 倍且 >= --max，否则最高并发点压不满、吞吐被低估。注意：显式给 `--dataset` 时本参数不生效（截断只发生在生成数据集的路径里，已有数据集原样使用）。"
+    description: "数据集条数（每点压测的请求数）。默认 64；要测并发上限时建议 `>= 4 × --max`（至少不低于 --max），否则最高并发点压不满、实测并发低于目标并发，该点会被判 degraded、不计入 sla_max_concurrency。注意：显式给 `--dataset` 时本参数不生效（截断只发生在生成数据集的路径里，已有数据集原样使用）。"
     default: "64"
 
   sla:
@@ -137,7 +142,12 @@ parameters:
 
   request_rate:
     type: number
-    description: "请求频率（RPS，写进 ais_bench 模型配置的 request_rate）。默认 3；0 = 不限速。频率 × 时延 < 目标并发时瓶颈会变成频率，实测并发（measured_concurrency）明显偏低——要测并发上限就设 0。"
+    description: |
+      请求频率（RPS，写进 ais_bench 模型配置的 request_rate）。默认 3；0 = 不限速。
+      **要测「最大并发」就必须设 0**：请求频率 × 时延 < 目标并发时，在飞请求数被频率卡住，
+      实测并发（measured_concurrency）明显低于目标并发 —— 此时该点会被标 degraded、不计入
+      sla_max_concurrency，整轮可能直接没有可用结论。推荐 `--request_rate=0` 且
+      `--data_num >= 4 × --max`。详见 README「硬警告」。
     default: "3"
 
   dataset_type:
@@ -184,14 +194,17 @@ parameters:
     required: true
     description: |
       ais_bench 的「工作根」（本 Tester 会往它下面写
-      ais_bench/benchmark/configs/models/vllm_api/vllm_api_chat_temp.py 与数据集目录），必须可写；
-      目录不存在时 Tester 会 mkdir -p。
-      **默认写 /tmp/aisbench-ws，不要写 /benchmark**：官方镜像里 /benchmark 是 ais_bench 源码根、
-      属 root 0755 不可写；平台 Job 又是 ReadOnlyRootFilesystem，只有 /workspace/output 与 /tmp 可写。
+      ais_bench/benchmark/configs/models/vllm_api/vllm_api_chat_temp.py 与数据集目录），必须可写。
+      平台上它**必填、且没有可用的默认值**：平台不会注入它，镜像里也没有可写的固定目录
+      （根文件系统只读，只有 /workspace/output 与 /tmp 可写），所以别指望省略它。
+      推荐值 `/tmp/aisbench-ws`（目录不存在时 Tester 会 mkdir -p）。
+      目录不可创建/不可写时本 Tester 直接 `failed` + `error.code=TESTER_NONZERO_EXIT`，
+      message 里写明「容器内请用 /tmp 下的路径」——不会再打一行 log 硬着头皮跑。
+      **不要写 /benchmark**：官方镜像里它是 ais_bench 源码根、属 root 0755，平台 Job 又是
+      ReadOnlyRootFilesystem，写不进去。
       run.sh 会自动做两处接线，让 /tmp 下的影子源码根被 ais_bench 认到：
       `AIS_BENCH_DATASETS_CACHE=<work_path>`（数据集相对路径锚点）与
       `--config-dir <work_path>/ais_bench/benchmark/configs`（模型配置搜索路径）。
-      指 /benchmark 时按原生路径工作（需要该目录可写，仅脱离平台的本地调试有意义）。
     example: "/tmp/aisbench-ws"
     required_for: "所有真实 ais_bench 调用"
 

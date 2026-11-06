@@ -5,6 +5,9 @@
 `ais_bench/datasets/gsm8k/test.jsonl`，然后执行 `ais_bench --models <name> ...`。
 
 与参考工具的区别：
+* **凭据不落盘**：模型配置里写的是 `os.environ.get("ENDPOINT_API_KEY", "")`，
+  真实 key 只在执行子进程时通过环境变量注入（见 `run_command(env_extra=...)`）。
+  这样 <work_path> 里的临时配置即便被收集/残留也不含密钥（评审 #62 硬问题 1）。
 * 不使用 shell 管道 tee，而是把 stdout/stderr 直接重定向到该点的日志文件
   （可解析、无死锁、Windows/Linux 行为一致）
 * 支持单点超时与进程树终止
@@ -30,8 +33,14 @@ MODEL_CFG_NAME = "vllm_api_chat_temp"
 DATASET_CFG = "gsm8k_gen_0_shot_cot_str_perf"
 SUMMARIZER = "default_perf"
 
-# 占位符版模板（源自参考工具 default_api.py）
-API_TEMPLATE = '''from ais_bench.benchmark.models import __API_TYPE__
+# 占位符版模板（源自参考工具 default_api.py）。
+# api_key **不在这里落明文**：配置文件里写的是一句读环境变量的表达式，真实 key 只在
+# 执行 ais_bench 的子进程环境里出现（run_command 的 env_extra），磁盘与日志都没有它。
+API_TEMPLATE = '''import os
+
+from ais_bench.benchmark.models import __API_TYPE__
+
+_API_KEY = os.environ.get("ENDPOINT_API_KEY", "")
 
 models = [
     dict(
@@ -40,7 +49,7 @@ models = [
         abbr='__API_ABBR__',
         path="__MODEL_PATH__",
         model="__MODEL_NAME__",
-        api_key="__API_KEY__",
+        api_key=_API_KEY,
         request_rate=__REQUEST_RATE__,
         retry=2,
         host_ip="__HOST_IP__",
@@ -77,7 +86,6 @@ def render_model_config(cfg, concurrency: int, output_len: int,
         ("__API_ABBR__", api_abbr),
         ("__MODEL_PATH__", cfg.model_path or ""),
         ("__MODEL_NAME__", cfg.model),
-        ("__API_KEY__", cfg.api_key or ""),
         ("__REQUEST_RATE__", repr(float(request_rate))),
         ("__HOST_IP__", str(target_fields["host_ip"])),
         ("__HOST_PORT__", str(target_fields["host_port"])),
@@ -183,11 +191,14 @@ class CommandResult:
 
 def run_command(command: str, log_path: str, cwd: str, timeout: float = 0.0,
                 verbose: bool = False, stream: bool = True,
-                all_log: str = "") -> CommandResult:
+                all_log: str = "", env_extra: Optional[Dict[str, str]] = None) -> CommandResult:
     """执行命令：输出**实时透传**到终端，同时写入 log_path（并追加到 all_log）。
 
     参考工具是把 ais_bench 的输出直接打到终端（不重定向），这里保留同样的可见性，
     但额外 tee 一份到该探测点的日志文件，便于事后排查。
+
+    `env_extra` 只用于**内存注入**凭据（如 `ENDPOINT_API_KEY`）：它不进命令行、
+    不写文件、也不进日志。真实 ais_bench 的模型配置读的就是这个环境变量。
     """
     os.makedirs(os.path.dirname(os.path.abspath(log_path)) or ".", exist_ok=True)
     logger.info("执行：%s", command)
@@ -195,6 +206,8 @@ def run_command(command: str, log_path: str, cwd: str, timeout: float = 0.0,
         logger.info("日志：%s（--no-stream，不实时打印）", log_path)
     started = time.time()
     popen_kwargs: Dict[str, object] = {}
+    if env_extra:
+        popen_kwargs["env"] = {**os.environ, **{k: v for k, v in env_extra.items() if v}}
     if sys.platform != "win32":
         popen_kwargs["start_new_session"] = True
     all_handle = open(all_log, "a", encoding="utf-8", errors="replace") if all_log else None

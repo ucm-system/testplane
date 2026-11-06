@@ -136,6 +136,11 @@ class Config:
 
     def normalize(self) -> None:
         self.repeat_rate = parse_prefix_ratio(self.repeat_rate)
+        # 凭据只走环境变量（ARCHITECTURE §12.4）：平台与 run.sh 一律通过
+        # ENDPOINT_API_KEY 注入，--api-key 只留给独立调试。key 在进程内使用，
+        # **不落盘**（ais_bench 模型配置里写的是读环境变量的表达式）也不进日志。
+        if not self.api_key:
+            self.api_key = os.environ.get("ENDPOINT_API_KEY", "") or ""
         # SLA：统一收敛到 sla 字典（旧字段并入，保持向后兼容）。
         # 支持三种输入：
         #   {"ttft_p90": 2000, "tpot_avg": 30}          # 键 = metric.agg / metric_agg

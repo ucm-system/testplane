@@ -135,6 +135,12 @@ def print_summary(result: SearchResult, cfg) -> None:
         print("  判定口径：" + "；".join(rule.label() for rule in cfg.sla_rules()))
     if result.max_ok is not None:
         print(f"  SLA 内最大并发：{result.max_ok}")
+    degraded = [p for p in result.points if p.degraded]
+    if degraded:
+        print(console.c(
+            f"  降级点（实测并发 < 目标的 80%，不计入最大并发）："
+            + "，".join(f"c={p.concurrency}（{p.degraded_reason}）" for p in degraded),
+            console.YELLOW))
     throughput = throughput_summary(result.points)
     peak = throughput.get("peak") or {}
     best_ok = throughput.get("best_within_sla") or {}
@@ -169,7 +175,10 @@ def print_dry_run(cfg) -> None:
 
 # --------------------------------------------------------------------- 落盘
 CSV_FIELDS = [
-    "kind", "concurrency", "seed", "output_len", "verdict", "reason",
+    "kind", "concurrency", "seed", "output_len", "verdict",
+    # 并发是否被真正压满（评审 #62）：degraded=true 的点不参与最大并发
+    "degraded", "degraded_reason", "measured_concurrency_ratio",
+    "reason",
     "request_rate",
     *ALL_METRIC_KEYS,
     "hbm_hit_rate", "ext_hit_rate", "hit_rate_note",
@@ -202,6 +211,18 @@ def write_csv(out_dir: str, points: List[PointResult]) -> str:
 
 def write_summary(out_dir: str, cfg, result: SearchResult) -> str:
     path = os.path.join(out_dir, "sla_summary.json")
+    from .search import MEASURED_CONCURRENCY_MIN_RATIO
+
+    passing = [p for p in result.points if p.ok and p.kind != "warmup"]
+    measured_ok = [p for p in passing if not p.degraded]
+    degraded_points = [
+        {"concurrency": p.concurrency,
+         "measured_concurrency": p.metrics.get("measured_concurrency", -1),
+         "measured_concurrency_ratio": (None if p.measured_ratio() is None
+                                        else round(p.measured_ratio(), 3)),
+         "reason": p.degraded_reason}
+        for p in passing if p.degraded
+    ]
     payload: Dict[str, object] = {
         "tool": f"aisbench-sla {__version__}",
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -210,6 +231,12 @@ def write_summary(out_dir: str, cfg, result: SearchResult) -> str:
         "note": result.note,
         "error": result.error,
         "max_ok_concurrency": result.max_ok,
+        # 只统计「实测并发达标」的 PASS 点：max_ok_concurrency 是「配置上没卡住」，
+        # 这个字段才是「测出来的」（评审 #62 硬问题 2）。run.sh 独立复核后取值。
+        "max_ok_concurrency_measured": (
+            max((p.concurrency for p in measured_ok), default=None)),
+        "measured_concurrency_min_ratio": MEASURED_CONCURRENCY_MIN_RATIO,
+        "degraded_points": degraded_points,
         "sla": dict(cfg.sla),
         "sla_labels": [rule.label() for rule in cfg.sla_rules()],
         "search": {"start": cfg.start, "max": cfg.max_concurrency,

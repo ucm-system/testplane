@@ -4,12 +4,13 @@
 # 运行期依赖只有 python3 + requests（工具 requirements.txt 的唯一运行时依赖）；
 # result.json 由 run.sh 内嵌的 python 写，因此**不需要 jq / curl**。
 #
-# 构建上下文 = **仓库根**（要从 testers/aisbench-sla 取 vendored 工具与 run.sh）：
-#   cd <repo-root>
-#   TAG=0.1.0
-#   docker build -f testers/aisbench-sla/build/Dockerfile \
-#     -t ghcr.io/ucm-system/testplane-tester-aisbench-sla:${TAG} .
-#   docker push ghcr.io/ucm-system/testplane-tester-aisbench-sla:${TAG}
+# 构建上下文 = **Tester 目录**（`testers/aisbench-sla`），不是仓库根：
+#   docker build -f testers/aisbench-sla/build/Dockerfile testers/aisbench-sla
+# 这是**发版路径**：.github/workflows/release.yml 的矩阵给每个 Tester 的
+# context 就是 `testers/<name>`（与 endpoint-probe 同一约定），所以这里的 COPY
+# 全部相对 Tester 目录。历史上写的「context = 仓库根」已作废 —— 用仓库根做 context
+# 会去找 testers/aisbench-sla/testers/aisbench-sla/run.sh，构建必失败（评审 #62 硬问题 3）。
+#
 # 构建由 CI 执行（§6.2）；tester.yaml 的 image 写产物引用即可（tag / digest 均可）。
 #
 # vendored 来源与 commit 见 testers/aisbench-sla/tool/VENDORED.md。
@@ -39,14 +40,21 @@ RUN groupadd -g 10001 tester \
  && chown -R 10001:10001 /workspace /tester
 
 # ---- 执行入口 ----------------------------------------------------------------
-COPY testers/aisbench-sla/run.sh /tester/run.sh
+COPY run.sh /tester/run.sh
 RUN chmod 0755 /tester/run.sh
 
-# ---- vendored 工具（只读副本，不改上游代码）----------------------------------
-COPY testers/aisbench-sla/tool /tester/tool
+# ---- vendored 工具（只读副本；本地改动见 tool/VENDORED.md）--------------------
+COPY tool /tester/tool
 
 # ---- 离线冒烟用的小数据集（8 行 × 512 字符；stub 按 chars/4 估 ~128 token）----
-COPY testers/aisbench-sla/tests/fixtures/smoke_dataset.jsonl /tester/fixtures/smoke_dataset.jsonl
+COPY tests/fixtures/smoke_dataset.jsonl /tester/fixtures/smoke_dataset.jsonl
+
+# CRLF 归一到 LF：Windows 上检出的 tool/**/*.py 可能带 CRLF，带 CRLF 的 shebang 会让
+# `--aisbench_cmd=/tester/tool/tests/stub_aisbench.py` 直接报
+# `/usr/bin/env: 'python3\r': No such file or directory`。在镜像里擦一遍，比要求每个
+# 开发者配 .gitattributes 稳（Dockerfile.aisbench 一直是这么做的）。
+RUN sed -i 's/\r$//' /tester/run.sh \
+ && find /tester/tool -name '*.py' -type f -exec sed -i 's/\r$//' {} +
 
 # 可执行位：--aisbench_cmd 直接写 .py 路径时要求她有执行位。
 # /tester/tool 必须对 10001 **可写**：工具会把每点的模型配置写进

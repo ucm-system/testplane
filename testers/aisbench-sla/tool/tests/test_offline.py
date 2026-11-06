@@ -739,6 +739,114 @@ class ParseTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 3.5 degraded（并发是否被真正压满）与凭据不落盘
+# --------------------------------------------------------------------------- #
+class DegradedAndCredentialTests(unittest.TestCase):
+    """评审 #62 的两条硬问题的单元级红证（不需要 mock / 网络）。
+
+    * `sla_max_concurrency` 必须来自实测并发达标的点：压不满的 PASS 点标 degraded，
+      `degraded` / `measured_concurrency_ratio` 写进 sla_points.csv 的旁注，
+      `maximum_ok_concurrency_measured` 只统计达标点；
+    * ais_bench 模型配置里**不得出现明文 key**（写的是读 ENDPOINT_API_KEY 的表达式）。
+    """
+
+    # 故意与 tests/smoke.sh 的 canary 不同：本文件的字面量会随镜像进容器，
+    # 若用同一个值，「凭据零泄漏」扫描会命中测试源码本身（假阳性）。
+    CANARY = "sk-test-UNITONLY-7Kq"
+
+    def _point(self, concurrency, measured, ok=True):
+        from sla_tool.search import PointResult
+        point = PointResult(concurrency=concurrency, ok=ok, kind="probe",
+                            metrics={"measured_concurrency": measured,
+                                     "ttft_avg_ms": 10.0, "tpot_p90_ms": 2.0,
+                                     "output_token_throughput": 100.0})
+        from sla_tool.search import SlaSearch
+        SlaSearch._mark_degraded(point)
+        return point
+
+    def test_under_filled_pass_point_is_degraded(self):
+        from sla_tool.search import MEASURED_CONCURRENCY_MIN_RATIO
+        self.assertAlmostEqual(MEASURED_CONCURRENCY_MIN_RATIO, 0.8)
+
+        filled = self._point(4, 4.0)
+        self.assertFalse(filled.degraded, "实测 4/4 不该标 degraded")
+        self.assertAlmostEqual(filled.measured_ratio(), 1.0)
+
+        # 评审证据里的那一行：目标并发 2、实测并发 1
+        capped = self._point(2, 1.0)
+        self.assertTrue(capped.degraded, "实测 1/2 = 50% < 80% 必须标 degraded")
+        self.assertIn("50%", capped.degraded_reason)
+
+        borderline = self._point(5, 4.0)          # 恰好 80%
+        self.assertFalse(borderline.degraded)
+
+        missing = self._point(8, -1.0)            # 日志里没有实测并发
+        self.assertTrue(missing.degraded, "测不到实测并发也不能当成达标")
+
+        failed = self._point(2, 1.0, ok=False)
+        self.assertFalse(failed.degraded, "FAIL 点不参与最大并发，不需要标 degraded")
+
+    def test_csv_carries_degraded_annotation(self):
+        from sla_tool import report
+        points = [self._point(1, 1.0), self._point(2, 1.0)]
+        out = Path(tempfile.mkdtemp(prefix="sla_csv_"))
+        self.addCleanup(shutil.rmtree, out, True)
+        path = Path(report.write_csv(str(out), points))
+        with path.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(len(rows), 2)
+        self.assertIn("degraded", rows[0], f"CSV 缺 degraded 旁注列：{list(rows[0])}")
+        self.assertIn("measured_concurrency_ratio", rows[0])
+        self.assertEqual(str(rows[0]["degraded"]).lower(), "false")
+        self.assertEqual(str(rows[1]["degraded"]).lower(), "true")
+        self.assertAlmostEqual(float(rows[1]["measured_concurrency_ratio"]), 0.5)
+        self.assertIn("50%", rows[1]["degraded_reason"])
+
+    def test_summary_reports_measured_max_only(self):
+        from sla_tool import report
+        from sla_tool.config import Config
+        from sla_tool.search import SearchResult
+        cfg = Config().merge({"sla": ["ttft.avg:1200"]})
+        result = SearchResult(points=[self._point(1, 1.0), self._point(2, 1.0)],
+                              max_ok=2, status="ok")
+        out = Path(tempfile.mkdtemp(prefix="sla_summary_"))
+        self.addCleanup(shutil.rmtree, out, True)
+        payload = json.loads(Path(report.write_summary(str(out), cfg, result)).read_text(
+            encoding="utf-8"))
+        self.assertEqual(payload["max_ok_concurrency"], 2, "工具的「配置口径」保持不变")
+        self.assertEqual(payload["max_ok_concurrency_measured"], 1,
+                         "只统计实测并发达标的点")
+        self.assertEqual([d["concurrency"] for d in payload["degraded_points"]], [2])
+        self.assertAlmostEqual(payload["measured_concurrency_min_ratio"], 0.8)
+
+    def test_model_config_never_contains_the_key(self):
+        from sla_tool import aisbench
+        from sla_tool.config import Config
+        cfg = Config()
+        cfg.api_key = self.CANARY
+        text = aisbench.render_model_config(cfg, 4, 8, 0.0)
+        self.assertNotIn(self.CANARY, text,
+                         "ais_bench 模型配置里出现了明文 key（会被收进产物/临时文件）")
+        self.assertIn('os.environ.get("ENDPOINT_API_KEY"', text,
+                      "模型配置应从环境变量读 key")
+
+    def test_api_key_comes_from_env(self):
+        from sla_tool.config import Config
+        old = os.environ.get("ENDPOINT_API_KEY")
+        os.environ["ENDPOINT_API_KEY"] = self.CANARY
+        try:
+            cfg = Config()
+            cfg.normalize()
+            self.assertEqual(cfg.api_key, self.CANARY,
+                             "没有 --api-key 时应回落到 ENDPOINT_API_KEY")
+        finally:
+            if old is None:
+                os.environ.pop("ENDPOINT_API_KEY", None)
+            else:
+                os.environ["ENDPOINT_API_KEY"] = old
+
+
+# --------------------------------------------------------------------------- #
 # 4. end to end: sla_search.py search against mock + stub
 # --------------------------------------------------------------------------- #
 CORE_READY = SLA_SEARCH.is_file()
