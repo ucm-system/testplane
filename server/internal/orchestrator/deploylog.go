@@ -228,6 +228,7 @@ func (c *DeployLogCollector) WaitLoop() {
 		<-done
 	}
 }
+
 // beginWrite 登记一个写盘 goroutine；stopping 之后不再接受新的（Stop 之后不该再有写入）。
 func (c *DeployLogCollector) beginWrite() bool {
 	c.mu.Lock()
