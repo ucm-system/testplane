@@ -62,3 +62,47 @@ test('运行中的 Run：默认就是执行视图（没有结果页签）', asyn
   await expect(page.getByTestId('run-result-verdict')).toHaveCount(0)
   await expect(page.getByRole('tab', { name: '结果' })).toHaveCount(0)
 })
+
+/**
+ * 执行链路末尾多出来的箭头（用户反馈）：箭头只该出现在**节点之间**。
+ * 断言的是结构关系（箭头数 = 节点数 - 1），Deploy + Task 混排时也一样；
+ * 单节点（只有 Deploy、0 个 Task）时一个箭头都不该有。
+ */
+test('执行链路：箭头只出现在节点之间（末尾无箭头；单节点无箭头）', async ({ page }) => {
+  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.setViewportSize({ width: 1440, height: 1000 })
+
+  await page.goto('/runs')
+  await page.locator('tbody a[href="/runs/r-20261105-0002"]').first().click()
+  // 终态 Run 默认「结果」视图，链路在「执行细节」里
+  await page.getByRole('tab', { name: '执行细节' }).click()
+
+  const nodes = page.locator('[data-chain-node]')
+  const arrows = page.locator('[data-testid="run-chain-arrow"]')
+  await expect(nodes.first()).toBeVisible({ timeout: 20_000 })
+
+  const count = await nodes.count()
+  expect(count, '这条 Run 应该是 Deploy + 多个 Task 的混排').toBeGreaterThan(1)
+  await expect(arrows).toHaveCount(count - 1)
+  // 最后一个节点（Task）后面没有箭头
+  await expect(nodes.last().locator('[data-testid="run-chain-arrow"]')).toHaveCount(0)
+
+  // 单节点：把这条 Run 的 tasks 清空（只留 Deploy），站内切走再切回触发重新拉取
+  await page.evaluate(async () => {
+    const mock = (await import('/src/api/mock.ts')) as {
+      mockApi: { getRun: (id: string) => Promise<Record<string, unknown>> }
+    }
+    const original = mock.mockApi.getRun.bind(mock.mockApi)
+    mock.mockApi.getRun = async (id: string) => {
+      const run = await original(id)
+      return id === 'r-20261105-0002' ? { ...run, tasks: [] } : run
+    }
+  })
+  await page.getByRole('link', { name: '运行列表' }).click()
+  await expect(page.getByText('全部 Run')).toBeVisible()
+  await page.locator('tbody a[href="/runs/r-20261105-0002"]').first().click()
+  await page.getByRole('tab', { name: '执行细节' }).click()
+
+  await expect(page.locator('[data-chain-node]')).toHaveCount(1)
+  await expect(page.locator('[data-testid="run-chain-arrow"]')).toHaveCount(0)
+})

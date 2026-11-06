@@ -72,6 +72,20 @@ func (m *MemoryStore) ListTesters(ctx context.Context) ([]Record, error) {
 	return out, nil
 }
 
+// MarkTesterOrphaned 把一行标记为 orphaned（只标记，不删）。
+func (m *MemoryStore) MarkTesterOrphaned(ctx context.Context, name, version string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := Key(name, version)
+	rec, ok := m.records[key]
+	if !ok {
+		return fmt.Errorf("registry: mark orphaned %s: %w", key, domain.ErrNotFound)
+	}
+	rec.Orphaned = true
+	m.records[key] = rec
+	return nil
+}
+
 func isLater(candidate, current string) bool {
 	return versionLess(current, candidate)
 }

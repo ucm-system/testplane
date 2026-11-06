@@ -254,7 +254,7 @@ run:
 | `GET` | `/tasks` | 跨 Run 列表（`status`、`tester`、`cursor`） |
 | `GET` | `/tasks/{id}` | 详情 + Attempt 列表 |
 | `POST` | `/tasks/{id}/cancel` | 取消单个 Task |
-| `POST` | `/tasks/{id}/retry` | 新建 Attempt |
+| `POST` | `/tasks/{id}/retry` | 新建 Attempt；**所属 Run 已终态 → 409 `run_terminal`**（改用 `/runs/{id}/retry`） |
 | `GET` | `/tasks/{id}/attempts` | Attempt 列表 |
 | `GET` | `/tasks/{id}/attempts/{idx}/result` | `result.json` |
 | `GET` | `/tasks/{id}/attempts/{idx}/logs` | `?stream=stdout|stderr&offset=&limit=&follow=1` |
@@ -274,9 +274,9 @@ X-Log-Coverage: 2026-11-05T01:00:00Z/2026-11-05T01:32:10Z
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/testers` | 目录（`role`、`orphaned` 过滤） |
-| `GET` | `/testers/{name}` | 最新版本 |
-| `GET` | `/testers/{name}/versions/{version}` | 指定版本（含 parameters/env 声明） |
+| `GET` | `/testers` | 目录（`role` 过滤；**默认每个 name 只回最新版本**，`include_retired=true` 回全部版本；条目带 `latest` / `retired`，`orphaned` 为旧别名） |
+| `GET` | `/testers/{name}` | 该 name 的最新版本（带 `latest` / `retired`） |
+| `GET` | `/testers/{name}/versions/{version}` | 指定版本（含 parameters/env 声明；退役版本仍可按 `name@version` 精确读取） |
 | `GET` | `/profiles` | Execution Profile + 挂载能力 |
 | `GET` | `/clusters` | 集群概要（不返回凭据） |
 | `GET` | `/secrets` | Secret 名称与说明（operator） |

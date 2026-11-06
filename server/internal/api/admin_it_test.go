@@ -525,7 +525,7 @@ func TestAdminCleanupArtifacts(t *testing.T) {
 
 	// 3) 终态 Run：造目录 + 索引行 → 清理。
 	if _, err := env.st.Pool().Exec(ctx,
-		`UPDATE runs SET status = 'succeeded', finished_at = now() WHERE id = $1`, runID); err != nil {
+		`UPDATE runs SET status = 'succeeded', finished_at = GREATEST(now(), submitted_at) WHERE id = $1`, runID); err != nil {
 		t.Fatalf("置终态: %v", err)
 	}
 	dir := filepath.Join(env.cfg.StorageRoot, runID)

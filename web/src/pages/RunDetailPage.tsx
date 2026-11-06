@@ -7,7 +7,6 @@ import { toApiError } from '@/api/client'
 import type { ApiErrorBody, Attempt, Deploy, DeploySnapshot, RetryPlan, Run, TaskDetail, TaskSummary } from '@/api/types'
 import { EventTimeline, CONNECTION_LABEL, connectionStateOf } from '@/components/app/EventTimeline'
 import { LogViewer } from '@/components/app/LogViewer'
-import { RightRail, RailCard } from '@/components/app/RightRail'
 import { RunResultView } from '@/components/app/RunResultView'
 import { DeployStateBadge, RunStatusBadge, TaskStatusBadge, WaitingReasonTag } from '@/components/app/StatusBadge'
 import { Badge, Tag } from '@/components/ui/badge'
@@ -22,6 +21,7 @@ import { Tabs, tabPanelProps } from '@/components/ui/tabs'
 import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
 import { DeployLogsPanel } from '@/components/app/DeployLogsPanel'
+import { NotFoundPage } from '@/pages/NotFoundPage'
 import { useIdentity } from '@/hooks/useIdentity'
 import { useLogTail } from '@/hooks/useLogTail'
 import { useRunEvents } from '@/hooks/useRunEvents'
@@ -715,7 +715,7 @@ export function RunDetailPage() {
   const connection = connectionStateOf(status)
   const toast = useToast()
   // 终态默认看「结果」（用户：跑完了只想拿结果），运行中只有「执行细节」
-  const [view, setView] = useState<'result' | 'detail'>('detail')
+  const [view, setView] = useState<'result' | 'detail' | 'events'>('detail')
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [actionError, setActionError] = useState<ApiErrorBody | null>(null)
@@ -800,6 +800,18 @@ export function RunDetailPage() {
   }
 
   if (run.error) {
+    /**
+     * 取到 404（对象不存在 / 已被清理）不是「加载失败」—— 它是**页面不存在**，
+     * 走全站统一的 404 组件（同一个组件、按上下文换文案），不摆红色错误条让人重试。
+     */
+    if (run.error.code === 'NOT_FOUND') {
+      return (
+        <NotFoundPage
+          title="Run 不存在或已被清理"
+          description="这个 Run 可能已经被清理，或者 ID 打错了。可以回到概览，或从运行列表里找最近的 Run。"
+        />
+      )
+    }
     return (
       <Card>
         <CardHeader tone="err" title="加载 Run 失败" />
@@ -819,27 +831,21 @@ export function RunDetailPage() {
   const terminal = detail ? isTerminalRun(detail.status) : false
   const tasks = detail?.tasks ?? []
 
+  /**
+   * 执行链路的节点序列：Deploy 在最前（如果有），之后按 `tests[]` 顺序排 Task。
+   * 箭头由这个数组的长度决定（见下面的 `isLast`），不要在 JSX 里各自写死。
+   */
+  const flowNodes: Array<
+    | { kind: 'deploy'; key: string; deploy: NonNullable<Run['deploy']> }
+    | { kind: 'task'; key: string; task: TaskSummary }
+  > = [
+    ...(detail && detail.deploy ? [{ kind: 'deploy' as const, key: 'deploy', deploy: detail.deploy }] : []),
+    ...tasks.map((task) => ({ kind: 'task' as const, key: task.id, task })),
+  ]
+
   return (
     <>
-      <RightRail>
-        <RailCard
-          title="事件"
-          tone="info"
-          sub={
-            terminal
-              ? 'Run 已结束 · 下面是历史事件'
-              : connection === 'live'
-                ? '实时更新中 · 断开后会自动重连'
-                : CONNECTION_LABEL[connection]
-          }
-        >
-          <EventTimeline events={events} connection={connection} ended={terminal} />
-        </RailCard>
-        <RailCard title="边界说明" tone="muted">
-          <p>页面上的状态跟着服务端推送走，不会先替你改成「已完成」；刷新一下拿到的才是最新。</p>
-          <p className="mt-2">日志不在事件流里：点开某个 Task，才单独读它那一次尝试的日志。</p>
-        </RailCard>
-      </RightRail>
+
 
       <div className="flex flex-wrap items-center gap-2">
         <Link to="/runs">
@@ -917,18 +923,46 @@ export function RunDetailPage() {
         </Card>
       ) : null}
 
-      {detail && terminal ? (
+      {detail ? (
         <Tabs<string>
           ariaLabel="Run 详情视图"
           idBase="run-view"
           value={view}
-          onChange={(next: string) => setView(next as 'result' | 'detail')}
+          onChange={(next: string) => setView(next as 'result' | 'detail' | 'events')}
           items={[
-            { value: 'result', label: '结果' },
+            ...(terminal ? [{ value: 'result', label: '结果' }] : []),
             { value: 'detail', label: '执行细节' },
+            { value: 'events', label: '事件' },
           ]}
           className="rounded-lg border border-line-soft bg-surface px-3 pt-1 shadow-card"
         />
+      ) : null}
+
+      {/* 事件页签：原来在右栏，右栏取消后搬进主内容的第三个页签（折叠 ≠ 隐藏） */}
+      {detail && view === 'events' ? (
+        <section {...tabPanelProps('run-view', 'events')} data-testid="run-events-panel" className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-[15px] font-semibold text-fg">事件</h2>
+            <span className="text-2xs text-fg-3">
+              {terminal
+                ? 'Run 已结束 · 下面是历史事件'
+                : connection === 'live'
+                  ? '实时更新中 · 断开后会自动重连'
+                  : CONNECTION_LABEL[connection]}
+            </span>
+            <span className="ml-auto text-2xs text-fg-3">共 {events.length} 条</span>
+          </div>
+          <Card>
+            <CardBody>
+              <EventTimeline events={events} connection={connection} ended={terminal} />
+            </CardBody>
+            <CardFooter>
+              <span>
+                页面上的状态跟着服务端推送走，不会先替你改成「已完成」；日志不在事件流里 —— 点开某个 Task 才读它那一次的日志。
+              </span>
+            </CardFooter>
+          </Card>
+        </section>
       ) : null}
 
       {/* 页签与面板配对：role=tabpanel + id / aria-controls / aria-labelledby（B7） */}
@@ -938,11 +972,8 @@ export function RunDetailPage() {
         </section>
       ) : null}
 
-      {detail && (!terminal || view === 'detail') ? (
-        <section
-          {...(terminal ? tabPanelProps('run-view', 'detail') : {})}
-          className="flex flex-col gap-4"
-        >
+      {detail && view === 'detail' ? (
+        <section {...tabPanelProps('run-view', 'detail')} className="flex flex-col gap-4">
           <Card>
             <CardHeader
               tone="muted"
@@ -1015,41 +1046,46 @@ export function RunDetailPage() {
               actions={<span className="text-2xs text-fg-3">共 {(detail.deploy ? 1 : 0) + tasks.length} 个节点</span>}
             />
             <CardBody>
+              {/*
+                箭头只出现在**节点之间**（`index < flowNodes.length - 1`）。
+                Deploy 与 Task 混排时它们同属一个数组，所以「最后一个」永远是视觉上的最后一个：
+                没有 Deploy 时是最后一个 Task，只有 Deploy 时（0 个 Task）就只有它自己 —— 不画箭头。
+              */}
               <ol className="flex items-center gap-2 overflow-x-auto pb-1" aria-label="执行链路">
-                {detail.deploy ? (
-                  <li className="flex shrink-0 items-center gap-2">
-                    <FlowNode
-                      name="Deploy"
-                      badge={detail.deploy.state}
-                      meta={detail.deploy.state === 'queued' ? '排队中' : detail.deploy.state}
-                      tone={detail.deploy.state === 'ready' ? 'ok' : detail.deploy.state === 'failed' ? 'err' : 'info'}
-                      onClick={() => {
-                        document.getElementById('deploy-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                      }}
-                    />
-                    <span className="text-fg-3" aria-hidden>
-                      →
-                    </span>
-                  </li>
-                ) : null}
-                {tasks.map((task) => {
-                  const meta = taskStatusMeta(task.status)
+                {flowNodes.map((node, index) => {
+                  const isLast = index === flowNodes.length - 1
                   return (
-                    <li key={task.id} className="flex shrink-0 items-center gap-2">
-                      <FlowNode
-                        name={task.name}
-                        badge={meta.label}
-                        meta={taskMeta(task)}
-                        tone={meta.tone}
-                        onClick={() => {
-                          document
-                            .getElementById('task-panels')
-                            ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                        }}
-                      />
-                      <span className="text-fg-3" aria-hidden>
-                        →
-                      </span>
+                    <li key={node.key} className="flex shrink-0 items-center gap-2" data-chain-node>
+                      {node.kind === 'deploy' ? (
+                        <FlowNode
+                          name="Deploy"
+                          badge={node.deploy.state}
+                          meta={node.deploy.state === 'queued' ? '排队中' : node.deploy.state}
+                          tone={node.deploy.state === 'ready' ? 'ok' : node.deploy.state === 'failed' ? 'err' : 'info'}
+                          onClick={() => {
+                            document
+                              .getElementById('deploy-section')
+                              ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                          }}
+                        />
+                      ) : (
+                        <FlowNode
+                          name={node.task.name}
+                          badge={taskStatusMeta(node.task.status).label}
+                          meta={taskMeta(node.task)}
+                          tone={taskStatusMeta(node.task.status).tone}
+                          onClick={() => {
+                            document
+                              .getElementById('task-panels')
+                              ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                          }}
+                        />
+                      )}
+                      {isLast ? null : (
+                        <span data-testid="run-chain-arrow" className="text-fg-3" aria-hidden>
+                          →
+                        </span>
+                      )}
                     </li>
                   )
                 })}

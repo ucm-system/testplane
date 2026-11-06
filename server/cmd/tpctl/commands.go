@@ -659,7 +659,8 @@ func statusFromBody(body []byte) string {
 func (a *app) cmdTesters(args []string) int {
 	fs := flag.NewFlagSet("testers", flag.ContinueOnError)
 	role := fs.String("role", "", "按角色过滤：test|pre_check")
-	orphaned := fs.Bool("orphaned", false, "包含已从目录移除的 Tester")
+	retired := fs.Bool("include-retired", false, "包含已退役的历史版本（器 #60）")
+	orphaned := fs.Bool("orphaned", false, "等价于 --include-retired（旧名，保留兼容）")
 	jsonOut := &a.jsonOut
 	fs.BoolVar(jsonOut, "json", a.jsonOut, "机器可读输出")
 	pos, err := parseArgs(fs, args)
@@ -676,8 +677,8 @@ func (a *app) cmdTesters(args []string) int {
 	if *role != "" {
 		q.Set("role", *role)
 	}
-	if *orphaned {
-		q.Set("orphaned", "true")
+	if *retired || *orphaned {
+		q.Set("include_retired", "true")
 	}
 
 	res, err := a.api.get(context.Background(), "/api/v1/testers", q)
@@ -695,6 +696,8 @@ func (a *app) cmdTesters(args []string) int {
 			Version     string `json:"version"`
 			Role        string `json:"role"`
 			Description string `json:"description"`
+			Latest      bool   `json:"latest"`
+			Retired     bool   `json:"retired"`
 			Orphaned    bool   `json:"orphaned"`
 		} `json:"items"`
 	}
@@ -707,8 +710,11 @@ func (a *app) cmdTesters(args []string) int {
 	}
 	for _, t := range list.Items {
 		suffix := ""
-		if t.Orphaned {
-			suffix = "  [orphaned]"
+		if t.Latest {
+			suffix += "  [latest]"
+		}
+		if t.Retired || t.Orphaned {
+			suffix += "  [retired]"
 		}
 		desc := t.Description
 		if desc == "" {

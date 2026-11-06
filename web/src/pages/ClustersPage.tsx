@@ -1,7 +1,6 @@
 import { Link } from 'react-router-dom'
 import { api } from '@/api'
 import type { Cluster, QueueStatus } from '@/api/types'
-import { RightRail, RailCard } from '@/components/app/RightRail'
 import { WaitingReasonTag } from '@/components/app/StatusBadge'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
@@ -57,17 +56,12 @@ export function ClustersPage() {
 
   return (
     <>
-      <RightRail>
-        <RailCard title="边界说明" tone="warn">
-          <p>平台不参与调度：这一页只回答「卡在平台名额，还是卡在 K8s / Volcano」。</p>
-          <p className="mt-2">平台名额是平台自己设的并发上限：满了就排队，不会拒绝；Volcano 那块是只读的，平台不插队、也不改配额。</p>
-        </RailCard>
-        <RailCard title="凭据" tone="muted">
-          <p>这里只显示集群地址和最近一次连通性结论，不显示任何凭据，也没有可以点开看密钥的入口。</p>
-        </RailCard>
-      </RightRail>
 
       {data.error ? <ErrorState error={data.error} onRetry={data.reload} /> : null}
+
+      <p className="text-2xs leading-relaxed text-fg-3">
+        平台不参与调度：这一页只回答「卡在平台名额，还是卡在 K8s / Volcano」；只显示集群地址与最近一次连通性结论，不显示凭据。
+      </p>
 
       <Card>
         <CardHeader tone="primary" title="集群" sub={`${clusters.length} 个 · 只读`} />

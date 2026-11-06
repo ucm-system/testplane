@@ -1,11 +1,11 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Trash2 } from 'lucide-react'
-import { parse as parseYaml } from 'yaml'
+import { Check, Copy, Info, Plus, Trash2 } from 'lucide-react'
+import { isMap, isScalar, parse as parseYaml, parseDocument } from 'yaml'
 import { api, writeBlockedReason } from '@/api'
 import { toApiError } from '@/api/client'
 import type { ApiErrorBody, DeployManifest, RunManifest, ValidationIssue } from '@/api/types'
-import { RightRail, RailCard } from '@/components/app/RightRail'
+import { TesterDrawer, TesterParamTable } from '@/components/app/TesterDrawer'
 import { Badge, Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
@@ -59,39 +59,113 @@ function insertAt<T>(list: readonly T[], index: number, item: T): T[] {
   return next
 }
 
-interface DeployParse {
-  deploy: DeployManifest | null
-  error: string | null
-  /** YAML 解析失败的位置（`yaml` 包 `LinePos`，1-based）；交给编辑器标行 */
-  pos: YamlEditorError | null
+/** 把片段**追加**到参数字符串末尾（不是覆盖）：已有内容时补一个空格。 */
+function appendArg(current: string, snippet: string): string {
+  const base = current.trimEnd()
+  return base ? `${base} ${snippet}` : snippet
 }
 
-/** 把 YAML 文本解析成 deploy 段；返回错误信息而不是抛。 */
+/** 字符偏移 → 1-based 行列（`yaml` 的节点 `range[0]` 是偏移量，编辑器要行号）。 */
+function lineColAt(text: string, offset: number): YamlEditorError {
+  const safe = Math.max(0, Math.min(offset, text.length))
+  const before = text.slice(0, safe)
+  return { line: before.split('\n').length, col: safe - before.lastIndexOf('\n') }
+}
+
+/** 顶层某个 key 的起始位置；找不到就退回第 1 行第 1 列。 */
+function keyPos(text: string, key: string): YamlEditorError {
+  try {
+    const doc = parseDocument(text)
+    if (isMap(doc.contents)) {
+      for (const pair of doc.contents.items) {
+        const node = pair.key
+        if (isScalar(node) && node.value === key && node.range) return lineColAt(text, node.range[0])
+      }
+    }
+  } catch {
+    // 语法都坏了就没有「结构位置」可言：退回文首
+  }
+  return { line: 1, col: 1 }
+}
+
+interface DeployParse {
+  deploy: DeployManifest | null
+  /** 一行可读错误（不含「第 N 行第 M 列」前缀） */
+  error: string | null
+  /** 错误位置（语法错误来自 `YAMLParseError.linePos`，结构错误来自 key 的 range） */
+  pos: YamlEditorError | null
+  /** 结构层字段级提示（provider / parameters）；语法错误时为空 */
+  fields: Array<{ field: 'provider' | 'parameters'; message: string }>
+}
+
+/**
+ * 把 YAML 文本解析成 deploy 段 —— **语法 + 结构**两层都校：
+ *  - 语法：`parse` 抛错时带 `linePos`，用来在编辑器里标红；
+ *  - 结构：`provider` 必须是字符串、`parameters` 必须是对象；
+ *    缺字段不是「解析失败」，但同样不能提交（用户之前看到「能 parse 就算有效」就是这么来的）。
+ */
 function parseDeploy(text: string): DeployParse {
-  if (!text.trim()) return { deploy: null, error: 'deploy 段不能为空', pos: null }
+  const fail = (
+    error: string,
+    pos: YamlEditorError | null,
+    fields: DeployParse['fields'] = [],
+  ): DeployParse => ({ deploy: null, error, pos, fields })
+
+  if (!text.trim()) {
+    return fail('deploy 段不能为空', { line: 1, col: 1 }, [
+      { field: 'provider', message: 'provider 必填' },
+      { field: 'parameters', message: 'parameters 必填' },
+    ])
+  }
+
   let parsed: unknown
   try {
     parsed = parseYaml(text)
   } catch (e) {
     // YAMLParseError 带 linePos[0] = { line, col }：编辑器靠它画红色波浪 + gutter 圆点
     const first = (e as { linePos?: Array<{ line: number; col: number }> }).linePos?.[0]
-    return {
-      deploy: null,
-      error: `YAML 解析失败：${(e as Error).message}`,
-      pos: first ? { line: first.line, col: first.col } : null,
-    }
+    return fail(
+      `YAML 语法错误：${(e as Error).message}`,
+      first ? { line: first.line, col: first.col } : { line: 1, col: 1 },
+    )
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { deploy: null, error: 'deploy 段必须是一个对象（含 provider / parameters）', pos: null }
+    return fail('结构无效：deploy 段必须是一个对象（含 provider / parameters）', { line: 1, col: 1 }, [
+      { field: 'provider', message: 'provider 必填' },
+      { field: 'parameters', message: 'parameters 必填（对象）' },
+    ])
   }
+
   const rec = parsed as Record<string, unknown>
   const provider = typeof rec['provider'] === 'string' ? rec['provider'] : ''
-  if (!provider) return { deploy: null, error: '缺少顶层 provider（平台按 provider 转交 Genet）', pos: null }
-  const parameters =
-    rec['parameters'] && typeof rec['parameters'] === 'object'
-      ? (rec['parameters'] as Record<string, unknown>)
-      : {}
-  return { deploy: { provider, parameters }, error: null, pos: null }
+  const rawParameters = rec['parameters']
+  const fields: DeployParse['fields'] = []
+
+  if (!provider) fields.push({ field: 'provider', message: 'provider 必填（平台按 provider 转交 Genet）' })
+  if (rawParameters === undefined || rawParameters === null) {
+    fields.push({ field: 'parameters', message: 'parameters 必填（必须是一个对象）' })
+  } else if (typeof rawParameters !== 'object' || Array.isArray(rawParameters)) {
+    fields.push({ field: 'parameters', message: 'parameters 必须是对象' })
+  }
+
+  if (fields.length > 0) {
+    const first = fields[0]!
+    // 标在「这段内容真正在哪」：缺 parameters 就标 provider 那行，缺 provider 就标 parameters 那行
+    const pos =
+      first.field === 'provider' && rec['parameters'] !== undefined
+        ? keyPos(text, 'parameters')
+        : first.field === 'parameters'
+          ? keyPos(text, 'parameters')
+          : keyPos(text, 'provider')
+    return fail(`结构无效：${first.message}`, pos, fields)
+  }
+
+  return {
+    deploy: { provider, parameters: rawParameters as Record<string, unknown> },
+    error: null,
+    pos: null,
+    fields: [],
+  }
 }
 
 export function SubmitPage() {
@@ -105,7 +179,11 @@ export function SubmitPage() {
   const testerList = testers.data ?? []
   const defaultTester = testerList.find((t) => t.role === 'test')?.name ?? ''
 
-  const [name, setName] = useState('qwen3-32b-daily')
+  /**
+   * 默认值一律留空，只给 placeholder：用户之前反馈「打开就有一堆像是已经填好的值」，
+   * 分不清哪些是自己写的、哪些是示例。空表单点提交会被**前端**拦下并给字段级错误。
+   */
+  const [name, setName] = useState('')
   const [mode, setMode] = useState<SourceMode>('deploy')
   const [deployYaml, setDeployYaml] = useState(DEFAULT_DEPLOY_YAML)
   const [serviceUrl, setServiceUrl] = useState('http://10.0.0.10:8000/v1')
@@ -114,11 +192,10 @@ export function SubmitPage() {
   const [precheck, setPrecheck] = useState<PrecheckMode>('auto')
   /** 执行环境 profile：TestSpec.execution.profile 必填；MVP 没有 /profiles 端点，给可编辑默认值 */
   const [profile, setProfile] = useState('k8s-npu')
-  const [envRows, setEnvRows] = useState<KeyValueRow[]>([{ key: 'LOG_LEVEL', value: 'info' }])
-  const [secretRows, setSecretRows] = useState<KeyValueRow[]>([{ key: 'ENDPOINT_API_KEY', value: '' }])
-  const [tests, setTests] = useState<TestDraft[]>([
-    { key: newKey(), name: 'accuracy-dataset-a', tester: '', args: '--dataset=/data/gsm8k.jsonl --limit=200' },
-  ])
+  /** 默认 0 行：点「+ 环境变量 / + 凭据引用」才出现 */
+  const [envRows, setEnvRows] = useState<KeyValueRow[]>([])
+  const [secretRows, setSecretRows] = useState<KeyValueRow[]>([])
+  const [tests, setTests] = useState<TestDraft[]>([{ key: newKey(), name: '', tester: '', args: '' }])
 
   const [issues, setIssues] = useState<ValidationIssue[]>([])
   const [error, setError] = useState<ApiErrorBody | null>(null)
@@ -126,7 +203,33 @@ export function SubmitPage() {
   const [submitting, setSubmitting] = useState(false)
   const [dryRunOk, setDryRunOk] = useState<boolean | null>(null)
 
+  /**
+   * 右栏与「参数复制」都针对**当前 Task**：点 Task 卡片 / 选 Tester / 添加 Task 都会把它设为当前。
+   * 没点过就取第一个（提交页默认只有一个 Task）。
+   */
+  const [activeKey, setActiveKey] = useState<string | null>(null)
+  const activeIndex = Math.max(
+    0,
+    tests.findIndex((test) => test.key === (activeKey ?? tests[0]?.key)),
+  )
+  const activeTest = tests[activeIndex]
+  const activeTesterName = activeTest ? activeTest.tester || defaultTester : ''
+  const activeTester = testerList.find((tester) => tester.name === activeTesterName)
+
+  /** Tester 详情抽屉（与 `/testers?open=` 同一个组件） */
+  const [detailTester, setDetailTester] = useState<string | null>(null)
+
   const deployParse = useMemo(() => parseDeploy(deployYaml), [deployYaml])
+
+  /**
+   * 编辑器标红/滚行用**防抖后**的位置：边打字边滚会把光标甩走。
+   * 校验结论（是否可提交）仍用即时的 `deployParse`，所以「停手 250ms」后标注与结论一致。
+   */
+  const [lintPos, setLintPos] = useState<YamlEditorError | null>(null)
+  useEffect(() => {
+    const timer = window.setTimeout(() => setLintPos(deployParse.pos), deployParse.pos ? 250 : 0)
+    return () => window.clearTimeout(timer)
+  }, [deployParse])
 
   const testerOptions = testerList.filter((t) => t.role === 'test')
   const precheckTester = testerList.find((t) => t.role === 'pre_check')
@@ -181,6 +284,18 @@ export function SubmitPage() {
 
   const setTest = (key: string, patch: Partial<TestDraft>) => {
     setTests((prev) => prev.map((test) => (test.key === key ? { ...test, ...patch } : test)))
+  }
+
+  /** 复制/点参数：一律追加到「当前 Task」的 args，已有内容时补空格（不覆盖）。 */
+  const appendToArgs = (testKey: string | undefined, snippet: string) => {
+    if (!testKey) return
+    setTests((prev) => prev.map((test) => (test.key === testKey ? { ...test, args: appendArg(test.args, snippet) } : test)))
+  }
+
+  const addTask = () => {
+    const key = newKey()
+    setTests((prev) => [...prev, { key, name: '', tester: defaultTester, args: '' }])
+    setActiveKey(key)
   }
 
   /**
@@ -401,34 +516,14 @@ export function SubmitPage() {
     }
   }
 
+  const [railCopied, setRailCopied] = useState<string | null>(null)
+  const flashRailCopied = (key: string) => {
+    setRailCopied(key)
+    window.setTimeout(() => setRailCopied((prev) => (prev === key ? null : prev)), 1500)
+  }
+
   return (
     <>
-      <RightRail>
-        <RailCard title="怎么填参数" tone="muted" sub="每个 Tester 一段字符串">
-          <p className="rounded-md border border-line-soft bg-surface-2 p-3 text-2xs leading-relaxed text-fg-2">
-            每个 Task 只有一个「参数」输入框，照 Tester 文档写成一整串即可（平台只做切分，不校验含义）。
-            这一栏的清单是给人看的说明，不是表单。
-          </p>
-          <div className="mt-3 space-y-2">
-            {testerList.slice(0, 3).map((tester) => (
-              <div key={tester.name}>
-                <p className="flex flex-wrap items-center gap-1.5">
-                  <Tag mono>{tester.name}</Tag>
-                  <span className="text-2xs text-fg-3">{tester.role}</span>
-                </p>
-                <p className="mt-1 font-mono text-2xs text-fg-3">{tester.placeholder ?? '—'}</p>
-              </div>
-            ))}
-          </div>
-        </RailCard>
-
-        <RailCard title="不用自己写的参数" tone="warn">
-          <p>
-            <code className="font-mono">--url</code> / <code className="font-mono">--model_name</code> /{' '}
-            <code className="font-mono">--model_path</code> 由平台自动补在参数末尾。再自己写一遍会被拒绝——删掉它就好。
-          </p>
-        </RailCard>
-      </RightRail>
 
       {/* 提交/校验失败：表单内摘要（不自动消失、自己滚进视口并聚焦、trace_id 可复制） */}
       <FormErrorSummary error={error} issues={issues} onJumpTo={focusField} />
@@ -456,7 +551,7 @@ export function SubmitPage() {
                 value={name}
                 maxLength={NAME_MAX_RUNES}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="qwen3-32b-daily"
+                placeholder="如 qwen3-32b-daily"
                 aria-invalid={Boolean(nameError)}
                 className="flex-1"
               />
@@ -495,17 +590,42 @@ export function SubmitPage() {
         <CardBody className="flex flex-col gap-2">
           {mode === 'deploy' ? (
             <>
-              {/* CodeMirror 6：真语法高亮 + 行号 + 横向滚动；解析失败按 LinePos 标行 */}
+              {/* CodeMirror 6：真语法高亮 + 行号 + 横向滚动；语法/结构错误都按行列标行 */}
               <YamlEditor
                 value={deployYaml}
                 onChange={setDeployYaml}
                 rows={7}
                 aria-label="deploy 段 YAML"
-                error={deployParse.pos}
+                error={lintPos}
               />
-              <p className={cn('text-2xs', deployParse.error ? 'text-danger-text' : 'text-success-text')}>
-                {deployParse.error ? `✗ ${deployParse.error}` : '✓ YAML 结构有效（provider + parameters）'}
+              {/*
+                一行可读错误：`第 N 行第 M 列：<错误>`。
+                结构（缺 provider / parameters）与语法错误走同一行，区别只在 error 文案。
+              */}
+              <p
+                data-testid="deploy-yaml-error"
+                data-state={deployParse.error ? 'error' : 'ok'}
+                role="status"
+                aria-live="polite"
+                className={cn('text-2xs', deployParse.error ? 'text-danger-text' : 'text-success-text')}
+              >
+                {deployParse.error
+                  ? `${deployParse.pos ? `第 ${deployParse.pos.line} 行第 ${deployParse.pos.col} 列：` : ''}${deployParse.error}`
+                  : '✓ YAML 结构有效（provider + parameters）'}
               </p>
+              {deployParse.fields.length > 0 ? (
+                <ul
+                  data-testid="deploy-yaml-field-hint"
+                  className="flex flex-col gap-0.5 rounded-md border border-danger/25 bg-danger-weak px-3 py-2"
+                >
+                  {deployParse.fields.map((item) => (
+                    <li key={item.field} className="text-2xs leading-relaxed text-danger-text">
+                      <code className="mr-1.5 font-mono">deploy.{item.field}</code>
+                      {item.message}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
               <p className="text-2xs leading-relaxed text-fg-3">
                 平台只校 YAML 结构并转交 Genet；部署失败会终止整个 Run，不会创建任何 Task。一个 Deploy 可能拉起多个 Pod
                 （多节点 / PD 分离），各自有日志且测试期间仍在追加。
@@ -537,16 +657,32 @@ export function SubmitPage() {
           sub="Run 粒度，注入该 Run 下全部 Task"
           actions={
             <>
-              <Button size="sm" icon={<Plus className="size-3" aria-hidden />} onClick={() => setEnvRows((p) => [...p, { key: '', value: '' }])}>
+              <Button
+                size="sm"
+                data-testid="add-env"
+                icon={<Plus className="size-3" aria-hidden />}
+                onClick={() => setEnvRows((p) => [...p, { key: '', value: '' }])}
+              >
                 环境变量
               </Button>
-              <Button size="sm" icon={<Plus className="size-3" aria-hidden />} onClick={() => setSecretRows((p) => [...p, { key: '', value: '' }])}>
+              <Button
+                size="sm"
+                data-testid="add-secret"
+                icon={<Plus className="size-3" aria-hidden />}
+                onClick={() => setSecretRows((p) => [...p, { key: '', value: '' }])}
+              >
                 凭据引用
               </Button>
             </>
           }
         />
         <CardBody className="flex flex-col gap-2">
+          {/* 默认 0 行：不预填 LOG_LEVEL=info / ENDPOINT_API_KEY（那两行是示例，不是要提交的内容） */}
+          {envRows.length === 0 && secretRows.length === 0 ? (
+            <p data-testid="env-empty-hint" className="text-2xs text-fg-3">
+              还没有环境变量或凭据引用。需要时点右上角「+ 环境变量 / + 凭据引用」再加一行。
+            </p>
+          ) : null}
           {envRows.map((row, index) => (
             <div key={`env-${index}`} className="flex items-center gap-2">
               <Input
@@ -627,16 +763,7 @@ export function SubmitPage() {
                   { value: 'off', label: 'off' },
                 ]}
               />
-              <Button
-                size="sm"
-                icon={<Plus className="size-3" aria-hidden />}
-                onClick={() =>
-                  setTests((prev) => [
-                    ...prev,
-                    { key: newKey(), name: `task-${prev.length + 1}`, tester: defaultTester, args: '' },
-                  ])
-                }
-              >
+              <Button size="sm" data-testid="add-task" icon={<Plus className="size-3" aria-hidden />} onClick={addTask}>
                 添加 Task
               </Button>
             </>
@@ -691,78 +818,112 @@ export function SubmitPage() {
             </div>
           ) : null}
 
-          {tests.map((test, index) => (
-            <div key={test.key} className="rounded-md border border-line-soft p-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="grid size-5 shrink-0 place-items-center rounded-full bg-surface-3 text-2xs text-fg-2">
-                  {index + 1}
-                </span>
-                <Input
-                  value={test.name}
-                  aria-label={`Task ${index + 1} 名称`}
-                  aria-invalid={Boolean(issueFor(`run.tests[${index}].name`))}
-                  title={issueFor(`run.tests[${index}].name`) ?? undefined}
-                  placeholder="accuracy-dataset-a"
-                  className="h-8 w-56"
-                  onChange={(e) => setTest(test.key, { name: e.target.value })}
-                />
-                <Select
-                  value={test.tester || defaultTester}
-                  aria-label={`Task ${index + 1} Tester`}
-                  className="h-8 w-48"
-                  onChange={(e) => setTest(test.key, { tester: e.target.value })}
-                >
-                  {testerOptions.length === 0 ? <option value="">（还没有 Tester）</option> : null}
-                  {testerOptions.map((tester) => (
-                    <option key={tester.name} value={tester.name}>
-                      {tester.name} v{tester.version}
-                    </option>
-                  ))}
-                </Select>
-                {(() => {
-                  const selected = testerList.find((t) => t.name === (test.tester || defaultTester))
-                  return selected ? (
-                    <span className="flex items-center gap-1">
-                      <Tag mono>{selected.version}</Tag>
-                      {selected.exclusive ? <Tag>独占</Tag> : null}
-                      <Tag>{selected.on_failure}</Tag>
-                    </span>
-                  ) : null
-                })()}
-                {issues.some((issue) => issue.path.startsWith(`tests[${index}]`)) ? (
-                  <Badge tone="err">有校验问题</Badge>
-                ) : null}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="ml-auto"
-                  aria-label={`移除 Task ${index + 1}`}
-                  data-testid={`remove-task-${index + 1}`}
-                  onClick={() => removeTask(index)}
-                >
-                  移除
-                </Button>
-              </div>
-              <div className="mt-2">
-                <Field
-                  label="参数（原样填，平台只做词法切分）"
-                  error={issueFor(`tests[${index}].args`) ?? issueFor(`tests[${index}].tester`)}
-                >
-                  <Textarea
-                    value={test.args}
-                    rows={2}
-                    spellCheck={false}
-                    aria-label={`Task ${index + 1} 参数`}
-                    placeholder={
-                      testerList.find((t) => t.name === (test.tester || defaultTester))?.placeholder ?? '--dataset=...'
-                    }
-                    className="font-mono text-xs"
-                    onChange={(e) => setTest(test.key, { args: e.target.value })}
+          {tests.map((test, index) => {
+            const resolvedTester = testerList.find((tester) => tester.name === (test.tester || defaultTester))
+            const nameIssue = issueFor(`run.tests[${index}].name`)
+            return (
+              <div
+                key={test.key}
+                data-testid={`task-row-${index + 1}`}
+                className={cn(
+                  'rounded-md border p-3 transition-colors duration-150',
+                  activeTest?.key === test.key ? 'border-primary/40 bg-primary-weak/30' : 'border-line-soft',
+                )}
+                onClick={() => setActiveKey(test.key)}
+                onFocusCapture={() => setActiveKey(test.key)}
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="grid size-5 shrink-0 place-items-center rounded-full bg-surface-3 text-2xs text-fg-2">
+                    {index + 1}
+                  </span>
+                  <Input
+                    value={test.name}
+                    aria-label={`Task ${index + 1} 名称`}
+                    aria-invalid={Boolean(nameIssue)}
+                    title={nameIssue ?? undefined}
+                    placeholder="如 accuracy-dataset-a"
+                    className="h-8 w-56"
+                    onChange={(e) => setTest(test.key, { name: e.target.value })}
                   />
-                </Field>
+                  <Select
+                    value={test.tester || defaultTester}
+                    aria-label={`Task ${index + 1} Tester`}
+                    className="h-8 w-48"
+                    onChange={(e) => {
+                      setActiveKey(test.key)
+                      setTest(test.key, { tester: e.target.value })
+                    }}
+                  >
+                    {testerOptions.length === 0 ? <option value="">（还没有 Tester）</option> : null}
+                    {testerOptions.map((tester) => (
+                      <option key={tester.name} value={tester.name}>
+                        {tester.name} v{tester.version}
+                      </option>
+                    ))}
+                  </Select>
+                  {/* 详情：复用 `/testers?open=` 的同一个抽屉组件（不复制第二份） */}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    data-testid="task-tester-detail"
+                    data-task-index={index + 1}
+                    disabled={!resolvedTester}
+                    title={resolvedTester ? `查看 ${resolvedTester.name} 的参数与镜像` : '还没有可选的 Tester'}
+                    aria-label={`查看 Task ${index + 1} 的 Tester 详情`}
+                    onClick={() => {
+                      if (!resolvedTester) return
+                      setActiveKey(test.key)
+                      setDetailTester(resolvedTester.name)
+                    }}
+                  >
+                    <Info className="size-3.5" aria-hidden />
+                    详情
+                  </Button>
+                  {resolvedTester ? (
+                    <span className="flex items-center gap-1">
+                      <Tag mono>{resolvedTester.version}</Tag>
+                      {resolvedTester.exclusive ? <Tag>独占</Tag> : null}
+                      <Tag>{resolvedTester.on_failure}</Tag>
+                    </span>
+                  ) : null}
+                  {issues.some((issue) => issue.path.startsWith(`run.tests[${index}]`)) ? (
+                    <Badge tone="err">有校验问题</Badge>
+                  ) : null}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="ml-auto"
+                    aria-label={`移除 Task ${index + 1}`}
+                    data-testid={`remove-task-${index + 1}`}
+                    onClick={() => removeTask(index)}
+                  >
+                    移除
+                  </Button>
+                </div>
+                {nameIssue ? (
+                  <p data-testid={`task-name-error-${index + 1}`} role="alert" className="mt-1.5 text-2xs text-danger-text">
+                    {nameIssue}
+                  </p>
+                ) : null}
+                <div className="mt-2">
+                  <Field
+                    label="参数（原样填，平台只做词法切分）"
+                    error={issueFor(`run.tests[${index}].args`) ?? issueFor(`run.tests[${index}].tester`)}
+                  >
+                    <Textarea
+                      value={test.args}
+                      rows={2}
+                      spellCheck={false}
+                      aria-label={`Task ${index + 1} 参数`}
+                      placeholder={resolvedTester?.placeholder ?? '--dataset=/data/gsm8k.jsonl --limit=200'}
+                      className="font-mono text-xs"
+                      onChange={(e) => setTest(test.key, { args: e.target.value })}
+                    />
+                  </Field>
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </CardBody>
         <CardFooter>
           <span>
@@ -799,6 +960,101 @@ export function SubmitPage() {
           </div>
         </CardFooter>
       </Card>
+
+      {/* 与 Tester 目录页是同一个抽屉组件：参数清单里也能直接复制进当前 Task 的 args */}
+      <TesterDrawer
+        name={detailTester}
+        onClose={() => setDetailTester(null)}
+        onCopyParam={(snippet) => appendToArgs(activeTest?.key, snippet)}
+      />
+
+      {/* 参数说明：原来在右栏，右栏取消后就地搬到主内容，默认折叠（说明性内容，不占首屏） */}
+      <details
+        data-testid="submit-tester-help"
+        className="group rounded-lg border border-line-soft bg-surface shadow-card"
+      >
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-3 text-[15px] font-semibold text-fg [&::-webkit-details-marker]:hidden">
+          参数说明
+          <span className="text-2xs font-normal text-fg-3">
+            {activeTester ? `${activeTester.name} v${activeTester.version}` : '跟着当前 Task 选中的 Tester 走'}
+          </span>
+          <span className="ml-auto text-2xs font-normal text-fg-3 group-open:hidden">点开</span>
+        </summary>
+        <div className="flex flex-col gap-3 border-t border-line-soft px-5 py-4">
+          <p className="rounded-md border border-line-soft bg-surface-2 p-3 text-2xs leading-relaxed text-fg-2">
+            每个 Task 只有一个「参数」输入框，照 Tester 文档写成一整串即可（平台只做切分，不校验含义）。
+            点参数旁的「复制」会把它追加到当前 Task 的参数末尾，不会覆盖已写的内容。
+          </p>
+
+          {!activeTest ? (
+            <p data-testid="rail-no-tester" className="text-2xs text-fg-3">
+              先在左侧添加一个 Task，再选 Tester。
+            </p>
+          ) : !activeTester ? (
+            <p data-testid="rail-no-tester" className="text-2xs text-fg-3">
+              先在左侧选一个 Tester
+            </p>
+          ) : (
+            <div data-testid="rail-tester" data-tester={activeTester.name} className="flex flex-col gap-3">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Tag mono>{activeTester.name}</Tag>
+                <span className="text-2xs text-fg-3">
+                  v{activeTester.version} · {activeTester.role}
+                </span>
+                {activeTester.exclusive ? <Tag>独占</Tag> : null}
+                <Tag>{activeTester.on_failure}</Tag>
+                <span className="text-2xs text-fg-3">Task {activeIndex + 1}</span>
+              </div>
+
+              {activeTester.placeholder ? (
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-2xs font-medium text-fg-2">args 示例</p>
+                    <button
+                      type="button"
+                      data-testid="copy-placeholder"
+                      aria-label="复制 args 示例到参数输入框"
+                      onClick={() => {
+                        appendToArgs(activeTest.key, activeTester.placeholder ?? '')
+                        flashRailCopied('placeholder')
+                      }}
+                      className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-2xs text-fg-3 transition-colors hover:bg-line-soft hover:text-fg"
+                    >
+                      {railCopied === 'placeholder' ? (
+                        <Check className="size-3 text-success" aria-hidden />
+                      ) : (
+                        <Copy className="size-3" aria-hidden />
+                      )}
+                      {railCopied === 'placeholder' ? '已加入参数' : '复制整段'}
+                    </button>
+                  </div>
+                  <pre className="mt-1 overflow-x-auto rounded-md border border-line-soft bg-surface-2 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-fg-2">
+                    {activeTester.placeholder}
+                  </pre>
+                </div>
+              ) : null}
+
+              <div>
+                <p className="mb-1 text-2xs font-medium text-fg-2">参数（{activeTester.parameters.length}）</p>
+                <TesterParamTable
+                  parameters={activeTester.parameters}
+                  copyTestId="copy-param"
+                  onCopy={(snippet) => {
+                    appendToArgs(activeTest.key, snippet)
+                    flashRailCopied(snippet)
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
+          <p className="border-t border-line-soft pt-3 text-2xs leading-relaxed text-fg-3">
+            不用自己写的参数：<code className="font-mono">--url</code> / <code className="font-mono">--model_name</code> /{' '}
+            <code className="font-mono">--model_path</code> 由平台自动补在参数末尾，再写一遍会被拒绝。
+          </p>
+        </div>
+      </details>
     </>
   )
 }
+

@@ -460,6 +460,25 @@ Tester 采用平台维护者管理的**白名单注册**机制。注册流程：
 
 > **镜像引用不作限制**：平台把 `tester.yaml.image` 原样交给 K8s，不解析 tag / digest，也不强制钉版本。版本可追溯由团队约定与 CI 保证；平台再加一道校验，只会让改一个 tag 就要走平台评审。§5.7 的"执行逻辑可追溯"因此改为记录镜像引用本身。
 
+#### 5.6.1 版本保留与退役（票 #60 / D-60）
+
+同一 `name` 可以有**多个版本并存**，这是正常的版本演进，不是重复入库：
+
+| 情形 | `testers` 行 | 目录里 | `GET /testers` 默认 | `retired` |
+|---|---|---|---|---|
+| 新版本发布（旧版本仍在目录） | 两行都在 | `0.1.0`、`0.2.0` | 只回 `0.2.0`（`latest=true`） | 都是 `false` |
+| 新版本发布后旧版本目录被删 | 旧行保留，标记 `orphaned` | 只有 `0.2.0` | 只回 `0.2.0` | 旧行 `true` |
+| 整个 Tester 下架 | 所有行 `orphaned` | 无 | 默认不出现（`include_retired=true` 才可见） | 都是 `true` |
+
+- **不删除旧行**：历史 Task/Attempt 用 `name@version` 引用（`03 §4.1`），删行会让历史报告永久失去 Tester 元数据（`§5.7` 可追溯性）。
+- `latest` 的值是"该 name 的最高版本"（含 `retired` 行），比较规则见 `domain.VersionLess`（注册表扫描排序、API、`tpctl` 共用同一份）。
+- `orphaned` 与 `retired` 同义（前者是 `testers` 列名，后者是对外字段名），两个字段都保留以兼容既有前端/CLI。
+- **`retired` 的口径是"该 **版本** 已不在目录里"**（不是"整个 Tester 下架"）：
+  - 只有旧版本从目录消失（`testers/<name>/tester.yaml` 里的 `version` 改了）→ 旧版本 `retired=true`，新版本 `retired=false`；
+  - **整个 Tester 目录消失**是同一条规则的极端情形：该 name 的**所有版本**都 `retired=true`（默认列表里这个 name 整个不出现）。
+  - 判定发生在启动期/重扫期的目录比对（`registry.Scan`）：目录里没有的 `name@version` → 标记；**标记会落库**
+    （`registry.Store.MarkTesterOrphaned`），因此**进程重启后 `retired` 不会丢**——这是票 #60 真机回归修的持久化缺口。
+
 ### 5.7 版本与可追溯性
 
 > **裁决：** 平台保证**执行逻辑可追溯**，不保证**结果可复现**。
@@ -1225,7 +1244,7 @@ task:
 
 - 同一个 `--dataset=/data/dataset-a`，在 `k8s-npu` 与 `k8s-gpu` 下可能来自不同挂载，这**不是**平台需要抹平的差异。
 - 路径如何可达由 Tester 决定：镜像内置、Profile 提供的挂载点、或 Tester 自行下载。
-- 若 Tester 需要平台保证某个挂载点存在，在 `tester.yaml` 的 `mounts` 中声明（`name` / `path` / `required`），由 Execution Profile 提供对应供给；供给缺失时 Task 失败并报 `MOUNT_UNAVAILABLE`。
+- Tester 若需要额外挂载点，在 `tester.yaml` 的 `mounts` 中声明：`name`（volume 名，可省略自动生成）/ `mount_path`（容器内绝对路径）/`read_only` / `source`（承载该挂载点的 PVC 名，缺省用平台 storage PVC）。平台按声明渲染 volume；**没有 `required` 字段**，也不做"Profile 是否供给"的提交期校验——挂载失败是**运行期**事实（Pod `FailedMount` / `FailedAttachVolume`），由 executor 观测后报 `MOUNT_UNAVAILABLE`（§附录 D）。
 - 平台不得为"帮你找数据集"而引入资源登记与解析逻辑——那会把平台变成数据管理系统的重复实现。
 
 ### 10.5 引用与安全
@@ -1714,7 +1733,7 @@ concurrency:
   endpoint_exclusive: true    # 独占该 Endpoint；性能类与 Pre-Check 必须为 true（§6.7）
 
 mounts:
-  - { name: dataset, path: /data, required: true }
+  - { name: dataset, mount_path: /data, read_only: true, source: dataset-nfs }
 
 # 受限 K8s 需求（可选，白名单字段）。平台渲染 Job 时合并；平台字段优先且不可覆盖（§6.8）。
 # 不允许写完整清单，也不允许 privileged / hostPath / hostNetwork。
@@ -1750,7 +1769,7 @@ env:                          # 运行期环境变量声明（§12.4）
 | `resources` | 是 | 默认资源需求，可被 Manifest 提高不可降低 |
 | `timeout_seconds` | 禁止 | **不设此字段**。跑多久是编排策略，不是 Tester 属性；Task 超时由平台配置 + `tests[].timeout_seconds` 覆盖（§6.6） |
 | `concurrency.endpoint_exclusive` | 是 | 是否独占该 Endpoint：性能类与 **Pre-Check 必须 `true`**，精度类默认 `false`（§6.7） |
-| `mounts` | 否 | 向平台声明的挂载需求；缺失时 `MOUNT_UNAVAILABLE` |
+| `mounts` | 否 | 额外挂载声明：`name` / `mount_path` / `read_only` / `source`（PVC 名，缺省用 storage PVC）。平台按声明渲染 volume；挂载失败由**运行期**观测报 `MOUNT_UNAVAILABLE`，不做提交期校验（D-60） |
 | `k8s` | 否 | 受限 K8s 需求，白名单字段：`node_selector` / `tolerations` / `annotations` / `security_context`（仅 `run_as_user`、`fs_group`）。**禁止**完整清单、`privileged`、`hostPath`、`hostNetwork`、自定义 `image` / `command`（§6.8） |
 | `parameters` | 是 | **参数清单（文档语义）**，见 §5.4：只给 Agent 与人类看，平台不渲染、不校验、不据此生成表单 |
 | `env` | 否 | 声明本 Tester **读取**哪些环境变量：`required` / `secret` / `description`。用于文档与必填检查；值由 Run 级 `env` / `secrets` 提供（§12.4） |
@@ -1783,7 +1802,7 @@ env:                          # 运行期环境变量声明（§12.4）
 | `ARTIFACT_QUOTA_EXCEEDED` | 507 | 收集 | 否 | 单次 Attempt 产物超过配额（§12.7），Task 判失败 |
 | `EXECUTOR_UNAVAILABLE` | 503 | 执行 | 是 | K8s API 不可达 |
 | `IMAGE_PULL_FAILED` | 502 | 执行 | 是 | 镜像拉取失败 |
-| `MOUNT_UNAVAILABLE` | 502 | 执行 | 否 | Profile 未提供声明的挂载 |
+| `MOUNT_UNAVAILABLE` | 502 | 执行 | 否 | Pod 挂载失败（`FailedMount` / `FailedAttachVolume`），由 executor 观测到 Pod 状态后报（运行期，不是提交期校验） |
 | `EXECUTOR_POD_ERROR` | 502 | 执行 | 是 | Pod 异常终止（`detail.k8s_reason` 保留原文，如 `Evicted`）；`Unschedulable` 不算失败，按 §6.9 留在排队态 |
 | `DEPLOY_FAILED` | 502 | Deploy | 否 | **平台侧**调用 Genet 失败（连接/5xx/同名冲突/安装失败）→ Run `failed`；`detail.reason` 保留 Genet 原文 |
 | `DEPLOY_BLOCKED` | 502 | Deploy | 是 | Genet 报 `blocked`（配额/资源/调度阻塞）或超部署窗口 → Run `service_unavailable`；`detail.reason ∈ {blocked,timeout,superseded,uninstalling,uninstalled}`（D-47） |
@@ -1866,3 +1885,4 @@ env:                          # 运行期环境变量声明（§12.4）
 | D-57 | **提交下限**：`POST /runs` 的 `tests` **至少 1 条**（与 `precheck` 无关）。Pre-Check 是平台注入的 `seq=0` Task，不计入用户测试；0 条 → 400 `VALIDATION_ERROR`（`path="tests"`），不落库。理由：否则会产出"成功地什么都没测"的 Run（绿色成功 + 报告"全部 1 个 Task 通过"），误导性极强 | `07-api.md §4.1`、`impl/control-plane.md` |
 | D-58 | **`run.name` 上限 200 字符**（当前 DB 是无限长 text、服务端也没校验，220 字符能存进去）。超长名称会撑坏列表/面包屑/工单标题；校验在服务端（`VALIDATION_ERROR` + `path="run.name"`）与前端（`maxlength` + 实时计数）各做一遍 | `07-api.md §4.1`、`openapi.yaml` `RunSubmit.name.maxLength` |
 | D-59 | **Pod 日志全部落盘，落盘副本是唯一真源**：Tester（attempt）与 **Deploy 的每个 Pod、每个容器**都落盘（`tasks/<t>/attempts/<n>/logs/stdout.log`、`deploy/logs/<pod>[.<container>].log`），**含容器重启前的 `previous` 日志**（重启写标记行并续写同一文件，`execution.md §7.2`）；`deploy/pods.json` 每 30s 原子写（Pod/容器/重启次数/日志文件与区间）。`GET /runs/{id}/deploy/logs`、`GET /runs/{id}/artifacts`、`GET /runs/{id}/bundle` 一律**优先读盘**；只有盘上缺失时才降级实时读 `pods/log`，且必须在响应里显式标注"这是实时窗口、Pod 回收后不可得"。理由：Pod 被 GC 或重启后实时读就永久丢失证据，而"事后复盘一次失败的部署"正是平台的核心价值 | `impl/execution.md §7`、`03-data-view.md §4.4`、`07-api.md §5.1` |
+|| D-60 | **Tester 目录的"同名多版本"与挂载声明口径**（票 #60）：① `GET /testers` **默认每个 name 只回最新版本**，`include_retired=true` 时回全部版本（`orphaned=true` 保留为旧别名）；条目新增 `latest`（该 name 的最高版本，比较规则 = `domain.VersionLess`，全仓唯一真源）与 `retired`（目录里已不存在、只剩库里的历史版本 = `testers.orphaned`）。② **历史版本永不删除**：`testers` 行不删，`orphaned` 只标记；历史 Run/Task 继续按 `name@version` 解析，报告与 Task 详情里的 `tester.version` 保持提交时冻结的值（可追溯性，§5.7）。③ `tester.yaml.mounts` 的字段以**实现为准**收敛为 `name / mount_path / read_only / source`（`source` = 承载该挂载点的 PVC 名，缺省用平台 storage PVC），**没有 `required`**；`MOUNT_UNAVAILABLE` 是**运行期**观测（Pod `FailedMount`/`FailedAttachVolume`），不是提交期校验——提交期无法可靠判断 Profile/StorageClass 能否供给。 | `07-api.md §5.1`、`ARCHITECTURE §5.6/§10.4`、`openapi.yaml` `Tester` |

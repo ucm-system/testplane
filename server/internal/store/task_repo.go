@@ -299,10 +299,14 @@ func (r *TaskRepo) WaitingBreakdown(ctx context.Context, tx pgx.Tx) (map[string]
 		domain.WaitPrecheckGate: 0, domain.WaitSlotWaiting: 0, domain.WaitGlobalLimit: 0,
 		domain.WaitQueueFull: 0, domain.WaitInsufficientResources: 0, domain.WaitGangPending: 0,
 	}
+	// 只统计**非终态 Run** 下的 Task：历史脏数据（Run 已终态但 Task 还挂在 pending/queued）
+	// 不得灌进 KPI/等待列表（D-60）。
 	rows, err := r.s.db(tx).Query(ctx, `
-		SELECT COALESCE(waiting_reason, 'unknown'), count(*)
-		  FROM tasks WHERE status IN ('pending','queued')
-		 GROUP BY 1`)
+		SELECT COALESCE(t.waiting_reason, 'unknown'), count(*)
+		  FROM tasks t JOIN runs r ON r.id = t.run_id
+		 WHERE t.status IN ('pending','queued')
+		   AND NOT (r.status = ANY($1))
+		 GROUP BY 1`, domain.TerminalRunStatusStrings())
 	if err != nil {
 		return nil, fmt.Errorf("store: waiting breakdown: %w", err)
 	}
@@ -344,8 +348,9 @@ func (r *TaskRepo) WaitingTasks(ctx context.Context, tx pgx.Tx, limit int) ([]Wa
 		       COALESCE(t.available_at, t.updated_at)
 		  FROM tasks t JOIN runs r ON r.id = t.run_id
 		 WHERE t.status IN ('pending','queued')
+		   AND NOT (r.status = ANY($2))
 		 ORDER BY r.submitted_at, t.seq
-		 LIMIT $1`, limit)
+		 LIMIT $1`, limit, domain.TerminalRunStatusStrings())
 	if err != nil {
 		return nil, fmt.Errorf("store: waiting tasks: %w", err)
 	}

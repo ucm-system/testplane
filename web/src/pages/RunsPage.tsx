@@ -4,7 +4,6 @@ import { Search, X } from 'lucide-react'
 import { api } from '@/api'
 import { toApiError } from '@/api/client'
 import type { ApiErrorBody, RunSummary } from '@/api/types'
-import { RightRail, RailCard } from '@/components/app/RightRail'
 import { RunStatusBadge } from '@/components/app/StatusBadge'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/card'
@@ -13,7 +12,7 @@ import { Segmented } from '@/components/ui/segmented'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
-import { TERMINAL_LEGEND, isTerminalRun } from '@/lib/status'
+import { isTerminalRun } from '@/lib/status'
 import { formatDateTime, formatDuration, formatRelative, runDuration } from '@/lib/utils'
 
 type StatusFilter = 'all' | 'active' | 'terminal' | 'failed'
@@ -157,26 +156,10 @@ export function RunsPage() {
 
   return (
     <>
-      <RightRail>
-        <RailCard title="终态语义" tone="info">
-          <ul className="flex flex-col gap-2">
-            {TERMINAL_LEGEND.map((item) => (
-              <li key={item.status} className="flex items-start gap-2">
-                <RunStatusBadge status={item.status} />
-                <span className="min-w-0 flex-1 text-2xs leading-relaxed text-fg-2">{item.desc}</span>
-              </li>
-            ))}
-          </ul>
-          <p className="mt-3 border-t border-line-soft pt-3 text-2xs leading-relaxed text-fg-3">
-            跳过 = 没跑，失败 = 跑了但没通过，两者不混用。
-          </p>
-        </RailCard>
-        <RailCard title="筛选与刷新" tone="muted">
-          <p>状态由服务端筛；时间与关键字只作用在已经加载出来的这些行上。</p>
-          <p className="mt-2">列表不会自己刷新：切页、改筛选或重新打开这一页，拿到的才是最新。</p>
-          <p className="mt-2">一次加载一页，点「加载更多」才取下一页；筛选条件都在地址栏里，复制链接给别人看到的和你一样。</p>
-        </RailCard>
-      </RightRail>
+
+      <p className="text-2xs leading-relaxed text-fg-3">
+        跳过 = 没跑，失败 = 跑了但没通过，两者不混用；状态由服务端筛，时间与关键字只作用在已加载出来的这些行上。
+      </p>
 
       <Card>
         <CardHeader

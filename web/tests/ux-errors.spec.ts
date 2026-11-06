@@ -96,6 +96,9 @@ test('③ toast（sonner）仍保留 role=status 无障碍语义', async ({ page
   await page.goto('/submit')
   // 等 Tester 目录加载完（否则 dry-run 会因「必须选择 Tester」被拦下，提交跑不到 toast）
   await expect(page.getByLabel('Task 1 Tester')).toContainText('aisbench', { timeout: 15_000 })
+  // 默认值是空的（用户要求只留 placeholder）：先填出一个能提交的表单
+  await page.getByLabel('Run 名称').fill('toast-semantics')
+  await page.getByLabel('Task 1 名称').fill('accuracy-dataset-a')
   await page.getByRole('button', { name: '提交', exact: true }).click()
   // 提交成功会跳详情并弹 toast（B8：一条「已受理 <run_id> · N 个 Task 已入队」+ 两个动作）
   await expect(page).toHaveURL(/\/runs\/[^/]+$/, { timeout: 20_000 })
@@ -133,6 +136,9 @@ test('① 后端 400：摘要展示 code/message/trace_id，且 trace_id 可一�
   })
 
   await expect(page.getByLabel('Task 1 Tester')).toContainText('aisbench', { timeout: 15_000 })
+  // 默认值是空的（用户要求只留 placeholder）：先让**前端**校验通过，才能走到被 patch 的 dryRun
+  await page.getByLabel('Run 名称').fill('backend-400')
+  await page.getByLabel('Task 1 名称').fill('accuracy-dataset-a')
   await page.getByRole('button', { name: '校验', exact: true }).click()
   const summary = page.getByTestId('form-error-summary')
   await expect(summary).toBeVisible({ timeout: 15_000 })

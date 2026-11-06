@@ -13,6 +13,7 @@
 | 设计约束文档（系统边界 / 契约 / 语义） | ✅ 定稿（v0.6） | [`design/ARCHITECTURE.md`](design/ARCHITECTURE.md) |
 | 可点击原型（6 个页面 + 全状态谱） | ✅ 可交互 | [`design/prototype/`](design/prototype/) |
 | 参考 Tester：endpoint-probe（Pre-Check） | ✅ 可运行 | [`testers/endpoint-probe/`](testers/endpoint-probe/) |
+| 实际 Tester：aisbench-sla（前缀缓存 SLA 搜索） | ✅ 可运行（离线 stub 已验证；真实 SLA 需 ais_bench 镜像 + 权重） | [`testers/aisbench-sla/`](testers/aisbench-sla/)
 | 实现技术方案（总览 + 三份分册） | 🟢 提案 v3（12 项决策已并入） | [`design/IMPLEMENTATION.md`](design/IMPLEMENTATION.md) |
 | 4+1 设计视图（场景 / 逻辑 / 数据 / 进程 / 开发 / 部署 / API） | 🟢 可开发基线 | [`design/views/`](design/views/) |
 | 契约：OpenAPI 3.1（25 operations） | ✅ 定稿 | [`server/api/openapi.yaml`](server/api/openapi.yaml) |
@@ -94,6 +95,14 @@ deploy/               规划：镜像构建、K8s 清单、配置
 ```
 
 > `server/`、`web/`、`deploy/` **尚未创建**，是给 P0 实现预留的位置。目录一落地就同步更新本表与上面的进度表。
+
+## 接口
+
+- API 前缀 `/api/v1`（Web 控制台调用的全部资源都在这下面）
+- 元信息 `/api/v1/meta`
+- 健康检查 `/healthz`（不带版本前缀，供探针使用）
+
+页面上不再有全局页脚展示这些入口：技术前缀属于部署与联调信息，放进本文档即可。
 
 ## 设计文档：约束，不是需求
 

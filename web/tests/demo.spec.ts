@@ -56,6 +56,9 @@ test('演示：提交服务形态 Run → 详情 → 报告 → 集群 → 管�
   await page.goto('/submit')
   const runName = `demo-service-${Date.now().toString().slice(-5)}`
   await page.getByLabel('Run 名称').fill(runName)
+  // 默认值已清空（只留 placeholder）：Task 名称要自己写，否则前端校验会拦住提交
+  await page.getByLabel('Task 1 名称').fill('accuracy-dataset-a')
+  await page.getByLabel('Task 1 参数').fill('--dataset=/data/gsm8k.jsonl --limit=200')
   // Segmented 是 role=group 里的 button（aria-pressed），不是原生 radio
   await page.getByRole('group', { name: '服务来源' }).getByRole('button', { name: '不部署' }).click()
   await expect(page.getByLabel('服务 base URL')).toBeVisible()

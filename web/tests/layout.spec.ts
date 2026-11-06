@@ -207,21 +207,18 @@ test('Deploy 日志：pod 页签带参 + tail/offset 二选一 + next_offset 续
 })
 
 /**
- * 页头分隔线**只能**有两条，且必须落在网格列线上（用户："左侧分隔符与侧边栏没对齐，特别扎眼"）。
- * 约束：
- *  - 页头里所有竖直分隔线（border-left/right 或 1px 宽的 div）x ∈ {240, vw−288}，不允许第三条；
- *  - 品牌块左内边距与左栏导航项文字左边缘对齐（都是 24px 的节奏）。
+ * 页头分隔线：**有栏页面两条（240 / vw−288），无栏页面只剩一条（240）**。
+ *
+ * 右栏现在只有概览页保留（其余页面单栏铺满），所以约束分两套：
+ *  - 有栏（/）：竖线 x ∈ {240, vw−288}，不允许第三条；
+ *  - 无栏（/runs）：竖线只有 {240}，且 main 右边界贴住视口（没有第 3 列）。
+ * 另外：品牌块左内边距与左栏导航项文字左边缘对齐（都是 24px 的节奏）。
  */
-test('页头分隔线只有 240 与 vw−288 两条，且品牌与导航左边缘对齐', async ({ page }) => {
+test('页头分隔线：有栏页面 240 与 vw−288，无栏页面只剩 240', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
 
-  for (const width of [1280, 1440]) {
-    await page.setViewportSize({ width, height: 900 })
-    await page.goto('/runs')
-    await expect(page.getByText('全部 Run')).toBeVisible()
-    await page.waitForTimeout(300)
-
-    const m = await page.evaluate(() => {
+  const measure = () =>
+    page.evaluate(() => {
       const header = document.querySelector('header')!
       const lines: number[] = []
       // 只看"整条竖线"：高度接近页头（>=40px）的边框，或 1px 宽且够高的 div。
@@ -229,8 +226,7 @@ test('页头分隔线只有 240 与 vw−288 两条，且品牌与导航左边�
       for (const el of Array.from(header.querySelectorAll('*'))) {
         const cs = getComputedStyle(el)
         const r = el.getBoundingClientRect()
-        const tall = r.height >= 40
-        if (!tall) continue
+        if (r.height < 40) continue
         if (parseFloat(cs.borderLeftWidth) > 0) lines.push(Math.round(r.left))
         if (parseFloat(cs.borderRightWidth) > 0) lines.push(Math.round(r.right))
         if (Math.round(r.width) === 1) lines.push(Math.round(r.left))
@@ -243,14 +239,46 @@ test('页头分隔线只有 240 与 vw−288 两条，且品牌与导航左边�
         const r = item.getBoundingClientRect()
         return Math.round(r.left + parseFloat(cs.borderLeftWidth) + parseFloat(cs.paddingLeft))
       })()
-      return { vw: window.innerWidth, lines: [...new Set(lines)].sort((a, b) => a - b), wordmarkLeft: Math.round(wordmark.left), navItemText }
+      const main = document.querySelector('main')!.getBoundingClientRect()
+      return {
+        vw: window.innerWidth,
+        rail: document.querySelector('[data-rail]')?.getAttribute('data-rail'),
+        lines: [...new Set(lines)].sort((a, b) => a - b),
+        wordmarkLeft: Math.round(wordmark.left),
+        navItemText,
+        mainLeft: Math.round(main.left),
+        mainRight: Math.round(main.right),
+        hasRailAside: Boolean(document.querySelector('aside[aria-label="辅助信息"]')),
+      }
     })
 
-    const want = [240, m.vw - 288].sort((a, b) => a - b)
-    expect(m.lines, `页头竖直分隔线应只有 ${JSON.stringify(want)}`).toEqual(want)
-    // 品牌左边缘与导航项文字左边缘对齐（同一 24px 节奏，允许 2px 渲染误差）
-    expect(Math.abs(m.wordmarkLeft - (m.navItemText ?? 0))).toBeLessThanOrEqual(2)
-    expect(m.wordmarkLeft).toBe(24)
+  for (const width of [1280, 1440]) {
+    // ---------- 有栏：概览 ----------
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/')
+    await expect(page.getByText('进行中 Run')).toBeVisible()
+    await page.waitForTimeout(300)
+    const withRail = await measure()
+
+    expect(withRail.rail).toBe('on')
+    expect(withRail.hasRailAside).toBe(true)
+    const wantRail = [240, withRail.vw - 288].sort((a, b) => a - b)
+    expect(withRail.lines, "有栏页面的页头竖线应只有 " + JSON.stringify(wantRail)).toEqual(wantRail)
+    expect(Math.abs(withRail.wordmarkLeft - (withRail.navItemText ?? 0))).toBeLessThanOrEqual(2)
+    expect(withRail.wordmarkLeft).toBe(24)
+
+    // ---------- 无栏：运行列表 ----------
+    await page.goto('/runs')
+    await expect(page.getByText('全部 Run')).toBeVisible()
+    await page.waitForTimeout(300)
+    const noRail = await measure()
+
+    expect(noRail.rail).toBe('off')
+    expect(noRail.hasRailAside).toBe(false)
+    expect(noRail.lines, '无栏页面的页头竖线只剩 240 一条').toEqual([240])
+    // 主内容左右边界：左贴 240，右贴视口（没有第 3 列）
+    expect(noRail.mainLeft).toBe(240)
+    expect(noRail.mainRight).toBe(noRail.vw)
   }
 
   await page.setViewportSize({ width: 1280, height: 900 })
@@ -258,6 +286,11 @@ test('页头分隔线只有 240 与 vw−288 两条，且品牌与导航左边�
   await expect(page.getByText('全部 Run')).toBeVisible()
   await page.waitForTimeout(400)
   await page.screenshot({ path: join(OUT_DIR, '06-header-divider-1280.png'), fullPage: false })
+
+  await page.goto('/')
+  await expect(page.getByText('进行中 Run')).toBeVisible()
+  await page.waitForTimeout(400)
+  await page.screenshot({ path: join(OUT_DIR, '06b-rail-overview-1280.png'), fullPage: true })
 })
 
 /**

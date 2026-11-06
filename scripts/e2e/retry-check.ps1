@@ -140,10 +140,12 @@ $np = JsonOf $r
 $blocked = ($r.StatusCode -eq 200 -and $np.retryable -eq $false) -or ($r.StatusCode -eq 409)
 Add-Check 'new_plan.not_retryable' $blocked ("status=" + $r.StatusCode + " retryable=" + $np.retryable + " reason=" + $np.reason)
 
-# Retry Task 单端点：旧 failed Task 应能重开 Attempt 202（新 Run 场景另测）
+# Retry Task 单端点：**所属 Run 已终态 → 必须 409 `run_terminal`**（这正是造僵尸的那条路径，D-60）。
+# 「非终态 Run 的 failed Task → 202」由 server 侧用例覆盖（TestRetryTask_*），这里只锁终态语义。
 $r = Call POST "/api/v1/tasks/$($failed.id)/retry"
 $tj = JsonOf $r
-Add-Check 'task.retry_202' ($r.StatusCode -eq 202 -and $tj.attempt_no -ge 2) ("status=" + $r.StatusCode + " attempt_no=" + $tj.attempt_no)
+$reason = $tj.detail.reason
+Add-Check 'task.retry_terminal_409' ($r.StatusCode -eq 409 -and $reason -eq 'run_terminal') ("status=" + $r.StatusCode + " reason=" + $reason)
 
 $ok = -not ($checks | Where-Object { -not $_.ok })
 $out = [pscustomobject]@{ ok = $ok; run_id = $runID; new_run_id = $newRunID; old_tasks = $tasks; new_tasks = $newTasks; plan = $plan; checks = $checks }

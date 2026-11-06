@@ -308,7 +308,7 @@ func (s *Server) handleRetryRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, store.ErrRetryConflict) {
 			fail(w, r, http.StatusConflict, domain.CodeConflict, err.Error(),
-				map[string]any{"run_id": runID}, false)
+				map[string]any{"run_id": runID, "reason": store.RetryConflictReason(err)}, false)
 			return
 		}
 		s.failErr(w, r, err)
@@ -501,7 +501,7 @@ func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, store.ErrRetryConflict):
 			fail(w, r, http.StatusConflict, domain.CodeConflict, err.Error(),
-				map[string]any{"task_id": taskID}, false)
+				map[string]any{"task_id": taskID, "reason": store.RetryConflictReason(err)}, false)
 		case errors.Is(err, domain.ErrNotFound):
 			fail(w, r, http.StatusNotFound, domain.CodeNotFound, "Task 不存在",
 				map[string]any{"task_id": taskID}, false)

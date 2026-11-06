@@ -1248,7 +1248,9 @@ paths:
       operationId: listTesters
       summary: Tester 目录（含参数清单，只读）
       description: |
-        07 §5.3：`role`、`orphaned` 过滤。`parameters` 是**文档语义**（05 §5.4），只给 Agent 与人看，
+        07 §5.3：`role`、`orphaned` 过滤。
+        **默认每个 name 只回最新版本**；include_retired=true 时回全部版本，
+        条目上的 latest / retired 说明这条是不是最新、是否已退役。`parameters` 是**文档语义**（05 §5.4），只给 Agent 与人看，
         平台不渲染、不校验。`orphaned=true` 表示目录里已移除、但历史 Run 仍引用的 Tester（03 §8）。
       tags: [testers]
       parameters:
@@ -1262,6 +1264,17 @@ paths:
           in: query
           required: false
           description: 是否包含已从目录移除的 Tester（默认 `false`，只读）
+          schema:
+            type: boolean
+            default: false
+        - name: include_retired
+          in: query
+          required: false
+          description: |
+            `true` 时返回**全部版本**（含已退役的历史版本）。默认 false = 每个 name 只回
+            一条最新版本（票 #60 / D-60）：同名多版本是正常的版本演进，不是重复入库。
+            历史版本永不删除：历史 Run/Task 仍按 name@version 解析（ARCHITECTURE §5.6）。
+            orphaned=true 是 include_retired=true 的旧别名，保留兼容。
           schema:
             type: boolean
             default: false
@@ -4394,7 +4407,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/TesterSpec'
         - type: object
-          required: [content_sha, source_file, orphaned, registered_at, registered_by]
+          required: [content_sha, source_file, orphaned, latest, retired, registered_at, registered_by]
           properties:
             content_sha:
               type: string
@@ -4404,7 +4417,17 @@ components:
               description: 目录内相对路径（`testers/<name>/tester.yaml`）
             orphaned:
               type: boolean
-              description: 目录里已移除；不删行，只标记（03 §8）
+              description: 目录里已移除；不删行，只标记（03 §8）。与 retired 同义，保留旧字段兼容。
+            latest:
+              type: boolean
+              description: |
+                该 (name, version) 是否为这个名字的**最高版本**（按 domain.VersionLess 比较，
+                含 retired 行）。默认列表对每个 name 只回最新版本，故默认视图里恒为 true。
+            retired:
+              type: boolean
+              description: |
+                已**退役**：目录里不再存在、只剩库里的历史版本（= testers.orphaned）。
+                这类行永不删除，历史 Run/Task 仍按 name@version 解析（ARCHITECTURE §5.6）。
             removed_at:
               $ref: '#/components/schemas/NullDateTime'
             registered_at:

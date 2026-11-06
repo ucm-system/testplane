@@ -100,7 +100,9 @@ func DecideRunOutcome(in RunOutcomeInput) RunStatus {
 // SkipReasonForRunTerminal 返回 Run 进入该终态时，未开始 Task 应写的 skip 原因。
 func SkipReasonForRunTerminal(to RunStatus) string {
 	switch to {
-	case RunCanceled:
+	case RunCanceled, RunCancelling:
+		// 取消的两个阶段用同一个原因：cancelling 时先把未开始的 Task 记 skipped，
+		// 到 canceled 时已经没有残留，不能让 cancelled 的 Run 里出现 upstream_abort（D-60）。
 		return SkipCanceled
 	case RunFailed:
 		return SkipPlatformError

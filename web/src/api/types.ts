@@ -406,6 +406,10 @@ export interface TesterWire {
   placeholder?: string
   content_sha?: string
   source_file?: string
+  /** 同名多版本：这一版是不是当前版（后端标；缺省时前端按版本号取最大） */
+  latest?: boolean
+  /** 已退役：目录里已移除，默认不返回（`?include_retired=true` 才回） */
+  retired?: boolean
   orphaned?: boolean
   removed_at?: Timestamp | null
   registered_at?: Timestamp
@@ -430,6 +434,10 @@ export interface Tester {
   placeholder?: string
   parameters: Array<TesterParameterDecl & { name: string }>
   env: Array<EnvVarDecl & { name: string }>
+  /** 该 name 下的当前版本（后端默认只回最新；历史版本要 `?include_retired=true`） */
+  latest?: boolean
+  /** 已退役：目录里已移除，历史 Run 仍按 name@version 引用 */
+  retired?: boolean
   orphaned?: boolean
   source_file?: string
   registered_at?: Timestamp
@@ -709,6 +717,8 @@ export interface TaskListQuery {
 export interface TesterListQuery {
   role?: string
   orphaned?: boolean
+  /** 历史版本：默认只回最新，带了才把已退役的版本一起回（UI 的「另有 N 个历史版本」用） */
+  include_retired?: boolean
 }
 
 /* ================================================================ 看板统计（前端现算） */

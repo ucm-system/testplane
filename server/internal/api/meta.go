@@ -92,7 +92,14 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListTesters 是 GET /api/v1/testers（只读目录，K-3）。
+// handleListTesters 是 GET /api/v1/testers（票 #60 / D-60）：
+//
+// 默认**每个 name 只回最新版本**——库里同名多版本是正常现象（历史版本不删，见 §5.6），
+// 但目录页按"一个 Tester 一条"呈现才不会让人误以为重复入库。
+// `include_retired=true` 时返回全部版本（含已退役的历史版本），每条带 `latest`/`retired`。
+// 旧的 `orphaned=true` 参数保留为 `include_retired` 的别名（CLI 兼容）。
 func (s *Server) handleListTesters(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	q := r.URL.Query()
 	role := q.Get("role")
 	if role != "" && role != domain.RoleTest && role != domain.RolePreCheck {
@@ -100,15 +107,60 @@ func (s *Server) handleListTesters(w http.ResponseWriter, r *http.Request) {
 			"role 只能是 test|pre_check", nil, false)
 		return
 	}
-	includeOrphaned := q.Get("orphaned") == "true"
-	specs, err := s.resolver.List(r.Context(), role, includeOrphaned)
+	includeRetired := q.Get("include_retired") == "true" || q.Get("orphaned") == "true"
+
+	specs, err := s.resolver.List(ctx, role, includeRetired)
 	if err != nil {
 		s.failErr(w, r, err)
 		return
 	}
+
+	// latest/retired 来自 testers 表（权威：含退役行，registry 内存快照默认隐藏退役）。
+	// trow 按 name@version 索引；latestByName 的名字集合也来自库，避免"目录里没有版本"时误判。
+	rows, err := s.st.Testers.List(ctx, nil, store.TesterFilter{Role: role, IncludeOrphaned: true})
+	if err != nil {
+		s.failErr(w, r, err)
+		return
+	}
+	byKey := make(map[string]*store.Tester, len(rows))
+	latestByName := make(map[string]string, len(rows))
+	latestPresentByName := make(map[string]string, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		byKey[row.Name+"@"+row.Version] = row
+		if cur, ok := latestByName[row.Name]; !ok || domain.VersionLess(cur, row.Version) {
+			latestByName[row.Name] = row.Version
+		}
+		if !row.Orphaned {
+			if cur, ok := latestPresentByName[row.Name]; !ok || domain.VersionLess(cur, row.Version) {
+				latestPresentByName[row.Name] = row.Version
+			}
+		}
+	}
+
 	out := make([]testerDTO, 0, len(specs))
 	for _, sp := range specs {
-		out = append(out, toTesterDTO(sp))
+		row := byKey[sp.Name+"@"+sp.Version]
+		if row == nil {
+			// 注册表内存里比库里新（刚扫描到、尚未落库）：按"在目录里"处理。
+			dto := toTesterDTO(sp)
+			dto.Latest = latestByName[sp.Name] == "" || !domain.VersionLess(sp.Version, latestByName[sp.Name])
+			out = append(out, dto)
+			continue
+		}
+		if !includeRetired && row.Version != latestPresentByName[sp.Name] {
+			// 默认视图：每个 name 只留"最新且未退役"的那条。
+			continue
+		}
+		dto := toTesterDTO(sp)
+		dto.ContentSHA = row.ContentSHA
+		dto.SourceFile = row.SourceFile
+		dto.Orphaned = row.Orphaned
+		dto.RegisteredAt = utcPtr(&row.RegisteredAt)
+		dto.RegisteredBy = row.RegisteredBy
+		dto.Retired = row.Orphaned
+		dto.Latest = latestByName[sp.Name] == row.Version
+		out = append(out, dto)
 	}
 	writeJSON(w, http.StatusOK, paged[testerDTO]{Items: out})
 }
@@ -131,6 +183,8 @@ func (s *Server) handleGetTester(w http.ResponseWriter, r *http.Request) {
 		dto.Orphaned = row.Orphaned
 		dto.RegisteredAt = utcPtr(&row.RegisteredAt)
 		dto.RegisteredBy = row.RegisteredBy
+		dto.Retired = row.Orphaned
+		s.markTesterLatest(ctx, &dto, spec.Name)
 	} else {
 		s.logger.Warn("Tester 元数据缺失", "err", err, "tester", spec.Name, "version", spec.Version)
 	}

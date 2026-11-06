@@ -714,7 +714,7 @@ UPDATE tasks SET cancel_requested=true, updated_at=now()
 ### C-5.6 重试与续跑
 
 - 同 Run 重试：Attempt 结束为 `failed` 时，若错误码在 `retry_on`（且 `retryable: true`）且 `idx < max_attempts` → `failed → queued`，`available_at = now + backoff`，**不新建 Task**。
-- Task 级手动重试（`POST /tasks/{id}/retry`）：仅在终态且未取消时允许；新建 Attempt（`failed/skipped → queued`），立即执行。
+- Task 级手动重试（`POST /tasks/{id}/retry`）：仅在**所属 Run 非终态**、且 Task 已终态未取消时允许；新建 Attempt（`failed/skipped → queued`），立即执行。**Run 已终态 → 409 `CONFLICT`（`detail.reason = run_terminal`）**，提示改用 `POST /runs/{id}/retry`（run 级续跑才带复用代际语义）。理由：终态 Run 不再被调度，允许单 Task 重试只会产出"永远不会跑的 queued Task"（实测曾积压 16 条僵尸）。
 - 跨 Run 续跑（P1）：新 Run 的 `retry_of` 指向原 Run；复用条件 = Tester 版本、镜像引用、参数快照、Endpoint 标识四者未变（§7.7），复用 Task 不重新执行，报告中标注来源。
 
 ### C-5.7 Cleanup

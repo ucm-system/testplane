@@ -180,7 +180,7 @@ func TestAuditCleanup_DirectoryRemoveFailureRecordsRejected(t *testing.T) {
 		t.Fatalf("造 Run: %v", err)
 	}
 	if _, err := env.st.Pool().Exec(ctx,
-		`UPDATE runs SET status = 'succeeded', finished_at = now() WHERE id = $1`, runID); err != nil {
+		`UPDATE runs SET status = 'succeeded', finished_at = GREATEST(now(), submitted_at) WHERE id = $1`, runID); err != nil {
 		t.Fatalf("置终态: %v", err)
 	}
 	dir := filepath.Join(env.cfg.StorageRoot, runID)

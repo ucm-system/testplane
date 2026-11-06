@@ -106,24 +106,20 @@ test('⑦ /testers?open= 直接打开抽屉，关闭后 URL 去掉该参数', as
   await expect(page).not.toHaveURL(/open=/)
 })
 
-test('⑧ 900px 宽：右栏收起后，事件流在主内容底部仍可展开', async ({ page }) => {
+test('⑧ 900px 宽：没有右栏了，事件流在「事件」页签里照样可达', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 900 })
   await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
   await page.goto('/runs/r-20261105-0003')
 
-  // 三列变两列：右栏整块收起
-  await expect(page.locator('aside[aria-label="辅助信息"]')).toBeHidden()
+  // 右栏只在概览页存在：Run 详情页压根没有 aside[aria-label="辅助信息"]
+  await expect(page.locator('aside[aria-label="辅助信息"]')).toHaveCount(0)
 
-  // 但内容没消失，而是落到主内容底部的可展开区块里
-  const inline = page.locator('#rail-inline')
-  const details = page.getByTestId('rail-inline-details')
-  await expect(details).toBeVisible({ timeout: 20_000 })
-  await expect(inline).toContainText('事件流与边界说明')
-
-  await details.locator('summary').click()
-  await expect(inline).toContainText('边界说明')
-  await expect(inline).toContainText('页面上的状态跟着服务端推送走')
-  await expect(inline).toContainText(/共 \d+ 条/)
+  // 事件流搬进主内容的第三个页签（折叠 ≠ 隐藏）
+  await page.getByRole('tab', { name: '事件' }).click()
+  const panel = page.getByTestId('run-events-panel')
+  await expect(panel).toBeVisible({ timeout: 20_000 })
+  await expect(panel).toContainText(/共 \d+ 条/)
+  await expect(panel).toContainText('日志不在事件流里')
 })
 
 test('C3 Task 行内「查看」按钮可聚焦并用键盘打开 Attempt 面板', async ({ page }) => {
