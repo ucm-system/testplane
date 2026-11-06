@@ -18,7 +18,11 @@ export function asPage<T>(data: unknown): Page<T> {
     const items = Array.isArray(rec['items']) ? (rec['items'] as T[]) : []
     const nextCursor = typeof rec['next_cursor'] === 'string' ? rec['next_cursor'] : null
     const hasMore = typeof rec['has_more'] === 'boolean' ? rec['has_more'] : nextCursor !== null
-    return { items, next_cursor: nextCursor, has_more: hasMore }
+    // offset 分页（D-61）会多回 total/page/page_size：**必须透传**，否则 UI 只能拿 items.length 兜底，共 N 条 就成了假数字。
+    const total = typeof rec['total'] === 'number' ? rec['total'] : null
+    const page = typeof rec['page'] === 'number' ? rec['page'] : null
+    const pageSize = typeof rec['page_size'] === 'number' ? rec['page_size'] : null
+    return { items, next_cursor: nextCursor, has_more: hasMore, total, page, page_size: pageSize }
   }
   return { items: [], next_cursor: null, has_more: false }
 }
