@@ -124,6 +124,11 @@ func (c *DeployLogCollector) Start(parent context.Context) {
 //   - `cleanup: never` / skipped / 卸载失败 → **不停**，让 collector 继续跟到
 //     "所有 Pod 消失"或 24h 上限（否则 Pod 还在跑、日志却再也采不到）。
 func (c *DeployLogCollector) Stop(reason string) {
+	c.stop(reason, true)
+}
+
+// stop 是 Stop 的实现；waitLoop=false 时不等发现循环（**selfStop 就是从循环里调用的，等会死锁**）。
+func (c *DeployLogCollector) stop(reason string, waitLoop bool) {
 	c.mu.Lock()
 	c.stopping = true
 	cancel := c.cancel
@@ -149,11 +154,17 @@ func (c *DeployLogCollector) Stop(reason string) {
 
 	// 注意：即使没 Start 过（cancel==nil），也要写 stopped 标记 + pods.json——
 	// 否则 "期间没起来" 的 collector 停止时会静默无痕。
+	done := c.done
 	if cancel != nil {
 		cancel()
 		for _, s := range streams {
 			s()
 		}
+	}
+	// 等发现循环真正退出：它可能正好在 discover 里写 pods.json，
+	// 不等就会在调用方清理目录时并发写（CI 上 -race/清理都抓到过）。
+	if waitLoop && done != nil {
+		<-done
 	}
 	for _, file := range files {
 		c.appendLine(file, fmt.Sprintf("--- [collection stopped: %s at %s] ---",
@@ -177,11 +188,16 @@ func (c *DeployLogCollector) StopQuiet() {
 	}
 	c.streaming = map[string]context.CancelFunc{}
 	c.mu.Unlock()
+	done := c.done
 	if cancel != nil {
 		cancel()
 	}
 	for _, s := range streams {
 		s()
+	}
+	// 同 Stop：等发现循环退出，再等所有写盘 goroutine。
+	if done != nil {
+		<-done
 	}
 	c.Wait()
 }
@@ -391,7 +407,7 @@ func (c *DeployLogCollector) selfStop(reason string, files []string) {
 	if reason == "max duration reached" {
 		marker = "max duration reached"
 	}
-	c.Stop(marker)
+	c.stop(marker, false) // 从发现循环里调用：不能等自己退出
 	if onStop != nil {
 		onStop(runID, marker)
 	}
