@@ -76,16 +76,19 @@ test('⑤ 结果 / 执行细节：role=tabpanel 且 id 与页签互相指向', a
   expect(await resultTab.getAttribute('aria-controls'), '切走后「结果」页签也不该悬空').toBeNull()
 })
 
-test('⑥ /runs?q= 直接生效，改筛选会写回 URL', async ({ page }) => {
-  await page.goto('/runs?q=qwen3-8b-nightly')
+test('⑥ /runs?q= 只在本页内查找，改关键字会写回 URL', async ({ page }) => {
+  // 列表已经是真分页（D-61）：q 不跨页、不改 total，只在当前页的条目里找
+  await page.goto('/runs?page_size=50&q=qwen3-8b-nightly')
   await expect(page.getByText('全部 Run')).toBeVisible()
 
-  const search = page.getByLabel('筛选本页 Run（按名称 / ID）')
+  const search = page.getByLabel('在当前页内查找（名称 / ID）')
   await expect(search).toHaveValue('qwen3-8b-nightly')
 
   const rows = page.locator('tbody tr')
   await expect(rows).toHaveCount(1)
   await expect(rows.first()).toContainText('qwen3-8b-nightly')
+  // 明确标注"页内查找，不跨页"
+  await expect(page.getByText(/页内查找，不跨页/)).toBeVisible()
 
   // 改关键字 → URL 跟着变，结果也跟着变
   await search.fill('daily')

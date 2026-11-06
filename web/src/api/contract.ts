@@ -27,6 +27,8 @@ import type {
   RunEvent,
   RunListQuery,
   RunManifest,
+  RunFacets,
+  RunFacetsQuery,
   RunSummary,
   SecretWrite,
   SubmitResult,
@@ -72,6 +74,9 @@ export interface Api {
 
   /* Run */
   listRuns(query?: RunListQuery): Promise<Page<RunSummary>>
+
+  /** `GET /runs/facets`：表头列筛选的候选值与计数（过滤参数与 listRuns 同名同义） */
+  listRunFacets(query?: RunFacetsQuery): Promise<RunFacets>
   /** 详情带 `tasks: TaskSummary[]` */
   getRun(id: string): Promise<Run>
   /** 取消：`POST /runs/{id}/cancel`（子路径，不是 `:cancel`） */

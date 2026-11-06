@@ -34,6 +34,8 @@ import type {
   RunEvent,
   RunListQuery,
   RunManifest,
+  RunFacets,
+  RunFacetsQuery,
   RunSummary,
   SecretWrite,
   SubmitResult,
@@ -99,11 +101,26 @@ export const realApi: Api = {
         kind: query.kind,
         tester: query.tester,
         submitter: query.submitter,
-        cursor: query.cursor ?? undefined,
-        limit: query.limit,
+        // offset 分页（UI）与游标分页（agent / CLI）互斥：给了 page 就不带 cursor
+        page: query.page,
+        page_size: query.page_size,
+        cursor: query.page ? undefined : (query.cursor ?? undefined),
+        limit: query.page ? undefined : query.limit,
       })}`,
     )
     return asPage<RunSummary>(data)
+  },
+
+  /** 表头下拉的候选值：过滤参数与 listRuns 完全一致，计数不受当前页限制 */
+  listRunFacets(query: RunFacetsQuery = {}): Promise<RunFacets> {
+    return request<RunFacets>(
+      `/runs/facets${qs({
+        status: query.status,
+        kind: query.kind,
+        tester: query.tester,
+        submitter: query.submitter,
+      })}`,
+    )
   },
 
   getRun(id: string): Promise<Run> {

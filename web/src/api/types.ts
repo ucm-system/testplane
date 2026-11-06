@@ -45,6 +45,10 @@ export interface Page<T> {
   items: T[]
   next_cursor: string | null
   has_more: boolean
+  /** 满足过滤条件的总条数：**只在 offset 分页（page/page_size）下计算**，游标分页为 null */
+  total?: number | null
+  page?: number | null
+  page_size?: number | null
 }
 
 /* ================================================================ 枚举 */
@@ -699,12 +703,46 @@ export interface TaskCancelResult {
 /* ================================================================ 查询参数 */
 
 export interface RunListQuery {
+  /** 多值，逗号分隔（`status=testing,deploying`） */
+  status?: string
+  kind?: string
+  tester?: string
+  /** 多值，逗号分隔（`submitter=dev,qa`） */
+  submitter?: string
+  /** 游标分页（agent / CLI 用）；与 page 互斥，给了 page 就忽略 cursor（D-61） */
+  cursor?: string | null
+  limit?: number
+  /** offset 分页页码（从 1 开始）；UI 走这套拿「第几页 / 共几页」 */
+  page?: number
+  /** offset 分页每页条数（默认 20，上限 100） */
+  page_size?: number
+}
+
+/** `RunFacets` / `FacetBucket` schema：表头列筛选的候选值与计数（Excel 式）。 */
+export interface FacetBucket {
+  value: string
+  count: number
+}
+
+/**
+ * `GET /runs/facets` 的应答：四个维度各自的取值与计数。
+ *
+ * 计数按维度独立（标准 facet 语义）：算 submitter 的计数时只应用其它维度的过滤，
+ * 不应用 submitter 自己那维 —— 否则勾了一个提交人之后，别的提交人就从候选里消失了。
+ */
+export interface RunFacets {
+  status: FacetBucket[]
+  submitter: FacetBucket[]
+  kind: FacetBucket[]
+  tester: FacetBucket[]
+}
+
+/** `/runs/facets` 的查询：与 `GET /runs` 同名同义（多值同样用逗号） */
+export interface RunFacetsQuery {
   status?: string
   kind?: string
   tester?: string
   submitter?: string
-  cursor?: string | null
-  limit?: number
 }
 
 export interface TaskListQuery {
