@@ -47,7 +47,7 @@ func bundleTestEnv(t *testing.T) (srv *Server, st *store.Store, runID string, cl
 		t.Fatalf("CreateRun: %v", err)
 	}
 	if _, err := st.Pool().Exec(ctx,
-		`UPDATE runs SET status='succeeded', finished_at=now() WHERE id=$1`, runID); err != nil {
+		`UPDATE runs SET status='succeeded', finished_at=GREATEST(now(), submitted_at) WHERE id=$1`, runID); err != nil {
 		t.Fatalf("置终态: %v", err)
 	}
 

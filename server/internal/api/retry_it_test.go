@@ -59,9 +59,10 @@ func retryTestEnv(t *testing.T) (srv *Server, st *store.Store, runID string,
 		t.Fatalf("CreateRun: %v", err)
 	}
 
-	// 把 Run 推到终态（failed）：直接改库最省事，判据只关心状态。
-	if _, err := st.Pool().Exec(ctx, `UPDATE runs SET status='failed', finished_at=now() WHERE id=$1`, runID); err != nil {
-		t.Fatalf("置终态: %v", err)
+	// Run 置为 **testing**（非终态）：task 级 retry 只允许在非终态 Run 上做（D-60），
+	// 而 run 级 retry-plan/retry 的用例会各自把 Run 再改成需要的终态。
+	if _, err := st.Pool().Exec(ctx, `UPDATE runs SET status='testing', finished_at=NULL WHERE id=$1`, runID); err != nil {
+		t.Fatalf("置 testing: %v", err)
 	}
 
 	// 写 succeeded Task 的真实产物（result.json 必须能过附录 A 校验）。
@@ -89,11 +90,21 @@ func retryTestEnv(t *testing.T) (srv *Server, st *store.Store, runID string,
 	return srv, st, runID, succeededTask, failedTask, cleanup
 }
 
+// finalizeRun 把 Run 置为给定终态（用例里显式声明"这条路径要求终态"）。
+func finalizeRun(t *testing.T, st *store.Store, runID, status string) {
+	t.Helper()
+	if _, err := st.Pool().Exec(context.Background(),
+		`UPDATE runs SET status=$2, finished_at=GREATEST(now(), submitted_at) WHERE id=$1`, runID, status); err != nil {
+		t.Fatalf("置终态 %s: %v", status, err)
+	}
+}
+
 // TestRetryPlan_ReuseAndRerun 验收 retry-plan 的复用/重跑判定：
 // 产物齐全的 succeeded → reuse；failed → rerun；且 retryable=true。
 func TestRetryPlan_ReuseAndRerun(t *testing.T) {
-	srv, _, runID, succeeded, failed, cleanup := retryTestEnv(t)
+	srv, st, runID, succeeded, failed, cleanup := retryTestEnv(t)
 	defer cleanup()
+	finalizeRun(t, st, runID, "failed")
 
 	rec := doGet(t, srv, "/api/v1/runs/"+runID+"/retry-plan")
 	if rec.Code != http.StatusOK {
@@ -142,8 +153,9 @@ func TestRetryPlan_ReuseAndRerun(t *testing.T) {
 // TestRetryPlan_BlockedWhenArtifactsMissing 产物不存在的 succeeded Task 不能复用 →
 // 进 blocked_items + rerun。
 func TestRetryPlan_BlockedWhenArtifactsMissing(t *testing.T) {
-	srv, _, runID, succeeded, _, cleanup := retryTestEnv(t)
+	srv, st, runID, succeeded, _, cleanup := retryTestEnv(t)
 	defer cleanup()
+	finalizeRun(t, st, runID, "failed")
 	// 删掉产物，模拟 PVC 上的文件丢了（DB 仍是 succeeded）。
 	dir := filepath.Join(srv.cfg.StorageRoot, runID, "tasks", succeeded.ID, "attempts", "1")
 	if err := os.RemoveAll(dir); err != nil {
@@ -205,6 +217,7 @@ func TestRetryRun_CreatesNewRunWithReuse(t *testing.T) {
 	srv, st, runID, succeeded, failed, cleanup := retryTestEnv(t)
 	defer cleanup()
 	ctx := context.Background()
+	finalizeRun(t, st, runID, "failed")
 
 	rec := doPost(t, srv, "/api/v1/runs/"+runID+"/retry", "")
 	if rec.Code != http.StatusAccepted {
@@ -391,6 +404,7 @@ func TestRetryPlan_SecondRetryRunNothingToRetry(t *testing.T) {
 	srv, st, runID, succeeded, _, cleanup := retryTestEnv(t)
 	defer cleanup()
 	ctx := context.Background()
+	finalizeRun(t, st, runID, "failed")
 
 	// 第一次 retry：生成 run2（复用 succeeded，另一个 pending）。
 	rec := doPost(t, srv, "/api/v1/runs/"+runID+"/retry", "")
@@ -438,7 +452,7 @@ func TestRetryPlan_SecondRetryRunNothingToRetry(t *testing.T) {
 		}
 	}
 	if _, err := st.Pool().Exec(ctx,
-		`UPDATE runs SET status='succeeded', finished_at=now() WHERE id=$1`, first.NewRunID); err != nil {
+		`UPDATE runs SET status='succeeded', finished_at=GREATEST(now(), submitted_at) WHERE id=$1`, first.NewRunID); err != nil {
 		t.Fatalf("置 run2 终态: %v", err)
 	}
 
@@ -523,6 +537,7 @@ func seedArtifactRowsWithSHA(t *testing.T, st *store.Store, runID, taskID, attem
 // （name=a 的复用 Task、name=b 的重跑 Task）。
 func secondGeneration(t *testing.T, srv *Server, st *store.Store, runID string) (string, *store.Task, *store.Task) {
 	t.Helper()
+	finalizeRun(t, st, runID, "failed") // run 级 retry 的前置：源 Run 必须终态
 	rec := doPost(t, srv, "/api/v1/runs/"+runID+"/retry", "")
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("retry run1 status = %d, body=%s", rec.Code, rec.Body.String())
@@ -628,7 +643,7 @@ func TestRetryPlan_SourceRetryableAfterCompletedWithErrors(t *testing.T) {
 	run2, a, b := secondGeneration(t, srv, st, runID)
 	finishTaskWithResult(t, srv, st, run2, b.ID, "failed")
 	if _, err := st.Pool().Exec(context.Background(),
-		`UPDATE runs SET status='completed_with_errors', finished_at=now() WHERE id=$1`, run2); err != nil {
+		`UPDATE runs SET status='completed_with_errors', finished_at=GREATEST(now(), submitted_at) WHERE id=$1`, run2); err != nil {
 		t.Fatalf("置 run2 终态: %v", err)
 	}
 	_ = a
@@ -678,7 +693,7 @@ func TestRetryRun_ThirdGenerationKeepsArtifacts(t *testing.T) {
 	run2, a2, b2 := secondGeneration(t, srv, st, runID)
 	finishTaskWithResult(t, srv, st, run2, b2.ID, "failed")
 	if _, err := st.Pool().Exec(ctx,
-		`UPDATE runs SET status='completed_with_errors', finished_at=now() WHERE id=$1`, run2); err != nil {
+		`UPDATE runs SET status='completed_with_errors', finished_at=GREATEST(now(), submitted_at) WHERE id=$1`, run2); err != nil {
 		t.Fatalf("置 run2 终态: %v", err)
 	}
 
@@ -782,11 +797,7 @@ func TestRetryTask_SkippedTaskCanBeRetried(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	if _, err := st.Pool().Exec(ctx,
-		`UPDATE runs SET status='completed_with_errors', finished_at=now() WHERE id=$1`, runID); err != nil {
-		t.Fatalf("置终态: %v", err)
-	}
-
+	// Run 保持 testing（非终态）：终态 Run 上重试 Task 现在会被 409 挡住（D-60）。
 	rec := doPost(t, srv, "/api/v1/tasks/"+taskID+"/retry", "")
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("skipped Task 重试 status = %d, 期望 202（body=%s）", rec.Code, rec.Body.String())

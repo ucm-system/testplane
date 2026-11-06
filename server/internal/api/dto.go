@@ -126,9 +126,15 @@ type testerDTO struct {
 	Placeholder string                   `json:"placeholder,omitempty"`
 
 	// 注册表元数据（openapi Tester 的 allOf 第二支要求）。
-	ContentSHA   string     `json:"content_sha,omitempty"`
-	SourceFile   string     `json:"source_file,omitempty"`
-	Orphaned     bool       `json:"orphaned"`
+	ContentSHA string `json:"content_sha,omitempty"`
+	SourceFile string `json:"source_file,omitempty"`
+	Orphaned   bool   `json:"orphaned"`
+	// Latest 表示该 (name, version) 是这个名字的**最高版本**（含 retired 行；
+	// 比较规则是 domain.VersionLess —— 唯一真源，票 #60 / D-60）。
+	Latest bool `json:"latest"`
+	// Retired 表示目录里已经不存在、只剩库里的历史版本（= testers.orphaned）。
+	// 这类行**永不删除**：历史 Run/Task 仍按 name@version 解析（ARCHITECTURE §5.6）。
+	Retired      bool       `json:"retired"`
 	RegisteredAt *time.Time `json:"registered_at,omitempty"`
 	RegisteredBy string     `json:"registered_by,omitempty"`
 }

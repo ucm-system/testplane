@@ -27,10 +27,20 @@ type fakeResolver struct {
 
 func (f *fakeResolver) Resolve(ctx context.Context, name, version string) (domain.TesterSpec, error) {
 	if version == "" {
+		// 与真实 registry 一致：空版本 = 该 name 的最高版本（domain.VersionLess 唯一真源）。
+		var best domain.TesterSpec
+		found := false
 		for k, sp := range f.specs {
-			if strings.HasPrefix(k, name+"@") {
-				return sp, nil
+			if !strings.HasPrefix(k, name+"@") {
+				continue
 			}
+			if !found || domain.VersionLess(best.Version, sp.Version) {
+				best = sp
+				found = true
+			}
+		}
+		if found {
+			return best, nil
 		}
 		return domain.TesterSpec{}, storeTestNotFound(name)
 	}

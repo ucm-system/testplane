@@ -10,6 +10,8 @@ package domain
 
 import (
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -253,3 +255,36 @@ func (s RunStatus) Status() Status     { return Status(s) }
 func (s TaskStatus) Status() Status    { return Status(s) }
 func (s AttemptStatus) Status() Status { return Status(s) }
 func (s TesterState) Status() Status   { return Status(s) }
+
+// VersionLess 比较两个 Tester 版本号：a < b 返回 true。
+//
+// 规则（与注册表 Scan 的排序一致，抽出来做唯一真源，禁止再实现一遍）：
+//  1. 去掉首个 `-` 之后的预发布/元数据（`0.2.0-rc1` 与 `0.2.0` 比较时只看 0.2.0）；
+//  2. 按 `.` 切三段，逐段数字比较（非数字按 0）；
+//  3. 三段都相同再看原始字符串（保证比较是严格弱序）。
+func VersionLess(a, b string) bool {
+	pa, pb := ParseVersion(a), ParseVersion(b)
+	for i := 0; i < 3; i++ {
+		if pa[i] != pb[i] {
+			return pa[i] < pb[i]
+		}
+	}
+	return a < b
+}
+
+// VersionGreater 报告 a > b（VersionLess 的反向，语义更直观）。
+func VersionGreater(a, b string) bool { return VersionLess(b, a) }
+
+// ParseVersion 把版本号解析成三段的数值（缺省段为 0；非数字段为 0）。
+func ParseVersion(v string) [3]int {
+	core := v
+	if i := strings.IndexByte(v, '-'); i >= 0 {
+		core = v[:i]
+	}
+	var out [3]int
+	for i, part := range strings.SplitN(core, ".", 3) {
+		n, _ := strconv.Atoi(part)
+		out[i] = n
+	}
+	return out
+}

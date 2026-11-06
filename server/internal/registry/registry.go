@@ -730,25 +730,6 @@ func normalizeText(b []byte) string {
 func runOnWindows() bool { return runtime.GOOS == "windows" }
 
 // versionLess 比较两个语义化版本（a < b）。
-func versionLess(a, b string) bool {
-	pa, pb := parseVersion(a), parseVersion(b)
-	for i := 0; i < 3; i++ {
-		if pa[i] != pb[i] {
-			return pa[i] < pb[i]
-		}
-	}
-	return a < b
-}
-
-func parseVersion(v string) [3]int {
-	core := v
-	if i := strings.IndexByte(v, '-'); i >= 0 {
-		core = v[:i]
-	}
-	var out [3]int
-	for i, part := range strings.SplitN(core, ".", 3) {
-		n, _ := strconv.Atoi(part)
-		out[i] = n
-	}
-	return out
-}
+// versionLess 委托给 domain.VersionLess —— 版本比较只允许有一份实现
+// （注册表排序、/testers 的 latest 判定、tpctl 展示都用它）。
+func versionLess(a, b string) bool { return domain.VersionLess(a, b) }

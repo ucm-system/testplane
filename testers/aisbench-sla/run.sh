@@ -29,7 +29,7 @@
 # =============================================================================
 set -uo pipefail   # 不用 -e：任何一步失败也要把 result.json 写出来（§5.9）
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 OUT="${OUTPUT_DIR:-/workspace/output}"
 LOG_DIR="${OUT}/logs"
 RAW_DIR="${OUT}/raw"
@@ -540,6 +540,21 @@ if [ ! -d "${WORK_PATH}" ]; then
   else
     log "work_path 不存在且无法创建：${WORK_PATH}（只读根文件系统？请改指 /tmp 下的可写目录）"
   fi
+fi
+
+# --- ais_bench 侧接线：让 work_path 下的「影子源码根」被真实 ais_bench 认到 --------
+# 背景见 build/Dockerfile.aisbench 头部注释：平台 Job 的根文件系统只读，写不了
+# /benchmark，所以 work_path 通常是 /tmp/aisbench-ws。但 ais_bench 有两处路径
+# 默认锚在它自己的源码根上，必须各接一根线：
+#   1) 数据集：ais_bench 把**相对**数据集路径拼在 AIS_BENCH_DATASETS_CACHE 下
+#      （benchmark/datasets/utils/datasets.py get_cache_dir()，默认=源码根），
+#      指到 work_path 即可让 path='ais_bench/datasets/gsm8k' 命中工具写的目录。
+#   2) 模型配置：ais_bench 支持 --config-dir，会在 <config-dir>/models 下找模型配置；
+#      work_path 不是镜像自带源码根时，把它补进 ais_bench 参数（不影响用户自带参数）。
+# 只改本脚本，没有改 vendored 的 sla_tool/。
+export AIS_BENCH_DATASETS_CACHE="${AIS_BENCH_DATASETS_CACHE:-${WORK_PATH}}"
+if [ "${WORK_PATH}" != "/benchmark" ]; then
+  AISBENCH_EXTRA="${AISBENCH_EXTRA:+${AISBENCH_EXTRA} }--config-dir ${WORK_PATH}/ais_bench/benchmark/configs"
 fi
 
 # --- 组装工具命令（逐项 argv，不经过 shell，§5.3）-------------------------------

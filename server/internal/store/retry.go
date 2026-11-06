@@ -22,9 +22,28 @@ import (
 // API 层统一映射成 409 CONFLICT，detail.reason 说明具体原因。
 var ErrRetryConflict = errors.New("store: retry conflict")
 
-// RetryConflict 带一个稳定的原因码（写进 detail.reason，客户端可判）。
+// retryConflictError 携带稳定的原因码（写进 409 的 detail.reason，客户端可判）。
+type retryConflictError struct {
+	reason  string
+	message string
+}
+
+func (e *retryConflictError) Error() string { return e.reason + ": " + e.message }
+func (e *retryConflictError) Unwrap() error { return ErrRetryConflict }
+
+// retryConflict 构造一个带原因码的冲突错误。
 func retryConflict(reason, msg string) error {
-	return fmt.Errorf("%w: %s: %s", ErrRetryConflict, reason, msg)
+	return &retryConflictError{reason: reason, message: msg}
+}
+
+// RetryConflictReason 取冲突错误里的原因码（不是冲突错误则返回空串）。
+// API 层用它填 409 的 `detail.reason`。
+func RetryConflictReason(err error) string {
+	var ce *retryConflictError
+	if errors.As(err, &ce) {
+		return ce.reason
+	}
+	return ""
 }
 
 // RetrySource 是生成 retry-plan 所需的原始数据（不含文件系统判定）。
@@ -220,6 +239,13 @@ func (s *Store) RetryTask(ctx context.Context, taskID, actor, role string) (int,
 		}
 		if runStatus == domain.RunCanceled {
 			return retryConflict("run_canceled", "Run 已取消，不能重试其 Task")
+		}
+		// D-60：Run 已终态时**不能**给它的 Task 重开 Attempt——终态 Run 不再被调度，
+		// 重开的 Task 会永远停在 queued（线上 34 条僵尸 Task 里 16 条就是这么来的）。
+		// 用户想要的是"重跑整条 Run"→ 用 POST /runs/{id}/retry（跨 Run 续跑）。
+		if domain.TerminalRunStatus(runStatus) {
+			return retryConflict("run_terminal",
+				"Run 已结束（"+string(runStatus)+"），不能再重试单个 Task；请用 POST /runs/{id}/retry 重跑整条 Run")
 		}
 		var (
 			status      domain.TaskStatus

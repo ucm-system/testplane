@@ -1,0 +1,4 @@
+# 仅本地验证用的 tokenizer 暂存目录（从 D:\Models\Qwen3-0.6B 拷进来，~15MB）。
+# 不入库：验证镜像才 COPY 它，生产镜像靠 Profile 挂载 tokenizer。
+# 准备命令见 README「验证镜像：真 ais_bench」一节 / build/prepare-tokenizer.ps1。
+models/

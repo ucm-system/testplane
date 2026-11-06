@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -75,6 +76,7 @@ func (s *Server) handleGetTesterVersion(w http.ResponseWriter, r *http.Request) 
 	dto := toTesterDTO(spec)
 	if row, err := s.st.Testers.Get(ctx, nil, spec.Name, spec.Version); err == nil {
 		fillTesterRegistryMeta(&dto, row)
+		s.markTesterLatest(ctx, &dto, spec.Name)
 	} else {
 		s.logger.Warn("Tester 元数据缺失", "err", err, "tester", name, "version", version)
 	}
@@ -88,4 +90,21 @@ func fillTesterRegistryMeta(dto *testerDTO, row *store.Tester) {
 	dto.Orphaned = row.Orphaned
 	dto.RegisteredAt = utcPtr(&row.RegisteredAt)
 	dto.RegisteredBy = row.RegisteredBy
+	// retired 与 orphaned 同源（票 #60）：目录里已不存在、只剩库里的历史版本。
+	dto.Retired = row.Orphaned
+}
+
+// markTesterLatest 按"该 name 的库里最高版本"设置 dto.Latest（domain.VersionLess 唯一真源）。
+func (s *Server) markTesterLatest(ctx context.Context, dto *testerDTO, name string) {
+	rows, err := s.st.Testers.List(ctx, nil, store.TesterFilter{IncludeOrphaned: true})
+	if err != nil {
+		return
+	}
+	var maxVer string
+	for i := range rows {
+		if rows[i].Name == name && domain.VersionLess(maxVer, rows[i].Version) {
+			maxVer = rows[i].Version
+		}
+	}
+	dto.Latest = maxVer == dto.Version
 }

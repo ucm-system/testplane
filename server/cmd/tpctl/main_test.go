@@ -382,7 +382,8 @@ func TestTestersJSON(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("退出码 = %d", code)
 	}
-	if !strings.Contains(gotQuery, "role=pre_check") || !strings.Contains(gotQuery, "orphaned=true") {
+	// --orphaned 是 --include-retired 的旧名：两者都映射到 include_retired=true（票 #60）。
+	if !strings.Contains(gotQuery, "role=pre_check") || !strings.Contains(gotQuery, "include_retired=true") {
 		t.Errorf("查询参数 = %q", gotQuery)
 	}
 	out := decodeJSON(t, stdout)

@@ -15,7 +15,12 @@ with no NPU, no real vLLM and no network:
 ``GET  /__sim__/state`` JSON snapshot of every counter (debug / assertions).
 ``GET  /__sim__/reset`` zero every counter.
 ``GET  /v1/models``     OpenAI-style model list (liveness / model probe).
-``POST /v1/chat/completions``  minimal completion (stream and non-stream).
+``POST /v1/chat/completions``  completion (stream and non-stream). Emits
+                        ``max_tokens`` content chunks at ``--token-delay-ms``
+                        apart, so ais_bench gets real decode-latency signal
+                        (TPOT/ITL) instead of a single-token response; honours
+                        ``stream_options.include_usage`` and always reports a
+                        ``usage`` block (ais_bench counts tokens from it).
 ======================  =====================================================
 
 Counters are guarded by a lock; the server is threaded so parallel probes work.
@@ -37,6 +42,25 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 DEFAULT_MODEL_NAME = "mock-model"
+# 输出长度：请求没带 max_tokens 时用它；请求带了就照办（上限防手滑打爆内存）。
+# ais_bench 的 perf 口径要求 output_len >= 2 才有 TPOT/ITL 数据，所以默认给 4。
+DEFAULT_MAX_TOKENS = 4
+MAX_TOKENS_CAP = 256
+
+
+def _estimate_prompt_tokens(messages) -> int:
+    """粗估 prompt token 数（mock 里没有 tokenizer，按 ~4 字符/token）。
+
+    ais_bench 从 usage.prompt_tokens 取 InputTokens；不给 usage 会记 0，
+    输入吞吐就全是 0，量级失真。
+    """
+    chars = 0
+    if isinstance(messages, list):
+        for item in messages:
+            content = item.get("content") if isinstance(item, dict) else None
+            if isinstance(content, str):
+                chars += len(content)
+    return max(1, (chars + 3) // 4)
 
 # Metric names are the ones the reference scraper looks for; do not rename.
 M_PREFIX_QUERIES = "vllm:prefix_cache_queries_total"
@@ -259,10 +283,22 @@ class _Handler(BaseHTTPRequestHandler):
             payload = {}
         model = payload.get("model") or self.state.model_name
         stream = bool(payload.get("stream"))
+        options = payload.get("stream_options") or {}
+        want_usage = bool(options.get("include_usage")) if isinstance(options, dict) else False
+        messages = payload.get("messages") or []
+        max_tokens = payload.get("max_tokens")
+        try:
+            max_tokens = int(max_tokens)
+        except (TypeError, ValueError):
+            max_tokens = DEFAULT_MAX_TOKENS
+        max_tokens = max(0, min(max_tokens, MAX_TOKENS_CAP))
+        prompt_tokens = _estimate_prompt_tokens(messages)
+        # One content chunk per token: ais_bench measures TTFT (first chunk) and
+        # TPOT/ITL (inter-chunk gaps), so a single-chunk reply yields no TPOT.
+        chunks = [f"tok{i}" for i in range(max_tokens)]
+        delay = float(getattr(self.server, "token_delay", 0.0) or 0.0)
         self.state.enter(0)
         try:
-            # Small transient so the running gauge is observable as >0.
-            time.sleep(0.02)
             created = int(time.time())
             if stream:
                 self.send_response(200)
@@ -270,27 +306,48 @@ class _Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
 
-                def chunk(delta: dict, finish=None) -> None:
-                    frame = {
+                def frame(data: dict) -> None:
+                    self.wfile.write(b"data: " + json.dumps(data).encode("utf-8") + b"\n\n")
+                    self.wfile.flush()
+
+                def chunk(delta: dict, finish=None, usage=None) -> None:
+                    data = {
                         "id": "chatcmpl-mock", "object": "chat.completion.chunk",
                         "created": created, "model": model,
                         "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
                     }
-                    self.wfile.write(b"data: " + json.dumps(frame).encode("utf-8") + b"\n\n")
-                    self.wfile.flush()
+                    if usage is not None:
+                        data["usage"] = usage
+                    frame(data)
 
                 chunk({"role": "assistant", "content": ""})
-                chunk({"content": "mock"})
+                for index, text in enumerate(chunks):
+                    if index and delay > 0:
+                        time.sleep(delay)
+                    chunk({"content": text})
                 chunk({}, finish="stop")
+                if want_usage:
+                    # OpenAI 的 usage 是独立的一帧、choices 为空；ais_bench 的
+                    # parse_stream_response 每帧都会读 usage，位置不影响。
+                    frame({"id": "chatcmpl-mock", "object": "chat.completion.chunk",
+                           "created": created, "model": model, "choices": [],
+                           "usage": {"prompt_tokens": prompt_tokens,
+                                     "completion_tokens": len(chunks),
+                                     "total_tokens": prompt_tokens + len(chunks)}})
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
             else:
+                if delay > 0 and chunks:
+                    time.sleep(delay * len(chunks))
                 self._send_json(200, {
                     "id": "chatcmpl-mock", "object": "chat.completion",
                     "created": created, "model": model,
                     "choices": [{"index": 0, "finish_reason": "stop",
-                                 "message": {"role": "assistant", "content": "mock"}}],
-                    "usage": {"prompt_tokens": 16, "completion_tokens": 4, "total_tokens": 20},
+                                 "message": {"role": "assistant",
+                                             "content": " ".join(chunks)}}],
+                    "usage": {"prompt_tokens": prompt_tokens,
+                              "completion_tokens": len(chunks),
+                              "total_tokens": prompt_tokens + len(chunks)},
                 })
         finally:
             self.state.leave(0)
@@ -298,11 +355,13 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def build_server(host: str, port: int, model_name: str = DEFAULT_MODEL_NAME,
-                 engines: int = 1, verbose: bool = False) -> ThreadingHTTPServer:
+                 engines: int = 1, verbose: bool = False,
+                 token_delay: float = 0.0) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, port), _Handler)
     server.daemon_threads = True
     server.state = MockState(model_name=model_name, engines=engines)  # type: ignore[attr-defined]
     server.verbose = verbose  # type: ignore[attr-defined]
+    server.token_delay = token_delay  # type: ignore[attr-defined]
     return server
 
 
@@ -312,10 +371,13 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int, default=8099, help="0 lets the OS pick a free port")
     ap.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     ap.add_argument("--engines", type=int, default=1)
+    ap.add_argument("--token-delay-ms", type=float, default=2.0,
+                    help="每个输出 token 之间的人为延迟（毫秒），让 TPOT/ITL 有真实数值")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
 
-    server = build_server(args.host, args.port, args.model_name, args.engines, args.verbose)
+    server = build_server(args.host, args.port, args.model_name, args.engines,
+                          args.verbose, max(0.0, args.token_delay_ms / 1000.0))
     host, port = server.server_address[0], server.server_address[1]
     print(f"MOCK_VLLM_READY host={host} port={port} model={args.model_name}", flush=True)
     try:

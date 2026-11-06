@@ -56,6 +56,12 @@ func Effects(entity EntityType, from, to Status) []EffectKind {
 		case RunCanceled, RunFailed:
 			// 平台侧终态前必须收口：未开始 → skipped，进行中 → canceled（C-5.8）。
 			return []EffectKind{EffectSkipUnfinished, EffectCloseActive}
+		case RunSucceeded, RunCompletedWithErrors, RunServiceUnavailable:
+			// **任何终态**都必须收口（D-60）：R5（deploying → service_unavailable，部署阻塞/超窗）
+			// 与 R7（cleanup → 三种终态）都可能有 Task 没跑过。之前只登记了 canceled/failed，
+			// 于是 service_unavailable 的 Run 里残留 pending/queued Task（等待列表被灌满）。
+			// 对 R7 的正常路径这两个 side-effect 是 no-op（进入 cleanup 前 Task 已全终态）。
+			return []EffectKind{EffectSkipUnfinished, EffectCloseActive}
 		case RunTesting:
 			return []EffectKind{EffectBackfillEndpoint}
 		}

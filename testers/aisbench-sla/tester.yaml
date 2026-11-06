@@ -1,11 +1,15 @@
 name: aisbench-sla
-version: 0.1.0
+version: 0.3.0
 display_name: AISBench 前缀缓存 SLA 搜索
 description: |
   用前缀缓存 SLA 搜索找出「满足延迟约束的最大并发」与「最高输出吞吐」。
   预检（并发=1）→ 指数阶梯（×2）→ 二分收敛，每条 SLA 约束是「指标.统计量:阈值」，多条 AND 生效；
   逐点写 ais_bench 配置并调用 ais_bench 压测，命中率按目标服务 /metrics 快照差分给出（只作证据，不参与判定）。
   只回答「这套服务在给定负载形态下能扛到几并发、吞吐多少」；是否达标由下游消费指标判断。
+
+  0.2.0 起镜像基于官方 AISBench benchmark 镜像（ghcr.io/aisbench/aisbench_benchmark，
+  3.1.20260330 / py310），`ais_bench` 是真命令；stub 仍留在镜像里仅供离线回归
+  （`--aisbench_cmd=/tester/tool/tests/stub_aisbench.py`）。
 
 role: test
 
@@ -16,7 +20,8 @@ on_failure: continue
 entry: /tester/run.sh
 
 # 镜像由 CI 构建产出（见 build/Dockerfile 与 README 的构建节）。平台与任何运行环境都不 build（§6.2）。
-image: ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.1.0
+# 0.2.0 = 真实 ais_bench 模式：build/Dockerfile.aisbench（基础镜像自带 ais_bench 3.1.20260330）。
+image: ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.3.0
 
 resources:
   cpu: "2"
@@ -46,9 +51,11 @@ placeholder: |
   --input_len=2048 --output_len=32 --data_num=160 --sla=ttft.avg:1200 --sla=tpot.avg:30 \
   --start=8 --max=256 --max_probes=12 --request_rate=0 \
   --dataset_type=prefix_cache --prefix_num=1 --repeat_rate=90% \
-  --work_path=/benchmark --dataset_path=/data/sla_datasets
+  --work_path=/tmp/aisbench-ws --dataset_path=/workspace/output/sla_out/datasets
   url 是 OpenAI 兼容的 base URL：形如 http://host:8000/v1；Tester 会去掉末尾 /v1 再交给工具
   （工具要的是服务根地址，自己拼 /v1/models 与 ais_bench 的 url 字段）。
+  work_path **不要**写 /benchmark：平台 Job 的根文件系统只读，/benchmark 属 root 不可写；
+  0.2.0 的 run.sh 会用 AIS_BENCH_DATASETS_CACHE + --config-dir 把 /tmp 下的影子源码根接给 ais_bench。
 
 parameters:
 
@@ -74,6 +81,9 @@ parameters:
       容器内 tokenizer/权重路径。工具的 ais_bench 模型配置必须带它（报错 UTILS-FILE-002），
       且工具会校验该目录真实存在。生成前缀数据集时要读 tokenizer；用现成 --dataset 时不读，
       但路径仍需存在。由 Profile 挂载提供，平台不改写（§10.4）。
+      **验证用 0.2.0 镜像自带** `/models/Qwen3-0.6B`（15MB tokenizer，仅本地/kind 验证镜像有，
+      生产镜像不带，靠 Profile 挂载）——所以本机验证时 service.model_path 写 /models/Qwen3-0.6B。
+      注意它是**公共参数**（§5.4.1），只能在 manifest 的 service.model_path 给，不能写进 args。
 
   input_len:
     type: integer
@@ -87,7 +97,7 @@ parameters:
 
   data_num:
     type: integer
-    description: "数据集条数（每点压测的请求数）。默认 64；建议取 --max 的 2~4 倍且 >= --max，否则最高并发点压不满、吞吐被低估。"
+    description: "数据集条数（每点压测的请求数）。默认 64；建议取 --max 的 2~4 倍且 >= --max，否则最高并发点压不满、吞吐被低估。注意：显式给 `--dataset` 时本参数不生效（截断只发生在生成数据集的路径里，已有数据集原样使用）。"
     default: "64"
 
   sla:
@@ -173,18 +183,21 @@ parameters:
     type: string
     required: true
     description: |
-      ais_bench 源码根（官方镜像里是 /benchmark），本 Tester 会往它下面写
-      ais_bench/benchmark/configs/models/vllm_api/vllm_api_chat_temp.py 与数据集软链，所以必须可写；
-      目录不存在时 Tester 会 mkdir -p。工具的 ais_bench 模型配置依赖它，缺失会报错。
-      平台 Job 的根文件系统是只读的（Executor 固定 ReadOnlyRootFilesystem），只有 /workspace/output
-      与 /tmp 可写：stub 冒烟把 work_path 指到 /tmp/aisbench-ws 之类的路径；真实 ais_bench 场景
-      指镜像里自带的 /benchmark（基础镜像可写）。
-    example: "/benchmark"
+      ais_bench 的「工作根」（本 Tester 会往它下面写
+      ais_bench/benchmark/configs/models/vllm_api/vllm_api_chat_temp.py 与数据集目录），必须可写；
+      目录不存在时 Tester 会 mkdir -p。
+      **默认写 /tmp/aisbench-ws，不要写 /benchmark**：官方镜像里 /benchmark 是 ais_bench 源码根、
+      属 root 0755 不可写；平台 Job 又是 ReadOnlyRootFilesystem，只有 /workspace/output 与 /tmp 可写。
+      run.sh 会自动做两处接线，让 /tmp 下的影子源码根被 ais_bench 认到：
+      `AIS_BENCH_DATASETS_CACHE=<work_path>`（数据集相对路径锚点）与
+      `--config-dir <work_path>/ais_bench/benchmark/configs`（模型配置搜索路径）。
+      指 /benchmark 时按原生路径工作（需要该目录可写，仅脱离平台的本地调试有意义）。
+    example: "/tmp/aisbench-ws"
     required_for: "所有真实 ais_bench 调用"
 
   aisbench_cmd:
     type: string
-    description: "替换 ais_bench 命令（可带参数，按 shell 解析）。默认 ais_bench；离线冒烟填 /tester/tool/tests/stub_aisbench.py 或 'python3 /tester/tool/tests/stub_aisbench.py'（前者要求可执行位，镜像已给）。"
+    description: "替换 ais_bench 命令（可带参数，按 shell 解析）。默认 ais_bench（0.2.0 起是真命令）；离线回归填 /tester/tool/tests/stub_aisbench.py 或 'python3 /tester/tool/tests/stub_aisbench.py'（前者要求可执行位，镜像已给）。"
     default: "ais_bench"
     example: "/tester/tool/tests/stub_aisbench.py"
 
