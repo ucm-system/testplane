@@ -1810,6 +1810,8 @@ env:                          # 运行期环境变量声明（§12.4）
 | `PRECHECK_FAILED` | 502 | Pre-Check | 是 | 探测返回非预期状态 |
 | `TASK_TIMEOUT` | 504 | 执行 | 按策略 | 超过 `timeout_seconds` |
 | `TESTER_NONZERO_EXIT` | 500 | 执行 | 否 | Tester 非零退出 |
+| `SLA_PRECHECK_FAILED` | 500 | 执行 | 否 | Tester 自报：SLA 预检（并发=1）不达标，说明**阈值与能力矛盾**，应改阈值/换机器而不是重试 |
+| `SLA_NO_FEASIBLE_CONCURRENCY` | 500 | 执行 | 否 | Tester 自报：搜索完整个并发区间仍**没有满足 SLA 的点**（能跑，但达不到要求） |
 | `RESULT_MISSING` | 500 | 收集 | 否 | 退出码 0 但未产出 `result.json` |
 | `RESULT_INVALID` | 500 | 收集 | 否 | `result.json` 不符合附录 A |
 | `CLEANUP_FAILED` | 500 | 清理 | 是 | 资源回收失败，不改变 Task 结果 |

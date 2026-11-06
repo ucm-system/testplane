@@ -2588,6 +2588,8 @@ components:
         - PRECHECK_FAILED
         - TASK_TIMEOUT
         - TESTER_NONZERO_EXIT
+        - SLA_PRECHECK_FAILED
+        - SLA_NO_FEASIBLE_CONCURRENCY
         - RESULT_MISSING
         - RESULT_INVALID
         - CLEANUP_FAILED

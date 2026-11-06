@@ -32,9 +32,13 @@ const (
 	CodePrecheckFailed      = "PRECHECK_FAILED"
 	CodeTaskTimeout         = "TASK_TIMEOUT"
 	CodeTesterNonzeroExit   = "TESTER_NONZERO_EXIT"
-	CodeResultMissing       = "RESULT_MISSING"
-	CodeResultInvalid       = "RESULT_INVALID"
-	CodeCleanupFailed       = "CLEANUP_FAILED"
+	// Tester 自报的语义化失败码（附录 D）：不与 TESTER_NONZERO_EXIT 混淆，
+	// 平台据 code 就能区分"阈值与能力矛盾"和"根本找不到可行并发"。
+	CodeSLAPrecheckFailed        = "SLA_PRECHECK_FAILED"
+	CodeSLANoFeasibleConcurrency = "SLA_NO_FEASIBLE_CONCURRENCY"
+	CodeResultMissing            = "RESULT_MISSING"
+	CodeResultInvalid            = "RESULT_INVALID"
+	CodeCleanupFailed            = "CLEANUP_FAILED"
 	// 部署失败只折叠成两个码（附录 D，D-46/D-47）；细分走 Failure.Detail["reason"]。
 	CodeDeployFailed  = "DEPLOY_FAILED"  // 502 不可重试：平台侧调 Genet 失败
 	CodeDeployBlocked = "DEPLOY_BLOCKED" // 502 可重试：Genet blocked 或超窗口
@@ -69,33 +73,35 @@ const (
 
 // retryableByCode 是附录 D "可重试" 列的机器版本。
 var retryableByCode = map[string]bool{
-	CodeResourceExhausted:       true,
-	CodeExecutorUnavailable:     true,
-	CodeExecutorPodError:        true, // 附录 D：可重试=是（换节点/重调度后可能成功）
-	CodeImagePullFailed:         true,
-	CodeEndpointUnreachable:     true,
-	CodePrecheckFailed:          true,
-	CodeCleanupFailed:           true,
-	CodeDeployFailed:            false, // 调用 Genet 失败属平台侧错误，重试大概率同样失败
-	CodeDeployBlocked:           true,  // 排队/部署未就绪：等服务或扩容后可重试
-	CodeInternalError:           true,  // HT 视情况：保守地标可通过实例字段覆盖
-	CodeTaskTimeout:             false, // 按策略：由实例的 Failure.Retryable 覆盖
-	CodeMountUnavailable:        false,
-	CodeTesterNonzeroExit:       false,
-	CodeResultMissing:           false,
-	CodeResultInvalid:           false,
-	CodeValidationError:         false,
-	CodeTesterNotFound:          false,
-	CodeExecutionProfileMissing: false,
-	CodeRunTooLarge:             false,
-	CodeArtifactQuotaExceeded:   false,
-	CodeConflict:                false,
-	CodeCanceled:                false,
-	CodeNotFound:                false,
-	CodeUnauthenticated:         false,
-	CodeForbidden:               false,
-	CodeTesterVersionPinned:     false,
-	CodeTesterInvalid:           false,
+	CodeResourceExhausted:        true,
+	CodeExecutorUnavailable:      true,
+	CodeExecutorPodError:         true, // 附录 D：可重试=是（换节点/重调度后可能成功）
+	CodeImagePullFailed:          true,
+	CodeEndpointUnreachable:      true,
+	CodePrecheckFailed:           true,
+	CodeCleanupFailed:            true,
+	CodeDeployFailed:             false, // 调用 Genet 失败属平台侧错误，重试大概率同样失败
+	CodeDeployBlocked:            true,  // 排队/部署未就绪：等服务或扩容后可重试
+	CodeInternalError:            true,  // HT 视情况：保守地标可通过实例字段覆盖
+	CodeTaskTimeout:              false, // 按策略：由实例的 Failure.Retryable 覆盖
+	CodeMountUnavailable:         false,
+	CodeTesterNonzeroExit:        false,
+	CodeSLAPrecheckFailed:        false, // 阈值与能力矛盾：重试同样失败，应改参数
+	CodeSLANoFeasibleConcurrency: false, // 无可行并发：同上
+	CodeResultMissing:            false,
+	CodeResultInvalid:            false,
+	CodeValidationError:          false,
+	CodeTesterNotFound:           false,
+	CodeExecutionProfileMissing:  false,
+	CodeRunTooLarge:              false,
+	CodeArtifactQuotaExceeded:    false,
+	CodeConflict:                 false,
+	CodeCanceled:                 false,
+	CodeNotFound:                 false,
+	CodeUnauthenticated:          false,
+	CodeForbidden:                false,
+	CodeTesterVersionPinned:      false,
+	CodeTesterInvalid:            false,
 }
 
 // Retryable 返回码级默认是否可重试。实例级 Failure.Retryable 优先（01 UC-07）。

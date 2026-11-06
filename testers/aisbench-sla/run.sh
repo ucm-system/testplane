@@ -8,33 +8,56 @@
 # 参数全部来自命令行（平台与独立运行完全同构）：
 #   /tester/run.sh --input_len=2048 --output_len=32 --data_num=160 \
 #                  --sla=ttft.avg:1200 --start=8 --max=256 \
-#                  --work_path=/benchmark \
+#                  --work_path=/tmp/aisbench-ws \
 #                  --url=http://10.0.0.10:8000/v1 --model_name=Qwen3-32B \
 #                  --model_path=/models/Qwen3-32B
 #   平台会把 --url / --model_name / --model_path 追加在末尾（§5.4.1），人手工跑时自己写。
 #
 # 运行元信息走环境变量：TESTPLANE_RUN_ID / TESTPLANE_TASK_ID / TESTPLANE_ATTEMPT_ID
-#                        TESTPLANE_TESTER_IMAGE
-# 凭据走环境变量：ENDPOINT_API_KEY（不进 argv、不落日志）
+#
+# 凭据策略（§12.4，评审 #62 硬问题 1）——key **只走环境变量**：
+#   * `ENDPOINT_API_KEY` 由平台/Run secrets 注入，本脚本**不把它拼进 argv**，
+#     因此容器里 `ps` 看不到它；
+#   * 日志里只出现 `--api-key ***` 这样的打码形态（真的万一出现 argv 也不会泄漏），
+#     且本脚本自己的日志行从不打印 key；
+#   * vendored 工具把 ais_bench 模型配置写成读 `ENDPOINT_API_KEY` 的表达式，
+#     **不写明文 key**，退出时再删掉该临时配置 —— 所以 key 不落日志、不留临时配置。
+#
 # 产物写到 /workspace/output（可用 OUTPUT_DIR 覆盖）：
 #   result.json（必须）、logs/sla.log、raw/、sla_out/（工具原生产物：sla_summary.json、
 #   sla_points.csv、run.log、aisbench_all.log、points/**）
+#
+# 指标口径（附录 A / openapi `ResultMetric`：名字只放指标，统计量与单位走字段）：
+#   sla_max_concurrency（count/count, labels.scope=search）
+#   output_throughput（tokens_per_s/max, labels.concurrency）
+#   ttft（ms/mean, labels.concurrency）  tpot（ms/p90, labels.concurrency）
+#   hit_rate（percent/mean, labels.concurrency）  probes_total（count/count）
+#   sla_max_concurrency **只取实测并发达标（>= 目标 80%）的 PASS 点**；不达标点标
+#   degraded、不参与取值；全部降级时不输出该指标并在 notes 说明「结论不可用」。
 #
 # 退出码（与 result.json.status 一致）：
 #   0  succeeded                        工具退出码 0（找到可行并发；含 max_unbounded）
 #   1  failed   SLA_PRECHECK_FAILED            工具退出码 2：预检（并发=1）不达标
 #   1  failed   SLA_NO_FEASIBLE_CONCURRENCY    工具退出码 3：没有任何并发点达标
-#   1  failed   TESTER_ERROR                   工具退出码 1 / 异常 / 本脚本参数错误
-#   2  failed   TESTER_ERROR                   本脚本参数错误（未知参数、缺必填、类型不对）
+#   1  failed   RESULT_INVALID                 工具退出码 0 但摘要缺失/损坏/dry-run（结果不可用）
+#   1  failed   TESTER_NONZERO_EXIT            工具退出码 1 / 异常退出 / work_path 不可写
+#   2  failed   VALIDATION_ERROR               本脚本参数错误（未知参数、缺必填、类型不对）
+#
+# 错误码只能用平台码表里有的（server/internal/domain/codes.go + openapi `ErrorCode`）：
+# 自造一个码不会报错，而是被平台**静默降级成 TESTER_NONZERO_EXIT**、丢掉区分信息
+# （评审 #62 就是这么发现 SLA_* 码缺失的）。本脚本因此不再输出 "TESTER_ERROR"。
 # =============================================================================
 set -uo pipefail   # 不用 -e：任何一步失败也要把 result.json 写出来（§5.9）
 
-VERSION="0.2.0"
+VERSION="0.4.0"
 OUT="${OUTPUT_DIR:-/workspace/output}"
 LOG_DIR="${OUT}/logs"
 RAW_DIR="${OUT}/raw"
 SLA_OUT="${OUT}/sla_out"
 RESULT="${OUT}/result.json"
+# 与 tool/sla_tool/search.py 的 MEASURED_CONCURRENCY_MIN_RATIO 同一口径：
+# PASS 点的实测并发 / 目标并发 低于它 → 该点 degraded，不参与 sla_max_concurrency。
+MEASURED_RATIO_MIN="0.8"
 # vendored 工具根（镜像里固定在 /tester/tool；测试时可用 TESTER_TOOL_DIR 覆盖）
 TOOL_DIR="${TESTER_TOOL_DIR:-/tester/tool}"
 TOOL_SLA="${TOOL_DIR}/sla_search.py"
@@ -46,6 +69,8 @@ log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "${LOG
 RUN_ID="${TESTPLANE_RUN_ID:-local}"
 TASK_ID="${TESTPLANE_TASK_ID:-local}"
 ATTEMPT_ID="${TESTPLANE_ATTEMPT_ID:-local}"
+# 平台当前**不注入** TESTPLANE_TESTER_IMAGE（executor/render.go 没给 Job 设这个变量），
+# 所以 result.json 的 tester.image_ref 恒为 "unknown" —— 这是预期行为，不是缺陷。
 IMAGE_REF="${TESTPLANE_TESTER_IMAGE:-unknown}"
 
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -69,7 +94,9 @@ usage() {
 
 数据与环境:
   --dataset=<现成 jsonl> --dataset_path=<数据集落盘目录>
-  --work_path=<ais_bench 源码根，必填且可写> --aisbench_cmd=ais_bench
+  --work_path=<ais_bench 工作根，必填且**可写**> --aisbench_cmd=ais_bench
+              平台上必须落在 /tmp 下（根文件系统只读），例如 /tmp/aisbench-ws；
+              不可写时直接 failed（TESTER_NONZERO_EXIT），不会硬着头皮跑。
   --aisbench_extra_args=<追加参数> --point_timeout=0
   --prefix_warmup=per-point|once|none --no_stream=true|false
 
@@ -227,21 +254,81 @@ if not tool_version and isinstance(summary, dict):
 points = []
 max_ok = None
 if isinstance(summary, dict):
-    points = summary.get("points") or []
+    points = [p for p in (summary.get("points") or []) if isinstance(p, dict)]
     max_ok = summary.get("max_ok_concurrency")
+
+# 「最大并发」必须是被测出来的（评审 #62 硬问题 2）：只认实测并发达到目标并发
+# MEASURED_RATIO_MIN 的 PASS 点。低于门槛（或压根没测到）的点标 degraded，
+# 不参与取值——它不是「服务能扛几并发」，而是「配置把在飞量卡在几」。
+MEASURED_RATIO_MIN = float(env("TP_MEASURED_RATIO_MIN", "0.8") or 0.8)
+
+
+def point_concurrency(point):
+    try:
+        return int(point.get("concurrency"))
+    except (TypeError, ValueError):
+        return None
+
+
+def point_passed(point):
+    verdict = str(point.get("verdict") or "").strip().upper()
+    if verdict in ("PASS", "FAIL"):
+        return verdict == "PASS"
+    return bool(point.get("ok"))
+
+
+def point_is_degraded(point):
+    ratio = point.get("measured_concurrency_ratio")
+    if isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
+        return bool(point.get("degraded")) or float(ratio) < MEASURED_RATIO_MIN
+    measured = point.get("measured_concurrency")
+    conc = point_concurrency(point)
+    if not conc or not isinstance(measured, (int, float)) or isinstance(measured, bool) \
+            or measured < 0:
+        return True          # 测不到 = 不能证明并发真的达到了
+    return bool(point.get("degraded")) or float(measured) / float(conc) < MEASURED_RATIO_MIN
+
+
+def point_ratio(point):
+    ratio = point.get("measured_concurrency_ratio")
+    if isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
+        return float(ratio)
+    measured = point.get("measured_concurrency")
+    conc = point_concurrency(point)
+    if conc and isinstance(measured, (int, float)) and not isinstance(measured, bool) \
+            and measured >= 0:
+        return float(measured) / float(conc)
+    return None
+
+
+passing = [p for p in points if point_passed(p) and str(p.get("kind")) != "warmup"]
+degraded = [p for p in passing if point_is_degraded(p)]
+verified = [p for p in passing if not point_is_degraded(p)]
+effective_max = max((point_concurrency(p) for p in verified
+                     if point_concurrency(p) is not None), default=None)
+selected = None
+if effective_max is not None:
+    same = [p for p in verified if point_concurrency(p) == effective_max]
+    probes = [p for p in same if str(p.get("kind")) != "preflight"]
+    selected = (probes or same)[0] if (probes or same) else None
 
 metrics = []
 missing = []
 
-# 1) SLA 内最大并发
-if isinstance(max_ok, (int, float)) and not isinstance(max_ok, bool):
+# 1) SLA 内最大并发（只取实测并发达标的点）
+if effective_max is not None:
     metrics.append({
         "name": "sla_max_concurrency",
-        "value": int(max_ok),
+        "value": int(effective_max),
         "unit": "count",
         "statistic": "count",
-        "labels": {},
+        "labels": {"scope": "search"},
     })
+elif isinstance(max_ok, (int, float)) and not isinstance(max_ok, bool):
+    missing.append(
+        "sla_max_concurrency（工具报 max_ok_concurrency=%s，但没有任何 PASS 点的实测并发达到"
+        "目标的 %d%%，并发没被真正压满 —— 结论不可用，不输出该指标）"
+        % (int(max_ok), int(MEASURED_RATIO_MIN * 100)))
 else:
     missing.append("sla_max_concurrency（sla_summary.json 里没有 max_ok_concurrency）")
 
@@ -251,33 +338,27 @@ throughput = summary.get("throughput") if isinstance(summary, dict) else None
 if isinstance(throughput, dict):
     peak = throughput.get("peak") or {}
 peak_value = peak.get("value") if isinstance(peak, dict) else None
+peak_degraded = False
 if isinstance(peak_value, (int, float)) and not isinstance(peak_value, bool) and peak_value >= 0:
     labels = {}
     if peak.get("concurrency") is not None:
         labels["concurrency"] = int(peak["concurrency"])
+        peak_degraded = any(point_concurrency(p) == int(peak["concurrency"]) and point_is_degraded(p)
+                            for p in passing)
     metrics.append({
-        "name": "max_output_throughput_tok_s",
+        "name": "output_throughput",
         "value": round(float(peak_value), 3),
         "unit": "tokens_per_s",
         "statistic": "max",
         "labels": labels,
     })
 else:
-    missing.append("max_output_throughput_tok_s（没有任何点的输出吞吐可解析）")
+    missing.append("output_throughput（没有任何点的输出吞吐可解析）")
 
-# 3) 最大并发点的 TTFT AVG / TPOT P90 / HBM 命中率
-max_point = None
-if isinstance(max_ok, (int, float)) and not isinstance(max_ok, bool):
-    same = [p for p in points if isinstance(p, dict)
-            and p.get("concurrency") is not None
-            and int(p.get("concurrency")) == int(max_ok)]
-    probes = [p for p in same if str(p.get("kind")) != "preflight"]
-    max_point = (probes or same or [None])[0]
-
-if max_point is None:
+# 3) 选中点（实测并发达标的最大并发点）的 TTFT AVG / TPOT P90 / 缓存命中率
+if selected is None:
     if points:
-        missing.append("ttft_avg_ms/tpot_p90_ms/hit_rate_percent"
-                       "（没有与 max_ok_concurrency 对应的探测点）")
+        missing.append("ttft/tpot/hit_rate（没有实测并发达标、且在 sla_max_concurrency 上的探测点）")
 
 
 def point_metric(point, key, name, unit, statistic, labels, scale=1.0):
@@ -295,23 +376,23 @@ def point_metric(point, key, name, unit, statistic, labels, scale=1.0):
 
 
 hit_note = ""
-if max_point is not None:
-    label = {"concurrency": int(max_ok)}
-    if not point_metric(max_point, "ttft_avg_ms", "ttft_avg_ms", "ms", "mean", label):
-        missing.append("ttft_avg_ms（该点 TTFT 无数据）")
-    if not point_metric(max_point, "tpot_p90_ms", "tpot_p90_ms", "ms", "p90", label):
-        missing.append("tpot_p90_ms（该点 TPOT 无数据）")
-    hit_raw = max_point.get("hbm_hit_rate")
+if selected is not None:
+    label = {"concurrency": int(effective_max)}
+    if not point_metric(selected, "ttft_avg_ms", "ttft", "ms", "mean", label):
+        missing.append("ttft（该点 TTFT 无数据）")
+    if not point_metric(selected, "tpot_p90_ms", "tpot", "ms", "p90", label):
+        missing.append("tpot（该点 TPOT 无数据）")
+    hit_raw = selected.get("hbm_hit_rate")
     if isinstance(hit_raw, (int, float)) and not isinstance(hit_raw, bool):
         metrics.append({
-            "name": "hit_rate_percent",
+            "name": "hit_rate",
             "value": round(float(hit_raw) * 100, 2),
             "unit": "percent",
             "statistic": "mean",
             "labels": label,
         })
     else:
-        hit_note = str(max_point.get("hit_rate_note") or "").strip()
+        hit_note = str(selected.get("hit_rate_note") or "").strip()
 
 # 4) 探测点数
 if isinstance(summary, dict):
@@ -321,7 +402,7 @@ if isinstance(summary, dict):
         "value": len(probes),
         "unit": "count",
         "statistic": "count",
-        "labels": {},
+        "labels": {"scope": "search"},
     })
 else:
     missing.append("probes_total（没有探测点记录）")
@@ -402,8 +483,26 @@ if isinstance(summary, dict):
         notes.append("注意：" + str(warning))
 if summary_problem:
     notes.append(summary_problem)
+if degraded:
+    notes.append(
+        "并发点降级（实测并发 < 目标并发的 %d%%，不参与 sla_max_concurrency）：%s"
+        % (int(MEASURED_RATIO_MIN * 100),
+           "，".join(
+               "c=%s 实测 %s（%s）" % (
+                   point_concurrency(p),
+                   ("测不到" if p.get("measured_concurrency") is None
+                    or not isinstance(p.get("measured_concurrency"), (int, float))
+                    else "%.1f" % float(p.get("measured_concurrency"))),
+                   ("%d%%" % int(point_ratio(p) * 100)) if point_ratio(p) is not None else "无实测值")
+               for p in degraded)))
+if effective_max is None and passing:
+    notes.append(
+        "并发未被真正测出：所有 PASS 点的实测并发都低于目标并发 —— 不输出 "
+        "sla_max_concurrency，本次结论不可用（建议 --request_rate=0 且 --data_num >= 4×--max 后重跑）")
+if peak_degraded:
+    notes.append("output_throughput 取自降级点（该点实测并发低于目标并发，吞吐对应的是更低的实际并发）")
 if hit_note:
-    notes.append("hit_rate_percent 未提供：" + hit_note)
+    notes.append("hit_rate 未提供：" + hit_note)
 if missing:
     notes.append("未写入的指标：" + "；".join(missing))
 if truncated:
@@ -417,9 +516,11 @@ if status != "succeeded":
     detail = {"tool_exit_code": tool_rc, "summary": "sla_out/sla_summary.json"}
     if isinstance(summary, dict):
         detail["tool_status"] = summary.get("status")
-        detail["sla_max_concurrency"] = summary.get("max_ok_concurrency")
+        detail["sla_max_concurrency"] = (effective_max if effective_max is not None
+                                         else summary.get("max_ok_concurrency"))
+        detail["degraded_points"] = [point_concurrency(p) for p in degraded]
     error_obj = {
-        "code": code or "TESTER_ERROR",
+        "code": code or "TESTER_NONZERO_EXIT",
         "message": (reason or "aisbench-sla 执行失败")[:1000],
         "detail": detail,
         "retryable": retryable,
@@ -435,6 +536,10 @@ workload = {
     "sla": [line for line in env("TP_SLA_LIST").splitlines() if line.strip()],
     "start": as_number("TP_START", int),
     "max_concurrency": as_number("TP_MAX", int),
+    # 本次结论落在哪个并发上（实测达标的最大并发）；没测出来时退回配置上限，
+    # 让下游至少知道这一轮压的是哪个形态（附录 A `workload` 要求带 concurrency）。
+    "concurrency": (int(effective_max) if effective_max is not None
+                    else as_number("TP_MAX", int)),
     "max_probes": as_number("TP_MAX_PROBES", int),
     "request_rate": as_number("TP_REQUEST_RATE", float),
     "dataset_type": env("TP_DATASET_TYPE"),
@@ -467,7 +572,7 @@ payload = {
     "metadata": {
         "tool": "aisbench-sla",
         "tool_version": tool_version or "unknown",
-        "tool_source": "vendored e271cb3bdddb714e526b0f8e5627c036e579d409",
+        "tool_source": "vendored e271cb3bdddb714e526b0f8e5627c036e579d409 + 本地改动（见 tool/VENDORED.md）",
         "output_dir": "sla_out",
     },
 }
@@ -482,15 +587,27 @@ print("[tester] result.json: status=%s metrics=%d artifacts=%d"
 PYRESULT
 }
 
-# 参数错误统一出口：写 result.json（status=failed / TESTER_ERROR）后退出 2
+# 参数错误统一出口：写 result.json（status=failed / VALIDATION_ERROR）后退出 2
 param_error() {
   local message="$1"
   log "参数错误：${message}"
   usage
-  TP_STATUS=failed TP_CODE=TESTER_ERROR TP_REASON="${message}" \
+  TP_STATUS=failed TP_CODE=VALIDATION_ERROR TP_REASON="${message}" \
   TP_RETRYABLE=false TP_RC="" TP_EXTRA_NOTE="本脚本参数校验未通过，未执行任何压测" \
     write_result || log "result.json 写入失败"
   exit 2
+}
+
+# 运行期硬失败出口（work_path 不可写、摘要损坏等）：写 result.json 后退出 1。
+# 这些都不是参数错误（参数本身合法），所以退出码用 1、code 用 TESTER_NONZERO_EXIT。
+hard_fail() {
+  local message="$1"
+  local note="${2:-}"
+  log "失败：${message}"
+  TP_STATUS=failed TP_CODE=TESTER_NONZERO_EXIT TP_REASON="${message}" \
+  TP_RETRYABLE=false TP_RC="" TP_EXTRA_NOTE="${note}" \
+    write_result || log "result.json 写入失败"
+  exit 1
 }
 
 # --- 参数校验（运行时才校验，平台不校验，§5.4）--------------------------------
@@ -530,17 +647,25 @@ case "${TARGET}" in
   */v1) TARGET="${TARGET%/v1}" ;;
 esac
 
-# --- work_path 兜底创建 ---------------------------------------------------------
+# --- work_path 兜底创建（建不了就**硬失败**）-------------------------------------
 # 平台 Executor 把根文件系统设成只读（ReadOnlyRootFilesystem），只有 /workspace/output 与 /tmp
-# 可写；所以平台上 --work_path 通常得指 /tmp 下的目录。工具要求该目录存在，这里不存在就建。
-# 真实 ais_bench 场景下 work_path 应指向镜像里已存在的 /benchmark，不会走到这个分支。
+# 可写；所以平台上 --work_path 通常得指 /tmp 下的目录。工具要求该目录存在且可写，这里不存在就建。
+# 以前建不了只打一行 log 继续跑（评审 #62 硬问题 5），结果是工具在写模型配置时才炸、报错看不懂；
+# 现在直接 failed + TESTER_NONZERO_EXIT，并把「容器内请用 /tmp 下的路径」写进 message。
 if [ ! -d "${WORK_PATH}" ]; then
   if mkdir -p "${WORK_PATH}" 2>/dev/null; then
     log "work_path 不存在，已创建：${WORK_PATH}"
-  else
-    log "work_path 不存在且无法创建：${WORK_PATH}（只读根文件系统？请改指 /tmp 下的可写目录）"
   fi
 fi
+if [ ! -d "${WORK_PATH}" ]; then
+  hard_fail "work_path 不可写：${WORK_PATH}（目录不存在且无法创建）。容器内请用 /tmp 下的路径，例如 /tmp/aisbench-ws —— 平台 Job 的根文件系统只读，/benchmark 之类不可写" \
+    "未执行任何压测；改 --work_path 后重跑"
+fi
+if ! { : > "${WORK_PATH}/.testplane-write-probe" 2>/dev/null; }; then
+  hard_fail "work_path 不可写：${WORK_PATH}（目录存在但不可写）。容器内请用 /tmp 下的路径，例如 /tmp/aisbench-ws" \
+    "未执行任何压测；改 --work_path 后重跑"
+fi
+rm -f "${WORK_PATH}/.testplane-write-probe" 2>/dev/null || true
 
 # --- ais_bench 侧接线：让 work_path 下的「影子源码根」被真实 ais_bench 认到 --------
 # 背景见 build/Dockerfile.aisbench 头部注释：平台 Job 的根文件系统只读，写不了
@@ -556,6 +681,14 @@ export AIS_BENCH_DATASETS_CACHE="${AIS_BENCH_DATASETS_CACHE:-${WORK_PATH}}"
 if [ "${WORK_PATH}" != "/benchmark" ]; then
   AISBENCH_EXTRA="${AISBENCH_EXTRA:+${AISBENCH_EXTRA} }--config-dir ${WORK_PATH}/ais_bench/benchmark/configs"
 fi
+
+# --- 开跑前清掉上次残留的 sla_out ------------------------------------------------
+# 本地复用同一个 OUTPUT_DIR 时，上次的 sla_summary.json / points 会被当成这次的结果
+# （评审 #62 nit）。平台每次是新的 emptyDir，这一步只是让两种运行同构。
+if [ -d "${SLA_OUT}" ]; then
+  rm -rf "${SLA_OUT}" 2>/dev/null && log "已清理上次残留的 ${SLA_OUT}"
+fi
+mkdir -p "${SLA_OUT}" 2>/dev/null || hard_fail "无法创建产物目录 ${SLA_OUT}（产物必须落在 /workspace/output 下）"
 
 # --- 组装工具命令（逐项 argv，不经过 shell，§5.3）-------------------------------
 CMD=(python3 "${TOOL_SLA}" search)
@@ -596,18 +729,44 @@ if [ -n "${DATASET}" ]; then
 fi
 CMD+=(--output-dir "${SLA_OUT}" --no-color --no-banner)
 
-# 凭据只走环境变量、不进 argv 日志（§12.4）：追加在最后，且不写进日志。
-if [ -n "${ENDPOINT_API_KEY:-}" ]; then CMD+=(--api-key "${ENDPOINT_API_KEY}"); fi
+# 凭据只走环境变量（§12.4）：**不拼进 argv**（容器里 `ps` 看不见），工具自己从
+# ENDPOINT_API_KEY 读（tool/sla_tool/config.py 的 normalize），模型配置里写的是读该变量的
+# 表达式，子进程执行时在内存里注入 —— 磁盘、argv、日志三处都没有明文 key。
+# 万一将来有人把 key 拼回 argv，打印时也会被 mask_argv 打码成 ***。
+mask_argv() {
+  local out="" prev="" arg
+  for arg in "$@"; do
+    if [ "${prev}" = "--api-key" ]; then
+      out+="*** "
+    else
+      out+="$(printf '%q ' "${arg}")"
+    fi
+    prev="${arg}"
+  done
+  printf '%s' "${out}"
+}
 
 # stub_aisbench 用它定位被改写过的模型配置（真 ais_bench 不读这个变量，无害）。
 # 见 tool/tests/stub_aisbench.py 的 STUB_WORK_DIR 说明。
 export STUB_WORK_DIR="${WORK_PATH}"
 export PYTHONUNBUFFERED=1
 
+# 退出时删掉工具逐点写下的临时 ais_bench 模型配置。它本身**不含凭据**（api_key 写的是
+# 读环境变量的表达式），删它是为了让 work_path 指到产物目录时不留下临时文件。
+MODEL_CFG="${WORK_PATH}/ais_bench/benchmark/configs/models/vllm_api/vllm_api_chat_temp.py"
+cleanup_model_cfg() {
+  if [ -f "${MODEL_CFG}" ]; then
+    rm -f "${MODEL_CFG}" 2>/dev/null && log "已删除临时模型配置（不含凭据）：${MODEL_CFG}"
+  fi
+}
+trap cleanup_model_cfg EXIT
+
 log "SLA 搜索：target=${TARGET} model=${MODEL_NAME:-<未指定>} work_path=${WORK_PATH}"
 log "SLA 约束：$(printf '%s ' ${SLA_ITEMS[@]+"${SLA_ITEMS[@]}"})| 并发 ${START_C:-1}→${MAX_C:-256} 预算 ${MAX_PROBES:-20} 点"
-printf '[%s] 命令：%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(printf '%q ' "${CMD[@]}")" >> "${LOG}"
-if [ -n "${ENDPOINT_API_KEY:-}" ]; then log "已从环境变量注入 ENDPOINT_API_KEY（不打印）"; fi
+printf '[%s] 命令：%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(mask_argv "${CMD[@]}")" >> "${LOG}"
+if [ -n "${ENDPOINT_API_KEY:-}" ]; then
+  log "已通过环境变量注入 ENDPOINT_API_KEY（不进 argv、不落日志、不写临时配置）"
+fi
 
 # --- 执行：stdout/stderr 同时落盘（tee），退出码取工具自己的 ---------------------
 "${CMD[@]}" 2>&1 | tee -a "${LOG}"
@@ -620,22 +779,54 @@ case "${RC}" in
      REASON="工具退出码 2：预检（并发=1）不满足 SLA，阈值与服务实际能力矛盾" ;;
   3) STATUS="failed"; CODE="SLA_NO_FEASIBLE_CONCURRENCY"; EXIT_CODE=1; RETRYABLE="false"
      REASON="工具退出码 3：没有任何并发点满足 SLA" ;;
-  1) STATUS="failed"; CODE="TESTER_ERROR"; EXIT_CODE=1; RETRYABLE="false"
+  1) STATUS="failed"; CODE="TESTER_NONZERO_EXIT"; EXIT_CODE=1; RETRYABLE="false"
      REASON="工具退出码 1：参数或执行错误（详见 sla_out/run.log）" ;;
-  *) STATUS="failed"; CODE="TESTER_ERROR"; EXIT_CODE=1; RETRYABLE="false"
+  *) STATUS="failed"; CODE="TESTER_NONZERO_EXIT"; EXIT_CODE=1; RETRYABLE="false"
      REASON="工具异常退出（exit=${RC}，例如被信号终止、OOM 或解释器缺失）" ;;
 esac
 
-# 退出码 0 但没产出摘要 = 工具本身没跑通，不能算成功（§5.8 的"执行完成"要有结果）
-if [ "${RC}" -eq 0 ] && [ ! -f "${SLA_OUT}/sla_summary.json" ]; then
-  STATUS="failed"; CODE="TESTER_ERROR"; EXIT_CODE=1
-  REASON="工具退出码 0 但没有产出 sla_out/sla_summary.json（结果不完整）"
-fi
-if [ "${RC}" -eq 0 ] && [ -f "${SLA_OUT}/sla_summary.json" ]; then
-  # dry-run 之类的"没真正压测"的形态不应被当成成功
-  if grep -q '"status": "dry_run"' "${SLA_OUT}/sla_summary.json" 2>/dev/null; then
-    STATUS="failed"; CODE="TESTER_ERROR"; EXIT_CODE=1
-    REASON="工具只做了 dry-run，没有真实压测结果"
+# 退出码 0 但摘要不可用 = 工具没跑通，不能算成功（§5.8 的"执行完成"要有结果）。
+# **不能只检查文件存在**（评审 #62 nit）：截断/空文件/没有 points 都会让 result.json
+# 记成 succeeded + 0 指标，下游拿不到任何可消费的结论。
+if [ "${RC}" -eq 0 ]; then
+  SUMMARY_PROBLEM="$(python3 - "${SLA_OUT}/sla_summary.json" <<'PYCHECK'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+except FileNotFoundError:
+    print("没有产出 sla_out/sla_summary.json（工具没跑到写摘要那一步）")
+    raise SystemExit(0)
+except (OSError, ValueError) as exc:
+    print("sla_out/sla_summary.json 无法解析：%s" % exc)
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    print("sla_out/sla_summary.json 不是 JSON 对象")
+    raise SystemExit(0)
+points = data.get("points")
+if not isinstance(points, list) or not points:
+    print("sla_out/sla_summary.json 的 points 为空（没有任何探测点）")
+    raise SystemExit(0)
+for key in ("status", "max_ok_concurrency", "sla", "tool"):
+    if key not in data:
+        print("sla_out/sla_summary.json 缺少关键字段 %s" % key)
+        raise SystemExit(0)
+if str(data.get("status") or "") == "dry_run":
+    print("工具只做了 dry-run，没有真实压测结果")
+    raise SystemExit(0)
+if not any(isinstance(p, dict) and p.get("concurrency") is not None for p in points):
+    print("sla_out/sla_summary.json 的 points 里没有可用的并发点")
+    raise SystemExit(0)
+PYCHECK
+)"
+  if [ -n "${SUMMARY_PROBLEM}" ]; then
+    # 工具退出码 0 但结果不可用：RESULT_INVALID 比 TESTER_NONZERO_EXIT 更贴切
+    # （不是非零退出，是"拿到了结果但不合法"），且是平台码表里有的码。
+    STATUS="failed"; CODE="RESULT_INVALID"; EXIT_CODE=1
+    REASON="工具退出码 0 但 ${SUMMARY_PROBLEM}（结果不完整，按失败处理）"
   fi
 fi
 
@@ -646,7 +837,7 @@ export TP_TOOL_VERSION
 if ! TP_STATUS="${STATUS}" TP_CODE="${CODE}" TP_REASON="${REASON}" \
      TP_RETRYABLE="${RETRYABLE}" TP_RC="${RC}" TP_EXTRA_NOTE="" write_result; then
   log "result.json 写入失败（违反 §5.9），按参数错误退出"
-  printf '{"schema_version":"1.0","run_id":"%s","task_id":"%s","attempt_id":"%s","tester":{"name":"aisbench-sla","version":"%s","image_ref":"%s"},"status":"failed","started_at":"%s","finished_at":"%s","metrics":[],"error":{"code":"TESTER_ERROR","message":"result.json 写入失败","detail":{},"retryable":false},"artifacts":[]}\n' \
+  printf '{"schema_version":"1.0","run_id":"%s","task_id":"%s","attempt_id":"%s","tester":{"name":"aisbench-sla","version":"%s","image_ref":"%s"},"status":"failed","started_at":"%s","finished_at":"%s","metrics":[],"error":{"code":"TESTER_NONZERO_EXIT","message":"result.json 写入失败","detail":{},"retryable":false},"artifacts":[]}\n' \
     "${RUN_ID}" "${TASK_ID}" "${ATTEMPT_ID}" "${VERSION}" "${IMAGE_REF}" "${STARTED}" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${RESULT}" 2>/dev/null || true
   exit 2

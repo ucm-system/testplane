@@ -143,6 +143,33 @@ func TestValidate_ExitCodeConsistency(t *testing.T) {
 	}
 }
 
+// TestValidateExit_AcceptsTesterDeclaredSLACodes 锁住"Tester 自报的 SLA 语义码不会被降级"。
+//
+// 背景（评审 #62 硬问题 3）：aisbench-sla 用 SLA_PRECHECK_FAILED / SLA_NO_FEASIBLE_CONCURRENCY
+// 区分"阈值与能力矛盾"和"根本找不到可行并发"。这两个码若不在附录 D / codes.go，
+// ValidateExit 会走 isKnownCode 兜底成 TESTER_NONZERO_EXIT，区分信息直接丢失。
+func TestValidateExit_AcceptsTesterDeclaredSLACodes(t *testing.T) {
+	v := &Validator{MaxBytes: 1 << 20}
+	one := int32(1)
+	for _, tc := range []struct {
+		code string
+		want string
+	}{
+		{"SLA_PRECHECK_FAILED", domain.CodeSLAPrecheckFailed},
+		{"SLA_NO_FEASIBLE_CONCURRENCY", domain.CodeSLANoFeasibleConcurrency},
+	} {
+		body := `{"schema_version":"1.0","run_id":"r","task_id":"t","attempt_id":"a",
+		  "tester":{"name":"aisbench-sla","version":"0.4.0"},"status":"failed",
+		  "started_at":"x","finished_at":"y","metrics":[],
+		  "error":{"code":"` + tc.code + `","message":"boom","retryable":false}}`
+		dir := writeResult(t, t.TempDir(), body)
+		f := v.ValidateExit(context.Background(), "r-1", "t-1", "t-1-a1", dir, &one)
+		if f == nil || f.Code != tc.want {
+			t.Fatalf("error.code=%s 应保留为 %s（不被降级成 TESTER_NONZERO_EXIT），得到 %+v",
+				tc.code, tc.want, f)
+		}
+	}
+}
 func TestValidate_Valid(t *testing.T) {
 	dir := writeResult(t, t.TempDir(), validResult)
 	v := &Validator{MaxBytes: 1 << 20}

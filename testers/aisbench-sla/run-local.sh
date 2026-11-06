@@ -8,7 +8,7 @@
 #   2. **本脚本不 build**。镜像由 CI 产出，这里只 pull/run（§6.2）。
 #
 # 用法：
-#   IMAGE=ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.1.0 ./run-local.sh \
+#   IMAGE=ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0-stub ./run-local.sh \
 #     --url=http://127.0.0.1:18080/v1 --model_name=mock-llm --model_path=/tester/tool \
 #     --input_len=128 --output_len=8 --data_num=8 --sla=ttft.avg:100000 \
 #     --dataset=/tester/fixtures/smoke_dataset.jsonl \
@@ -21,13 +21,14 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-IMAGE="${IMAGE:-ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.1.0}"
+IMAGE="${IMAGE:-ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0-stub}"
 OUT_DIR="${OUTPUT_DIR:-${HERE}/.local/out}"
 
 if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
   echo "镜像 ${IMAGE} 不存在。" >&2
   echo "  镜像由 CI 产出，本脚本不 build（§6.2）。" >&2
-  echo "  本地验证可先构建：docker build -f build/Dockerfile -t ${IMAGE} ../.." >&2
+  echo "  本地验证可先构建（**构建上下文 = Tester 目录本身**，不是仓库根）：" >&2
+  echo "    cd testers/aisbench-sla && docker build -f build/Dockerfile -t ${IMAGE} ." >&2
   exit 2
 fi
 
