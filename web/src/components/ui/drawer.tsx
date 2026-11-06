@@ -11,7 +11,20 @@ export interface DrawerProps {
   children: ReactNode
   footer?: ReactNode
   side?: 'right' | 'left'
+  /**
+   * 尺寸档位（票 #58 反馈：Tester 详情塞不下参数说明）：
+   * md = 28rem（默认，窄抽屉）；lg = 42rem；xl = min(64rem, 96vw)（宽表格/长说明用）。
+   * 需要更细控制时仍可传 `widthClass` 覆盖。
+   */
+  size?: 'md' | 'lg' | 'xl'
   widthClass?: string
+}
+
+const DRAWER_SIZE: Record<'md' | 'lg' | 'xl', string> = {
+  md: 'max-w-md',
+  lg: 'max-w-2xl',
+  // 宽屏上限 1024px，窄屏留 4vw 让遮罩可见；用 w- 而不是 max-w- 才能顶满这个宽度
+  xl: 'w-[min(64rem,96vw)] max-w-none',
 }
 
 /** 右侧抽屉（原型 .drawer）：Tester 详情/注册、移动端导航都用它。 */
@@ -23,7 +36,8 @@ export function Drawer({
   children,
   footer,
   side = 'right',
-  widthClass = 'max-w-md',
+  size = 'md',
+  widthClass,
 }: DrawerProps) {
   const titleId = useId()
 
@@ -53,8 +67,9 @@ export function Drawer({
         className={cn(
           'absolute inset-y-0 flex w-full flex-col bg-surface shadow-modal',
           side === 'right' ? 'right-0 animate-slide-in-right border-l border-line' : 'left-0 animate-slide-in border-r border-line',
-          widthClass,
+          widthClass ?? DRAWER_SIZE[size],
         )}
+        data-drawer-size={widthClass ? undefined : size}
       >
         <header className="flex items-start gap-3 border-b border-line-soft px-5 py-4">
           <div className="min-w-0 flex-1">
