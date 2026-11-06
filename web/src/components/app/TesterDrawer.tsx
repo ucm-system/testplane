@@ -48,7 +48,7 @@ export function TesterParamTable({
             <TH>参数</TH>
             <TH>说明</TH>
             {onCopy ? (
-              <TH className="text-right">
+              <TH className="w-[5.5rem] text-right">
                 <span className="sr-only">操作</span>
               </TH>
             ) : null}
@@ -59,16 +59,16 @@ export function TesterParamTable({
             const snippet = paramSnippet(param.name, param)
             return (
               <TR key={param.name} className="hover:bg-transparent">
-                <TD className="align-top">
+                <TD className="w-[15rem] align-top">
                   <span className="font-mono text-2xs text-fg">{param.name}</span>
                   <p className="mt-0.5 font-mono text-2xs text-fg-3">{snippet}</p>
                 </TD>
-                <TD className="align-top text-2xs leading-relaxed text-fg-3">
+                <TD className="align-top text-2xs leading-relaxed text-fg-3 whitespace-normal">
                   {param.description ?? '—'}
                   {param.required ? <Badge tone="warn" className="ml-1.5">必填</Badge> : null}
                 </TD>
                 {onCopy ? (
-                  <TD className="align-top text-right">
+                  <TD className="align-top text-right whitespace-nowrap">
                     <button
                       type="button"
                       data-testid={copyTestId}
@@ -134,6 +134,7 @@ export function TesterDrawer({
 
   return (
     <Drawer
+      size="xl"
       open={name !== null}
       onClose={onClose}
       title={detail.data?.display_name ?? name ?? 'Tester'}
