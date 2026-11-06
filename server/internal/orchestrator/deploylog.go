@@ -73,9 +73,14 @@ type DeployLogCollector struct {
 	collecting bool
 	lastPods   []ports.PodInfo
 	streaming  map[string]context.CancelFunc // pod/container → 取消该流的跟随
-	// followWG 跟踪所有写盘 goroutine（follow + previous 补齐），Wait 必须等它们全部结束，
+	// active 跟踪所有写盘 goroutine（follow + previous 补齐），Wait 必须等它们全部结束，
 	// 否则测试/关闭时会在"文件还没写完"时去读（CI 慢的时候必现，本机快看不出来）。
-	followWG sync.WaitGroup
+	//
+	// 用 mu+cond+计数器而不是 sync.WaitGroup：Wait 与 Add 并发是 WaitGroup 的未定义用法
+	// （-race 在 CI 上抓到了：Wait() 与 follow() 里的 Add(1) 同时进行）。
+	active     int
+	activeCond *sync.Cond
+	stopping   bool
 	// stopFiles 是 collector 自我停止时要写 stopped 标记的文件（Pod 全消失时 lastPods 已空）。
 	stopFiles map[string]bool
 	lastTs    map[string]time.Time // pod/container → 已写入的最新时间戳
@@ -120,6 +125,7 @@ func (c *DeployLogCollector) Start(parent context.Context) {
 //     "所有 Pod 消失"或 24h 上限（否则 Pod 还在跑、日志却再也采不到）。
 func (c *DeployLogCollector) Stop(reason string) {
 	c.mu.Lock()
+	c.stopping = true
 	cancel := c.cancel
 	c.cancel = nil
 	streams := make([]context.CancelFunc, 0, len(c.streaming))
@@ -162,6 +168,7 @@ func (c *DeployLogCollector) Stop(reason string) {
 // 写 `collection stopped` 会让用户以为采集终止了（真机踩过一次）。
 func (c *DeployLogCollector) StopQuiet() {
 	c.mu.Lock()
+	c.stopping = true
 	cancel := c.cancel
 	c.cancel = nil
 	streams := make([]context.CancelFunc, 0, len(c.streaming))
@@ -185,7 +192,34 @@ func (c *DeployLogCollector) StopQuiet() {
 // 注意：它**不**等发现循环（那是 Stop 的职责）。之前误等落盘循环的 done channel，
 // 在 Start 之后调用 Wait 会永久阻塞；写盘 goroutine 才是"读文件前必须等的东西"。
 func (c *DeployLogCollector) Wait() {
-	c.followWG.Wait()
+	c.mu.Lock()
+	if c.activeCond == nil {
+		c.activeCond = sync.NewCond(&c.mu)
+	}
+	for c.active > 0 {
+		c.activeCond.Wait()
+	}
+	c.mu.Unlock()
+}
+
+// beginWrite 登记一个写盘 goroutine；stopping 之后不再接受新的（Stop 之后不该再有写入）。
+func (c *DeployLogCollector) beginWrite() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopping {
+		return false
+	}
+	c.active++
+	return true
+}
+
+func (c *DeployLogCollector) endWrite() {
+	c.mu.Lock()
+	c.active--
+	if c.active == 0 && c.activeCond != nil {
+		c.activeCond.Broadcast()
+	}
+	c.mu.Unlock()
 }
 
 func (c *DeployLogCollector) interval() time.Duration {
@@ -377,9 +411,11 @@ func (c *DeployLogCollector) follow(ctx context.Context, pod, container string) 
 	last := c.lastTs[key]
 	c.mu.Unlock()
 
-	c.followWG.Add(1)
+	if !c.beginWrite() {
+		return
+	}
 	go func() {
-		defer c.followWG.Done()
+		defer c.endWrite()
 		defer func() {
 			c.mu.Lock()
 			delete(c.streaming, key)
