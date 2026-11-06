@@ -106,12 +106,9 @@ func (s *Store) MarkAttemptCanceled(ctx context.Context, attemptID string) error
 //   - deploy->'uninstall'->>'state' 不是 verified / skipped（缺失也算待收口）。
 func (s *Store) ListDeployCleanupPending(ctx context.Context, limit int) ([]Run, error) {
 	limit = normalizeLimit(limit)
-	// 终态包含 canceled（票 #28-2）：取消的 Run 同样要收口 Genet 资源。
-	terminal := []string{
-		string(domain.RunSucceeded), string(domain.RunFailed),
-		string(domain.RunCompletedWithErrors), string(domain.RunServiceUnavailable),
-		string(domain.RunCanceled),
-	}
+	// 终态集合来自 domain（#45-5）：以前这里手抄 5 个，和 domain 的集合改一处就会漂，
+	// 正是 #33-3 / #40-8 修过两次的同类问题。
+	terminal := domain.TerminalRunStatusStrings()
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+runCols+`
 		  FROM runs r

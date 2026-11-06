@@ -152,6 +152,10 @@ type Controller struct {
 	logWG sync.WaitGroup
 	// gcSem 保证同一时刻只有一轮 GC（容量 1 的信号量，票 #20-4）。
 	gcSem chan struct{}
+	// deployLogs 是每个 Run 一个的 Deploy 日志 collector（D-59）；nil map 表示未启用。
+	deployLogs map[string]*DeployLogCollector
+	// baseCtx 是 collector 的父 ctx（Stop 时统一取消）。
+	baseCtx context.Context
 }
 
 // New 构造 Controller。Repos / Executor 必填。
@@ -195,6 +199,10 @@ func New(opts Options) (*Controller, error) {
 		logf:      logf,
 		clock:     clockOrDefault(opts.Clock),
 		watches:   make(map[string]context.CancelFunc),
+		gcSem:     make(chan struct{}, 1),
+		// collector 的父 ctx 不随单次调用取消：跟着进程/控制器生命周期走。
+		baseCtx:    context.Background(),
+		deployLogs: make(map[string]*DeployLogCollector),
 	}, nil
 }
 
@@ -963,6 +971,10 @@ func (c *Controller) writeAttemptLogs(ctx context.Context, attempt AttemptRef) e
 	}
 	defer rc.Close()
 
+	// 先补"重启之前"的那段（D-59 / execution §7.2）：容器重启后旧日志只在 previous 里。
+	c.appendPreviousAttemptLogs(ctx, attempt, dir)
+	// 清孤儿 .tmp：上次中断留下的 0 字节残留会出现在 /artifacts 里（#45 / D-59）。
+	cleanStaleTmp(logsDir)
 	tmpPath := filepath.Join(logsDir, AttemptLogFileName+".tmp")
 	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -978,6 +990,22 @@ func (c *Controller) writeAttemptLogs(ctx context.Context, attempt AttemptRef) e
 		return fmt.Errorf("close %s: %w", tmpPath, err)
 	}
 	finalPath := filepath.Join(logsDir, AttemptLogFileName)
+	// 有 previous 段（容器重启过）时：previous 在前、当前流在后（顺序不能再反）。
+	prevPath := filepath.Join(logsDir, AttemptLogFileName+".prev")
+	if prev, perr := os.ReadFile(prevPath); perr == nil {
+		cur, cerr := os.ReadFile(tmpPath)
+		if cerr == nil {
+			final, ferr := os.OpenFile(finalPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+			if ferr == nil {
+				_, _ = final.Write(prev)
+				_, _ = final.Write(cur)
+				_ = final.Close()
+				_ = os.Remove(prevPath)
+				_ = os.Remove(tmpPath)
+				return nil
+			}
+		}
+	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename logs: %w", err)
@@ -1084,6 +1112,8 @@ func (c *Controller) beginRun(ctx context.Context, run RunView) error {
 			_ = c.repos.RecordDeployState(ctx, run.ID, domain.DeploySnapshot{State: "blocked", Failure: f})
 			return c.repos.FinishDeployAsFailed(ctx, run.ID, f)
 		}
+		// D-59：Deploy 日志从这一刻起落盘（不等 ready；Pod 可能已经起来了）。
+		c.ensureDeployLogCollector(ctx, run)
 		return nil
 	}
 	if _, err := c.repos.BeginTesting(ctx, run.ID); err != nil {
@@ -1143,6 +1173,8 @@ func (c *Controller) pollDeploy(ctx context.Context, run RunView) error {
 	if err := c.repos.RecordDeployState(ctx, run.ID, snap); err != nil {
 		return err
 	}
+	// D-59：每轮确保 collector 在跑（Pod 可能晚于 release 出现；控制器重启后重建）。
+	c.ensureDeployLogCollector(ctx, run)
 	switch st.Phase {
 	case "ready":
 		if st.Endpoint.BaseURL == "" {
@@ -1277,7 +1309,12 @@ func (c *Controller) CancelTask(ctx context.Context, taskID, actor string) error
 
 // cleanupDeployIfTerminal 在 Run 已终态且仍是 deploy 形态时收口 Genet 资源。
 func (c *Controller) cleanupDeployIfTerminal(ctx context.Context, runID string) {
-	if c.deployer == nil || runID == "" {
+	if runID == "" {
+		return
+	}
+	// D-59：Run 进入 CLEANUP/终态才停日志采集（不是测试一结束就停）。
+	c.stopDeployLogCollector(runID, "run entered CLEANUP")
+	if c.deployer == nil {
 		return
 	}
 	run, err := c.repos.GetRun(ctx, runID)
@@ -1351,4 +1388,125 @@ func fileExists(path string) bool {
 func dirExists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.IsDir()
+}
+
+// ---- Deploy 日志落盘（D-59） ---------------------------------------------
+
+// ensureDeployLogCollector 确保该 Run 有一个在跑的 Deploy 日志 collector。
+//
+// 调用时机：Deploy 启动后与每次 Poll（Pod 可能晚于 ready 才出现；collector 自己每 30s 重新发现）。
+// 启用条件：执行器实现了 ports.PodLogSource（可选能力）**且**配置了 StorageRoot。
+// 不满足时静默跳过（旧行为：日志只在实时窗口可得）——但要能在日志里看出来。
+func (c *Controller) ensureDeployLogCollector(ctx context.Context, run RunView) {
+	if c.cfg.StorageRoot == "" {
+		return
+	}
+	src, ok := c.exec.(ports.PodLogSource)
+	if !ok {
+		return
+	}
+	m := DeployManifestFields(run.DeployJSON)
+	if m.Namespace == "" && m.ReleaseName == "" {
+		return
+	}
+
+	c.mu.Lock()
+	if _, exists := c.deployLogs[run.ID]; exists {
+		c.mu.Unlock()
+		return
+	}
+	ns := m.Namespace
+	if ns == "" {
+		ns = c.cfg.Namespace
+	} else if ns != c.cfg.Namespace {
+		// Deploy 的 Pod 在 Genet 的 namespace 里：collector 必须去那里抓。
+		// （c.exec 的默认 namespace 是本平台 namespace，所以这里显式传 ns。）
+	}
+	collector := &DeployLogCollector{
+		RunID:       run.ID,
+		Namespace:   ns,
+		ReleaseName: m.ReleaseName,
+		Root:        c.cfg.StorageRoot,
+		Src:         src,
+		Logf:        c.logf,
+	}
+	c.deployLogs[run.ID] = collector
+	c.mu.Unlock()
+
+	collector.Start(c.baseCtx)
+	c.logf("orchestrator: deploy_logs collector started: run %s ns %s release %s", run.ID, ns, m.ReleaseName)
+}
+
+// stopDeployLogCollector 停 collector 并写 stopped 标记（Run 进入 CLEANUP / 终态时调用）。
+func (c *Controller) stopDeployLogCollector(runID, reason string) {
+	c.mu.Lock()
+	collector, ok := c.deployLogs[runID]
+	delete(c.deployLogs, runID)
+	c.mu.Unlock()
+	if !ok {
+		return
+	}
+	collector.Stop(reason)
+	c.logf("orchestrator: deploy_logs collector stopped: run %s (%s)", runID, reason)
+}
+
+// appendPreviousAttemptLogs 在写当前流之前，先把容器 previous（重启前）的日志补写到同一文件，
+// 并写重启标记行。以前只抓当前流，重启前的证据直接丢了（用户明确问的那一段）。
+func (c *Controller) appendPreviousAttemptLogs(ctx context.Context, attempt AttemptRef, dir string) {
+	src, ok := c.exec.(ports.PodLogSource)
+	if !ok {
+		return
+	}
+	h := ports.JobHandle{Namespace: c.cfg.Namespace, JobName: attempt.Job()}
+	pods, err := src.ListPods(ctx, h.Namespace)
+	if err != nil {
+		c.logf("orchestrator: WARN attempt_previous_list: attempt %s: %v", attempt.AttemptID, err)
+		return
+	}
+	for _, p := range pods {
+		if !strings.Contains(p.Name, attempt.TaskID) {
+			continue
+		}
+		for _, ct := range p.Containers {
+			if ct.Restarts == 0 {
+				continue
+			}
+			rc, perr := src.StreamLogs(ctx, h.Namespace, p.Name, ct.Name,
+				ports.LogStreamOptions{Container: ct.Name, Previous: true, Timestamps: true})
+			if perr != nil {
+				c.logf("orchestrator: WARN attempt_previous_logs: attempt %s: %v", attempt.AttemptID, perr)
+				continue
+			}
+			logPath := filepath.Join(dir, "logs", AttemptLogFileName+".prev")
+			f, ferr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if ferr != nil {
+				rc.Close()
+				c.logf("orchestrator: WARN attempt_previous_open: %s: %v", logPath, ferr)
+				return
+			}
+			_, _ = io.Copy(f, rc)
+			_ = f.Close()
+			_ = rc.Close()
+			// 标记行：说明"这里断过"，不假装连续。
+			if mf, merr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); merr == nil {
+				_, _ = mf.WriteString(fmt.Sprintf(
+					"--- [container restarted #%d at %s, previous exit: %s] ---\n",
+					ct.Restarts, c.now().UTC().Format(time.RFC3339), firstNonEmpty(ct.LastExit, "unknown")))
+				_ = mf.Close()
+			}
+		}
+	}
+}
+
+// cleanStaleTmp 清掉上次中断留下的 `*.tmp`（原子落盘的半成品，留着没用还会被当产物列出来）。
+func cleanStaleTmp(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".tmp") {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }

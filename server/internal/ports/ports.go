@@ -201,3 +201,46 @@ type ResultValidator interface {
 type ReportWriter interface {
 	WriteRunReport(ctx context.Context, runID string) (path string, err error)
 }
+
+// ---- Pod 日志落盘（D-59） -------------------------------------------------
+
+// PodInfo 是执行器的 Pod 视图（Deploy 日志落盘与 pods.json 用）。
+type PodInfo struct {
+	Name       string
+	Namespace  string
+	Phase      string
+	Node       string
+	Ready      bool
+	CreatedAt  time.Time
+	Containers []ContainerInfo
+}
+
+// ContainerInfo 是容器级事实（restarts 与上次退出原因决定"要不要补 previous 段"）。
+type ContainerInfo struct {
+	Name         string
+	Restarts     int32
+	LastExitCode int32
+	LastExit     string // K8s reason：OOMKilled | Error | Completed | …
+	StartedAt    time.Time
+	FinishedAt   time.Time
+}
+
+// LogStreamOptions 对应 K8s PodLogOptions 的子集（只读）。
+type LogStreamOptions struct {
+	Container  string
+	Follow     bool
+	Timestamps bool
+	Previous   bool // 重启前的上一份容器日志
+	TailLines  *int64
+	SinceTime  *time.Time
+}
+
+// PodLogSource 是 Executor 的**可选**能力：按 namespace 列 Pod、流式读任意容器日志。
+//
+// 为什么单独一个接口：Tester 的 `Logs(handle)` 只覆盖"当前 Attempt 的 tester 容器"，
+// 而 Deploy 日志落盘要对 Genet namespace 里**任意 Pod/容器**流式抓（含 previous 重启段）。
+// 不实现它时编排层退化为"只实时读、不落盘"（旧行为），不影响主流程。
+type PodLogSource interface {
+	ListPods(ctx context.Context, namespace string) ([]PodInfo, error)
+	StreamLogs(ctx context.Context, namespace, pod, container string, opts LogStreamOptions) (io.ReadCloser, error)
+}

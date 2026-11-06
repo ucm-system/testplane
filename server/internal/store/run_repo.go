@@ -263,8 +263,8 @@ func (r *RunRepo) ListActiveEndpoints(ctx context.Context, tx pgx.Tx) ([]Endpoin
 		       COALESCE(endpoint->>'source','')
 		  FROM runs
 		 WHERE endpoint IS NOT NULL
-		   AND status NOT IN ('succeeded','completed_with_errors','service_unavailable','failed','canceled')
-		 ORDER BY submitted_at DESC`)
+		   AND status <> ALL($1)
+		 ORDER BY submitted_at DESC`, domain.TerminalRunStatusStrings())
 	if err != nil {
 		return nil, fmt.Errorf("store: list endpoints: %w", err)
 	}

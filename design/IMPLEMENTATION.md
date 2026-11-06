@@ -439,7 +439,7 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 > **实现边界（票 #33 之后）**：`design/views/07-api.md §5` 里 50 个端点**全部实现**，`tools/contract/allow-missing.txt` 为 **0 条**。仍属"明确不做"的只有 `POST /tasks`（独立 Task 提交，`ARCHITECTURE §13` 当期不做）。
 >
 > 三条**有意的实现偏差**（每条都写进 §15.3 偏差表）：
-> 1. `GET /runs/{id}/deploy/logs` 是**实时读 K8s `pods/log`**，不是设计里的落盘 `deploy/logs/<pod>.log`；Pod 被 GC 回收后读不到，端点会显式返回 `message` 说明"Pod 已回收"，**不假装空日志**（§15.3 第 20 行）；
+> 1. ~~`GET /runs/{id}/deploy/logs` 是实时读 `pods/log`~~ → **已按 D-59 落盘**（`deploy/logs/<pod>[.<container>].log` + `deploy/pods.json`，含重启前 `previous` 日志与 gap/terminated 标记）；端点与 bundle 优先读盘，盘上缺失才降级实时并显式标注（原偏差见 §15.3 第 20 行）；
 > 2. 续跑产物用**硬链接 + 新建 `reused/` 目录**，不是设计设想的"引用旧目录"（§15.3 第 21 行）；
 > 3. rotat​e 的 Secret 读取是 D-55 的**窄例外**（`resourceNames` 限定），未在默认清单里授予通配权限。
 >

@@ -325,8 +325,9 @@ func (s *Server) appendDeployLogs(ctx context.Context, run *store.Run, files *[]
 	addMissing func(path, reason string)) {
 
 	var deploy struct {
-		Namespace string `json:"namespace"`
-		State     string `json:"state"`
+		Namespace   string `json:"namespace"`
+		ReleaseName string `json:"release_name"`
+		State       string `json:"state"`
 	}
 	if len(run.Deploy) > 0 {
 		_ = json.Unmarshal(run.Deploy, &deploy)
@@ -341,8 +342,26 @@ func (s *Server) appendDeployLogs(ctx context.Context, run *store.Run, files *[]
 		addMissing("logs/deploy", fallbackNote+"（Deploy 的 Pod 通常在 Genet 的 namespace，如 testplane-mock，这里可能读不到）")
 	}
 	client, err := s.deployLogsClient()
-	if err != nil {
-		addMissing("logs/deploy", "K8s 客户端不可用: "+err.Error())
+	// D-59：先读盘（落盘副本是唯一真源），不再实时抓 deploy 日志。
+	listed := 0
+	for _, rel := range deployLogFiles(s.cfg.StorageRoot, run.ID) {
+		raw, rerr := os.ReadFile(filepath.Join(s.cfg.StorageRoot, run.ID, filepath.FromSlash(rel)))
+		if rerr != nil {
+			addMissing(rel, "读盘失败: "+rerr.Error())
+			continue
+		}
+		*files = append(*files, bundleFile{name: "logs/deploy/" + filepath.Base(rel), bytes: raw})
+		listed++
+		if listed >= bundleMaxDeployPods {
+			addMissing("logs/deploy", fmt.Sprintf("Deploy 日志文件超过上限 %d，其余未打包", bundleMaxDeployPods))
+			break
+		}
+	}
+	client, cerr := s.deployLogsClient()
+	if cerr != nil {
+		if listed == 0 {
+			addMissing("logs/deploy", "K8s 客户端不可用（盘上也没有落盘副本）: "+cerr.Error())
+		}
 		return
 	}
 	pods, err := client.ListPods(ctx, ns)
@@ -350,11 +369,14 @@ func (s *Server) appendDeployLogs(ctx context.Context, run *store.Run, files *[]
 		addMissing("logs/deploy", "列 Pod 失败: "+err.Error())
 		return
 	}
-	listed := 0
 	for _, pod := range pods {
 		name := pod.Name
-		if !strings.HasPrefix(name, "tp-") && !strings.Contains(name, run.ID) {
-			continue // 只取与本 Run 相关的 Pod（Job 名带 task id，不强行关联时跳过）
+		// #45-2：归属判定统一走 podBelongsToRun（与 /deploy、collector 同一套语义）。
+		if !podBelongsToRun(pod, run, deploy.ReleaseName) {
+			continue
+		}
+		if _, _, ok := deployLogLinesFromDisk(s.cfg.StorageRoot, run.ID, name); ok {
+			continue // 已有落盘副本，不重复实时抓
 		}
 		if listed >= bundleMaxDeployPods {
 			addMissing("logs/deploy", fmt.Sprintf("Pod 数超过上限 %d，其余未打包", bundleMaxDeployPods))

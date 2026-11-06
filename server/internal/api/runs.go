@@ -337,10 +337,15 @@ func (s *Server) handleRunDeploy(w http.ResponseWriter, r *http.Request) {
 	if data, err := os.ReadFile(filepath.Join(dir, "manifest.yaml")); err == nil {
 		resp["manifest"] = yamlToJSON(data)
 	}
-	if data, err := os.ReadFile(filepath.Join(dir, "pods.json")); err == nil {
-		var pods []any
-		if json.Unmarshal(data, &pods) == nil {
-			resp["pods"] = pods
+	// D-59 / #43：Pod 拓扑来自落盘的 deploy/pods.json（collector 每 30s 原子写）。
+	// 盘上没有就明确说明原因，不静默返回空数组。
+	if doc, ok := readDeployPodsDoc(s.cfg.StorageRoot, runID); ok {
+		resp["pods"] = doc.Pods
+		resp["pods_generated_at"] = doc.GeneratedAt
+	} else {
+		resp["pods"] = []any{}
+		if _, statErr := os.Stat(filepath.Join(dir, "pods.json")); statErr != nil {
+			resp["pods_message"] = "deploy/pods.json 尚未生成：日志 collector 未运行或该 Run 还没有 Pod（D-59）"
 		}
 	}
 	resp["deploy_timeout_seconds"] = int(s.cfg.DeployTimeout.Seconds())

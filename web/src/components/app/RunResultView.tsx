@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ArrowUpRight, Check, Download, FileText } from 'lucide-react'
+import { ArrowUpRight, Check, ChevronRight, Download, FileText } from 'lucide-react'
 import { API_BASE, api } from '@/api'
 import { toApiError } from '@/api/client'
 import type { ApiErrorBody, Artifact, Run } from '@/api/types'
@@ -11,6 +11,7 @@ import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
 import { RunStatusBadge } from '@/components/app/StatusBadge'
 import { useAsync } from '@/hooks/useAsync'
+import { ARTIFACT_GROUPS, groupArtifacts, relativeArtifactPath } from '@/lib/artifact-groups'
 import { formatBytes, saveBlob } from '@/lib/download'
 import { formatDateTime, formatDuration } from '@/lib/utils'
 
@@ -38,15 +39,9 @@ const KIND_TONE: Record<Artifact['kind'], 'info' | 'ok' | 'muted' | 'warn'> = {
   other: 'muted',
 }
 
-/** 结果页里最该被点到的几个文件：排前面并且高亮 */
-const HEADLINE = ['report.json', 'report.md', 'metadata.json', 'events.jsonl']
-
+/** `/files?path=` 的下载地址（`path` 用 artifacts 返回的 storage-root 相对路径） */
 function fileUrl(runId: string, path: string): string {
   return `${API_BASE}/runs/${encodeURIComponent(runId)}/files?path=${encodeURIComponent(path)}`
-}
-
-function fileName(path: string): string {
-  return path.split('/').pop() ?? path
 }
 
 /** 一句结论：成功就是成功，失败要说清"为什么" */
@@ -110,8 +105,8 @@ export function RunResultView({ run }: { run: Run }) {
   const counts = run.task_counts
   const verdict = conclusion(run)
   const items = artifacts.data?.items ?? []
-  const headline = items.filter((item) => HEADLINE.includes(fileName(item.path)))
-  const rest = items.filter((item) => !HEADLINE.includes(fileName(item.path)))
+  // 分组只影响展示：部署日志 / 测试日志 / 报告与数据，三组都渲染，文件一个不少。
+  const groups = groupArtifacts(items, runId)
 
   return (
     <>
@@ -251,59 +246,64 @@ export function RunResultView({ run }: { run: Run }) {
             <EmptyState title="还没有产物" description="产物在 Run 结束后写出；存储未接线时这里会是空的。" />
           </CardBody>
         ) : (
-          <>
-            {headline.length > 0 ? (
-              <CardBody className="flex flex-wrap gap-2">
-                {headline.map((item) => (
-                  <a
-                    key={item.path}
-                    data-testid="artifact-download"
-                    href={fileUrl(runId, item.path)}
-                    className="flex items-center gap-2 rounded-md border border-line bg-surface-2 px-3 py-2 text-xs text-fg-2 transition-colors duration-150 hover:border-line-strong hover:text-fg"
-                  >
-                    <FileText className="size-3.5 text-primary" aria-hidden />
-                    <span className="font-mono">{fileName(item.path)}</span>
-                    <span className="text-2xs text-fg-3">{formatBytes(item.size_bytes)}</span>
-                    <Download className="size-3.5 text-fg-3" aria-hidden />
-                  </a>
-                ))}
-              </CardBody>
-            ) : null}
-            {rest.length > 0 ? (
-              <TableWrap>
-                <Table>
-                  <THead>
-                    <TR className="hover:bg-transparent">
-                      <TH>文件</TH>
-                      <TH>类型</TH>
-                      <TH>大小</TH>
-                      <TH className="text-right">下载</TH>
-                    </TR>
-                  </THead>
-                  <TBody>
-                    {rest.map((item) => (
-                      <TR key={item.path}>
-                        <TD className="break-all font-mono text-2xs text-fg">{item.path.replace(`${runId}/`, '')}</TD>
-                        <TD>
-                          <Badge tone={KIND_TONE[item.kind]}>{KIND_LABEL[item.kind]}</Badge>
-                        </TD>
-                        <TD className="tabular-nums text-2xs">{formatBytes(item.size_bytes)}</TD>
-                        <TD className="text-right">
-                          <a
-                            data-testid="artifact-download"
-                            className={buttonClassName({ size: 'sm', variant: 'ghost' })}
-                            href={fileUrl(runId, item.path)}
-                          >
-                            下载
-                          </a>
-                        </TD>
-                      </TR>
-                    ))}
-                  </TBody>
-                </Table>
-              </TableWrap>
-            ) : null}
-          </>
+          <div className="flex flex-col gap-2 px-5 py-3" data-testid="artifact-groups">
+            {ARTIFACT_GROUPS.map((group) => {
+              const rows = groups[group.key]
+              return (
+                <details
+                  key={group.key}
+                  open
+                  data-testid={`artifact-group-${group.key}`}
+                  className="group rounded-md border border-line-soft"
+                >
+                  <summary className="flex list-none cursor-pointer flex-wrap items-center gap-2 px-3 py-2 text-xs">
+                    <ChevronRight className="size-3 text-fg-3 transition-transform group-open:rotate-90" aria-hidden />
+                    <span className="font-medium text-fg">{group.label}</span>
+                    <Badge tone="muted">{rows.length}</Badge>
+                    <span className="text-2xs text-fg-3">{group.description}</span>
+                  </summary>
+                  {rows.length === 0 ? (
+                    <p className="border-t border-line-soft px-3 py-2 text-2xs text-fg-3">这一组没有文件</p>
+                  ) : (
+                    <TableWrap>
+                      <Table>
+                        <THead>
+                          <TR className="hover:bg-transparent">
+                            <TH>文件</TH>
+                            <TH>类型</TH>
+                            <TH>大小</TH>
+                            <TH className="text-right">下载</TH>
+                          </TR>
+                        </THead>
+                        <TBody>
+                          {rows.map((item) => (
+                            <TR key={item.path}>
+                              <TD className="break-all font-mono text-2xs text-fg">
+                                {relativeArtifactPath(item.path, runId)}
+                              </TD>
+                              <TD>
+                                <Badge tone={KIND_TONE[item.kind]}>{KIND_LABEL[item.kind]}</Badge>
+                              </TD>
+                              <TD className="tabular-nums text-2xs">{formatBytes(item.size_bytes)}</TD>
+                              <TD className="text-right">
+                                <a
+                                  data-testid="artifact-download"
+                                  className={buttonClassName({ size: 'sm', variant: 'ghost' })}
+                                  href={fileUrl(runId, item.path)}
+                                >
+                                  下载
+                                </a>
+                              </TD>
+                            </TR>
+                          ))}
+                        </TBody>
+                      </Table>
+                    </TableWrap>
+                  )}
+                </details>
+              )
+            })}
+          </div>
         )}
         <CardFooter>
           <span>这些都是这次 Run 落下的文件；点一下就开始下载，不需要再回报告页翻。</span>

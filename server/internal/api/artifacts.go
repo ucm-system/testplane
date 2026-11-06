@@ -66,7 +66,28 @@ func (s *Server) handleRunArtifacts(w http.ResponseWriter, r *http.Request) {
 		s.failErr(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, groupArtifacts(rows))
+	out := groupArtifacts(rows)
+	// D-59：Deploy 的落盘副本也要能下载（deploy/logs/*.log + deploy/pods.json）。
+	// 这些文件不进 artifacts 索引表，直接从盘上列，按 "deploy_logs" / "deploy_meta" 分组。
+	for _, rel := range deployLogFiles(s.cfg.StorageRoot, runID) {
+		full := filepath.Join(s.cfg.StorageRoot, runID, filepath.FromSlash(rel))
+		st, serr := os.Stat(full)
+		if serr != nil {
+			continue
+		}
+		dto := artifactDTO{Path: rel, Kind: "deploy_logs", SizeBytes: st.Size()}
+		out.Items = append(out.Items, dto)
+		out.ByKind[dto.Kind] = append(out.ByKind[dto.Kind], dto)
+		out.TotalSizeBytes += dto.SizeBytes
+	}
+	if st, serr := os.Stat(filepath.Join(s.cfg.StorageRoot, runID, deployPodsJSONRel)); serr == nil && !st.IsDir() {
+		dto := artifactDTO{Path: deployPodsJSONRel, Kind: "deploy_meta", SizeBytes: st.Size()}
+		out.Items = append(out.Items, dto)
+		out.ByKind[dto.Kind] = append(out.ByKind[dto.Kind], dto)
+		out.TotalSizeBytes += dto.SizeBytes
+	}
+	sort.Slice(out.Items, func(i, j int) bool { return out.Items[i].Path < out.Items[j].Path })
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleAttemptArtifacts 是 GET /api/v1/tasks/{task_id}/attempts/{idx}/artifacts。
