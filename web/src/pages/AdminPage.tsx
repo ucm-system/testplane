@@ -11,7 +11,6 @@ import type {
   ProfileWrite,
   SecretWrite,
 } from '@/api/types'
-import { RightRail, RailCard } from '@/components/app/RightRail'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
@@ -717,7 +716,11 @@ export function AdminPage() {
         <Banner role="alert" tone="warn" title="无权限：本页仅 admin 可见">
           当前角色 {auth.role ?? '未知'}；需要 admin 角色才能维护 Profile / 集群 / Secret 与查看审计。
         </Banner>
-        <Card>
+        <p className="text-2xs leading-relaxed text-fg-3">
+        管理台只维护「东西在哪」：Profile 指定集群与队列，集群条目只记 kubeconfig 文件名，Secret 只登记引用（凭据不经过浏览器）；新建、编辑、删除都会记一条审计，在 Audit 页签里可查。
+      </p>
+
+      <Card>
           <CardHeader tone="muted" title="管理台" />
           <CardBody>
             <p className="text-xs text-fg-2">
@@ -731,15 +734,6 @@ export function AdminPage() {
 
   return (
     <>
-      <RightRail>
-        <RailCard title="这里只登记位置" tone="warn">
-          <p>管理台只维护「东西在哪」：Profile 说明用哪个集群和队列，集群条目只记 kubeconfig 的文件名，Secret 只登记引用。</p>
-          <p className="mt-2">凭据本身不经过浏览器，所以这一页没有「查看密钥」这类入口。</p>
-        </RailCard>
-        <RailCard title="改动都会留痕" tone="muted">
-          <p>新建、编辑、删除都会记一条审计，在 Audit 页签里能查到是谁、什么时候做的。</p>
-        </RailCard>
-      </RightRail>
 
       <Tabs<TabKey>
         ariaLabel="管理台分区"

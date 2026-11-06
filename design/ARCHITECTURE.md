@@ -473,6 +473,11 @@ Tester 采用平台维护者管理的**白名单注册**机制。注册流程：
 - **不删除旧行**：历史 Task/Attempt 用 `name@version` 引用（`03 §4.1`），删行会让历史报告永久失去 Tester 元数据（`§5.7` 可追溯性）。
 - `latest` 的值是"该 name 的最高版本"（含 `retired` 行），比较规则见 `domain.VersionLess`（注册表扫描排序、API、`tpctl` 共用同一份）。
 - `orphaned` 与 `retired` 同义（前者是 `testers` 列名，后者是对外字段名），两个字段都保留以兼容既有前端/CLI。
+- **`retired` 的口径是"该 **版本** 已不在目录里"**（不是"整个 Tester 下架"）：
+  - 只有旧版本从目录消失（`testers/<name>/tester.yaml` 里的 `version` 改了）→ 旧版本 `retired=true`，新版本 `retired=false`；
+  - **整个 Tester 目录消失**是同一条规则的极端情形：该 name 的**所有版本**都 `retired=true`（默认列表里这个 name 整个不出现）。
+  - 判定发生在启动期/重扫期的目录比对（`registry.Scan`）：目录里没有的 `name@version` → 标记；**标记会落库**
+    （`registry.Store.MarkTesterOrphaned`），因此**进程重启后 `retired` 不会丢**——这是票 #60 真机回归修的持久化缺口。
 
 ### 5.7 版本与可追溯性
 

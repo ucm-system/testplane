@@ -406,3 +406,175 @@ func TestEndpointKeyNormalization(t *testing.T) {
 		t.Errorf("empty endpoint has no key; the scheduler guard must reject it (C-4.5)")
 	}
 }
+
+// TestScanPersistsOrphanedSoRestartKeepsRetired 是票 #60 真机回归的核心用例：
+// Scan 发现目录里的版本消失后，**必须把 orphaned 落库**；新建一个 Registry 只从同一个
+// store 读取（模拟进程重启）时，旧版本仍应为 orphaned=true，并且默认 List 不返回它。
+//
+// 改前：Scan 只改内存 → 重启后从库里读回 orphaned=false → `retired` 恒 false。
+// TestLoadMarksOrphanedForStoreOnlyVersions 锁住 Load 的顺序：必须**先水合再 Scan**。
+//
+// 真机回归（票 #60）：升级到 0.3.0 后，0.1.0/0.2.0 只存在于库里、目录里没有；
+// 旧实现先 Scan（此时 records 为空，removed 恒空）再 ListTesters，于是永远不标
+// orphaned → `retired` 恒 false。这里直接把"库里已有旧版本、目录只有新版本"喂给 Load。
+func TestLoadMarksOrphanedForStoreOnlyVersions(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	root := t.TempDir()
+
+	// ① 让库里先有 0.1.0（模拟上一个镜像注册过的旧版本）。
+	old := strings.Replace(validManifest, "version: 1.2.3", "version: 0.1.0", 1)
+	writeTesterDir(t, root, "my-tester", old)
+	if _, err := New(store, Options{}).Scan(ctx, root); err != nil {
+		t.Fatalf("seed Scan: %v", err)
+	}
+
+	// ② 目录换成 0.2.0（模拟新镜像只剩新版本），然后**只调用 Load**（进程重启的真实路径）。
+	if err := os.RemoveAll(filepath.Join(root, "my-tester")); err != nil {
+		t.Fatal(err)
+	}
+	writeTesterDir(t, root, "my-tester", strings.Replace(validManifest, "version: 1.2.3", "version: 0.2.0", 1))
+
+	reg := New(store, Options{})
+	diff, err := reg.Load(ctx, root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(diff.Removed) != 1 || diff.Removed[0] != "my-tester@0.1.0" {
+		t.Fatalf("diff.Removed = %+v, 期望 [my-tester@0.1.0]（Load 必须先水合再 Scan）", diff.Removed)
+	}
+	rec, err := store.GetTester(ctx, "my-tester", "0.1.0")
+	if err != nil {
+		t.Fatalf("store.GetTester: %v", err)
+	}
+	if !rec.Orphaned {
+		t.Fatal("Load 之后库里的 0.1.0 仍是 orphaned=false（顺序错了：先 Scan 后水合）")
+	}
+	got, err := reg.List(ctx, "", false)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 || got[0].Version != "0.2.0" {
+		t.Fatalf("List(includeOrphaned=false) = %+v, 期望只剩 0.2.0", got)
+	}
+}
+func TestScanPersistsOrphanedSoRestartKeepsRetired(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	root := t.TempDir()
+
+	// 第一次启动：目录里是 1.2.3（一个 tester 目录只有一份 tester.yaml，同名不同版本
+	// 通过"改目录内容 + 重扫"来表达，正是真实升版本的样子）。
+	writeTesterDir(t, root, "my-tester", validManifest)
+
+	reg := New(store, Options{})
+	if _, err := reg.Scan(ctx, root); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	// 升级到 1.3.0：删掉旧目录，用同名目录写新版本，再扫一次。
+	if err := os.RemoveAll(filepath.Join(root, "my-tester")); err != nil {
+		t.Fatal(err)
+	}
+	writeTesterDir(t, root, "my-tester", strings.Replace(validManifest, "version: 1.2.3", "version: 1.3.0", 1))
+
+	diff, err := reg.Scan(ctx, root)
+	if err != nil {
+		t.Fatalf("Scan(2): %v", err)
+	}
+	if len(diff.Removed) != 1 || diff.Removed[0] != "my-tester@1.2.3" {
+		t.Fatalf("diff.Removed = %+v, 期望 [my-tester@1.2.3]", diff.Removed)
+	}
+
+	// 关键：库里必须已经落库（而不是只在内存）。
+	rec, err := store.GetTester(ctx, "my-tester", "1.2.3")
+	if err != nil {
+		t.Fatalf("store.GetTester: %v", err)
+	}
+	if !rec.Orphaned {
+		t.Fatal("Scan 后库里的 1.2.3 仍是 orphaned=false（只改了内存，没落库）")
+	}
+
+	// 模拟重启：新 Registry 只从同一个 store 读（Load 不带目录 = 纯水合）。
+	restarted := New(store, Options{})
+	if _, err := restarted.Load(ctx, ""); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	listAll, err := restarted.List(ctx, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, sp := range listAll {
+		if sp.Name == "my-tester" && sp.Version == "1.2.3" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("重启后 includeOrphaned=true 应仍能看到 1.2.3: %+v", listAll)
+	}
+	defaultList, err := restarted.List(ctx, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sp := range defaultList {
+		if sp.Version == "1.2.3" {
+			t.Fatalf("重启后默认 List 不应返回已退役的 1.2.3: %+v", defaultList)
+		}
+	}
+	// 再确认内存快照里的 orphaned 标记也回来了（不是靠 List 过滤掩盖）。
+	rec2 := recordOf(t, restarted, "my-tester", "1.2.3")
+	if rec2.Orphaned != rec.Orphaned {
+		t.Fatalf("重启后 orphaned = %v，库内 = %v（内存与库分叉）", rec2.Orphaned, rec.Orphaned)
+	}
+}
+
+// TestScanOrphanedFailureDoesNotDivergeMemory 落库失败时不得只改内存。
+func TestScanOrphanedFailureDoesNotDivergeMemory(t *testing.T) {
+	ctx := context.Background()
+	store := &failingOrphanStore{MemoryStore: NewMemoryStore()}
+	root := t.TempDir()
+	writeTesterDir(t, root, "my-tester", validManifest)
+
+	reg := New(store, Options{})
+	if _, err := reg.Scan(ctx, root); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "my-tester")); err != nil {
+		t.Fatal(err)
+	}
+	store.fail = true
+	if _, err := reg.Scan(ctx, root); err == nil {
+		t.Fatal("落库失败时 Scan 必须返回错误（不能让内存与库分叉）")
+	}
+	// 内存里的标记必须仍是 false（没有单方面置 true）。
+	rec := recordOf(t, reg, "my-tester", "1.2.3")
+	if rec.Orphaned {
+		t.Fatal("落库失败后内存里却标了 orphaned（内存与库分叉）")
+	}
+}
+
+// recordOf 读注册表内存快照里的一行（同包测试用，避免为测试新增导出 API）。
+func recordOf(t *testing.T, r *Registry, name, version string) Record {
+	t.Helper()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rec, ok := r.records[Key(name, version)]
+	if !ok {
+		t.Fatalf("内存快照里没有 %s@%s", name, version)
+	}
+	return rec
+}
+
+// failingOrphanStore 让 MarkTesterOrphaned 可控失败。
+type failingOrphanStore struct {
+	*MemoryStore
+	fail bool
+}
+
+func (f *failingOrphanStore) MarkTesterOrphaned(ctx context.Context, name, version string) error {
+	if f.fail {
+		return errors.New("store unavailable")
+	}
+	return f.MemoryStore.MarkTesterOrphaned(ctx, name, version)
+}

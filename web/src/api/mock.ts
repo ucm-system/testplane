@@ -222,6 +222,43 @@ const TESTERS: TesterWire[] = [
       concurrency: { type: 'list<int>', required: true, description: '并发档位' },
     },
   }),
+  // 票 #60：同名多版本 —— 0.2.0 是当前版，0.1.0 已退役（目录里已移除，历史 Run 仍按 name@version 引用）
+  testerWire({
+    name: 'aisbench-sla',
+    version: '0.2.0',
+    display_name: 'SLA 时延评测',
+    description: '按目标 SLA 测首包与每 token 时延，输出达标率。',
+    role: 'test',
+    on_failure: 'continue',
+    exclusive: false,
+    placeholder: '--target_ttft_ms=800 --target_tpot_ms=30 --samples=200',
+    parameters: {
+      url: { type: 'string', required: true, description: 'OpenAI 兼容 base URL' },
+      model_name: { type: 'string', required: true, description: '模型名' },
+      target_ttft_ms: { type: 'integer', required: true, description: '首包时延目标（毫秒）' },
+      target_tpot_ms: { type: 'integer', description: '每 token 时延目标（毫秒）' },
+      samples: { type: 'integer', description: '采样条数' },
+    },
+  }),
+  {
+    ...testerWire({
+      name: 'aisbench-sla',
+      version: '0.1.0',
+      display_name: 'SLA 时延评测',
+      description: '旧版：只测首包时延，没有 TPOT 目标。',
+      role: 'test',
+      on_failure: 'continue',
+      exclusive: false,
+      placeholder: '--target_ttft_ms=900',
+      parameters: {
+        url: { type: 'string', required: true, description: 'OpenAI 兼容 base URL' },
+        model_name: { type: 'string', required: true, description: '模型名' },
+        target_ttft_ms: { type: 'integer', required: true, description: '首包时延目标（毫秒）' },
+      },
+    }),
+    // 已退役：默认不出现在目录里，只有 ?include_retired=true 才回
+    retired: true,
+  },
   testerWire({
     name: 'evalscope-acc',
     version: '2.3.0',
@@ -1623,7 +1660,10 @@ export const mockApi: Api = {
 
   async listTesters(query: TesterListQuery = {}): Promise<Tester[]> {
     await delay(90)
-    return state.testers
+    const visible = state.testers.filter((t) =>
+      query.include_retired ? true : !(t as { retired?: boolean }).retired,
+    )
+    return visible
       .filter((t) => (query.role ? t.role === query.role : true))
       .filter((t) => (query.orphaned === undefined ? true : Boolean(t.orphaned) === query.orphaned))
       .map((t) => normalizeTester(t))

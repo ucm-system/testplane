@@ -240,3 +240,40 @@
     opacity: 0.35;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   404 页插画：纸飞机沿虚线航线飞走（内联 SVG + CSS 动效，不引图片）
+   两档都只动 transform / stroke-dashoffset（不触发重排）；
+   `prefers-reduced-motion: reduce` 时**整段动画关闭**（不是只把时长压到最小）。
+   --------------------------------------------------------------------------- */
+
+@utility notfound-float {
+  animation: notfound-float 4.2s ease-in-out infinite;
+}
+
+@keyframes notfound-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@utility notfound-dash {
+  animation: notfound-dash 2.6s linear infinite;
+}
+
+@keyframes notfound-dash {
+  to {
+    stroke-dashoffset: -160;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notfound-float,
+  .notfound-dash {
+    animation: none !important;
+  }
+}

@@ -308,23 +308,23 @@ ais_bench 的逐点产物在 `sla_out/`。实测一次 3 点真跑（`--data_num
 
 | 文件 | 字节 | 行数 |
 |---|---|---|
-| `logs/stdout.log`（平台日志框的来源） | 51 779 | 378 |
-| `logs/sla.log`（同一份内容 + Tester 自己的 log 行） | 52 216 | 378 |
-| `sla_out/aisbench_all.log`（工具消息 + 各点 ais_bench 输出，追加） | 50 280 | 358 |
-| `sla_out/points/c1/full.log`（单点的 ais_bench 输出） | 15 096 | 106 |
+| `logs/stdout.log`（平台日志框的来源） | 51 833 | 380 |
+| `logs/sla.log`（同一份内容 + Tester 自己的 log 行） | 52 270 | 380 |
+| `sla_out/aisbench_all.log`（工具消息 + 各点 ais_bench 输出，追加） | 50 334 | 360 |
+| `sla_out/points/c1/full.log`（单点的 ais_bench 输出） | 15 060 | 106 |
 
 结论：
 
 * 「平台日志框只装容器 stdout」这句**对**，但**不等于看不到 ais_bench 日志**：`run.sh` 默认把 ais_bench
   输出实时 tee 到 stdout（`--no_stream=false`），所以 ais_bench 的逐点日志**基本都在**日志框里
-  （51 779 B 里 50 280 B 是 ais_bench 原文）。真正只在产物里的，是逐点的结构化结果与附件：
+  （51 833 B 里 50 334 B 是 ais_bench 原文）。真正只在产物里的，是逐点的结构化结果与附件：
   `points/c*/<exp>/aisbench_full.log`、`configs/*.py`、`performances/**/{gsm8k.csv,gsm8k.json,gsm8k_details.jsonl,gsm8k_plot.html,db_data/*.db}`
-  —— 同一次 Run 的产物合计 511 651 B，是日志框那份的 ~10 倍。
+  —— 同一次 Run 的产物合计 512 763 B，是日志框那份的 ~10 倍。
 * 日志 API（`GET /api/v1/tasks/{id}/attempts/{idx}/logs`）**没有 `truncated`/`next_offset` 字段**：
   它按 `offset`（字节）分页，响应头 `X-Log-Offset` 给出「本次读到哪」，`limit` 默认/上限 **64 KiB**
   （`maxLogChunk = 64<<10`），另有 `tail=N` 取最后 N 行。本次 `limit=65536` 一次取回全量
-  51 779 B（`X-Log-Offset: 51779`）；`limit=4096` 只回 4096 B（`X-Log-Offset: 4096`），UI 的
-  `useLogTail` 就是这么续读的。所以**只有当 stdout 超过 64 KiB 才需要翻页**（本次 51 KiB，
+  51 833 B（`X-Log-Offset: 51833`）；`limit=4096` 只回 4096 B（`X-Log-Offset: 4096`），UI 的
+  `useLogTail` 就是这么续读的。所以**只有当 stdout 超过 64 KiB 才需要翻页**（本次 ~51 KiB，
   再多一两个探测点就会超）。
 * 想让「日志框里就有结论」的话，当前默认（`--stream` 开 + 结尾打印汇总表 + `sla_out` 全量入 artifacts）
   已经够；不建议再 `tail aisbench_all.log`——那会把同一批行打第二遍，且长跑时白占日志框额度。
@@ -466,8 +466,8 @@ pwsh testers/aisbench-sla/tests/smoke.ps1 -Image aisbench-sla:t1
 | 容器冒烟 | `pwsh tests/smoke.ps1` | `status=succeeded`，6 个 metrics，退出码 0 |
 | 退出码矩阵 | 容器内 4 个分支各跑一次 | `0/succeeded`、`2+1/SLA_PRECHECK_FAILED`、`3+1/SLA_NO_FEASIBLE_CONCURRENCY`、参数错 `2/TESTER_ERROR` |
 | 平台真跑 | `POST /api/v1/runs`（stub 模式，`service` 指向集群内 mock） | Run `r-20261106-ZC7R` `succeeded`；`/report` 的 `result_ref` 非空；attempt result 的 metrics 与 `sla_points.csv`/`sla_summary.json` 都能从 `/bundle` 下到 |
-| **平台真跑（真 ais_bench 0.2.0）** | `POST /api/v1/runs`，`precheck: auto`，`service.url=http://sla-mock.testplane-mock.svc:18080/v1` | Run `r-20261106-MWMY`（1 点）/ `r-20261106-9DTC`（3 点：c=1,2,4）均 `succeeded`；链路 `precheck(succeeded) → sla-search-real(succeeded)`；metrics 来自真 ais_bench（9DTC：`sla_max_concurrency=4`、`max_output_throughput_tok_s=1256.463`、`ttft_avg_ms=1.5`、`tpot_p90_ms=2.2`、`probes_total=3`）；artifacts 含 `sla_out/points/c{1,2,4}/<exp>/aisbench_full.log` |
-| 日志体积（同上 Run `9DTC`） | PVC 上 `wc -c` / `wc -l` + logs API | `logs/stdout.log` 51 779 B / 378 行；`sla_out/aisbench_all.log` 50 280 B / 358 行；`points/c1/full.log` 15 096 B；产物合计 511 651 B；logs API `limit=65536` 一次取回（`X-Log-Offset: 51779`），无 `truncated`/`next_offset` |
+| **平台真跑（真 ais_bench 0.2.0）** | `POST /api/v1/runs`，`precheck: auto`，`service.url=http://sla-mock.testplane-mock.svc:18080/v1` | Run `r-20261106-MWMY`（1 点）/ `r-20261106-9DTC` / `r-20261106-938F`（后两次 3 点：c=1,2,4）均 `succeeded`；链路 `precheck(succeeded) → sla-search-real(succeeded)`；metrics 来自真 ais_bench（938F：`sla_max_concurrency=4`、`max_output_throughput_tok_s=1253.612`、`ttft_avg_ms=1.8`、`tpot_p90_ms=2.3`、`probes_total=3`；c=4 那点 ais_bench 原始表 TTFT avg 1.8 / TPOT avg 2.2 / E2EL avg 17.2 ms、Total Generated Tokens 256）；artifacts 含 `sla_out/points/c{1,2,4}/<exp>/aisbench_full.log` |
+| 日志体积（同上 Run `9DTC`） | PVC 上 `wc -c` / `wc -l` + logs API | `logs/stdout.log` 51 833 B / 380 行；`sla_out/aisbench_all.log` 50 334 B / 360 行；`points/c1/full.log` 15 060 B（c2/c4 各 ~15.2 KB）；产物合计 512 763 B；logs API `limit=65536` 一次取回全量（`X-Log-Offset: 51833`），无 `truncated`/`next_offset` |
 | stub 回归（0.2.0 镜像内） | `--aisbench_cmd=/tester/tool/tests/stub_aisbench.py --work_path=/tester/tool` | `status=succeeded`，`sla_max_concurrency=2`、`最高输出吞吐 56.7 tok/s`（stub 公式值，仅证明链路） |
 
 平台真跑用的 mock 是 vendored 的 `tool/tests/mock_vllm.py`（集群内一个 Deployment + Service），

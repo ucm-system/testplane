@@ -54,6 +54,9 @@ test('① 0 个测试 Task：提交/校验置灰（disabled + aria-disabled + ti
 test('② 删掉最后一个 Task 后立即置灰；撤销后恢复并重新可用', async ({ page }) => {
   await openSubmit(page)
 
+  // 默认值是空的（见 ux-submit-defaults）：先自己写一个名字，撤销才有「原值」可恢复
+  await page.getByLabel('Task 1 名称').fill('accuracy-dataset-a')
+
   const submit = page.getByTestId('submit-run')
   await page.getByTestId('remove-task-1').click()
 
@@ -74,8 +77,12 @@ test('② 删掉最后一个 Task 后立即置灰；撤销后恢复并重新可�
 test('③ 环境变量删除后给 undo toast，撤销恢复原位置原值', async ({ page }) => {
   await openSubmit(page)
 
-  const keyRow = page.getByLabel('env 键 1')
-  await expect(keyRow).toHaveValue('LOG_LEVEL')
+  // 默认 0 行：先手动加一行并填好，再删（验证的是「删除 → 撤销」这条链路）
+  await expect(page.getByLabel('env 键 1')).toHaveCount(0)
+  await page.getByTestId('add-env').click()
+  await page.getByLabel('env 键 1').fill('LOG_LEVEL')
+  await page.getByLabel('env 值 1').fill('info')
+  await expect(page.getByLabel('env 键 1')).toHaveValue('LOG_LEVEL')
 
   await page.getByLabel('删除该环境变量').click()
 
@@ -102,8 +109,10 @@ test('④ YAML 语法错误：波浪线 + gutter 标记存在，且编辑器滚�
   lines.push('broken: [unclosed')
   await replaceYaml(page, lines.join('\n'))
 
-  // 页面下方的解析结论仍走老文案（错误信息来自同一个 parseDeploy）
-  await expect(page.getByText('YAML 解析失败', { exact: false })).toBeVisible()
+  // 页面下方的解析结论走同一套（错误信息来自同一个 parseDeploy），并带行列
+  const yamlError = page.getByTestId('deploy-yaml-error')
+  await expect(yamlError).toHaveAttribute('data-state', 'error')
+  await expect(yamlError).toContainText(/第 41 行第 \d+ 列：YAML 语法错误/)
 
   // 红色波浪线（mark decoration）与左侧 gutter 圆点
   await expect(page.locator('.cm-yaml-error-mark').first()).toBeVisible()

@@ -127,6 +127,10 @@ type Store interface {
 	GetTester(ctx context.Context, name, version string) (Record, error)
 	// ListTesters 列出全部；role 为空不过滤。
 	ListTesters(ctx context.Context) ([]Record, error)
+	// MarkTesterOrphaned 把 (name, version) 标记为 retired/orphaned（**只标记，不删除**）。
+	// 必须在 Scan 里落库：否则进程重启后从库里读回来的行 orphaned=false，
+	// `retired` 会永远为 false（票 #60 真机回归）。
+	MarkTesterOrphaned(ctx context.Context, name, version string) error
 }
 
 // Options 是注册表配置。
@@ -227,16 +231,42 @@ func (r *Registry) Scan(ctx context.Context, dir string) (SyncDiff, error) {
 	}
 
 	// 目录里消失的只标记 orphaned，不自动删（§10）。
-	r.mu.Lock()
+	//
+	// **必须落库**：只改内存的话，进程重启后从库里读回来的行 orphaned 仍是 false，
+	// `retired` 标志退化成恒 false（票 #60 真机回归）。
+	// 顺序：先写库，成功后再改内存 —— 写库失败时内存保持原样，天然不会与库分叉
+	// （等价于"回滚"，因为此时尚未改内存）。
+	r.mu.RLock()
+	removed := make([]Record, 0, len(r.records))
 	for k, existing := range r.records {
 		if _, ok := found[k]; ok {
 			continue
 		}
-		existing.Orphaned = true
-		r.records[k] = existing
-		diff.Removed = append(diff.Removed, k)
+		removed = append(removed, existing)
 	}
-	r.mu.Unlock()
+	r.mu.RUnlock()
+	sort.Slice(removed, func(i, j int) bool {
+		if removed[i].Spec.Name != removed[j].Spec.Name {
+			return removed[i].Spec.Name < removed[j].Spec.Name
+		}
+		return removed[i].Spec.Version < removed[j].Spec.Version
+	})
+	for _, rec := range removed {
+		key := Key(rec.Spec.Name, rec.Spec.Version)
+		if r.store != nil {
+			if err := r.store.MarkTesterOrphaned(ctx, rec.Spec.Name, rec.Spec.Version); err != nil {
+				// 内存一个字节都没动 → 返回错误即可，不会出现"内存说 retired、库里不是"。
+				return diff, fmt.Errorf("registry: mark orphaned %s: %w", key, err)
+			}
+		}
+		r.mu.Lock()
+		if cur, ok := r.records[key]; ok {
+			cur.Orphaned = true
+			r.records[key] = cur
+		}
+		r.mu.Unlock()
+		diff.Removed = append(diff.Removed, key)
+	}
 	sort.Strings(diff.Removed)
 	return diff, nil
 }
@@ -375,25 +405,26 @@ func (r *Registry) Len() int {
 // Load 预热内存快照：先扫描目录（自发现），再从 Store 补齐历史版本（重启后 Resolve 仍可解析旧版本）。
 func (r *Registry) Load(ctx context.Context, dir string) (SyncDiff, error) {
 	var diff SyncDiff
-	if dir != "" {
-		var err error
-		diff, err = r.Scan(ctx, dir)
+	// **先水合、再扫描**：Scan 判定"目录里已消失的版本"依赖 r.records 里已有的行。
+	// 先 Scan 再 ListTesters 的话 records 还是空的，removed 恒为空 —— 只存在于库里的
+	// 旧版本永远不会被标 orphaned/retired（真机回归：升到 0.3.0 后 0.1.0/0.2.0 的
+	// retired 一直是 false，库里 orphaned 也一直是 f）。
+	if r.store != nil {
+		recs, err := r.store.ListTesters(ctx)
 		if err != nil {
-			return diff, err
+			return diff, fmt.Errorf("registry: load: %w", err)
+		}
+		for _, rec := range recs {
+			r.put(rec)
 		}
 	}
-	if r.store == nil {
+	if dir == "" {
 		return diff, nil
 	}
-	recs, err := r.store.ListTesters(ctx)
+	var err error
+	diff, err = r.Scan(ctx, dir)
 	if err != nil {
-		return diff, fmt.Errorf("registry: load: %w", err)
-	}
-	for _, rec := range recs {
-		if _, ok := r.records[Key(rec.Spec.Name, rec.Spec.Version)]; ok {
-			continue
-		}
-		r.put(rec)
+		return diff, err
 	}
 	return diff, nil
 }

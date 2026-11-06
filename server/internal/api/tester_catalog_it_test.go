@@ -136,6 +136,10 @@ func TestListTesters_IncludeRetiredReturnsAllVersions(t *testing.T) {
 	}
 
 	all := listTesters(t, srv, "?include_retired=true")
+	// 真机回归证据：带 retired 标志的响应片段（见 PR/回报）。
+	if rec := doGet(t, srv, "/api/v1/testers?include_retired=true"); rec.Code == http.StatusOK {
+		t.Logf("GET /api/v1/testers?include_retired=true → %s", rec.Body.String())
+	}
 	got := map[string]testerItem{}
 	for _, it := range all {
 		if it.Name == "catalog-retired" {

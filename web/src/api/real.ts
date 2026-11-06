@@ -175,6 +175,8 @@ export const realApi: Api = {
       `/testers${qs({
         role: query.role,
         orphaned: query.orphaned === undefined ? undefined : String(query.orphaned),
+        // 默认只回最新；只有显式要历史时后端才会带上 retired 版本
+        include_retired: query.include_retired ? 'true' : undefined,
       })}`,
     )
     return asArray<unknown>(data).map(normalizeTester)

@@ -1,9 +1,11 @@
 // 布局审计：用 DOM 实测，不靠肉眼。
 // 验收项（来自用户对前端原型的要求）：
 //   1. 页头左侧分隔线 x == 240；右侧用户区分隔线 x == 视口宽 - 288（>=1024 时）
-//   2. body 三列宽度 == 240 / 剩余 / 288；三列等高
+//   2. **有栏页面**（概览 /）：body 三列 240 / 剩余 / 288，三列等高；
+//      **无栏页面**（其余）：两列 240 / 剩余，main 右边界贴住视口
 //   3. DOM 里 <main> 先于两侧 <aside>
-//   4. 页头 sticky top-0；页脚 sticky bottom-0；main 有 min-width:0
+//   4. 页头 sticky top-0；**全局页脚已删除**（主体吃到底、整页无 footer）；
+//      main 有 min-width:0
 //   5. 字体是否真的加载了 Albert Sans / Noto Sans SC
 //   6. 禁止项：rounded-none / shadow-2xl / font-black / text-5xl 及以上的计算字号、backdrop-blur、渐变
 //   7. 动效时长 <= 200ms
@@ -17,7 +19,8 @@ const push = (name, ok, detail) => results.push({ name, ok, detail })
 
 async function audit(page, label, width, height) {
   await page.setViewportSize({ width, height })
-  await page.goto(BASE + '/runs', { waitUntil: 'networkidle' })
+  // 有栏测量在概览页（右栏只在这里保留）
+  await page.goto(BASE + '/', { waitUntil: 'networkidle' })
   await page.waitForTimeout(600)
 
   const m = await page.evaluate(() => {
@@ -79,20 +82,65 @@ async function audit(page, label, width, height) {
   })
 
   const wide = width > 1024
+  // ---- 有栏页面（概览）：三列 + 两条分隔线 ----
   if (wide) {
-    push(`${label}: 左分隔线 x=240`, m.thin.includes(240) || m.bordered.some((x) => Math.abs(x - 240) <= 1), `thin=${m.thin} bordered=${m.bordered}`)
+    push(`${label} 有栏: 左分隔线 x=240`, m.thin.includes(240) || m.bordered.some((x) => Math.abs(x - 240) <= 1), `thin=${m.thin} bordered=${m.bordered}`)
     const want = width - 288
-    push(`${label}: 右分隔线 x=${want}`, m.bordered.some((x) => Math.abs(x - want) <= 1), `bordered=${m.bordered}`)
-    push(`${label}: 左栏宽=240`, m.leftW === 240, `leftW=${m.leftW}`)
-    push(`${label}: 右栏宽=288`, m.rightW === 288, `rightW=${m.rightW}`)
-    push(`${label}: 三列等高`, m.leftH === m.mainH || Math.abs(m.leftH - m.mainH) <= 2, `left=${m.leftH} main=${m.mainH} right=${m.rightH}`)
+    push(`${label} 有栏: 右分隔线 x=${want}`, m.bordered.some((x) => Math.abs(x - want) <= 1), `bordered=${m.bordered}`)
+    push(`${label} 有栏: 左栏宽=240`, m.leftW === 240, `leftW=${m.leftW}`)
+    push(`${label} 有栏: 右栏宽=288`, m.rightW === 288, `rightW=${m.rightW}`)
+    push(`${label} 有栏: 三列等高`, Math.abs(m.leftH - m.mainH) <= 2, `left=${m.leftH} main=${m.mainH} right=${m.rightH}`)
   }
-  push(`${label}: DOM 里 main 先于 aside`, m.mainFirst, JSON.stringify(m.bodyCols))
-  push(`${label}: 页头 sticky`, m.headerPos === 'sticky', `pos=${m.headerPos} h=${m.headerH}`)
-  push(`${label}: 页脚 sticky`, m.footerPos === 'sticky', `pos=${m.footerPos}`)
-  push(`${label}: main min-width=0`, m.mainMinW === '0px', `minW=${m.mainMinW}`)
+  push(`${label} 有栏: DOM 里 main 先于 aside`, m.mainFirst, JSON.stringify(m.bodyCols))
+  push(`${label} 有栏: 页头 sticky`, m.headerPos === 'sticky', `pos=${m.headerPos} h=${m.headerH}`)
+  push(`${label} 有栏: main min-width=0`, m.mainMinW === '0px', `minW=${m.mainMinW}`)
+
+  // ---- 无栏页面（运行列表）：只有 240 一条，main 贴住视口 ----
+  await page.goto(BASE + '/runs', { waitUntil: 'networkidle' })
+  await page.waitForTimeout(400)
+  const off = await page.evaluate(() => {
+    const r = (el) => (el ? el.getBoundingClientRect() : null)
+    const header = document.querySelector('header')
+    const main = document.querySelector('main')
+    // 只看"整条竖线"：高度 >= 40 的边框（徽标/头像的小圆角不算分隔线）
+    const bordered = [...header.querySelectorAll('*')]
+      .filter((el) => {
+        const b = el.getBoundingClientRect()
+        return b.height >= 40 && parseFloat(getComputedStyle(el).borderLeftWidth) > 0
+      })
+      .map((el) => Math.round(el.getBoundingClientRect().left))
+    const thin = [...header.querySelectorAll('div')]
+      .filter((el) => {
+        const b = el.getBoundingClientRect()
+        return b.width > 0 && b.width <= 2 && b.height >= 40
+      })
+      .map((el) => Math.round(el.getBoundingClientRect().left))
+    return {
+      rail: document.querySelector('[data-rail]')?.getAttribute('data-rail'),
+      hasRailAside: Boolean(document.querySelector('aside[aria-label="辅助信息"]')),
+      bordered,
+      thin,
+      mainRight: main ? Math.round(r(main).right) : 0,
+      vw: window.innerWidth,
+      mainLeft: main ? Math.round(r(main).left) : 0,
+      mainMinW: main ? getComputedStyle(main).minWidth : null,
+      headerPos: header ? getComputedStyle(header).position : null,
+      footerPos: document.querySelector('footer') ? getComputedStyle(document.querySelector('footer')).position : null,
+    }
+  })
+  const offLines = [...new Set([...off.bordered, ...off.thin])].sort((a, b) => a - b)
+  push(`${label} 无栏: data-rail=off`, off.rail === 'off', `rail=${off.rail}`)
+  push(`${label} 无栏: 没有右栏 aside`, off.hasRailAside === false, `hasRailAside=${off.hasRailAside}`)
+  push(`${label} 无栏: 页头竖线只剩 240`, offLines.every((x) => Math.abs(x - 240) <= 1), `lines=${offLines}`)
+  // ≤768 左栏收起（走抽屉），main 从 0 开始；更宽时左栏 240
+  const wantLeft = off.vw >= 769 ? 240 : 0
+  push(`${label} 无栏: main 左=${wantLeft} 右=视口`, off.mainLeft === wantLeft && off.mainRight === off.vw, `left=${off.mainLeft} right=${off.mainRight} vw=${off.vw}`)
+  push(`${label} 无栏: 页头 sticky`, off.headerPos === 'sticky', `pos=${off.headerPos}`)
+
+  // ---- 两套布局共有：字体、无页脚 ----
   push(`${label}: 字体 Albert Sans 已加载`, m.fonts.albert, JSON.stringify(m.fonts))
   push(`${label}: 字体 Noto Sans SC 已加载`, m.fonts.noto, JSON.stringify(m.fonts))
+  push(`${label}: 全局页脚已删除`, m.footerPos === null && off.footerPos === null, `on=${m.footerPos} off=${off.footerPos}`)
 }
 
 const ctx = await browser.newContext()

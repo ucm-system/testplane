@@ -10,7 +10,6 @@ import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
 import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
 import { TaskStatusBadge } from '@/components/app/StatusBadge'
-import { RightRail, RailCard } from '@/components/app/RightRail'
 import { useAsync } from '@/hooks/useAsync'
 import { ARTIFACT_GROUPS, groupArtifacts, relativeArtifactPath } from '@/lib/artifact-groups'
 import { formatBytes, saveBlob } from '@/lib/download'
@@ -318,17 +317,6 @@ export function ReportPage() {
 
   return (
     <>
-      <RightRail>
-        <RailCard title="这份报告是什么" tone="info">
-          <p>报告按 Task 列清单：谁成功、谁失败、失败原因是什么，外加几个可以直接下载的原文件。</p>
-          <p className="mt-2">
-            指标不在这里汇总：展开下面的「指标」卡，才会去读每个 Task 自己上报的那份结果。
-          </p>
-        </RailCard>
-        <RailCard title="打不开的时候" tone="muted">
-          <p>Run 还没跑完时报告还没写出来，页面会等一会儿自动再试；跑完之后刷新就有。</p>
-        </RailCard>
-      </RightRail>
 
       <div className="flex flex-wrap items-center gap-2">
         <Link to={`/runs/${runId}`}>

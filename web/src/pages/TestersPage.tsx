@@ -1,131 +1,47 @@
+import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { ChevronDown } from 'lucide-react'
 import { api } from '@/api'
 import type { Tester } from '@/api/types'
-import { RightRail, RailCard } from '@/components/app/RightRail'
-import { Badge, Tag } from '@/components/ui/badge'
+import { TesterDrawer } from '@/components/app/TesterDrawer'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/card'
-import { Drawer } from '@/components/ui/drawer'
 import { TableSkeleton } from '@/components/ui/skeleton'
-import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/states'
+import { EmptyState, ErrorState } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
 import { useAsync } from '@/hooks/useAsync'
 import { cn } from '@/lib/utils'
 
-/** Tester 详情抽屉（只读）：参数清单与 env 声明供 Agent 与维护者阅读。 */
-function TesterDrawer({ name, onClose }: { name: string | null; onClose: () => void }) {
-  const detail = useAsync(
-    () => (name ? api.getTester(name) : Promise.resolve(null)),
-    [name],
-  )
-
-  return (
-    <Drawer
-      open={name !== null}
-      onClose={onClose}
-      title={detail.data?.display_name ?? name ?? 'Tester'}
-      description={`${name ?? ''} · 平台只认 tester.yaml + run.sh`}
-    >
-      {detail.loading && !detail.data ? (
-        <LoadingBlock label="加载 Tester 详情…" />
-      ) : detail.error ? (
-        <ErrorState error={detail.error} onRetry={detail.reload} />
-      ) : detail.data ? (
-        <div className="flex flex-col gap-4">
-          {detail.data.description ? (
-            <p className="text-xs leading-relaxed text-fg-2">{detail.data.description}</p>
-          ) : null}
-
-          <dl className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
-            <dt className="text-fg-3">名称</dt>
-            <dd className="font-mono text-fg-2">{detail.data.name}</dd>
-            <dt className="text-fg-3">版本</dt>
-            <dd className="font-mono text-fg-2">{detail.data.version}</dd>
-            <dt className="text-fg-3">角色</dt>
-            <dd>
-              <Badge tone={detail.data.role === 'pre_check' ? 'primary' : 'muted'}>{detail.data.role}</Badge>
-            </dd>
-            <dt className="text-fg-3">失败策略</dt>
-            <dd className="font-mono text-fg-2">{detail.data.on_failure}</dd>
-            <dt className="text-fg-3">独占 Endpoint</dt>
-            <dd className="text-fg-2">{detail.data.exclusive ? '是（不与其它 Task 并行）' : '否'}</dd>
-            <dt className="text-fg-3">镜像</dt>
-            <dd className="break-all font-mono text-2xs text-fg-2">{detail.data.image}</dd>
-            <dt className="text-fg-3">入口</dt>
-            <dd className="font-mono text-2xs text-fg-2">{detail.data.entry ?? '—'}</dd>
-          </dl>
-
-          {detail.data.placeholder ? (
-            <div>
-              <p className="text-xs font-medium text-fg-2">args 示例</p>
-              <pre className="mt-1 overflow-x-auto rounded-md border border-line-soft bg-surface-2 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-fg-2">
-                {detail.data.placeholder}
-              </pre>
-            </div>
-          ) : null}
-
-          <div>
-            <p className="mb-1 text-xs font-medium text-fg-2">参数清单（{detail.data.parameters.length}）</p>
-            {detail.data.parameters.length === 0 ? (
-              <p className="text-2xs text-fg-3">没有声明参数。</p>
-            ) : (
-              <TableWrap>
-                <Table>
-                  <THead>
-                    <TR className="hover:bg-transparent">
-                      <TH>参数</TH>
-                      <TH>类型</TH>
-                      <TH>必填</TH>
-                      <TH>默认</TH>
-                    </TR>
-                  </THead>
-                  <TBody>
-                    {detail.data.parameters.map((param) => (
-                      <TR key={param.name} className="hover:bg-transparent">
-                        <TD className="align-top">
-                          <span className="font-mono text-2xs text-fg">{param.name}</span>
-                          {param.description ? (
-                            <p className="mt-0.5 text-2xs leading-relaxed text-fg-3">{param.description}</p>
-                          ) : null}
-                        </TD>
-                        <TD className="align-top font-mono text-2xs">{param.type}</TD>
-                        <TD className="align-top">{param.required ? <Badge tone="warn">必填</Badge> : '—'}</TD>
-                        <TD className="align-top font-mono text-2xs">{param.default ?? '—'}</TD>
-                      </TR>
-                    ))}
-                  </TBody>
-                </Table>
-              </TableWrap>
-            )}
-          </div>
-
-          <div>
-            <p className="mb-1 text-xs font-medium text-fg-2">env 声明</p>
-            {detail.data.env.length === 0 ? (
-              <p className="text-2xs text-fg-3">没有声明环境变量。</p>
-            ) : (
-              <ul className="flex flex-col gap-1.5">
-                {detail.data.env.map((item) => (
-                  <li key={item.name} className="flex flex-wrap items-center gap-2 text-2xs">
-                    <Tag mono>{item.name}</Tag>
-                    {item.secret ? <Badge tone="warn">凭据</Badge> : null}
-                    {item.required ? <Badge tone="info">必填</Badge> : <span className="text-fg-3">可选</span>}
-                    <span className="text-fg-3">{item.description}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <p className="rounded-md border border-line-soft bg-surface-2 p-3 text-2xs leading-relaxed text-fg-3">
-            Tester 随镜像内置，平台启动时扫描目录自动发现 —— 控制台不提供上传或注册入口。
-          </p>
-        </div>
-      ) : null}
-    </Drawer>
-  )
+/** 版本比较：`0.10.0 > 0.9.0`（按数字段比，别用字符串排序） */
+function compareVersion(a: string, b: string): number {
+  const pa = a.split(/[.-]/).map((part) => Number.parseInt(part, 10))
+  const pb = b.split(/[.-]/).map((part) => Number.parseInt(part, 10))
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const x = Number.isNaN(pa[i]) ? 0 : (pa[i] ?? 0)
+    const y = Number.isNaN(pb[i]) ? 0 : (pb[i] ?? 0)
+    if (x !== y) return y - x // 大的在前
+  }
+  return 0
 }
 
+interface TesterGroup {
+  name: string
+  /** 目录里的当前版本（后端默认只回最新；`latest` 缺省时按版本号取最大） */
+  latest: Tester
+  /** 历史版本（`?include_retired=true` 才会带回来） */
+  older: Tester[]
+}
+
+/**
+ * Tester 目录：**按 name 聚合**，一行一个 name。
+ *
+ * 票 #60：`GET /testers` 会同时回 `aisbench-sla@0.1.0` 与 `@0.2.0`，并列展示时用户以为重复。
+ * 现在主行只显示最新版本，历史版本收进「另有 N 个历史版本」——展开才看得到，
+ * 并标 `已退役`（"目录里已移除；历史 Run 仍按 name@version 引用"）。
+ *
+ * 历史 Run 的报告/Task 详情里显示的 `name@version` **不改**：那是当时跑的版本，是对的。
+ */
 export function TestersPage() {
   /**
    * 抽屉状态进 URL（C1）：打开写 `?open=<name>`，关闭删掉。
@@ -133,6 +49,7 @@ export function TestersPage() {
    */
   const [params, setParams] = useSearchParams()
   const openName = params.get('open')
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
   const setOpenName = (name: string | null) => {
     const next = new URLSearchParams(params)
@@ -141,35 +58,46 @@ export function TestersPage() {
     setParams(next, { replace: true })
   }
 
-  const testers = useAsync(() => api.listTesters(), [])
+  const testers = useAsync(() => api.listTesters({ include_retired: true }), [])
   const list: Tester[] = testers.data ?? []
+
+  const groups = useMemo<TesterGroup[]>(() => {
+    const byName = new Map<string, Tester[]>()
+    for (const tester of list) {
+      byName.set(tester.name, [...(byName.get(tester.name) ?? []), tester])
+    }
+    return [...byName.entries()]
+      .map(([name, versions]) => {
+        const sorted = [...versions].sort((a, b) => compareVersion(a.version, b.version))
+        const latest = sorted.find((item) => item.latest) ?? sorted.find((item) => !item.retired) ?? sorted[0]!
+        return {
+          name,
+          latest,
+          older: sorted.filter((item) => item.version !== latest.version),
+        }
+      })
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [list])
 
   return (
     <>
-      <RightRail>
-        <RailCard title="这些 Tester 从哪来" tone="info">
-          <p>随镜像一起发版：平台启动时扫一遍目录，控制台不能上传、也不能在这儿注册新的。</p>
-          <p className="mt-2">想做新 Tester，得把目录加进镜像再重启平台；这里看到的永远是当前这一版。</p>
-        </RailCard>
-        <RailCard title="参数清单怎么用" tone="muted">
-          <p>参数清单是写给写 Run 的人看的说明书，平台不会照着它做校验。</p>
-          <p className="mt-2">url / model_name / model_path 这三项由平台自动带上，写 Run 时不用再写一遍。</p>
-        </RailCard>
-      </RightRail>
+      <p className="text-2xs leading-relaxed text-fg-3">
+        Tester 随镜像内置，平台启动时扫描目录自动发现；参数清单是写给写 Run 的人看的说明书，平台不会照着它做校验。
+      </p>
 
       <Card>
         <CardHeader
           tone="primary"
           title="已注册 Tester"
-          sub={`${list.length} 个 · 随镜像内置，平台启动时扫描目录自动发现`}
+          sub={`${groups.length} 个名字 · 随镜像内置，平台启动时扫描目录自动发现`}
         />
         {testers.error ? (
           <div className="p-4">
             <ErrorState error={testers.error} onRetry={testers.reload} />
           </div>
         ) : testers.loading && list.length === 0 ? (
-          <TableSkeleton rows={4} cols={6} />
-        ) : list.length === 0 ? (
+          <TableSkeleton rows={4} cols={7} />
+        ) : groups.length === 0 ? (
           <EmptyState
             title="目录里还没有 Tester"
             description="把 tester.yaml + run.sh 放进 testers/<name>/，平台重启后会自动发现。"
@@ -190,34 +118,92 @@ export function TestersPage() {
                 </TR>
               </THead>
               <TBody>
-                {list.map((tester) => (
-                  <TR key={tester.name} className="cursor-pointer" onClick={() => setOpenName(tester.name)}>
-                    <TD className="font-mono text-2xs text-fg">{tester.name}</TD>
-                    <TD className="font-mono text-2xs">{tester.version}</TD>
-                    <TD>
-                      <Badge tone={tester.role === 'pre_check' ? 'primary' : 'muted'}>{tester.role}</Badge>
-                    </TD>
-                    <TD>
-                      <Badge tone={tester.on_failure === 'abort_run' ? 'warn' : 'muted'}>{tester.on_failure}</Badge>
-                    </TD>
-                    <TD className={cn('text-2xs', tester.exclusive ? 'text-fg' : 'text-fg-3')}>
-                      {tester.exclusive ? '是' : '否'}
-                    </TD>
-                    <TD className="tabular-nums">{tester.parameters.length}</TD>
-                    <TD className="tabular-nums">{tester.env.length}</TD>
-                    <TD className="text-right">
-                      <Button size="sm" variant="ghost" onClick={() => setOpenName(tester.name)}>
-                        详情
-                      </Button>
-                    </TD>
-                  </TR>
-                ))}
+                {groups.map((group) => {
+                  const tester = group.latest
+                  const isOpen = Boolean(expanded[group.name])
+                  return [
+                    <TR key={`${group.name}-latest`}>
+                      <TD className="font-mono text-2xs text-fg">{group.name}</TD>
+                      <TD>
+                        <button
+                          type="button"
+                          data-testid="tester-version"
+                          className="rounded-sm font-mono text-2xs text-primary underline-offset-2 hover:underline"
+                          onClick={() => setOpenName(group.name)}
+                        >
+                          {tester.version}
+                        </button>
+                        {tester.retired ? <Badge tone="muted" className="ml-1.5">已退役</Badge> : null}
+                      </TD>
+                      <TD>
+                        <Badge tone={tester.role === 'pre_check' ? 'primary' : 'muted'}>{tester.role}</Badge>
+                      </TD>
+                      <TD>
+                        <Badge tone={tester.on_failure === 'abort_run' ? 'warn' : 'muted'}>{tester.on_failure}</Badge>
+                      </TD>
+                      <TD className={cn('text-2xs', tester.exclusive ? 'text-fg' : 'text-fg-3')}>
+                        {tester.exclusive ? '是' : '否'}
+                      </TD>
+                      <TD className="tabular-nums">{tester.parameters.length}</TD>
+                      <TD className="tabular-nums">{tester.env.length}</TD>
+                      <TD className="flex flex-wrap items-center justify-end gap-1.5 text-right">
+                        {group.older.length > 0 ? (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            data-testid="toggle-older-versions"
+                            aria-expanded={isOpen}
+                            onClick={() => setExpanded((prev) => ({ ...prev, [group.name]: !prev[group.name] }))}
+                            icon={
+                              <ChevronDown
+                                className={cn('size-3 transition-transform duration-150', isOpen && 'rotate-180')}
+                                aria-hidden
+                              />
+                            }
+                          >
+                            另有 {group.older.length} 个历史版本
+                          </Button>
+                        ) : null}
+                        <Button size="sm" variant="ghost" onClick={() => setOpenName(group.name)}>
+                          详情
+                        </Button>
+                      </TD>
+                    </TR>,
+
+                    ...(isOpen
+                      ? group.older.map((old) => (
+                          <TR key={`${group.name}-${old.version}`} className="bg-surface-2/60">
+                            <TD className="pl-6 text-2xs text-fg-3">↳ {group.name}</TD>
+                            <TD>
+                              <span className="font-mono text-2xs text-fg-2">{old.version}</span>
+                              <Badge tone="muted" className="ml-1.5">
+                                已退役
+                              </Badge>
+                            </TD>
+                            <TD>
+                              <Badge tone="muted">{old.role}</Badge>
+                            </TD>
+                            <TD>
+                              <Badge tone={old.on_failure === 'abort_run' ? 'warn' : 'muted'}>{old.on_failure}</Badge>
+                            </TD>
+                            <TD className="text-2xs text-fg-3">{old.exclusive ? '是' : '否'}</TD>
+                            <TD className="tabular-nums">{old.parameters.length}</TD>
+                            <TD className="tabular-nums">{old.env.length}</TD>
+                            <TD className="text-right text-2xs text-fg-3">
+                              目录里已移除；历史 Run 仍按 name@version 引用
+                            </TD>
+                          </TR>
+                        ))
+                      : []),
+                  ]
+                })}
               </TBody>
             </Table>
           </TableWrap>
         )}
       </Card>
 
+      {/* 与提交页 Task 行的「详情」是同一个组件（TesterDrawer）：内容只写一份 */}
       <TesterDrawer name={openName} onClose={() => setOpenName(null)} />
     </>
   )

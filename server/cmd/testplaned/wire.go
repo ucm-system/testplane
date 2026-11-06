@@ -564,6 +564,11 @@ func (s *registryStorage) UpsertTester(ctx context.Context, rec registry.Record)
 	return s.reg.UpsertTester(ctx, row)
 }
 
+// MarkTesterOrphaned 把目录里消失的版本落库标记（只标记，不删除历史行）。
+func (s *registryStorage) MarkTesterOrphaned(ctx context.Context, name, version string) error {
+	return s.reg.MarkTesterOrphaned(ctx, name, version)
+}
+
 func (s *registryStorage) GetTester(ctx context.Context, name, version string) (registry.Record, error) {
 	row, err := s.reg.GetTester(ctx, name, version)
 	if err != nil {

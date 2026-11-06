@@ -52,6 +52,7 @@ const TITLES: Array<{ test: (path: string) => boolean; title: string; sub: strin
   { test: (p) => p === '/testers', title: 'Tester 目录', sub: '随镜像内置，平台启动时扫描目录自动发现' },
   { test: (p) => p === '/clusters', title: '集群与队列', sub: '只回答「卡在队列还是卡在平台槽位」' },
   { test: (p) => p === '/admin', title: '管理台', sub: 'Profile / 集群 / Secret 引用 / 审计（仅 admin）' },
+  { test: (p) => p === '/404', title: '页面不存在', sub: '这个地址没有对应的页面' },
 ]
 
 function titleFor(pathname: string): { title: string; sub: string } {
@@ -111,10 +112,17 @@ export function AppShell() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const { title, sub } = titleFor(location.pathname)
 
+  /**
+   * 右栏只在**概览**保留（快捷操作 / 排队中 Task / 这页怎么看）。
+   * 其余页面单栏铺满：说明性文字就地收进 title / 问号提示，不搬家。
+   * data-rail="on|off" 让布局断言能区分两套栅格（有栏 240/1fr/288，无栏 240/1fr）。
+   */
+  const hasRail = location.pathname === '/'
+
   useEffect(() => setMobileNavOpen(false), [location.pathname])
 
   return (
-    <div className="flex min-h-screen flex-col bg-canvas">
+    <div data-rail={hasRail ? 'on' : 'off'} className="flex min-h-screen flex-col bg-canvas">
       <a
         href="#main"
         className="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-[70] focus:rounded-md focus:bg-surface focus:px-3 focus:py-1.5 focus:text-xs focus:shadow-pop"
@@ -123,7 +131,14 @@ export function AppShell() {
       </a>
 
       {/* 页头：列宽与 body 完全一致，两条 1px 竖线踩在列线上 */}
-      <header className="sticky top-0 z-40 grid h-[56px] shrink-0 grid-cols-[240px_minmax(0,1fr)_288px] items-stretch border-b border-line bg-surface max-[1024px]:grid-cols-[240px_minmax(0,1fr)] max-[768px]:flex max-[768px]:items-center max-[768px]:gap-2">
+      <header
+        className={cn(
+          'sticky top-0 z-40 grid h-[56px] shrink-0 items-stretch border-b border-line bg-surface max-[768px]:flex max-[768px]:items-center max-[768px]:gap-2',
+          hasRail
+            ? 'grid-cols-[240px_minmax(0,1fr)_288px] max-[1024px]:grid-cols-[240px_minmax(0,1fr)]'
+            : 'grid-cols-[240px_minmax(0,1fr)]',
+        )}
+      >
         <div className="flex min-w-0 items-center gap-3 pl-6 pr-3 max-[768px]:w-auto max-[768px]:shrink-0 max-[768px]:pl-2">
           <button
             type="button"
@@ -145,16 +160,31 @@ export function AppShell() {
 
         <div className="flex min-w-0 flex-1 items-center gap-2.5 border-l border-line pl-5 max-[768px]:border-l-0 max-[768px]:pl-2">
           <h1 className="truncate whitespace-nowrap text-[15px] font-semibold tracking-[-0.01em] text-fg">{title}</h1>
-          <span className="hidden truncate text-xs text-fg-3 md:inline">{sub}</span>
+          <span className="hidden min-w-0 truncate text-xs text-fg-3 md:inline">{sub}</span>
+          {/* 无栏页面只有两列：用户菜单并进标题格右端，避免第三个子元素换行 */}
+          {!hasRail ? (
+            <span className="ml-auto flex shrink-0 items-center gap-2 pr-6 max-[768px]:pr-3">
+              <UserMenu />
+            </span>
+          ) : null}
         </div>
 
-        <div className="flex min-w-0 items-center justify-end gap-2 border-l border-line pl-4 pr-6 max-[1024px]:border-l-0 max-[1024px]:pr-4 max-[768px]:shrink-0 max-[768px]:pl-2 max-[768px]:pr-3">
-          <UserMenu />
-        </div>
+        {hasRail ? (
+          <div className="flex min-w-0 items-center justify-end gap-2 border-l border-line pl-4 pr-6 max-[1024px]:border-l-0 max-[1024px]:pr-4 max-[768px]:shrink-0 max-[768px]:pl-2 max-[768px]:pr-3">
+            <UserMenu />
+          </div>
+        ) : null}
       </header>
 
       {/* 三列主体：main 写在最前，用 grid-column 摆到第 2 列 */}
-      <div className="grid flex-1 grid-cols-[240px_minmax(0,1fr)_288px] items-stretch max-[1024px]:grid-cols-[240px_minmax(0,1fr)] max-[768px]:grid-cols-[minmax(0,1fr)]">
+      <div
+        className={cn(
+          'grid flex-1 items-stretch max-[768px]:grid-cols-[minmax(0,1fr)]',
+          hasRail
+            ? 'grid-cols-[240px_minmax(0,1fr)_288px] max-[1024px]:grid-cols-[240px_minmax(0,1fr)]'
+            : 'grid-cols-[240px_minmax(0,1fr)]',
+        )}
+      >
         <main
           id="main"
           className="col-start-2 row-start-1 flex min-w-0 flex-col gap-4 p-6 max-[768px]:col-start-1 max-[768px]:row-start-2 max-[768px]:p-4"
@@ -171,16 +201,18 @@ export function AppShell() {
 
           {/* ≤1024px 时右栏被收成两列：页面把右栏内容 portal 到这里（主内容底部的可展开区块），
               折叠 ≠ 隐藏 —— 事件流与边界说明仍然可达（C4） */}
-          <div id="rail-inline" data-testid="rail-inline" className="min-[1025px]:hidden" />
+          {hasRail ? (
+            <div id="rail-inline" data-testid="rail-inline" className="min-[1025px]:hidden" />
+          ) : null}
         </main>
 
-        {/* 左栏（col 1）：sticky，高度锁一屏（页头 56 + 页脚 40） */}
+        {/* 左栏（col 1）：sticky，高度锁一屏（只剩页头 56 —— 页脚已删） */}
         <aside
           aria-label="主导航"
           className="col-start-1 row-start-1 self-stretch border-r border-line bg-surface max-[768px]:hidden"
         >
           {/* 外层撑满行高 → 三列等高；内层 sticky → 导航不随主内容滚走 */}
-          <div className="sticky top-[56px] flex h-[calc(100vh-96px)] flex-col overflow-y-auto pb-4 pt-1.5">
+          <div className="sticky top-[56px] flex h-[calc(100vh-56px)] flex-col overflow-y-auto pb-4 pt-1.5">
             <NavList />
             <div className="mt-auto border-t border-line px-5 pb-2 pt-4 text-2xs text-fg-3">
               {USE_MOCK ? '示意原型 · 数据为 mock' : 'TestPlane · 实时数据'}
@@ -188,22 +220,20 @@ export function AppShell() {
           </div>
         </aside>
 
-        {/* 右栏（col 3）：外层撑满行高（等高），内层 sticky 且作为 portal 目标 */}
-        <aside
-          aria-label="辅助信息"
-          className="col-start-3 row-start-1 min-w-0 self-stretch border-l border-line bg-surface max-[1024px]:hidden"
-        >
-          <div
-            id="right-rail"
-            className="sticky top-[56px] flex h-[calc(100vh-96px)] flex-col gap-4 overflow-y-auto p-5 [&:empty]:hidden"
-          />
-        </aside>
+        {/* 右栏（col 3）：只有概览页有；其余页面单栏铺满 */}
+        {hasRail ? (
+          <aside
+            aria-label="辅助信息"
+            className="col-start-3 row-start-1 min-w-0 self-stretch border-l border-line bg-surface max-[1024px]:hidden"
+          >
+            <div
+              id="right-rail"
+              className="sticky top-[56px] flex h-[calc(100vh-56px)] flex-col gap-4 overflow-y-auto p-5 [&:empty]:hidden"
+            />
+          </aside>
+        ) : null}
       </div>
 
-      <footer className="sticky bottom-0 z-30 flex h-10 shrink-0 items-center gap-3 border-t border-line bg-surface px-6 text-xs text-fg-2 max-[768px]:px-4">
-        <span>TestPlane · {USE_MOCK ? '示意原型，数据为 mock，操作不产生真实执行' : '控制台'}</span>
-        <span className="ml-auto hidden text-fg-3 sm:inline">API: /api/v1</span>
-      </footer>
 
       <Drawer open={mobileNavOpen} onClose={() => setMobileNavOpen(false)} title="导航" widthClass="max-w-[16rem]" side="left">
         <NavList onNavigate={() => setMobileNavOpen(false)} />
