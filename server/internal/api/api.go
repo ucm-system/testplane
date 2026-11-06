@@ -167,6 +167,9 @@ func (s *Server) Handler() http.Handler {
 
 		// Run（只读：viewer）
 		r.Get("/runs", s.handleListRuns)
+		// 列筛选候选值（Excel 式表头下拉，D-61）。必须注册在 /runs/{id} 之前更直观
+		// （chi 本身静态段优先，不依赖顺序）。
+		r.Get("/runs/facets", s.handleRunFacets)
 		r.Get("/runs/{id}", s.handleGetRun)
 		r.Get("/runs", s.handleListRuns)
 		r.Get("/runs/{id}", s.handleGetRun)

@@ -215,7 +215,8 @@ run:
 | 方法 | 路径 | 说明 | 成功 |
 |---|---|---|---|
 | `POST` | `/runs` | 提交 Run（YAML/JSON）；`?dry_run=true` 只校验 | 202 / 200(dry) |
-| `GET` | `/runs` | 列表：`status`、`kind`、`tester`、`submitter`、`cursor`、`limit` | 200 |
+| `GET` | `/runs` | 列表：`status`、`kind`、`tester`、`submitter`、`cursor`、`limit`；**UI 另有 `page`/`page_size`（offset 分页，响应带 `total`）** | 200 |
+| `GET` | `/runs/facets` | Excel 式列筛选的候选值：`status` / `submitter` / `kind` / `tester` 各值**及计数**（同一套过滤参数） | 200 |
 | `GET` | `/runs/{id}` | 详情 + Task 摘要 | 200 |
 | `GET` | `/runs/{id}/tasks` | Task 列表（分页） | 200 |
 | `POST` | `/runs/{id}/cancel` | 取消（含 Deploy 排队） | 202 |
