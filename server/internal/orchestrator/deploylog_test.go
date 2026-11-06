@@ -462,6 +462,19 @@ func TestControllerKeepsCollectorWhenUninstallSkipped(t *testing.T) {
 
 		c.ensureDeployLogCollector(context.Background(), RunView{ID: "r-" + tc.name, DeployJSON: r.DeployJSON})
 		c.cleanupDeployIfTerminal(context.Background(), "r-"+tc.name)
+		// 采集是后台 goroutine：测试结束前必须停掉并等它写完，否则 t.TempDir 清理会撞上并发写
+		// （CI 上就是这么红的：TempDir RemoveAll cleanup: unlinkat …）。
+		t.Cleanup(func() {
+			c.mu.Lock()
+			left := make([]*DeployLogCollector, 0, len(c.deployLogs))
+			for _, col := range c.deployLogs {
+				left = append(left, col)
+			}
+			c.mu.Unlock()
+			for _, col := range left {
+				col.StopQuiet()
+			}
+		})
 
 		c.mu.Lock()
 		collector := c.deployLogs["r-"+tc.name]
