@@ -301,6 +301,7 @@ func TestDeployLogCollector_KeepsCollectingWhenUninstallSkipped(t *testing.T) {
 	root := t.TempDir()
 	src := &fakePodLogs{pods: nil}
 	c := newDeployCollector(t, root, src)
+	t.Cleanup(func() { c.StopQuiet(); c.WaitLoop() })
 	c.Start(context.Background())
 	defer c.Stop("test cleanup")
 
@@ -342,6 +343,7 @@ func TestDeployLogCollector_StopsWhenUninstalled(t *testing.T) {
 		logs: map[string]string{"tp-rel-stack-1|server": "2026-11-06T01:00:00Z x\n"},
 	}
 	c := newDeployCollector(t, root, src)
+	t.Cleanup(func() { c.StopQuiet(); c.WaitLoop() })
 	c.Start(context.Background())
 	c.discover(context.Background())
 	c.Wait()
@@ -375,6 +377,7 @@ func TestDeployLogCollector_StopsWhenAllPodsGone(t *testing.T) {
 		logs: map[string]string{"tp-rel-stack-1|server": "2026-11-06T01:00:00Z x\n"},
 	}
 	c := newDeployCollector(t, root, src)
+	t.Cleanup(func() { c.StopQuiet(); c.WaitLoop() })
 	c.Start(context.Background())
 	c.discover(context.Background())
 	c.Wait()
@@ -408,6 +411,7 @@ func TestDeployLogCollector_StopsAtMaxDuration(t *testing.T) {
 		logs: map[string]string{"tp-rel-stack-1|server": "2026-11-06T01:00:00Z x\n"},
 	}
 	c := newDeployCollector(t, root, src)
+	t.Cleanup(func() { c.StopQuiet(); c.WaitLoop() })
 	// 不启后台循环：直接把"已经开始且远超上限"的状态摆好，discover 一次即可判定。
 	// （早先版本用 Start + 1ms 上限，在 CI/race 下会偶发绿红。）
 	c.MaxDuration = time.Millisecond

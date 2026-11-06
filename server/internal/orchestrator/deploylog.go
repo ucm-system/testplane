@@ -218,6 +218,16 @@ func (c *DeployLogCollector) Wait() {
 	c.mu.Unlock()
 }
 
+// WaitLoop 等发现循环退出（测试收尾用：循环里可能还会写一次 pods.json，
+// 不等就会在 t.TempDir 清理时并发写——CI 上抓过好几次）。
+func (c *DeployLogCollector) WaitLoop() {
+	c.mu.Lock()
+	done := c.done
+	c.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
 // beginWrite 登记一个写盘 goroutine；stopping 之后不再接受新的（Stop 之后不该再有写入）。
 func (c *DeployLogCollector) beginWrite() bool {
 	c.mu.Lock()
