@@ -758,11 +758,16 @@ function seedAll(): void {
         startedMinAgo: 1,
         // 状态机不推进这个 Task：Run 保持 testing，日志轮询能一直演示下去
         sticky: true,
-        logSeed: Array.from(
-          { length: 40 },
-          (_, i) =>
-            `[00:00:${String(i % 60).padStart(2, '0')}] [stream] 第 ${i + 1} 行：input_len=${256 + i * 32} tokens/s=${1200 + i * 7}`,
-        ),
+        logSeed: [
+          ...Array.from(
+            { length: 40 },
+            (_, i) =>
+              `[00:00:${String(i % 60).padStart(2, '0')}] [stream] 第 ${i + 1} 行：input_len=${256 + i * 32} tokens/s=${1200 + i * 7}`,
+          ),
+          // 平台标记行：重启前的 previous 段与采集缺口（UI 要渲染成 warn / danger 分隔条）
+          '--- [container restarted #3 at 2026-11-05T06:44:11Z, previous exit: OOMKilled] ---',
+          '--- [log gap: 2026-11-05T06:44:12Z – 2026-11-05T06:46:30Z, collector restarted] ---',
+        ],
       },
     ],
   })
@@ -944,6 +949,9 @@ function deployLogLines(podName: string, runName: string): string[] {
   lines.push(`${t(7)} [main] serving request batch size=32, throughput=1280 tok/s`)
   lines.push(`${t(8)} [main] ERROR: transient HCCL timeout, retrying (attempt 1/3)`)
   lines.push(`${t(9)} [main] recovered, HCCL group re-established in 1.2s`)
+  // 采集器写的标记行（与后端同一格式；UI 按分隔样式渲染，内容不改）
+  lines.push('--- [container restarted #3 at 2026-11-05T06:44:11Z, previous exit: OOMKilled] ---')
+  lines.push('--- [log gap: 2026-11-05T06:44:12Z – 2026-11-05T06:46:30Z, collector restarted] ---')
   return lines
 }
 
@@ -1816,8 +1824,21 @@ export const mockApi: Api = {
       { path: `${prefix}report.md`, kind: 'report', size_bytes: 6_208, sha256: null, task_id: null, attempt_id: null },
       { path: `${prefix}metadata.json`, kind: 'other', size_bytes: 3_914, sha256: null, task_id: null, attempt_id: null },
       { path: `${prefix}events.jsonl`, kind: 'raw', size_bytes: 42_106, sha256: null, task_id: null, attempt_id: null },
-      { path: `${prefix}deploy/logs/${run.deploy ? 'genet-main-0' : 'n/a'}.log`, kind: 'log', size_bytes: 12_880, sha256: null, task_id: null, attempt_id: null },
     ]
+    // D-59：Deploy 的每个 Pod 一份日志 + pods.json 拓扑快照（与后端落盘路径一致）
+    if (run.deploy) {
+      items.push({ path: `${prefix}deploy/pods.json`, kind: 'raw', size_bytes: 1_204, sha256: null, task_id: null, attempt_id: null })
+      for (const pod of state.deploys[runId]?.pods ?? []) {
+        items.push({
+          path: `${prefix}deploy/logs/${pod.name}.log`,
+          kind: 'log',
+          size_bytes: 12_880,
+          sha256: null,
+          task_id: null,
+          attempt_id: null,
+        })
+      }
+    }
     for (const task of run.tasks ?? []) {
       const detail = state.tasks[task.id]
       if (!detail) continue
@@ -1856,10 +1877,37 @@ export const mockApi: Api = {
     return new Blob([`PK\u0003\u0004 testplane mock bundle for ${runId}`], { type: 'application/zip' })
   },
 
-  /** 单文件下载（mock）：按后缀给合理 content-type */
+  /** 单文件下载（mock）：按后缀给合理 content-type；Deploy 日志只认真正落盘的路径 */
   async downloadFile(runId: string, path: string): Promise<Blob> {
     await delay(80)
-    findRun(runId)
+    const run = findRun(runId)
+    const rel = path.startsWith(`${runId}/`) ? path.slice(runId.length + 1) : path
+
+    if (rel.startsWith('deploy/logs/')) {
+      const file = rel.slice('deploy/logs/'.length)
+      const pods = state.deploys[runId]?.pods ?? []
+      // 单容器：<pod>.log；多容器/滚档：<pod>.<suffix>.log
+      const exists = pods.some((pod) => file === `${pod.name}.log` || file.startsWith(`${pod.name}.`))
+      if (!exists) {
+        throw new ApiClientError(404, {
+          code: 'NOT_FOUND',
+          message: `deploy/logs/${file} 还没落盘（Pod 可能刚创建）`,
+          detail: { path: rel },
+          retryable: false,
+        })
+      }
+      return new Blob([`mock deploy log of deploy/logs/${file}`], { type: 'text/plain' })
+    }
+
+    if (rel === 'deploy/pods.json') {
+      if (!run.deploy) {
+        throw new ApiClientError(404, { code: 'NOT_FOUND', message: '这次 Run 没有 Deploy', retryable: false })
+      }
+      return new Blob([JSON.stringify({ generated_at: nowIso(), pods: state.deploys[runId]?.pods ?? [] })], {
+        type: 'application/json',
+      })
+    }
+
     const type = path.endsWith('.md')
       ? 'text/markdown'
       : path.endsWith('.jsonl')

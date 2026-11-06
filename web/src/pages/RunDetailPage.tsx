@@ -148,6 +148,8 @@ const RETRY_PLAN_REASON: Record<string, string> = {
     if (!deploy) return null
     return api.getDeploy(run.id)
   }, [run.id, version, Boolean(deploy)])
+  /** Pod 拓扑表点某一行 → 日志面板切到对应 Pod 页签（两边共享同一个选中值） */
+  const [selectedPod, setSelectedPod] = useState<string | null>(null)
 
   if (!deploy) return null
 
@@ -230,54 +232,95 @@ const RETRY_PLAN_REASON: Record<string, string> = {
           <CardHeader
             tone="info"
             title="Pods"
-            sub="多节点 / PD 分离时一个 Deploy 对应多个 Pod"
+            sub="多节点 / PD 分离时一个 Deploy 对应多个 Pod；点 Pod 名切到它的日志页签"
             className="border-b-0 px-5 py-3"
           />
-          <TableWrap>
-            <Table>
-              <THead>
-                <TR className="hover:bg-transparent">
-                  <TH>Pod</TH>
-                  <TH>角色</TH>
-                  <TH>阶段</TH>
-                  <TH>就绪</TH>
-                  <TH>节点</TH>
-                  <TH>重启</TH>
-                </TR>
-              </THead>
-              <TBody>
-                {pods.map((pod) => (
-                  <TR key={pod.name}>
-                    <TD className="font-mono text-2xs text-fg">{pod.name}</TD>
-                    <TD>{pod.role ? <Tag mono>{pod.role}</Tag> : <span className="text-fg-3">—</span>}</TD>
-                    <TD className="text-2xs" title={pod.phase ?? undefined}>{phaseLabel(pod.phase)}</TD>
-                    <TD>
-                      <Badge tone={pod.ready ? 'ok' : 'warn'}>{pod.ready ? '已就绪' : '未就绪'}</Badge>
-                    </TD>
-                    <TD className="text-2xs">{pod.node ?? '—'}</TD>
-                    <TD className="tabular-nums">{pod.restarts ?? 0}</TD>
+          <div data-testid="deploy-pods">
+            <TableWrap>
+              <Table>
+                <THead>
+                  <TR className="hover:bg-transparent">
+                    <TH>Pod</TH>
+                    <TH>角色</TH>
+                    <TH>阶段</TH>
+                    <TH>就绪</TH>
+                    <TH>重启</TH>
+                    <TH>节点</TH>
                   </TR>
-                ))}
-              </TBody>
-            </Table>
-          </TableWrap>
-          <div className="border-t border-line-soft">
+                </THead>
+                <TBody>
+                  {pods.map((pod) => (
+                    <TR key={pod.name}>
+                      <TD>
+                        <button
+                          type="button"
+                          data-testid="deploy-pod-name"
+                          onClick={() => {
+                            setSelectedPod(pod.name)
+                            document.getElementById('deploy-logs')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                          }}
+                          className="break-all text-left font-mono text-2xs text-primary-text hover:underline"
+                          title={`查看 ${pod.name} 的日志`}
+                        >
+                          {pod.name}
+                        </button>
+                      </TD>
+                      <TD>{pod.role ? <Tag mono>{pod.role}</Tag> : <span className="text-fg-3">—</span>}</TD>
+                      <TD className="text-2xs" title={pod.phase ?? undefined}>{phaseLabel(pod.phase)}</TD>
+                      <TD>
+                        <Badge tone={pod.ready ? 'ok' : 'warn'}>{pod.ready ? '已就绪' : '未就绪'}</Badge>
+                      </TD>
+                      <TD className="tabular-nums">
+                        {(pod.restarts ?? 0) > 0 ? <Badge tone="warn">{pod.restarts} 次</Badge> : 0}
+                      </TD>
+                      <TD className="text-2xs">{pod.node ?? '—'}</TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+            </TableWrap>
+          </div>
+          <div id="deploy-logs" className="border-t border-line-soft">
             <div className="flex flex-wrap items-center gap-2 px-5 pb-1 pt-4">
               <span className="text-sm font-semibold text-fg">Deploy 日志</span>
-              <span className="text-2xs text-fg-3">按 Pod 分页签，不合并；断过的地方显式标 gap</span>
+              <span className="text-2xs text-fg-3">按 Pod 分页签，不合并；断过的地方显式标 gap；落盘文件可直接下载 .log</span>
             </div>
-            <DeployLogsPanel runId={run.id} deployState={deploy.state} pods={pods} live={!isTerminalRun(run.status)} />
+            <DeployLogsPanel
+              runId={run.id}
+              deployState={deploy.state}
+              pods={pods}
+              live={!isTerminalRun(run.status)}
+              pod={selectedPod}
+              onPodChange={setSelectedPod}
+            />
           </div>
         </div>
       ) : (
         /* Pod 拓扑为空（排队中 / 已回收）：日志端点 `?pod=` 必选，没有 Pod 时**不请求**，
            面板按 deploy.state 给"排队中 / 已回收"的文案。 */
         <div className="border-t border-line-soft">
-          <div className="flex flex-wrap items-center gap-2 px-5 pb-1 pt-4">
-            <span className="text-sm font-semibold text-fg">Deploy 日志</span>
-            <span className="text-2xs text-fg-3">没有 Pod 时不请求日志端点（`?pod=` 必选）</span>
+          <CardHeader
+            tone="info"
+            title="Pods"
+            sub="Pod 列表来自 deploy/pods.json；暂无 Pod 时仍可看排队原因"
+            className="border-b-0 px-5 py-3"
+          />
+          <div data-testid="deploy-pods">
+            <p className="px-5 pb-3 text-xs text-fg-3">暂无 Pod（排队中或已回收）</p>
           </div>
-          <DeployLogsPanel runId={run.id} deployState={deploy.state} pods={pods} />
+          <div id="deploy-logs" className="border-t border-line-soft">
+            <div className="flex flex-wrap items-center gap-2 px-5 pb-1 pt-4">
+              <span className="text-sm font-semibold text-fg">Deploy 日志</span>
+              <span className="text-2xs text-fg-3">没有 Pod 时不请求日志端点（`?pod=` 必选）</span>
+            </div>
+            <DeployLogsPanel
+              runId={run.id}
+              deployState={deploy.state}
+              pods={pods}
+              pod={selectedPod}
+              onPodChange={setSelectedPod}
+            />
+          </div>
         </div>
       )}
     </Card>

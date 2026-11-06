@@ -158,6 +158,9 @@ $ShaTag = "sha-$($gitInfo.ShortSha)"
 
 $RefTag = "$Registry/$($Image):$Tag"
 $RefSha = "$Registry/$($Image):$ShaTag"
+# kind 流程用 `:kind-local`（values-kind.yaml 钉的就是它）：
+# -KindCluster 时额外打一个本地 tag，保证"照 README 敲一条命令就能跑起来"，不用再手工 --set image.tag。
+$KindLocalRef = if ($KindCluster) { "$Registry/$($Image):kind-local" } else { $null }
 
 $platformList = @($Platforms.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($platformList.Count -eq 0) { throw '-Platforms 不能为空' }
@@ -208,6 +211,7 @@ if ($multiArch) {
     # attestation manifest，`docker manifest inspect` 与部分集群的校验会看着别扭。
     $args = @('build', '--platform', $platformList[0], '--provenance=false', '--sbom=false') + $commonArgs +
             @('--tag', $RefTag, '--tag', $RefSha, $BuildContext)
+    if ($KindLocalRef) { $args = $args[0..($args.Count - 2)] + @('--tag', $KindLocalRef, $args[-1]) }
     Write-Info ("docker " + ($args -join ' '))
     & docker @args
     if ($LASTEXITCODE -ne 0) { throw "docker build 失败（exit $LASTEXITCODE）" }
@@ -261,6 +265,7 @@ Write-Host ("耗时: {0:n1}s" -f $sw.Elapsed.TotalSeconds) -ForegroundColor Dark
 # 且 buildx 产出的是 manifest list，kind 看不到本地镜像）。改为：
 #   docker save → docker cp → ctr -n k8s.io images import（走 containerd 的 import）
 if ($KindCluster) {
+    if ($KindLocalRef) { Write-Info "kind-local tag: $KindLocalRef（values-kind.yaml 默认就钉这个）" }
     Write-Step "导入 kind 集群：$KindCluster"
     $node = "$KindCluster-control-plane"
     & docker inspect $node *> $null

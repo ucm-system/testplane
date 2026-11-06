@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"path/filepath"
 
 	"github.com/ucm-system/testplane/server/internal/config"
 	"github.com/ucm-system/testplane/server/internal/domain"
@@ -40,6 +41,9 @@ const (
 	deployLogMaxTailLines = 5000
 	// deployLogContainer 默认容器名；空则取 Pod 的第一个容器。
 	deployLogContainer = ""
+
+	// deployLogDefaultContainer 是单容器 Pod 的默认容器名（落盘文件名 `<pod>.log` 就用它）。
+	deployLogDefaultContainer = "server"
 
 	// 两种窗口（票 #40-4）：行号基准不同，响应里显式告诉客户端。
 	deployLogWindowFull = "full" // 全文窗口：offset/next_offset 是全文行号，可续页
@@ -201,16 +205,18 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 把"回退"这件事写进 message（有 message 就追加，没有就设成它）。
-	noteFallback := func() {
-		if namespaceFallback == "" {
+	// 追加一条说明（多个来源按顺序拼接，避免互相覆盖）。
+	appendMessage := func(note string) {
+		if note == "" {
 			return
 		}
 		if resp.Message == "" {
-			resp.Message = namespaceFallback
+			resp.Message = note
 		} else {
-			resp.Message += "；" + namespaceFallback
+			resp.Message += "；" + note
 		}
 	}
+	noteFallback := func() { appendMessage(namespaceFallback) }
 
 	// ---- 参数校验（`?pod=` 必选：游标只在单个 Pod 内有意义，见下）----
 	q := r.URL.Query()
@@ -236,25 +242,48 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 		tailLines = deployLogMaxTailLines
 	}
 
-	client, err := s.deployLogsClient()
-	if err != nil {
-		// 拿不到集群凭据 = 平台侧不可用，不是"没有日志"。
-		fail(w, r, http.StatusBadGateway, domain.CodeExecutorUnavailable,
-			"无法连接执行集群读取 Deploy 日志", map[string]any{"reason": "kube_client", "error": err.Error()}, true)
-		return
+	// D-59：落盘副本是唯一真源 —— Pod 列表先看 `<run>/deploy/pods.json`。
+	// 只有盘上没有时才实时 LIST（那多半意味着 collector 没起来），并在响应里标注。
+	podsDoc, hasPodsDoc := readDeployPodsDoc(s.cfg.StorageRoot, runID)
+	var client deployLogClient
+	if !hasPodsDoc {
+		var cerr error
+		client, cerr = s.deployLogsClient()
+		if cerr != nil {
+			// 拿不到集群凭据 = 平台侧不可用，不是"没有日志"。
+			fail(w, r, http.StatusBadGateway, domain.CodeExecutorUnavailable,
+				"无法连接执行集群读取 Deploy 日志", map[string]any{"reason": "kube_client", "error": cerr.Error()}, true)
+			return
+		}
 	}
 
-	pods, err := client.ListPods(ctx, ns)
-	if err != nil {
-		s.failDeployLogKubeErr(w, r, "list", err)
-		return
+	var pods []corev1.Pod
+	if hasPodsDoc {
+		// 用 pods.json 的拓扑构造 Pod 视图（不碰 K8s API）。
+		for _, p := range podsDoc.Pods {
+			var pod corev1.Pod
+			pod.Name = p.Name
+			for _, ct := range p.Containers {
+				pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: ct.Name})
+				pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+					Name: ct.Name, Ready: p.Ready, RestartCount: ct.Restarts,
+				})
+			}
+			pods = append(pods, pod)
+		}
+	} else {
+		var lerr error
+		pods, lerr = client.ListPods(ctx, ns)
+		if lerr != nil {
+			s.failDeployLogKubeErr(w, r, "list", lerr)
+			return
+		}
 	}
-	// Genet 的 Pod 名以 release 名开头（`<release>-unified-cache-stack-xyz` 等）；
-	// release 未知时退化成"该 namespace 的所有 Pod"。
-	if deploy.ReleaseName != "" {
+	// #45-2：归属判定统一走 podBelongsToRun（与 bundle、collector 同一套语义）。
+	if !hasPodsDoc {
 		filtered := make([]corev1.Pod, 0, len(pods))
 		for _, pod := range pods {
-			if strings.HasPrefix(pod.Name, deploy.ReleaseName) {
+			if podBelongsToRun(pod, run, deploy.ReleaseName) {
 				filtered = append(filtered, pod)
 			}
 		}
@@ -378,13 +407,45 @@ func (s *Server) handleRunDeployLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	container := firstContainer(target.Name, pods)
-	raw, err := client.Logs(ctx, ns, target.Name, container, int64(tailLines))
-	if err != nil {
-		s.failDeployLogKubeErr(w, r, "logs", err)
-		return
+	// D-59：盘优先。落盘副本是唯一真源——Pod 被 GC 或重启后，实时窗口就永久丢了。
+	// 盘上没有这个 Pod 的日志文件时才降级实时读，并在 message 里**明确标注**。
+	container := ""
+	var lines []string
+	if diskLines, diskFile, ok := deployLogLinesFromDisk(s.cfg.StorageRoot, runID, target.Name); ok {
+		lines = diskLines
+		container = containerFromLogFile(diskFile, target.Name)
+		appendMessage("日志来自落盘副本 " + diskFile)
+	} else {
+		if client == nil {
+			if hasPodsDoc && !podsDoc.Collecting {
+				// 采集已结束（`cleanup: never` / Pod 全消失 / 到上限），且没有可用的实时通道。
+				resp.Message = fmt.Sprintf(
+					"该 Run 未卸载（Pod 仍在运行），但日志采集已结束（原因：%s）；盘上没有该 Pod 的副本，也无法实时读取",
+					firstNonEmptyStr(podsDoc.StopReason, "unknown"))
+			} else {
+				resp.Message = "该 Pod 的日志未落盘（collector 未运行），且当前无法连接执行集群实时读取"
+			}
+			noteFallback()
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		container = firstContainer(target.Name, pods)
+		raw, err := client.Logs(ctx, ns, target.Name, container, int64(tailLines))
+		if err != nil {
+			s.failDeployLogKubeErr(w, r, "logs", err)
+			return
+		}
+		lines = splitLogLines(raw)
+		if hasPodsDoc && !podsDoc.Collecting {
+			// 采集已结束但 Pod 还活着：这是 `cleanup: never` / skipped / 卸载失败的情形，
+			// 用户最需要知道"为什么没有日志"——说清原因，别只讲"没有落盘副本"。
+			appendMessage(fmt.Sprintf(
+				"该 Run 未卸载（Pod 仍在运行），但日志采集已结束（原因：%s）；以下内容来自实时窗口",
+				firstNonEmptyStr(podsDoc.StopReason, "unknown")))
+		} else {
+			appendMessage("这是实时窗口（pods/log），Pod 回收后不可得；该 Pod 暂无落盘副本")
+		}
 	}
-	lines := splitLogLines(raw)
 
 	// tail 窗口：取到的就是"最后 N 行"，一次性吐完，不提供续页。
 	if tailLines > 0 {
@@ -525,4 +586,28 @@ func k8sDefaultNamespace(cfg *config.Config) string {
 		return ns
 	}
 	return "testplane"
+}
+
+// containerFromLogFile 从日志文件名反推容器名：`<pod>.log` → 默认容器，
+// `<pod>.<container>.log` → 容器名。
+func containerFromLogFile(file, pod string) string {
+	base := strings.TrimSuffix(filepath.Base(file), ".log")
+	base = strings.TrimSuffix(base, ".1") // 滚档代
+	if base == pod {
+		return deployLogDefaultContainer
+	}
+	if rest := strings.TrimPrefix(base, pod+"."); rest != base {
+		return rest
+	}
+	return deployLogDefaultContainer
+}
+
+// firstNonEmptyStr 取第一个非空字符串（提示语里的兜底）。
+func firstNonEmptyStr(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

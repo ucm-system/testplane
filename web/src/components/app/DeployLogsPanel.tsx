@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, Loader2, Pause, ScrollText } from 'lucide-react'
-import { api } from '@/api'
+import { ChevronDown, Download, Loader2, Pause, ScrollText } from 'lucide-react'
+import { api, isApiClientError } from '@/api'
 import { toApiError } from '@/api/client'
 import type { ApiErrorBody, DeployLogEntry, DeployLogs, DeployPod } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
@@ -8,6 +8,8 @@ import { Button } from '@/components/ui/button'
 import { Banner, EmptyState, ErrorState } from '@/components/ui/states'
 import { useFollowScroll } from '@/hooks/useFollowScroll'
 import { LOG_POLL_INTERVAL_MS } from '@/hooks/useLogTail'
+import { formatBytes, saveBlob } from '@/lib/download'
+import { logMarkerTone } from '@/lib/log-markers'
 import { cn, formatClock } from '@/lib/utils'
 
 /**
@@ -47,15 +49,30 @@ function formatGapTime(value: string): string {
 function LogBlock({ entry }: { entry: DeployLogEntry }) {
   return (
     <pre className="whitespace-pre-wrap break-all font-mono text-[12.5px] leading-[1.7]">
-      {entry.text.split('\n').map((line, index) => (
-        <span
-          key={`${entry.pod}-${entry.offset}-${index}`}
-          data-testid="deploy-log-line"
-          className={cn('block', lineClass(line))}
-        >
-          {line}
-        </span>
-      ))}
+      {entry.text.split('\n').map((line, index) => {
+        // 与 LogViewer 同一套语义：标记行是分隔条，不是正文；内容原样保留。
+        const markerTone = logMarkerTone(line)
+        return (
+          <span
+            key={`${entry.pod}-${entry.offset}-${index}`}
+            data-testid={markerTone ? 'log-marker' : 'deploy-log-line'}
+            data-marker-tone={markerTone ?? undefined}
+            className={cn(
+              'block',
+              markerTone
+                ? cn(
+                    'my-1 rounded-sm bg-white/[0.06] px-2 py-1 text-center text-[11.5px]',
+                    markerTone === 'warn' && 'text-[#fcd34d]',
+                    markerTone === 'danger' && 'text-[#fca5a5]',
+                    markerTone === 'neutral' && 'text-[#94a3b8]',
+                  )
+                : lineClass(line),
+            )}
+          >
+            {line}
+          </span>
+        )
+      })}
     </pre>
   )
 }
@@ -97,9 +114,20 @@ export interface DeployLogsPanelProps {
   pods: DeployPod[]
   /** Run 是否仍在运行：运行中才轮询（终态停止，避免长尾请求） */
   live?: boolean
+  /** 受控的当前 Pod（Pod 拓扑表点某一行时由外部切换） */
+  pod?: string | null
+  /** 切 Pod 时通知外部（表格高亮 / 滚动定位） */
+  onPodChange?: (name: string) => void
 }
 
-export function DeployLogsPanel({ runId, deployState, pods, live = false }: DeployLogsPanelProps) {
+export function DeployLogsPanel({
+  runId,
+  deployState,
+  pods,
+  live = false,
+  pod: podProp = null,
+  onPodChange,
+}: DeployLogsPanelProps) {
   const [pod, setPod] = useState<string | null>(null)
   const [tailLatest, setTailLatest] = useState(false)
   const [data, setData] = useState<DeployLogView | null>(null)
@@ -110,14 +138,47 @@ export function DeployLogsPanel({ runId, deployState, pods, live = false }: Depl
   const [appended, setAppended] = useState(0)
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null)
   const [reloadToken, setReloadToken] = useState(0)
+  /** 多容器 Pod 的容器页签（落盘文件名是 `<pod>.<container>.log`） */
+  const [container, setContainer] = useState<string | null>(null)
+  const [downloading, setDownloading] = useState(false)
+  const [downloadNotice, setDownloadNotice] = useState<string | null>(null)
+  const [downloadError, setDownloadError] = useState<ApiErrorBody | null>(null)
 
   const cursorRef = useRef(0)
 
-  // 页签默认选第一个 Pod；`pods` 变了就回落到第一个
+  // 页签默认选第一个 Pod；`pods` 变了就回落到第一个。外部传入的 `pod` 优先（Pod 拓扑表点击）。
   const selectedPod = useMemo(() => {
     if (pods.length === 0) return null
-    return pods.some((item) => item.name === pod) ? (pod as string) : (pods[0]?.name ?? null)
-  }, [pods, pod])
+    const wanted = podProp ?? pod
+    return pods.some((item) => item.name === wanted) ? (wanted as string) : (pods[0]?.name ?? null)
+  }, [pods, pod, podProp])
+
+  const selectedPodMeta = useMemo(
+    () => pods.find((item) => item.name === selectedPod) ?? null,
+    [pods, selectedPod],
+  )
+
+  /** 容器名：优先 pods.json 的 `containers[]`，拿不到就退回当前日志段里的 container */
+  const containerNames = useMemo(() => {
+    const names = new Set<string>()
+    for (const item of selectedPodMeta?.containers ?? []) {
+      if (item?.name) names.add(item.name)
+    }
+    for (const entry of data?.entries ?? []) {
+      if (entry.pod === selectedPod && entry.container) names.add(entry.container)
+    }
+    return [...names]
+  }, [selectedPodMeta, data, selectedPod])
+
+  const selectedContainer =
+    container && containerNames.includes(container) ? container : (containerNames[0] ?? null)
+
+  // 切 Pod 时容器选择回到该 Pod 的第一个
+  useEffect(() => {
+    setContainer(null)
+    setDownloadNotice(null)
+    setDownloadError(null)
+  }, [selectedPod])
 
   const follow = useFollowScroll(data?.entries.length ?? 0, Boolean(data?.entries.length))
 
@@ -205,6 +266,53 @@ export function DeployLogsPanel({ runId, deployState, pods, live = false }: Depl
 
   const switchPod = (next: string) => {
     setPod(next)
+    onPodChange?.(next)
+  }
+
+  const logFileName = `${selectedPod ?? 'pod'}${containerNames.length > 1 && selectedContainer ? `.${selectedContainer}` : ''}.log`
+
+  /**
+   * 下载**当前 Pod（与容器）**的落盘日志（D-59：`deploy/logs/<pod>[.<container>].log`）。
+   *
+   * 必须走带鉴权的 fetch → Blob（`saveBlob`），不能裸 `<a href>`：
+   * dev 是 Bearer、OIDC 是 Cookie，裸链会 401。
+   * 单容器 Pod 落盘是 `<pod>.log`，多容器是 `<pod>.<container>.log`（execution.md §7.2）；
+   * 前端不确定时就两个都试，只有**全部 404** 才说"还没落盘"。
+   */
+  const downloadDeployLog = async () => {
+    if (!selectedPod) return
+    setDownloading(true)
+    setDownloadNotice(null)
+    setDownloadError(null)
+
+    const base = `deploy/logs/${selectedPod}`
+    const withContainer = selectedContainer ? `${base}.${selectedContainer}.log` : null
+    const candidates = [
+      ...(containerNames.length > 1 && withContainer ? [withContainer] : []),
+      `${base}.log`,
+      ...(withContainer ? [withContainer] : []),
+    ].filter((value, index, all) => all.indexOf(value) === index)
+
+    let lastError: unknown = null
+    for (const candidate of candidates) {
+      try {
+        const blob = await api.downloadFile(runId, `${runId}/${candidate}`)
+        saveBlob(blob, `${selectedPod}.log`)
+        setDownloadNotice(`${candidate} · ${formatBytes(blob.size)} 已开始下载`)
+        setDownloading(false)
+        return
+      } catch (e) {
+        lastError = e
+      }
+    }
+
+    setDownloading(false)
+    if (isApiClientError(lastError) && lastError.status === 404) {
+      // 盘上还没有这份日志（Pod 刚创建 / 容器还没输出）：是事实，不是错误，不弹红色。
+      setDownloadNotice('该 Pod 的日志还没落盘（可能刚创建）')
+      return
+    }
+    setDownloadError(toApiError(lastError))
   }
 
   const loadMore = async () => {
@@ -243,8 +351,8 @@ export function DeployLogsPanel({ runId, deployState, pods, live = false }: Depl
           </Banner>
         ) : (
           <EmptyState
-            title="Pod 已回收，没有可读日志"
-            description="日志随 Pod 一起消失（MVP 未落盘）；缺口与回收原因由后端在 gaps 里说明。"
+            title="Pod 已回收，没有可读的 Pod"
+            description="Pod 拓扑已回收，面板没有可选的 Pod；已落盘的 deploy/logs/*.log 仍可在产物区逐条下载。"
           />
         )}
       </div>
@@ -270,6 +378,16 @@ export function DeployLogsPanel({ runId, deployState, pods, live = false }: Depl
       {error ? (
         <p role="alert" className="rounded-md border border-danger/25 bg-danger-weak px-2.5 py-1.5 text-2xs text-fg">
           {error.code}：{error.message}（已收到的日志保留，下一轮会自动重试）
+        </p>
+      ) : null}
+      {downloadNotice ? (
+        <p data-testid="deploy-log-download-notice" role="status" className="text-2xs text-fg-2">
+          {downloadNotice}
+        </p>
+      ) : null}
+      {downloadError ? (
+        <p data-testid="deploy-log-download-error" role="alert" className="text-2xs text-danger-text">
+          {downloadError.code}：{downloadError.message}
         </p>
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
@@ -301,6 +419,42 @@ export function DeployLogsPanel({ runId, deployState, pods, live = false }: Depl
           ))}
         </div>
 
+        {/* 多容器 Pod：落盘文件名是 <pod>.<container>.log，下载按当前容器走 */}
+        {containerNames.length > 1 ? (
+          <div role="tablist" aria-label="容器页签" className="flex flex-wrap items-center gap-1">
+            {containerNames.map((name) => (
+              <button
+                key={name}
+                type="button"
+                role="tab"
+                aria-selected={selectedContainer === name}
+                data-testid="deploy-log-container-tab"
+                onClick={() => setContainer(name)}
+                className={cn(
+                  'h-7 rounded-md px-2 font-mono text-2xs transition-colors duration-150',
+                  selectedContainer === name
+                    ? 'bg-primary-weak text-primary-text'
+                    : 'text-fg-3 hover:bg-surface-2',
+                )}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        <Button
+          size="sm"
+          variant="secondary"
+          data-testid="download-deploy-log"
+          icon={<Download className="size-3" aria-hidden />}
+          loading={downloading}
+          onClick={() => void downloadDeployLog()}
+          title={`下载 deploy/logs/${logFileName}（带鉴权，落盘文件原样下载）`}
+        >
+          下载 .log
+        </Button>
+
         <label className="ml-auto flex items-center gap-1.5 text-2xs text-fg-2">
           <input
             type="checkbox"
@@ -318,7 +472,7 @@ export function DeployLogsPanel({ runId, deployState, pods, live = false }: Depl
       <div className="overflow-hidden rounded-lg border border-line" style={{ background: TERMINAL_BG }}>
         <div className="flex flex-wrap items-center gap-2 border-b border-white/10 px-3 py-2 text-2xs text-[#94a3b8]">
           <ScrollText className="size-3.5" aria-hidden />
-          <span className="font-mono">deploy/logs/{selectedPod}.log</span>
+          <span className="font-mono">deploy/logs/{logFileName}</span>
           <span className="font-mono" data-testid="deploy-log-last-updated">
             最后更新 {lastUpdatedAt == null ? '—' : formatClock(new Date(lastUpdatedAt).toISOString())}
           </span>

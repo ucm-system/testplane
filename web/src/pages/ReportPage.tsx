@@ -1,9 +1,9 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, Download, FileWarning, RefreshCw } from 'lucide-react'
+import { ArrowLeft, ChevronRight, Download, FileWarning, RefreshCw } from 'lucide-react'
 import { api } from '@/api'
 import { toApiError } from '@/api/client'
-import type { ApiErrorBody, Result, ResultMetric } from '@/api/types'
+import type { ApiErrorBody, Artifact, Result, ResultMetric } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
@@ -12,6 +12,7 @@ import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/tabl
 import { TaskStatusBadge } from '@/components/app/StatusBadge'
 import { RightRail, RailCard } from '@/components/app/RightRail'
 import { useAsync } from '@/hooks/useAsync'
+import { ARTIFACT_GROUPS, groupArtifacts, relativeArtifactPath } from '@/lib/artifact-groups'
 import { formatBytes, saveBlob } from '@/lib/download'
 import { formatDuration } from '@/lib/utils'
 
@@ -30,6 +31,15 @@ const FILES = [
   { name: 'metadata.json', label: 'metadata.json' },
   { name: 'events.jsonl', label: 'events.jsonl' },
 ] as const
+
+/** 产物类型的中文标签（与结果视图同一套语义） */
+const ARTIFACT_KIND_LABEL: Record<Artifact['kind'], string> = {
+  report: '报告',
+  result: '结果',
+  log: '日志',
+  raw: '原始数据',
+  other: '其它',
+}
 
 /** 后端没给 `Retry-After` 时的兜底秒数（与报告异步生成的节奏一致） */
 const FALLBACK_RETRY_AFTER = 5
@@ -143,11 +153,16 @@ export function ReportPage() {
   const { runId = '' } = useParams<{ runId: string }>()
   const report = useAsync(() => api.getReport(runId), [runId])
   const markdown = useAsync(() => api.getReportMd(runId), [runId])
+  const artifacts = useAsync(() => api.listRunArtifacts(runId), [runId])
   const [downloading, setDownloading] = useState<string | null>(null)
   const [downloadNotice, setDownloadNotice] = useState<string | null>(null)
   const [downloadError, setDownloadError] = useState<ApiErrorBody | null>(null)
+  const [artifactDownloading, setArtifactDownloading] = useState<string | null>(null)
+  const [artifactError, setArtifactError] = useState<ApiErrorBody | null>(null)
 
   const data = report.data
+  const artifactItems = artifacts.data?.items ?? []
+  const artifactGroups = groupArtifacts(artifactItems, runId)
 
   /* ---------------------------------------------------------- 404：报告尚未生成 */
   const notGenerated = report.error?.code === 'NOT_FOUND'
@@ -284,6 +299,20 @@ export function ReportPage() {
       setDownloadError(toApiError(e))
     } finally {
       setDownloading(null)
+    }
+  }
+
+  /** 产物逐条下载（同样带鉴权 fetch → Blob，不裸 href） */
+  const downloadArtifact = async (item: Artifact) => {
+    setArtifactDownloading(item.path)
+    setArtifactError(null)
+    try {
+      const blob = await api.downloadFile(runId, item.path)
+      saveBlob(blob, item.path.split('/').pop() ?? 'artifact')
+    } catch (e) {
+      setArtifactError(toApiError(e))
+    } finally {
+      setArtifactDownloading(null)
     }
   }
 
@@ -561,6 +590,101 @@ export function ReportPage() {
             )}
             <CardFooter>
               <span>失败清单来自报告；单个 Task 的完整结果见「指标」卡里那一节。</span>
+            </CardFooter>
+          </Card>
+
+          {/* 产物：按来源分组（部署日志 / 测试日志 / 报告与数据），组内逐条可下载；不过滤任何文件 */}
+          <Card data-testid="report-artifacts">
+            <CardHeader
+              tone="info"
+              title="产物下载"
+              sub={
+                artifacts.data
+                  ? `${artifactItems.length} 个文件 · 共 ${formatBytes(artifacts.data.total_size_bytes)}`
+                  : '按来源分组：部署日志 / 测试日志 / 报告与数据'
+              }
+            />
+            {artifactError ? (
+              <CardBody className="pb-0">
+                <ErrorState error={artifactError} compact />
+              </CardBody>
+            ) : null}
+            {artifacts.error ? (
+              <CardBody>
+                <ErrorState error={artifacts.error} onRetry={artifacts.reload} compact />
+              </CardBody>
+            ) : artifacts.loading && !artifacts.data ? (
+              <LoadingBlock label="加载产物清单…" />
+            ) : artifactItems.length === 0 ? (
+              <CardBody>
+                <p className="text-xs text-fg-3">这次 Run 还没有产物文件。</p>
+              </CardBody>
+            ) : (
+              <div className="flex flex-col gap-2 px-5 py-3" data-testid="artifact-groups">
+                {ARTIFACT_GROUPS.map((group) => {
+                  const rows = artifactGroups[group.key]
+                  return (
+                    <details
+                      key={group.key}
+                      open
+                      data-testid={`artifact-group-${group.key}`}
+                      className="group rounded-md border border-line-soft"
+                    >
+                      <summary className="flex list-none cursor-pointer flex-wrap items-center gap-2 px-3 py-2 text-xs">
+                        <ChevronRight className="size-3 text-fg-3 transition-transform group-open:rotate-90" aria-hidden />
+                        <span className="font-medium text-fg">{group.label}</span>
+                        <Badge tone="muted">{rows.length}</Badge>
+                        <span className="text-2xs text-fg-3">{group.description}</span>
+                      </summary>
+                      {rows.length === 0 ? (
+                        <p className="border-t border-line-soft px-3 py-2 text-2xs text-fg-3">这一组没有文件</p>
+                      ) : (
+                        <TableWrap>
+                          <Table>
+                            <THead>
+                              <TR className="hover:bg-transparent">
+                                <TH>文件</TH>
+                                <TH>类型</TH>
+                                <TH>大小</TH>
+                                <TH className="text-right">下载</TH>
+                              </TR>
+                            </THead>
+                            <TBody>
+                              {rows.map((item) => (
+                                <TR key={item.path}>
+                                  <TD className="break-all font-mono text-2xs text-fg">
+                                    {relativeArtifactPath(item.path, runId)}
+                                  </TD>
+                                  <TD>
+                                    <Badge tone={item.kind === 'log' ? 'muted' : item.kind === 'report' ? 'info' : 'ok'}>
+                                      {ARTIFACT_KIND_LABEL[item.kind] ?? item.kind}
+                                    </Badge>
+                                  </TD>
+                                  <TD className="tabular-nums text-2xs">{formatBytes(item.size_bytes)}</TD>
+                                  <TD className="text-right">
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      data-testid="artifact-download"
+                                      loading={artifactDownloading === item.path}
+                                      onClick={() => void downloadArtifact(item)}
+                                    >
+                                      下载
+                                    </Button>
+                                  </TD>
+                                </TR>
+                              ))}
+                            </TBody>
+                          </Table>
+                        </TableWrap>
+                      )}
+                    </details>
+                  )
+                })}
+              </div>
+            )}
+            <CardFooter>
+              <span>分组只是展示层：接口返回的每个文件都会出现在某一组里，不会因为分组被过滤。</span>
             </CardFooter>
           </Card>
 

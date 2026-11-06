@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/ucm-system/testplane/server/internal/domain"
 )
 
 // metricsRegistry 是手写的 Prometheus 指标登记处（不引 client_golang）：
@@ -151,20 +153,29 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 // 指标里的状态维度**全量预置**（即使计数为 0 也输出），让看板不必处理"序列时有时无"。
+// 终态部分必须走 domain 的单一真源：手抄一份会在新增状态时静默漏掉（issue #45-5）。
 var (
-	runStatusSeries = []string{
-		"submitted", "queued", "deploying", "testing", "cleanup", "cancelling",
-		"succeeded", "completed_with_errors", "service_unavailable", "failed", "canceled",
-	}
-	taskStatusSeries = []string{
-		"pending", "queued", "preparing", "running",
-		"succeeded", "failed", "canceled", "skipped",
-	}
+	runStatusSeries = append(
+		[]string{"submitted", "queued", "deploying", "testing", "cleanup", "cancelling"},
+		sortedCopy(domain.TerminalRunStatusStrings())...,
+	)
+	taskStatusSeries = append(
+		[]string{"pending", "queued", "preparing", "running"},
+		sortedCopy(domain.TerminalTaskStatusStrings())...,
+	)
 	waitingReasonSeries = []string{
 		"precheck_gate", "slot_waiting", "global_limit",
 		"queue_full", "insufficient_resources", "gang_pending",
 	}
 )
+
+// sortedCopy 复制并排序（domain 返回的顺序不是契约，指标序列要稳定）。
+func sortedCopy(in []string) []string {
+	out := make([]string, len(in))
+	copy(out, in)
+	sort.Strings(out)
+	return out
+}
 
 // writeSeriesMetric 输出 `<name>{<label>="<v>"} n`。
 // keys 非 nil 时先按给定顺序补齐（看板要求 6 个 waiting_reason 全在）。

@@ -47,6 +47,7 @@ pwsh deploy/docker/build-push.ps1 -Tag v0.2.0 -Platforms linux/amd64,linux/arm64
 
 # 本地 kind 验证：构建后导入集群（见下方"kind 的坑"）
 pwsh deploy/docker/build-push.ps1 -KindCluster testplane
+# 会自动多打一个 :kind-local —— values-kind.yaml 默认就钉它，装的时候不用再 --set image.tag
 ```
 
 ## 打出来的两个 tag（为什么）
@@ -83,7 +84,7 @@ PLATFORMS=linux/amd64,linux/arm64  PUSHED=True
 | `-Platforms` | `linux/amd64` | 逗号分隔多架构；多架构自动走 `buildx --push` |
 | `-Push` | 关 | 不传 = 只构建（PR 校验用） |
 | `-NoCache` | 关 | `--no-cache` |
-| `-KindCluster` | 空 | 构建完成后导入该 kind 集群（仅单架构） |
+| `-KindCluster` | 空 | 构建完成后导入该 kind 集群（仅单架构）；**同时额外打 `:kind-local`**（`values-kind.yaml` 默认值，装的时候一条命令即可） |
 
 ## web 镜像的运行时行为
 

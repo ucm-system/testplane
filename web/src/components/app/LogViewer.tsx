@@ -6,6 +6,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useToast } from '@/components/ui/toast'
 import type { ApiErrorBody } from '@/api/types'
 import { useFollowScroll } from '@/hooks/useFollowScroll'
+import { logMarkerTone } from '@/lib/log-markers'
 import { cn, copyText, formatClock } from '@/lib/utils'
 
 type LineKind = 'plain' | 'time' | 'error' | 'restart' | 'gap' | 'ok'
@@ -169,6 +170,28 @@ export function LogViewer({
               aria-live="off"
             >
               {lines.map((line, index) => {
+                // 平台标记行（restart / gap / terminated / collection stopped）走分隔样式：
+                // 灰底、居中、小字；**行内容原样输出**（用户要复制去搜）。
+                const markerTone = logMarkerTone(line)
+                if (markerTone) {
+                  return (
+                    <div
+                      key={index}
+                      data-testid="log-marker"
+                      data-marker-tone={markerTone}
+                      className={cn(
+                        'my-1.5 flex items-center justify-center gap-2 rounded-sm bg-white/[0.06] px-2 py-1 text-center text-[11px]',
+                        markerTone === 'warn' && 'text-warn',
+                        markerTone === 'danger' && 'text-[#fca5a5]',
+                        markerTone === 'neutral' && 'text-slate-400',
+                      )}
+                    >
+                      <span className="h-px flex-1 bg-white/10" aria-hidden />
+                      <span className="whitespace-pre-wrap break-all">{line}</span>
+                      <span className="h-px flex-1 bg-white/10" aria-hidden />
+                    </div>
+                  )
+                }
                 const kind = classify(line)
                 const match = TIME_RE.exec(line)
                 return (

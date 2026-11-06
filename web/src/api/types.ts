@@ -138,6 +138,8 @@ export interface DeployPod {
   ready?: boolean
   restarts?: number
   logs?: LogSegment[]
+  /** `pods.json` 的容器快照（D-59）：多容器 Pod 的落盘文件是 `<pod>.<container>.log` */
+  containers?: Array<{ name: string; restarts?: number; last_exit?: string | null }>
 }
 
 /** `LogSegment` schema：一份 Deploy 日志文件的覆盖区间（前端目前只展示元信息，不下载）。 */

@@ -91,6 +91,25 @@ erDiagram
 | `reused_from_task_id` | text | 是 | P1 | 跨 Run 续跑复用来源 |
 | `error` | jsonb | 是 | 失败 | Failure；含 `retryable` 与 `detail` |
 
+#### 4.4.1 Run 目录里的日志与拓扑（D-59）
+
+```
+<run>/
+  tasks/<task>/attempts/<n>/logs/stdout.log        # Tester 容器日志（含重启前 previous 段）
+  deploy/logs/<pod>.log                            # Deploy 每个 Pod 一份（多容器：<pod>.<container>.log）
+  deploy/pods.json                                 # 拓扑快照（每 30s 原子写）
+```
+
+- Tester 容器重启：把 `previous=true` 的日志补写到同一文件，并写 `--- [container restarted #N at <RFC3339>, previous exit: <reason>] ---` 标记；
+- Deploy 的 Pod 消失写 `--- [pod terminated at <RFC3339>] ---`；流中断写 `--- [log gap: <from> – <to>, <reason>] ---`（**宁可标缺口也不伪造连续**，`execution.md §7.2`）；单文件超 200MB 滚到 `<pod>.1.log`；
+- `pods.json`：
+  ```json
+  { "generated_at": "…", "pods": [ { "name": "tp-…-mock-llm-0", "phase": "Running", "node": "…", "ready": true,
+      "containers": [ { "name": "server", "restarts": 2, "last_exit": "OOMKilled" } ],
+      "logs": [ { "file": "deploy/logs/tp-….log", "start": "…", "end": "…", "truncated": false } ] } ] }
+  ```
+- `/runs/{id}/deploy/logs`、`/artifacts`、`/bundle` 三个读取口都**优先读盘**；盘上缺失才降级实时读 `pods/log`，并在响应里标注"实时窗口，Pod 回收后不可得"。
+
 **`attempts`**
 
 | 列 | 类型 | 空 | 写时机 | 语义 / 规则 |

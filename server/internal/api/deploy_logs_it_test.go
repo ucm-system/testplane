@@ -581,8 +581,8 @@ func TestDeployLogs_UsesDeployNamespace(t *testing.T) {
 			t.Fatalf("读取用的 namespace = %q，want testplane-mock（不能用配置回退）; 全部=%v", ns, fake.seenNamespaces)
 		}
 	}
-	if body.Message != "" {
-		t.Fatalf("message = %q，正常路径不该有回退提示", body.Message)
+	if strings.Contains(body.Message, "��有 namespace") {
+		t.Fatalf("message = %q，不该出现 namespace 回退提示", body.Message)
 	}
 }
 
