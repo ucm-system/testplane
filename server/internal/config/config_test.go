@@ -309,3 +309,47 @@ func TestLoadDeployProvider(t *testing.T) {
 		}
 	})
 }
+
+// D-63：TESTPLANE_SHARED_MOUNTS 解析与校验。
+func TestParseSharedMounts(t *testing.T) {
+	t.Run("默认 readOnly=true", func(t *testing.T) {
+		out, err := ParseSharedMounts(`[{"name":"models","mountPath":"/models","claimName":"c1"}]`)
+		if err != nil {
+			t.Fatalf("ParseSharedMounts: %v", err)
+		}
+		if len(out) != 1 || !out[0].ReadOnly {
+			t.Fatalf("readOnly 默认应为 true: %+v", out)
+		}
+	})
+	t.Run("显式 false 可写", func(t *testing.T) {
+		out, err := ParseSharedMounts(`[{"name":"rw","mountPath":"/models","claimName":"c1","readOnly":false}]`)
+		if err != nil {
+			t.Fatalf("ParseSharedMounts: %v", err)
+		}
+		if out[0].ReadOnly {
+			t.Fatal("显式 false 不应被改成 true")
+		}
+	})
+	t.Run("空 = 不注入", func(t *testing.T) {
+		for _, raw := range []string{"", "[]", "  "} {
+			out, err := ParseSharedMounts(raw)
+			if err != nil || len(out) != 0 {
+				t.Errorf("raw=%q → %v, %v", raw, out, err)
+			}
+		}
+	})
+	t.Run("非法输入拒绝", func(t *testing.T) {
+		cases := []string{
+			`not-json`,
+			`[{"mountPath":"/models","claimName":""}]`,            // claimName 必填
+			`[{"mountPath":"relative","claimName":"c"}]`,          // 绝对路径
+			`[{"mountPath":"/workspace/output","claimName":"c"}]`, // 保留路径
+			`[{"name":"a","mountPath":"/m1","claimName":"c"},{"name":"a","mountPath":"/m2","claimName":"c"}]`,
+		}
+		for _, raw := range cases {
+			if _, err := ParseSharedMounts(raw); err == nil {
+				t.Errorf("raw=%s 应被拒绝", raw)
+			}
+		}
+	})
+}

@@ -25,6 +25,8 @@ import (
 	"github.com/ucm-system/testplane/server/internal/executor"
 	"github.com/ucm-system/testplane/server/internal/genet"
 	"github.com/ucm-system/testplane/server/internal/genet/mocks"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/ucm-system/testplane/server/internal/k8s"
 	"github.com/ucm-system/testplane/server/internal/orchestrator"
 	"github.com/ucm-system/testplane/server/internal/ports"
@@ -110,6 +112,9 @@ func run() error {
 		logger.Warn("Tester 注册表校验失败，api 继续启动", "err", err, "dir", testersDir)
 	}
 	logger.Info("Tester 注册表就绪", "dir", testersDir, "count", reg.Len())
+
+	// ---- 统一共享挂载 preflight（D-63 ④：缺失只告警，不拒绝启动、不阻断 Pod）----
+	preflightSharedMounts(ctx, cfg, logger)
 
 	// ---- 报告 ----
 	reportWriter := &report.Writer{
@@ -263,12 +268,14 @@ func buildController(ctx context.Context, cfg *config.Config, st *store.Store,
 		Deployer:  deployer,
 		Validator: validator,
 		Config: orchestrator.Config{
-			Namespace:            namespace,
-			StoragePVC:           cfg.StoragePVC,
-			StorageRoot:          cfg.StorageRoot,
-			MaxGlobalConcurrency: cfg.MaxGlobalConcurrency,
-			TaskTimeoutDefault:   cfg.TaskTimeoutDefault,
-			DeployTimeout:        cfg.DeployTimeout,
+			Namespace:                    namespace,
+			StoragePVC:                   cfg.StoragePVC,
+			SharedMounts:                 cfg.SharedMounts,
+			SharedMountsDisabledProfiles: disabledSharedMountProfiles(cfg),
+			StorageRoot:                  cfg.StorageRoot,
+			MaxGlobalConcurrency:         cfg.MaxGlobalConcurrency,
+			TaskTimeoutDefault:           cfg.TaskTimeoutDefault,
+			DeployTimeout:                cfg.DeployTimeout,
 		},
 		Logf: func(format string, args ...any) {
 			logger.Info(fmt.Sprintf(format, args...), "component", "orchestrator")
@@ -392,5 +399,48 @@ func buildDeployer(cfg *config.Config, logger *slog.Logger) (ports.Deployer, err
 		return client, nil
 	default:
 		return nil, fmt.Errorf("config: 未知的 Deploy provider %q（允许 mock|genet）", cfg.DeployProvider)
+	}
+}
+
+// disabledSharedMountProfiles 解析 TESTPLANE_SHARED_MOUNTS_DISABLED_PROFILES（逗号分隔的 Profile 名）。
+//
+// D-63 ③ 说"Execution Profile 可用 sharedMounts: false 关闭"，但 execution_profiles 表里还没有
+// 这一列（DB/管理 API 未落地）；先用环境变量表达同一语义，算子落在渲染层（JobSpec.SharedMountsDisabled）。
+// 列落地后把这里换成读库即可，渲染层不用动。
+func disabledSharedMountProfiles(cfg *config.Config) map[string]bool {
+	out := map[string]bool{}
+	for _, name := range strings.Split(os.Getenv("TESTPLANE_SHARED_MOUNTS_DISABLED_PROFILES"), ",") {
+		if n := strings.TrimSpace(name); n != "" {
+			out[n] = true
+		}
+	}
+	return out
+}
+
+// preflightSharedMounts 检查每个统一挂载的 claimName 是否存在（D-63 ④）。
+//
+// **只告警，不 fail-fast**：存储是集群运维的事，平台只认 PVC 名（§10.4）；
+// 缺了由 Tester 自己报"权重路径不存在"，而不是让整个控制面起不来。
+func preflightSharedMounts(ctx context.Context, cfg *config.Config, logger *slog.Logger) {
+	if len(cfg.SharedMounts) == 0 {
+		logger.Info("统一共享挂载未配置（D-63），Tester Job 不注入 /models")
+		return
+	}
+	ns := os.Getenv("TESTPLANE_EXECUTOR_NAMESPACE")
+	if ns == "" {
+		ns = "testplane"
+	}
+	client, err := k8s.NewClientset(k8s.Options{Kubeconfig: cfg.Kubeconfig})
+	if err != nil {
+		logger.Warn("统一共享挂载 preflight 跳过：K8s 客户端不可用", "err", err)
+		return
+	}
+	for _, sm := range cfg.SharedMounts {
+		if _, perr := client.CoreV1().PersistentVolumeClaims(ns).Get(ctx, sm.ClaimName, metav1.GetOptions{}); perr != nil {
+			logger.Warn("统一共享挂载的 PVC 不存在（继续启动：Pod 会 Pending，由 Tester 报路径不存在）",
+				"mountPath", sm.MountPath, "claimName", sm.ClaimName, "namespace", ns, "err", perr)
+			continue
+		}
+		logger.Info("统一共享挂载就绪", "mountPath", sm.MountPath, "claimName", sm.ClaimName, "namespace", ns, "readOnly", sm.ReadOnly)
 	}
 }

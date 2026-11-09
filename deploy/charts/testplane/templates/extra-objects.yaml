@@ -1,0 +1,13 @@
+{{- /*
+任意 YAML 原样渲染（D-63 ⑥ 便利通道）：运维把 NFS PV/PVC 之类的第三方清单贴进
+values.extraObjects（字符串或映射都行），chart 只做渲染，**不解析、不改写** ——
+平台仍然只认 PVC 名（ARCHITECTURE §10.4：平台不理解 NFS 协议）。
+*/ -}}
+{{- range .Values.extraObjects }}
+---
+{{- if kindIs "string" . }}
+{{ tpl . $ }}
+{{- else }}
+{{ tpl (toYaml .) $ }}
+{{- end }}
+{{- end }}

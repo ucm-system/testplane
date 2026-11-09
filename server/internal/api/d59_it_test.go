@@ -13,6 +13,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
 
@@ -336,5 +337,51 @@ func TestRunArtifactsExposeCollectionState(t *testing.T) {
 	}
 	if !strings.Contains(body.DeployCollection.Message, "采集已结束") {
 		t.Errorf("message = %q", body.DeployCollection.Message)
+	}
+}
+
+// D-63：提交期统一挂载冲突 → 400 VALIDATION_ERROR + issue CONFLICT（不做只读交集）。
+func TestSubmitRejectsMountConflictWithSharedMount(t *testing.T) {
+	srv, _, cleanup := integrationServer(t)
+	defer cleanup()
+	// 平台级统一挂载：/models。
+	srv.submit.SharedMounts = []domain.SharedMountSpec{
+		{Name: "models", MountPath: "/models", ReadOnly: true, ClaimName: "c"},
+	}
+	// Tester 自己声明了 /models（fakeResolver 的 spec.Mounts）。
+	srv.resolver.(*fakeResolver).specs["probe@1.0.0"] = domain.TesterSpec{
+		Name: "probe", Version: "1.0.0", Role: "test", Image: "i:1", Entry: "/tester/run.sh",
+		Mounts: []domain.MountSpec{{Name: "mine", MountPath: "/models"}},
+	}
+
+	body := `{"run":{"name":"conflict","service":{"url":"http://e:8000"},
+	  "tests":[{"name":"t1","tester":"probe","version":"1.0.0","args":"","execution":{"profile":"k8s-npu"}}]}}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	var errBody struct {
+		Code   string `json:"code"`
+		Detail struct {
+			Issues []struct {
+				Code string `json:"code"`
+			} `json:"issues"`
+		} `json:"detail"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &errBody)
+	if errBody.Code != domain.CodeValidationError {
+		t.Errorf("code = %q, want VALIDATION_ERROR", errBody.Code)
+	}
+	found := false
+	for _, is := range errBody.Detail.Issues {
+		if is.Code == domain.IssueCodeConflict {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("缺 issue CONFLICT: %s", rec.Body.String())
 	}
 }

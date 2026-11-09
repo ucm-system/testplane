@@ -29,6 +29,9 @@ data:
   TESTPLANE_RESULT_MAX_BYTES: {{ .Values.config.resultMaxBytes | quote }}
   TESTPLANE_STORAGE_ROOT: {{ .Values.config.storageRoot | quote }}
   TESTPLANE_STORAGE_PVC: {{ default (include "testplane.storageClaim" .) .Values.config.storagePVC | quote }}
+  # D-63 统一共享挂载：平台级配置（JSON 数组），全局注入所有 Tester Job。
+  # 平台只认 claimName（PVC 名），不理解 NFS 协议（ARCHITECTURE §10.4）。
+  TESTPLANE_SHARED_MOUNTS: {{ toJson .Values.sharedMounts | quote }}
   TESTPLANE_DEPLOY_PROVIDER: {{ .Values.config.deployProvider | quote }}
   TESTPLANE_SSE_HEARTBEAT: {{ .Values.config.sseHeartbeat | quote }}
   TESTPLANE_SSE_REPLAY_HOURS: {{ .Values.config.sseReplayHours | quote }}

@@ -196,6 +196,9 @@ type Submitter struct {
 	MaxTasks       int
 	DefaultTimeout time.Duration
 	MaxTimeout     time.Duration
+	// SharedMounts 是平台级统一共享挂载（D-63）：Tester 自己的 mounts[] 与它同路径
+	// → 提交期 400 CONFLICT（不做只读交集）。
+	SharedMounts []domain.SharedMountSpec
 }
 
 // now 返回业务时间（UTC）。**不要**在提交链路里直调 time.Now()。
@@ -357,6 +360,20 @@ func (s *Submitter) Prepare(ctx context.Context, body []byte, submittedBy string
 		specs[i] = spec
 	}
 
+	// 5.5 统一共享挂载冲突校验（D-63 ⑤，#74 保留路径合并）：
+	// Tester 的 mounts[].mount_path 与平台保留 / 统一挂载路径相同 → 400 + issue CONFLICT。
+	if conflicts := domain.MountPathConflicts(collectSpecMounts(specs), s.SharedMounts); len(conflicts) > 0 {
+		issues := make([]domain.ValidationIssue, 0, len(conflicts))
+		for p, reason := range conflicts {
+			issues = append(issues, domain.ValidationIssue{
+				Path:    p,
+				Code:    domain.IssueCodeConflict,
+				Message: fmt.Sprintf("挂载路径 %q 与 %s 冲突（Tester 不得占用平台保留/统一挂载路径）", p, reason),
+			})
+		}
+		return nil, &domain.ValidationError{Issues: issues}
+	}
+
 	pm, err := normalizePrecheck(m.Precheck)
 	if err != nil {
 		return nil, err
@@ -496,6 +513,7 @@ func (s *Submitter) Prepare(ctx context.Context, body []byte, submittedBy string
 
 // precheckModeOf 只取模式，不报错（结构校验阶段用）。
 func precheckModeOf(m *Manifest) string {
+
 	pm, err := normalizePrecheck(m.Precheck)
 	if err != nil {
 		return "auto"
@@ -776,4 +794,13 @@ func retryJSON(r *RetrySpec) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// collectSpecMounts 汇总多个 TesterSpec 的 mounts（提交期冲突校验用）。
+func collectSpecMounts(specs []domain.TesterSpec) []domain.MountSpec {
+	out := make([]domain.MountSpec, 0, len(specs))
+	for _, sp := range specs {
+		out = append(out, sp.Mounts...)
+	}
+	return out
 }

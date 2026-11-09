@@ -88,6 +88,8 @@ type TaskView struct {
 	CancelRequested bool
 	AttemptNo       int // current_attempt（已完成/进行中的次数）
 	Failure         *domain.Failure
+	// Profile 是该 Task 的执行 Profile 名（D-63 ③：Profile 可关闭统一挂载）。
+	Profile string
 	// ResultRef 是 Task 终态时写的产物引用（相对 Run 目录，03-data-view §3.1）。
 	// 报告页的 tasks[].result_ref 就是它；空 = 没有产物（不造死链）。
 	ResultRef string

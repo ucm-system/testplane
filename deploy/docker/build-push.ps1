@@ -277,7 +277,8 @@ if ($KindCluster) {
         & docker save -o $tar $RefSha
         if ($LASTEXITCODE -ne 0) { throw "docker save 失败（exit $LASTEXITCODE）" }
 
-        $nodeTar = "/tmp/" + (Split-Path $tar -Leaf)
+        # 用 /root 而不是 /tmp：本机实测 `docker cp` 到 kind 节点的 /tmp 会静默丢失（exit 0 但文件不存在）。
+        $nodeTar = "/root/" + (Split-Path $tar -Leaf)
         Write-Info "docker cp $tar ${node}:$nodeTar"
         & docker cp $tar "${node}:$nodeTar"
         if ($LASTEXITCODE -ne 0) { throw "docker cp 失败（exit $LASTEXITCODE）" }
@@ -290,7 +291,7 @@ if ($KindCluster) {
         Write-Host "已导入 $node：$RefSha（Pods 用 imagePullPolicy: IfNotPresent 即可）" -ForegroundColor Green
     } finally {
         if (Test-Path $tar) { Remove-Item $tar -Force -ErrorAction SilentlyContinue }
-        & docker exec $node rm -f "/tmp/$(Split-Path $tar -Leaf)" *> $null
+        & docker exec $node rm -f "/root/$(Split-Path $tar -Leaf)" *> $null
     }
 }
 

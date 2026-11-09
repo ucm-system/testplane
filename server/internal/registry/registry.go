@@ -78,11 +78,11 @@ var (
 	// versionPattern：语义化版本（§10 校验项 2）。
 	versionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
 	// 平台保留的挂载点（§10 校验项 11）。
-	reservedMountPaths = map[string]string{
-		"/workspace/output": "platform output directory",
-		"/tmp":              "platform tmp directory",
-		"/tester":           "tester image directory",
-	}
+	//
+	// #74：这里曾经和 executor/render.go 的集合不一致（少了 /workspace/input、多了也不齐），
+	// 导致 `/tester` 提交期被拒、渲染期却放行。现在**唯一来源是 domain**；
+	// 统一共享挂载（D-63）的路径也在其中（由调用方传入 shared 列表时合入）。
+	reservedMountPaths = domain.ReservedMountPaths(nil)
 	// 禁止出现的 K8s 清单（§6.8、§10 校验项 15）。
 	forbiddenManifests = map[string]struct{}{
 		"job.yaml":           {},

@@ -55,12 +55,16 @@ type JobSpec struct {
 	Labels         map[string]string
 	Annotations    map[string]string
 
-	Resources  domain.ResourceRequest
-	Mounts     []domain.MountSpec
-	OutputDir  string // 宿主视角的产物目录；渲染时按 §3.1 转成 subPath
-	InputDir   string
-	StoragePVC string
-	StorageRO  bool
+	Resources domain.ResourceRequest
+	Mounts    []domain.MountSpec
+	// SharedMounts 是平台级统一共享挂载（D-63）：PVC source，全局默认注入所有 Tester Job。
+	SharedMounts []domain.SharedMountSpec
+	// SharedMountsDisabled 由 Execution Profile 的 `sharedMounts: false` 置位（D-63 ③）。
+	SharedMountsDisabled bool
+	OutputDir            string // 宿主视角的产物目录；渲染时按 §3.1 转成 subPath
+	InputDir             string
+	StoragePVC           string
+	StorageRO            bool
 
 	TimeoutSeconds int
 
