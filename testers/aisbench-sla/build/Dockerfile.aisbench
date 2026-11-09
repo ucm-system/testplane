@@ -1,4 +1,9 @@
-# TestPlane Tester: aisbench-sla —— **真实 ais_bench 模式**镜像（本地/kind 验证用）
+# release-skip: 依赖 build/models/（15MB tokenizer，.gitignore 掉）+ 6.4GB ais_bench 基础镜像，CI 构建不出来
+#
+# 本地/私有环境构建（先准备 tokenizer）：
+#   pwsh testers/aisbench-sla/build/prepare-tokenizer.ps1
+#   docker build -f testers/aisbench-sla/build/Dockerfile.aisbench -t <repo>/testplane-tester-aisbench-sla-aisbench:local testers/aisbench-sla
+## TestPlane Tester: aisbench-sla —— **真实 ais_bench 模式**镜像（本地/kind 验证用）
 #
 # 与 build/Dockerfile（stub 模式，python:3.11-slim + 自带 stub_aisbench）的区别：
 #   基础镜像换成官方 AISBench benchmark 镜像，镜像里真的带 ais_bench 命令与它自己的
