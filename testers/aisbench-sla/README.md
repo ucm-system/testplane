@@ -66,14 +66,13 @@
 aisbench-sla/
 ├── tester.yaml            # 元数据 + 参数清单（文档语义） + 资源/并发声明
 ├── run.sh                 # 唯一执行入口（参数映射 + 跑工具 + 写 result.json）
-├── build/Dockerfile       # stub 小镜像（python:3.11-slim，构建上下文 = Tester 目录）
-├── build/Dockerfile.aisbench  # 真 ais_bench 镜像（官方基镜像，同一构建上下文）
+├── build/Dockerfile       # **唯一发布镜像**（FROM 官方 ais_bench 基础镜像，上下文 = Tester 目录）
 ├── run-local.sh           # 本地便捷脚本（只 run，不 build）
 ├── tool/                  # vendored 的上游 CLI（sla_search.py + sla_tool/ + tests/）
 │   └── VENDORED.md        # 来源仓库、commit、版本、**本地改动**、如何升级
 ├── tests/
-│   ├── smoke.sh           # 容器内冒烟：成功路径 + 退出码 2/3 + 凭据零泄漏
-│   ├── smoke.ps1          # 宿主侧驱动：docker run 一次并断言（Windows）
+│   ├── smoke.sh           # 容器内冒烟（**唯一入口**）：成功路径 + 退出码 2/3 + 凭据零泄漏
+│   ├── Dockerfile.stub    # 离线冒烟用的 stub 镜像（python slim + tool/tests/stub_aisbench.py）
 │   ├── test_result_mapping.py  # summary fixture → result.json 映射（降级/正常/全降级）
 │   ├── validate_result_schema.py  # result.json 按 openapi Result schema 校验（含 ErrorCode）
 │   └── fixtures/smoke_dataset.jsonl   # 8 行 × 512 字符（stub 估 ~128 token）
@@ -240,15 +239,15 @@ aisbench_cmd）。`metadata` 记录工具名、工具版本（`aisbench-sla 0.7.
 
 **构建上下文是 Tester 目录本身**（`testers/aisbench-sla`），不是仓库根。这是**发版路径**：
 `.github/workflows/release.yml` 的矩阵给每个 Tester 的 `context` 就是 `testers/<name>`、
-`dockerfile` 是 `testers/<name>/build/Dockerfile`（与 `endpoint-probe` 同一约定）。两个 Dockerfile
+dockerfile 是 `testers/<name>/build/Dockerfile`（与 `endpoint-probe` 同一约定）。Dockerfile
 的 `COPY` 全部相对这个目录：
 
 ```bash
 # 发版路径（= release.yml 矩阵的 context）
 docker build -f testers/aisbench-sla/build/Dockerfile \
-  -t ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0-stub \
+  -t ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0 \
   testers/aisbench-sla
-docker push ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0-stub
+docker push ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0
 # 把镜像引用回填 tester.yaml 的 image 字段（tag 或 digest 均可）
 ```
 
@@ -257,60 +256,49 @@ docker push ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0-stub
 > `testers/aisbench-sla/testers/aisbench-sla/run.sh` → 发版时构建失败（评审 #62 硬问题 3；
 > PR 的 CI 只构建 server/web，所以一直绿着）。0.4.0 已改成相对 Tester 目录。
 
-两个镜像与 tag 约定：
+**只有一种发布镜像**（用户 2026-11-09 拍板）：`build/Dockerfile` 就是真镜像，基础镜像为
+`ghcr.io/aisbench/aisbench_benchmark:v3.1-20260330-master_x86_64_py_310`（6.39 GB，镜像里
+`ais_bench` 是真命令）。曾经的 `Dockerfile.aisbench` 已删除——它和 `build/Dockerfile` 并存时，
+发布矩阵只构建后者，于是**发出去的是 stub 假镜像**，真镜像反而因为依赖本地 tokenizer 构建不出来。
 
-| tag | 来自 | 用途 |
+| 产物 | 来自 | 用途 |
 |---|---|---|
-| `:0.4.0-stub` | `build/Dockerfile`（`python:3.11-slim` + 自带 stub） | 小镜像（214 MB）：离线冒烟、kind 里的 mock、不想拉 6.4 GB 的场景 |
-| `:0.4.0` | `build/Dockerfile.aisbench`（官方 ais_bench 基镜像） | **真 ais_bench 模式**：生产/真实 SLA 结论用它 |
+| `:<version>` | `build/Dockerfile` | **唯一发布镜像**：真 `ais_bench`，生产/真实 SLA 结论用它 |
+| `:<version>-stub`（自建，不进矩阵） | `tests/Dockerfile.stub` | 离线冒烟：python slim + `tool/tests/stub_aisbench.py`，不需要 6.4 GB 基镜像 |
 
-`tester.yaml` 的 `image` 写 `:0.4.0`（真版）。注意：**发版矩阵目前只构建 `build/Dockerfile`**
-（stub），真版镜像不在矩阵里——要让 tag 发版产出真版，需要给矩阵加一条「Tester 名 → Dockerfile」
-的映射，或单独一个 job；在那之前真版按下一节手工/CI 单独构建。这是一处**已知的流水线缺口**，
-不是本 Tester 能自己决定的。
+发版矩阵只扫 `testers/<name>/build/Dockerfile*`，所以 `tests/Dockerfile.stub` **不会**进发布
+（这是有意的：stub 只证明入口与结果映射，不证明模型能力）。
 
-镜像内容：`python:3.11-slim` + `bash` + `ca-certificates` + `pip install requests` +
-`/tester/run.sh` + `/tester/tool`（vendored）+ `/tester/fixtures/smoke_dataset.jsonl`；
-非 root（uid 10001），`/tester` 与 `/workspace` 归 10001（工具要写 `<work_path>/ais_bench/...`）。
-构建时会把 `run.sh` 与 `tool/**/*.py` 的 CRLF 擦成 LF（Windows 检出的 `#!/usr/bin/env python3\r`
-会让 stub 模式直接报 `No such file or directory`）。
+镜像内容：官方 ais_bench 基础镜像 + `/tester/run.sh` + `/tester/tool`（vendored）+ `/tester/fixtures`；
+非 root（uid 10001），`/tmp`、`/models`、`/tester`、`/workspace` 都归 10001；
+`HOME`/`HF_HOME` 收到 `/tmp`（非 root 没有 `/home`，否则 HF 缓存会炸）。
+
+> **镜像不带 tokenizer / 数据集 / 权重，这是设计不是缺陷**：模型与 tokenizer 由平台统一共享挂载
+> （D-63）提供，默认挂到 `/models`（必要时还有 `/mnt/model`）；`--model_path` 只是**容器内路径**，
+> run.sh **原样透传**给 `ais_bench`，不做存在性预检、不猜 fallback、不提示"请先准备 tokenizer"。
 
 **平台、SSH 主机、本地一律只 `docker pull` + `docker run`**（§6.2）——不在目标机器上 build。
 
-## 真 ais_bench 模式（`build/Dockerfile.aisbench`，0.4.0）
-
-0.1.0 是 stub 模式（自带假 ais_bench，只证明链路）。0.2.0 起把基镜像换成官方
-`ghcr.io/aisbench/aisbench_benchmark:v3.1-20260330-master_x86_64_py_310`（6.39 GB，镜像里
-`ais_bench` 是真命令、`transformers`/`datasets`/`requests` 都已装好），`run.sh` 与 `tester.yaml`
-的契约零改动，只多两处「接线」（见下）。
-
-### 构建（本地/CI 同一份，context = Tester 目录）
+## 构建与运行真镜像（唯一发布镜像）
 
 ```bash
-# 1) 只给**验证镜像**用的 tokenizer（15MB，生产镜像不带）
-pwsh testers/aisbench-sla/build/prepare-tokenizer.ps1      # 从 D:\Models\Qwen3-0.6B 拷到 build/models/
-# 2) 构建（context = Tester 目录，与发版矩阵一致）
-docker build -f testers/aisbench-sla/build/Dockerfile.aisbench \
-  -t ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0 \
+# 构建（context = Tester 目录，与发版矩阵一致）
+docker build -f testers/aisbench-sla/build/Dockerfile \
+  -t ghcr.io/ucm-system/testplane-tester-aisbench-sla:<version> \
   testers/aisbench-sla
+
+# 关键断言：镜像里真的有 ais_bench，且跑在 uid 10001
+docker run --rm <img> bash -lc 'command -v ais_bench && id'
 ```
 
-镜像内容：官方 ais_bench 基础镜像 + `/tester/run.sh` + `/tester/tool`（vendored，stub 也在）+
-`/tester/fixtures` + `/models/Qwen3-0.6B`；非 root（10001），`/tmp`、`/models`、`/tester`、
-`/workspace` 都归 10001；`HOME`/`HF_HOME` 收到 `/tmp`（非 root 没有 `/home`，否则 HF 缓存会炸）。
+### 运行前提：`/models` 由平台挂载（D-63），不是 Tester 的职责
 
-### tokenizer 怎么进容器：选「COPY 进镜像」（三选一里的第 1 种）
-
-| 方案 | 结论 |
-|---|---|
-| ① COPY 进镜像 `/models/Qwen3-0.6B`（**选了它**） | Job 只挂产物 PVC，没有别的共享存储可挂；15MB 换来「一条 docker build 就能在 kind 里真跑」，可复现、不碰节点 |
-| ② kind 节点 hostPath PV/PVC + `tester.yaml.mounts` | 更接近生产，但要在节点里放文件、依赖节点路径，且 `mounts` 是**执行 Profile** 的事，写死在 Tester 里会把某套目录布局钉住（tester.yaml 里已有这条说明） |
-| ③ 塞进产物 PVC 再绝对路径挂 | 把「权重/数据集不由平台托管」（§10.4）这条破坏了，且每次 Run 得先准备 PVC |
-
-**这只是验证镜像**：`build/models/` 在 `build/.gitignore` 里、不入库；生产镜像**不带** tokenizer，
-tokenizer/权重由 Execution Profile 挂载，调用方用 `service.model_path`（公共参数）指容器内绝对路径。
-为了让「带」和「不带」一眼可辨，Dockerfile 里那条 `COPY` 单独一行、带注释。
-
+- 平台级 `sharedMounts`（Helm values → 平台配置）会把共享 PVC 挂进**所有** Tester Pod，
+  默认路径 `/models` 与 `/mnt/model`，默认只读；
+- 调用方（或平台注入的公共参数）给的 `--model_path` 就是**容器内路径**，约定形如
+  `/models/<模型名>`；Tester 只把它透传给 `ais_bench`；
+- 路径不存在时由 `ais_bench` 自己报错（`UTILS-FILE-002` 之类），**Tester 不做预检**；
+- 镜像里没有 `/models/*` 的任何内容——平台不替 Tester 分发模型（§10.4 路径不透明）。
 ### 关键接线：work_path 走 `/tmp/aisbench-ws`，不写 `/benchmark`
 
 官方镜像里 `/benchmark` 是 ais_bench 的源码根（root:root 0755）。而本工具要往 **work_path 下**写两样东西：
@@ -448,33 +436,35 @@ ais_bench 的逐点产物在 `sla_out/`。实测一次 3 点真跑（`--data_num
 另外整轮用 `ENDPOINT_API_KEY=sk-test-SECRET123` 跑，最后 `grep -r` 产物目录与 `work_path`：
 **必须 0 命中**（凭据零泄漏，评审 #62 硬问题 1 的常驻红证）。
 
-```powershell
-# Windows（宿主侧驱动，负责 docker run + 断言）
-pwsh testers/aisbench-sla/tests/smoke.ps1
-#   产物默认落到 .data\sla-tester\smoke\（含 cases/exit2、cases/exit3、cases/degraded）
+```bash
+# 唯一冒烟入口（**只有 shell，没有 ps1**；Windows 用 WSL 跑同一份）：
+bash testers/aisbench-sla/tests/smoke.sh
+#   产物默认落到 .data/sla-tester/smoke/（含 cases/exit2、cases/exit3、cases/degraded）
 ```
 
 ```bash
-# Linux/macOS 等价（镜像用 stub 版）：
+# 在 stub 镜像里跑（发布镜像不带 stub，所以冒烟用 tests/Dockerfile.stub 构建的镜像）：
+docker build -f testers/aisbench-sla/tests/Dockerfile.stub \
+  -t ghcr.io/ucm-system/testplane-tester-aisbench-sla:stub testers/aisbench-sla
 docker run --rm --entrypoint bash \
   -v "$PWD/.data/sla-tester/smoke:/workspace/output" \
-  -v "$PWD/testers/aisbench-sla/tests:/tests:ro" \
-  ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0-stub /tests/smoke.sh
+  ghcr.io/ucm-system/testplane-tester-aisbench-sla:stub /tester/tests/smoke.sh
 ```
 
-冒烟用的那串参数（与 `tests/smoke.*` 里一致）：
+冒烟用的那串参数（与 `tests/smoke.sh` 里一致）：
 
 ```text
---url=http://127.0.0.1:18080/v1 --model_name=mock-llm --model_path=/tester/tool
+--url=http://127.0.0.1:18080/v1 --model_name=mock-llm --model_path=/models/Qwen3-0.6B
 --input_len=128 --output_len=8 --data_num=8 --sla=ttft.avg:100000
 --start=1 --max=4 --max_probes=2 --request_rate=0
 --dataset=/tester/fixtures/smoke_dataset.jsonl
---aisbench_cmd=/tester/tool/tests/stub_aisbench.py --work_path=/tester/tool
+--aisbench_cmd=/tester/tool/tests/stub_aisbench.py --work_path=/tmp/aisbench-ws
 ```
 
-> `--model_path` 指 `/tester/tool`（镜像里存在的目录）而不是 `/weights/x`：工具会校验该目录存在
-> （ais_bench 模型配置需要 tokenizer）。用 `--dataset` 时它不会被真正读取，但校验仍会跑。
-> `--dataset` 是必需的：本镜像不装 `transformers`，不能现场生成数据集（见「已知限制」）。
+> `--model_path` 是**容器内路径**，由平台统一共享挂载（D-63，默认 `/models/<模型名>`）提供；
+> Tester 只透传、**不校验存在性**。stub 镜像里没有真的 `/models` 内容（stub 不读权重），
+> 所以 stub 冒烟直接用约定的 `/models/Qwen3-0.6B` 字符串即可。
+> `--dataset` 在 stub 镜像里是必需的：stub 不装 `transformers`，不能现场生成数据集（见「已知限制」）。
 
 ## 平台上提交（Run）
 
@@ -528,18 +518,18 @@ docker run --rm --add-host=host.docker.internal:host-gateway \
 
 或 `IMAGE=... ./run-local.sh <同样的参数>`（只 run，不 build）。
 
-（0.4.0 里 `ais_bench` 就是真命令，不用再写 `--aisbench_cmd`；`--model_path` 换成你挂进来的
-tokenizer 目录即可。要凭据就 `-e ENDPOINT_API_KEY=...`——它不会进 argv、不会落日志。）
+（`ais_bench` 就是镜像里的真命令，不用再写 `--aisbench_cmd`；`--model_path` 写平台挂进来的
+容器内路径即可，默认形如 `/models/<模型名>`。要凭据就 `-e ENDPOINT_API_KEY=...`——它不会进 argv、不会落日志。）
 
 ## 已知限制
 
-1. **`build/Dockerfile`（stub 小镜像，tag `:0.4.0-stub`）不含 ais_bench**：它只证明封装与契约。
-   真跑用 `build/Dockerfile.aisbench`（tag `:0.4.0`，官方 ais_bench 基镜像），见上面「真 ais_bench 模式」。
-   小镜像仍有用：本机 kind 里的 `sla-mock` Deployment 就是用它跑 `tool/tests/mock_vllm.py`
-   （6.39 GB 的真镜像不适合跑一个 mock）。
+1. **`build/Dockerfile` 是唯一发布镜像（真 `ais_bench`）**；stub 镜像只是 `tests/Dockerfile.stub` 的产物（不进发布）。
+   stub 仍有用：本机 kind 里的 `sla-mock` Deployment 就是用它跑 `tool/tests/mock_vllm.py`。
+
+   （6.39 GB 的真镜像不适合跑一个 mock）
 2. **stub 镜像不能现场生成数据集**：真镜像自带 `transformers`，可以
    （`--dataset_type=normal|prefix_cache` + `--model_path` 指 tokenizer 目录即可）；stub 镜像仍需
-   `--dataset`。给了 `--dataset` 时工具跳过生成，但**仍会校验 `--model_path` 目录存在**。
+   `--dataset`。给了 `--dataset` 时工具跳过生成；`--model_path` **不做存在性校验**（路径由平台统一挂载提供）。
    注意工具在 `--seed-per-point`（默认）下**会忽略 `--dataset`** 去重新生成——所以 `run.sh` 在 `--dataset`
    存在时自动加 `--no-seed-per-point`，各点复用同一份数据集（命中率会逐点饱和，工具会告警）。
 3. **`hit_rate` 依赖目标服务的 `/metrics`**：只有暴露 `vllm:prefix_cache_queries_total` /
@@ -549,7 +539,7 @@ tokenizer 目录即可。要凭据就 `-e ENDPOINT_API_KEY=...`——它不会�
    平台 Executor 固定 `readOnlyRootFilesystem: true`，只有 `/workspace/output` 与 `/tmp` 可写。
    写不了时 0.4.0 **直接 failed + TESTER_NONZERO_EXIT**（不再打一行 log 硬着头皮跑）。
    0.2.0 起 `run.sh` 用 `AIS_BENCH_DATASETS_CACHE` + `--config-dir` 把 `/tmp/aisbench-ws` 接给 ais_bench
-   （见「真 ais_bench 模式」），**不要再写 `/benchmark`**：那里属 root 且平台只读。
+   （见上面「构建与运行真镜像」里的 work_path 接线），**不要再写 `/benchmark`**：那里属 root 且平台只读。
 5. **平台的 `--model_path` 不校验存在性**（§10.4 路径对平台不透明），而工具会校验；路径写错时的表现是
    `exit 1` + `TESTER_NONZERO_EXIT`，`notes` 里能看到工具的原始报错。
 6. **`stub_aisbench.py` 只能证明链路，不能当结论**：它的 TTFT/TPOT 是确定性公式（`100 + 20×c` /
@@ -578,8 +568,8 @@ py -3.11 testers/aisbench-sla/tests/test_result_mapping.py
 py -3.11 testers/aisbench-sla/tests/validate_result_schema.py
 # 5) 镜像离线冒烟（构建上下文 = Tester 目录，与发版矩阵一致）
 docker build -f testers/aisbench-sla/build/Dockerfile \
-  -t ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0-stub testers/aisbench-sla
-pwsh testers/aisbench-sla/tests/smoke.ps1
+  -t ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0 testers/aisbench-sla
+bash testers/aisbench-sla/tests/smoke.sh
 ```
 
 ## 本机验证记录（2026-11-06，0.4.0）
@@ -590,9 +580,9 @@ pwsh testers/aisbench-sla/tests/smoke.ps1
 | vendored CLI | `py -3.11 tool/tests/test_cli_surface.py` | `PASS (34/34 OK)` |
 | vendored 离线 e2e | `py -3.11 tool/tests/test_offline.py` | `Ran 22 tests ... OK`（含 mock+stub 全链路与 `DegradedAndCredentialTests`） |
 | summary→result.json 映射 | `py -3.11 tests/test_result_mapping.py` | `PASS (26/26 OK)`：正常 fixture 出 4、降级 fixture 只出 1、全降级不输出该指标 |
-| 容器冒烟（`:0.4.0-stub`） | `pwsh tests/smoke.ps1` | 退出码 0；成功路径 6 个 metrics（新名字）；`cases/degraded` 的 `sla_max_concurrency=1 < max_ok=2`；退出码 2/3 的 `error.code` 正确；`grep sk-test-SECRET123` 在产物与 work_path 下 **0 命中** |
+| 容器冒烟（stub 镜像） | `bash tests/smoke.sh`（在 `tests/Dockerfile.stub` 构建的镜像里） | 退出码 0；成功路径 6 个 metrics（新名字）；`cases/degraded` 的 `sla_max_concurrency=1 < max_ok=2`；退出码 2/3 的 `error.code` 正确；`grep sk-test-SECRET123` 在产物与 work_path 下 **0 命中** |
 | 契约校验 | `py -3.11 tests/validate_result_schema.py` | RESULT SCHEMA: PASS (5/5)：冒烟/红证/降级/退出码 2/3 的 result.json 全过 openapi Result（含 ErrorCode enum） |
-| 两个镜像按发版 context 构建 | `docker build -f build/Dockerfile … testers/aisbench-sla` 与 `… Dockerfile.aisbench … testers/aisbench-sla` | 均成功；`:0.4.0-stub`（214 MB）/ `:0.4.0`（6.43 GB） |
+| 单一发布镜像按发版 context 构建 | `docker build -f build/Dockerfile … testers/aisbench-sla` | 成功；`:0.4.0`（官方 ais_bench 基镜像，约 6.4 GB）；`command -v ais_bench && id` 输出真命令与 `uid=10001` |
 | **平台真跑（真 ais_bench，mock 服务）** | `POST /api/v1/runs`，`precheck: auto`，`service.url=http://sla-mock.testplane-mock.svc:18080/v1` | **本 README 只引用这一次：Run `r-20261106-938F`**（3 点 c=1,2,4，`succeeded`；链路 `precheck(succeeded) → sla-search-real(succeeded)`）。⚠️ 目标是 **mock 服务（`tool/tests/mock_vllm.py`），不是真模型**——它证明链路与产物形态，不是模型性能。该次用 0.2.0 镜像，metrics 按旧名：`sla_max_concurrency=4`、`max_output_throughput_tok_s=1253.612`、`ttft_avg_ms=1.8`、`tpot_p90_ms=2.3`、`probes_total=3`（0.4.0 对应 `output_throughput` / `ttft` / `tpot`）；c=4 那点 ais_bench 原始表 TTFT avg 1.8 / TPOT avg 2.2 / E2EL avg 17.2 ms、Total Generated Tokens 256；artifacts 含 `sla_out/points/c{1,2,4}/<exp>/aisbench_full.log` |
 | 日志体积（同 manifest 的 3 点真跑，0.2.0 镜像；体积只取决于点数与负载，与 938F 同构） | PVC 上 `wc -c` / `wc -l` + logs API | `logs/stdout.log` 51 833 B / 380 行；`sla_out/aisbench_all.log` 50 334 B / 360 行；`points/c1/full.log` 15 060 B（c2/c4 各 ~15.2 KB）；产物合计 512 763 B；logs API `limit=65536` 一次取回全量（`X-Log-Offset: 51833`），无 `truncated`/`next_offset` |
 

@@ -241,12 +241,13 @@ class Config:
             raise ValueError("必须提供 --work-path（ais_bench 的 benchmark 目录）")
         if not os.path.isdir(self.work_path):
             raise ValueError(f"--work-path 不存在：{self.work_path}")
-        # ais_bench 的模型配置必须带 tokenizer 路径（即使数据集已由 --dataset 提供）
+        # ais_bench 的模型配置必须带模型/权重路径（即使数据集已由 --dataset 提供）。
+        # **不做存在性校验**：路径由平台统一共享挂载（D-63，默认 /models）或调用方提供，
+        # Tester 不判断它是否存在、也不猜 fallback 路径 —— 真缺了由 ais_bench 自己报
+        # UTILS-FILE-002，Tester 不为它背书。
         if not self.model_path:
-            raise ValueError("必须提供 --model-path（tokenizer 路径）："
-                             "ais_bench 的模型配置需要它，否则报 UTILS-FILE-002")
-        if not os.path.isdir(self.model_path):
-            raise ValueError(f"--model-path 目录不存在：{self.model_path}")
+            raise ValueError("必须提供 --model-path（容器内模型/权重路径，"
+                             "通常由平台统一挂载到 /models）")
 
     # ------------------------------------------------------------------ 便捷
     def model_fields(self) -> Dict[str, object]:

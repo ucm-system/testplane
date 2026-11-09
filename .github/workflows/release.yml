@@ -59,21 +59,13 @@ jobs:
             printf '{"image":"server","dockerfile":"deploy/docker/server.Dockerfile","context":"."},'
             printf '{"image":"web","dockerfile":"deploy/docker/web.Dockerfile","context":"."}'
             # Tester：上下文是 testers/<name>/（不是仓库根）
-            # 一个 Tester 可以有多个变体镜像：build/Dockerfile（默认）与 build/Dockerfile.<variant>
-            # （例如 aisbench-sla 的真 ais_bench 镜像 Dockerfile.aisbench）。变体镜像名带后缀
-            # tester-<name>-<variant>，不和默认镜像抢同一个 tag。
+            # build/Dockerfile 是该 Tester 的唯一发布镜像。若将来确有变体，可加 build/Dockerfile.<variant>，
+            # 镜像名会带后缀 tester-<name>-<variant>，不和默认镜像抢同一个 tag。
             for d in $(ls -1 testers); do
               if [ -f "testers/$d/build/Dockerfile" ]; then
                 printf ',{"image":"tester-%s","dockerfile":"testers/%s/build/Dockerfile","context":"testers/%s"}' "$d" "$d" "$d"
               fi
               for v in $(ls -1 "testers/$d/build"/Dockerfile.* 2>/dev/null | sed 's#.*/Dockerfile\.##'); do
-                df="testers/$d/build/Dockerfile.$v"
-                # 变体可以声明 `# release-skip: <理由>`：依赖 gitignore 掉的本地产物
-                # （如 aisbench 的 15MB tokenizer）时，CI 里根本构建不出来，别让它把发布搞红。
-                if head -n 5 "$df" | grep -q "release-skip:"; then
-                  echo "跳过 $df（$(head -n 5 "$df" | grep -o "release-skip:.*" | head -n1)）" >&2
-                  continue
-                fi
                 printf ',{"image":"tester-%s-%s","dockerfile":"testers/%s/build/Dockerfile.%s","context":"testers/%s"}' "$d" "$v" "$d" "$v" "$d"
               done
             done

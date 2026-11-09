@@ -51,6 +51,7 @@ python -c "import sys; sys.path.insert(0, 'tool'); import sla_tool; print(sla_to
 | `sla_tool/search.py` | `_run_phase` 通过 `env_extra` 注入 key；新增 `MEASURED_CONCURRENCY_MIN_RATIO = 0.8`、`PointResult.degraded/degraded_reason` 与 `_mark_degraded()`，并把降级点写进 `warnings` | 「最大并发必须是测出来的」：实测并发 < 目标 80% 的点不能当 PASS 结论（评审 #62 硬问题 2） |
 | `sla_tool/report.py` | `sla_points.csv` 新增 `degraded` / `degraded_reason` / `measured_concurrency_ratio` 三列；`sla_summary.json` 新增 `max_ok_concurrency_measured` / `measured_concurrency_min_ratio` / `degraded_points` | 同上；CSV 是给人看证据的地方，必须能一眼看到哪个点没压满 |
 | `tests/test_offline.py` | 新增 `DegradedAndCredentialTests`（降级判定、CSV 旁注、summary 只统计达标点、模型配置不含明文 key、env 回落） | 上述两处的回归 |
+| `sla_tool/config.py` | `validate_for_run()` **删掉 `--model-path` 的 `os.path.isdir()` 存在性校验**（保留"必须提供"） | D-63 / 用户 2026-11-09：模型与 tokenizer 由平台 `sharedMounts` 挂到 `/models`，Tester 只透传路径，不判断存在性、不猜 fallback；缺了由 `ais_bench` 报 `UTILS-FILE-002` |
 
 **语义保持不变**的字段：`max_ok_concurrency` 仍是「配置口径下最大的 PASS 并发」（工具退出码与
 搜索策略不变）；`max_ok_concurrency_measured` 才是「实测并发达标」的那个数，`run.sh` 用它
