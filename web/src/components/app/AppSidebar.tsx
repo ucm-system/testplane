@@ -117,11 +117,11 @@ export function AppSidebar() {
                   src="/brand-icon.webp"
                   alt=""
                   aria-hidden
-                  width={56}
-                  height={56}
+                  width={96}
+                  height={69}
                   decoding="async"
                   data-testid="sidebar-brand-icon"
-                  className="hidden size-7 shrink-0 select-none group-data-[collapsible=icon]:block"
+                  className="hidden h-6 w-auto shrink-0 select-none group-data-[collapsible=icon]:block"
                 />
               </Link>
             </SidebarMenuButton>
