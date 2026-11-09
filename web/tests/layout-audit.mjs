@@ -8,7 +8,7 @@
 //   4. 页头 sticky、h-14（56px），没有竖分隔线（侧栏自成一列，不再靠页头里的 1px 线对齐）；
 //   5. 全页只有一个 `<main>`，min-width:0，DOM 里侧栏先于主内容（shadcn 骨架的顺序）；
 //   6. 移动端（390）：桌面侧栏不渲染、主内容 0..vw，点汉堡出 288 的 sheet 抽屉（可 Esc 关闭）；
-//   7. 字体是否真的加载了 Albert Sans / Noto Sans SC；
+//   7. 品牌图（/brand.webp）是否真的解码出来、Noto Sans SC 是否加载；
 //   8. 禁止项：rounded-none / shadow-2xl / font-black / text-5xl 及以上的计算字号、backdrop-blur、渐变；
 //   9. 动效时长 <= 200ms。
 // 用法：node tests/layout-audit.mjs   （DEMO_BASE 默认 http://127.0.0.1:8132）
@@ -79,6 +79,10 @@ const MEASURE = () => {
     cookie: document.cookie,
     fonts: {
       albert: document.fonts.check('16px "Albert Sans"'),
+      brand: (() => {
+        const img = document.querySelector('[data-testid="sidebar-brand"], header img[alt="TestPlane"]')
+        return img ? { ok: img.complete && img.naturalWidth > 0, w: img.naturalWidth, src: img.getAttribute('src') } : null
+      })(),
       noto: document.fonts.check('16px "Noto Sans SC"'),
     },
   }
@@ -202,7 +206,10 @@ async function audit(page, label, width, height) {
   }
 
   // ---- 字体与页脚 ----
-  push(`${label}: 字体 Albert Sans 已加载`, m.fonts.albert, JSON.stringify(m.fonts))
+  // 品牌是图片（用户提供的徽章 lockup），不再依赖 Albert Sans 字标：改断言品牌图真的加载出来
+  const brand = m.fonts.brand
+  push(`${label}: 品牌图已加载（/brand.webp）`, Boolean(brand && brand.ok && brand.src === '/brand.webp'), JSON.stringify(brand))
+  push(`${label}: 字体 Noto Sans SC 已加载`, m.fonts.noto, JSON.stringify(m.fonts))
   push(`${label}: 字体 Noto Sans SC 已加载`, m.fonts.noto, JSON.stringify(m.fonts))
   push(`${label}: 全局页脚已删除`, m.footerPos === null, `on=${m.footerPos}`)
 }

@@ -52,6 +52,11 @@ ENV NPM_CONFIG_MINIMUM_RELEASE_AGE=0
 
 WORKDIR /src/web
 
+# 前端构建前要跑 scripts/sync-spec.mjs 把契约投影到 src/generated/。
+# 构建上下文是**仓库根**（下面 COPY web/ 就是证据），所以这里能把契约拷进 web 的工作目录；
+# 只 COPY web/ 的话容器里没有 ../server/api/，prebuild 会直接失败（踩过）。
+COPY server/api/openapi.yaml ./server-api/openapi.yaml
+
 COPY web/package.json web/pnpm-lock.yaml* ./
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store pnpm install --frozen-lockfile --config.minimumReleaseAge=0 --allow-build=esbuild
 

@@ -1,7 +1,6 @@
 import { Link, useLocation } from 'react-router-dom'
 import { ChevronRight, Plus } from 'lucide-react'
 import { UserMenu } from '@/components/app/UserMenu'
-import { Wordmark } from '@/components/app/Wordmark'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/shadcn/separator'
 import { SidebarTrigger } from '@/components/ui/shadcn/sidebar'
@@ -20,11 +19,16 @@ const TITLES: Array<{ test: (path: string) => boolean; title: string; sub: strin
   { test: (p) => p === '/clusters', title: '集群与队列', sub: '只回答「卡在队列还是卡在平台槽位」' },
   { test: (p) => p === '/admin', title: '管理台', sub: 'Profile / 集群 / Secret 引用 / 审计（仅 admin）' },
   { test: (p) => p === '/404', title: '页面不存在', sub: '这个地址没有对应的页面' },
+  // 文档与 API：只给标题，不给副标题（用户要求页头不再自说自话）
+  { test: (p) => p === '/docs', title: '文档', sub: '' },
+  { test: (p) => p === '/api', title: 'API', sub: '' },
 ]
 
 function titleFor(pathname: string): { title: string; sub: string } {
   const hit = TITLES.find((item) => item.test(pathname))
-  return hit ?? { title: 'TestPlane', sub: '' }
+  // 没命中任何已知路由 = 404：面包屑写「页面不存在」，不要退化成品牌名
+  // （否则页头会出现「TestPlane › TestPlane」，看起来像面包屑坏了）
+  return hit ?? { title: '页面不存在', sub: '' }
 }
 
 /**
@@ -44,7 +48,14 @@ export function SiteHeader() {
       <SidebarTrigger />
       {/* 移动端侧栏在 sheet 里，页头留一个品牌入口（≥md 时品牌在侧栏顶部，这里隐藏） */}
       <Link to="/" aria-label="TestPlane 首页" className="flex shrink-0 items-center md:hidden">
-        <Wordmark className="text-fg" height={20} />
+        <img
+          src="/brand.webp"
+          alt="TestPlane"
+          width={700}
+          height={177}
+          decoding="async"
+          className="h-6 w-auto select-none"
+        />
       </Link>
       <Separator orientation="vertical" className="hidden h-4 md:block" />
 

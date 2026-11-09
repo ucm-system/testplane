@@ -264,22 +264,28 @@ test('⑦ /runs/:id 取到 404：复用同一个 404 组件，文案按上下文
   await expect(page.getByText('加载 Run 失败')).toHaveCount(0)
 })
 
-test('⑦ 404 插画是内联 SVG 动画；prefers-reduced-motion: reduce 下不播', async ({ page }) => {
+test('⑦ 404 主视觉是图片（webp，装饰性 alt 为空）；没有残留的内联 SVG 动画', async ({ page }) => {
   await page.goto('/404')
 
-  const art = page.getByRole('img', { name: '一架纸飞机沿着虚线航线飞走，表示这个页面已经不存在' })
+  // 用户 2026-11-09：404 的主元素换成提供的插画（public/404.webp，760px / 69KB）
+  const art = page.getByTestId('not-found-art')
   await expect(art).toBeVisible()
-  // 没有引用任何图片资源：整张插画就是内联 SVG（自有令牌上色）
-  await expect(page.locator('[data-testid="not-found"] img')).toHaveCount(0)
+  await expect(art).toHaveAttribute('src', '/404.webp')
 
-  const normal = await page.locator('.notfound-float').evaluate((el) => getComputedStyle(el).animationName)
-  expect(normal).toBe('notfound-float')
+  // 装饰性插画：alt 为空 + aria-hidden；页面身份由 h1 里的「404」承担
+  await expect(art).toHaveAttribute('alt', '')
+  await expect(art).toHaveAttribute('aria-hidden', 'true')
 
-  // 减少动效：动画被整段关掉（animation-name: none），不是只把时长压到 0.001ms
-  await page.emulateMedia({ reducedMotion: 'reduce' })
-  await page.reload()
-  const reduced = await page.locator('.notfound-float').evaluate((el) => getComputedStyle(el).animationName)
-  expect(reduced).toBe('none')
-  const dash = await page.locator('.notfound-dash').evaluate((el) => getComputedStyle(el).animationName)
-  expect(dash).toBe('none')
+  // 图片解码是异步的：轮询到 naturalWidth>0 再断言，别和浏览器解码时序赛跑
+  await expect
+    .poll(
+      () => art.evaluate((el) => (el.complete ? el.naturalWidth : 0)),
+      { timeout: 10_000, intervals: [200] },
+    )
+    .toBeGreaterThan(0)
+
+  // 纸飞机那套内联 SVG 动效已删除（连 utility 一起），不要回潮
+  // 插画不再用内联 SVG（按钮里的 lucide 图标不算）：断言没有 role=img 的 SVG、也没有旧动画类
+  await expect(page.locator('[data-testid="not-found"] svg[role="img"]')).toHaveCount(0)
+  await expect(page.locator('.notfound-float, .notfound-dash')).toHaveCount(0)
 })
