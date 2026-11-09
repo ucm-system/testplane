@@ -21,7 +21,8 @@ export interface NotFoundPageProps {
  * —— 同页两个 main landmark 会让"跳到主内容"的目标变歧义，读屏也会重复播报。
  * 改用 `<section aria-labelledby>`，并把 `document.title` 设成「404 · 页面不存在」。
  *
- * **版式（用户 2026-11-09 定稿）**：插画在**左**，右侧只放两个动作按钮。
+ * **版式（用户 2026-11-09 第三次定稿，别再左右分栏）**：整页**居中一列** ——
+ * 插画在上、两个动作按钮在下，一起水平居中。左右分栏时按钮悬在插画旁边，看着像没对齐。
  * 「404 / 这个地址没有对应的页面 / 可能是链接过期了……」那两行文字**不再显示**（图里已经写着 404，
  * 文字与图并排像没对齐的两栏）。文字没有丢：`h1` 与说明留成 `sr-only`，
  * 读屏与 SEO 仍拿得到「404 + 上下文」——是"视觉上删掉"，不是"语义上删掉"。
@@ -44,7 +45,7 @@ export function NotFoundPage({
   return (
     <section aria-labelledby="not-found-title" data-testid="not-found" className="min-w-0">
       <Card className="px-6 py-8 sm:px-10 sm:py-10">
-        <div className="flex flex-col items-center gap-8 md:flex-row md:items-center md:gap-12">
+        <div className="mx-auto flex max-w-lg flex-col items-center gap-6 text-center">
           {/* 主视觉：左 */}
           <img
             src="/404.webp"
@@ -54,17 +55,17 @@ export function NotFoundPage({
             height={760}
             decoding="async"
             data-testid="not-found-art"
-            className="w-full max-w-[16rem] shrink-0 select-none sm:max-w-[20rem] md:max-w-[22rem]"
+            className="w-full max-w-[16rem] shrink-0 select-none sm:max-w-[20rem]"
           />
 
-          {/* 右侧只有动作；标题与说明对读屏可见（sr-only），视觉上由图承担 */}
-          <div className="min-w-0 md:flex-1">
+          {/* 动作在下；标题与说明对读屏可见（sr-only），视觉上由图承担 */}
+          <div className="w-full">
             <h1 id="not-found-title" className="sr-only">
               404 {title}
             </h1>
             <p className="sr-only">{description}</p>
 
-            <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
+            <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:justify-center">
               <Link to="/" data-testid="not-found-home">
                 <Button
                   variant="primary"
