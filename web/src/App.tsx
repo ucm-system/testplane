@@ -1,11 +1,10 @@
 import { lazy } from 'react'
-import { BrowserRouter, Navigate, Route, Routes, useParams } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { AppShell } from '@/components/app/AppShell'
 import { ToastProvider } from '@/components/ui/toast'
 
 /* 路由级拆包（design/impl/web-and-delivery.md §6：每个 route lazyRouteComponent） */
 const DashboardPage = lazy(() => import('@/pages/DashboardPage').then((m) => ({ default: m.DashboardPage })))
-const RunsPage = lazy(() => import('@/pages/RunsPage').then((m) => ({ default: m.RunsPage })))
 const RunDetailPage = lazy(() => import('@/pages/RunDetailPage').then((m) => ({ default: m.RunDetailPage })))
 const SubmitPage = lazy(() => import('@/pages/SubmitPage').then((m) => ({ default: m.SubmitPage })))
 const TestersPage = lazy(() => import('@/pages/TestersPage').then((m) => ({ default: m.TestersPage })))
@@ -20,6 +19,15 @@ function RunDetailRoute() {
   return <RunDetailPage key={runId} />
 }
 
+/**
+ * `/runs` 兼容重定向（D-62）：列表页已并入概览，旧链接连同 query 一起转到 `/`。
+ * 这里跑在 BrowserRouter（非 Data Router）下，所以用 `<Navigate>` 而不是 router 级 redirect。
+ */
+function RunsRedirect() {
+  const { search } = useLocation()
+  return <Navigate to={{ pathname: '/', search }} replace />
+}
+
 export function App() {
   return (
     <ToastProvider>
@@ -27,7 +35,12 @@ export function App() {
         <Routes>
           <Route element={<AppShell />}>
             <Route index element={<DashboardPage />} />
-            <Route path="runs" element={<RunsPage />} />
+            {/*
+              D-62：概览与运行列表合并 —— 独立列表页已删除。
+              /runs 保留成兼容重定向，**query 原样带过去**（旧书签与分享链接不能失效）：
+              /runs?status=failed&page=2 → /?status=failed&page=2
+            */}
+            <Route path="runs" element={<RunsRedirect />} />
             <Route path="runs/:runId" element={<RunDetailRoute />} />
             <Route path="submit" element={<SubmitPage />} />
             <Route path="testers" element={<TestersPage />} />

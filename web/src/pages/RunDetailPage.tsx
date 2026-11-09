@@ -63,7 +63,7 @@ function FlowNode({
       type="button"
       onClick={onClick}
       className={cn(
-        'flex w-[172px] shrink-0 flex-col gap-1 rounded-[10px] border border-line-strong bg-surface px-3 py-2 text-left',
+        'flex w-[172px] shrink-0 flex-col gap-1 rounded-lg border border-line-strong bg-surface px-3 py-2 text-left',
         'transition-all duration-150 hover:border-primary/40 hover:bg-surface-2',
       )}
     >
@@ -215,8 +215,8 @@ const RETRY_PLAN_REASON: Record<string, string> = {
 
         {manifest ? (
           <details className="rounded-md border border-line-soft bg-surface-2 px-3 py-2" open>
-            <summary className="cursor-pointer text-2xs text-fg-2">实际提交给部署方的参数（原文快照）</summary>
-            <pre className="mt-2 overflow-x-auto font-mono text-[11.5px] leading-relaxed text-fg-2">{manifest}</pre>
+            <summary className="flex h-6 cursor-pointer items-center text-2xs text-fg-2">实际提交给部署方的参数（原文快照）</summary>
+            <pre className="mt-2 overflow-x-auto font-mono text-2xs leading-relaxed text-fg-2">{manifest}</pre>
           </details>
         ) : null}
       </CardBody>
@@ -259,7 +259,7 @@ const RETRY_PLAN_REASON: Record<string, string> = {
                             setSelectedPod(pod.name)
                             document.getElementById('deploy-logs')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
                           }}
-                          className="break-all text-left font-mono text-2xs text-primary-text hover:underline"
+                          className="inline-flex h-6 items-center break-all text-left font-mono text-2xs text-primary-text hover:underline"
                           title={`查看 ${pod.name} 的日志`}
                         >
                           {pod.name}
@@ -934,7 +934,7 @@ export function RunDetailPage() {
             { value: 'detail', label: '执行细节' },
             { value: 'events', label: '事件' },
           ]}
-          className="rounded-lg border border-line-soft bg-surface px-3 pt-1 shadow-card"
+          className="rounded-xl border border-line bg-surface px-3 pt-1 shadow-xs"
         />
       ) : null}
 
@@ -942,7 +942,7 @@ export function RunDetailPage() {
       {detail && view === 'events' ? (
         <section {...tabPanelProps('run-view', 'events')} data-testid="run-events-panel" className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-[15px] font-semibold text-fg">事件</h2>
+            <h2 className="text-base font-semibold text-fg">事件</h2>
             <span className="text-2xs text-fg-3">
               {terminal
                 ? 'Run 已结束 · 下面是历史事件'
@@ -980,7 +980,7 @@ export function RunDetailPage() {
               title={
                 <span className="flex flex-wrap items-center gap-2">
                   {/* 页面内 h1（对象名）：19px/600，压过卡头 15px 的普通标题 */}
-                  <h1 className="text-[19px] font-semibold leading-tight tracking-[-0.02em]">{detail.name}</h1>
+                  <h1 className="text-xl font-semibold leading-tight tracking-[-0.02em]">{detail.name}</h1>
                   <RunStatusBadge status={detail.status} />
                   <Tag mono>{detail.id}</Tag>
                   <Tag>{detail.kind === 'run' ? 'Run' : '独立 Task'}</Tag>

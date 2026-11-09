@@ -81,7 +81,9 @@ test('③ Pod 拓扑：pods[] 非空渲染表格（Pod 名可点、重启标 war
   // 重启次数 > 0 的 Pod 用 warn 徽标（不只是一个裸数字）
   const restartedRow = table.locator('tr', { hasText: 'decode-0' })
   await expect(restartedRow).toContainText('1 次')
-  await expect(restartedRow.locator('.text-warn-text').first()).toBeVisible()
+  // 重启次数 > 0 的 Pod 用 warn 徽标（不只是一个裸数字）。
+  // 断言走 `data-tone` 而不是颜色类：徽标改成了「描边 + 彩色点」，色不再写在文字 class 上。
+  await expect(restartedRow.locator('[data-tone="warn"]').first()).toBeVisible()
 
   // 点 Pod 名 → 下方 Deploy 日志面板切到对应 Pod 页签
   const targetName = (await podNames.nth(1).innerText()).trim()
@@ -134,13 +136,10 @@ test('④ 产物分组：三个组都在，文件一个不少（数量 = /artifa
   await expect(groups.deploy).toContainText('deploy/pods.json')
   await expect(groups.tests).toContainText('stdout.log')
 
-  // 报告页同一套分组（展示层，不过滤）
+  // 报告页不再放产物详情（用户 2026-11-09 / D-64）：产物只在结果页，报告页只有计数/指标/Task/失败清单/report.md
   await page.goto(`/runs/${DONE_RUN}/report`)
-  await expect(page.getByTestId('report-artifacts')).toBeVisible({ timeout: 20_000 })
-  await expect(page.getByTestId('artifact-group-deploy')).toBeVisible()
-  await expect(page.getByTestId('artifact-group-tests')).toBeVisible()
-  await expect(page.getByTestId('artifact-group-reports')).toBeVisible()
-  await expect(page.getByTestId('artifact-download')).toHaveCount(expected.total)
+  await expect(page.getByTestId('report-artifacts')).toHaveCount(0)
+  await expect(page.getByTestId('report-md')).toBeVisible({ timeout: 20_000 })
 })
 
 test('⑤ 落盘缺失：下载 404 显示「还没落盘」，不弹红色错误', async ({ page }) => {

@@ -84,16 +84,22 @@ test('③ 结果视图：打包下载 .zip 存在且点击触发下载，按文�
   const [download] = await Promise.all([page.waitForEvent('download'), bundle.click()])
   expect(download.suggestedFilename()).toMatch(/\.zip$/)
 
-  // 按文件下载仍在（不是把单文件入口换掉了）
+  // 按文件下载仍在（不是把单文件入口换掉了）；分组默认折叠，先点开再断言
+  for (const key of ['deploy', 'tests', 'reports']) {
+    await page.getByTestId(`artifact-group-${key}`).locator('summary').click()
+  }
   await expect(page.getByTestId('artifact-download').first()).toBeVisible()
 })
 
 test('④ 运行中 Run：Deploy 日志面板也按游标追加', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
   await page.goto(`/runs/${LIVE_RUN}`)
-  await expect(page.getByText('Deploy 日志')).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByText('Deploy 日志', { exact: true })).toBeVisible({ timeout: 20_000 })
 
   const lines = page.getByTestId('deploy-log-line')
+  // 先等首批行真的渲染出来再取基线：`goto` 之后立刻 count 偶尔是 0（面板还在拉首屏），
+  // 那条 `expect(before).toBeGreaterThan(0)` 就会偶发变红——是取基线的时机问题，不是轮询没工作。
+  await expect.poll(() => lines.count(), { timeout: 20_000, intervals: [300] }).toBeGreaterThan(0)
   const before = await lines.count()
   expect(before).toBeGreaterThan(0)
   await expect.poll(() => lines.count(), { timeout: 6_000, intervals: [400] }).toBeGreaterThan(before)

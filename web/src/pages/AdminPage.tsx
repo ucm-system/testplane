@@ -741,7 +741,7 @@ export function AdminPage() {
         value={tab}
         onChange={setTab}
         items={TAB_ITEMS}
-        className="rounded-lg border border-line-soft bg-surface px-3 pt-1 shadow-card"
+        className="rounded-xl border border-line bg-surface px-3 pt-1 shadow-xs"
       />
 
       <section {...tabPanelProps('admin', tab)}>

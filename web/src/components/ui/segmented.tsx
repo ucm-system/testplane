@@ -15,7 +15,13 @@ export interface SegmentedProps<T extends string> {
   disabled?: boolean
 }
 
-/** 分段控件（原型 .fde-seg）：轨道灰底 + 选中白底，用于「部署 / 不部署」这类二态切换。 */
+/**
+ * 分段控件（原型 .fde-seg）：轨道灰底 + 选中白底，用于「部署 / 不部署」这类二态切换。
+ *
+ * 视觉对齐 shadcn Tabs 的"药丸在灰轨道里"：轨道 `rounded-lg bg-surface-3 p-1`，
+ * 选中项 `rounded-md bg-surface shadow-xs`，高度 32px（可点面积够大），
+ * 焦点 `ring-[3px] ring-ring/50`。
+ */
 export function Segmented<T extends string>({
   value,
   onChange,
@@ -28,7 +34,7 @@ export function Segmented<T extends string>({
     <div
       role="group"
       aria-label={ariaLabel}
-      className={cn('inline-flex rounded-md bg-surface-3 p-0.5', disabled && 'opacity-60', className)}
+      className={cn('inline-flex rounded-lg bg-surface-3 p-1', disabled && 'opacity-50', className)}
     >
       {options.map((option) => {
         const active = option.value === value
@@ -40,9 +46,10 @@ export function Segmented<T extends string>({
             aria-pressed={active}
             onClick={() => onChange(option.value)}
             className={cn(
-              'h-7 whitespace-nowrap rounded-sm px-3 text-xs transition-colors duration-150',
+              'h-8 whitespace-nowrap rounded-md px-3 text-xs transition-colors duration-150',
+              'outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50',
               active
-                ? 'bg-surface font-medium text-primary-text shadow-card'
+                ? 'bg-surface font-medium text-fg shadow-xs'
                 : 'text-fg-2 hover:text-fg disabled:cursor-not-allowed',
             )}
           >

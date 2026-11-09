@@ -208,7 +208,7 @@ test('⑤ YAML 语法错误：报错带行列，修好后标记消失', async ({
 
 test('⑥ 全局页脚已删除：chrome 里不再出现 API 前缀，页面高度撑到视口底部', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 })
-  await page.goto('/runs')
+  await page.goto('/')
   await expect(page.getByText('全部 Run')).toBeVisible()
 
   // 页脚整段删掉：既没有 footer 元素，也没有那条 API 链接
@@ -216,12 +216,12 @@ test('⑥ 全局页脚已删除：chrome 里不再出现 API 前缀，页面高�
   await expect(page.getByTestId('footer-api-link')).toHaveCount(0)
   await expect(page.getByText('TestPlane · 控制台')).toHaveCount(0)
 
-  // 栅格从 header/body/footer 三段变两段：body 底边贴住视口底边
+  // shadcn 骨架（inset 变体）：主体底边贴住视口底边，只留 inset 的 8px 页边距
   const bottom = await page.evaluate(() => {
     const main = document.querySelector('#main')!
     return { main: Math.round(main.getBoundingClientRect().bottom), vh: window.innerHeight }
   })
-  expect(bottom.main).toBeGreaterThanOrEqual(bottom.vh - 2)
+  expect(bottom.main).toBeGreaterThanOrEqual(bottom.vh - 10)
 })
 
 /* ============================================================ 7. 统一 404 */
@@ -248,7 +248,8 @@ test('⑦ 未匹配路由与 /404 是同一个 404 组件，带两个可用动�
 
   // 按钮真的可用
   await page.getByTestId('not-found-runs').click()
-  await expect(page).toHaveURL(/\/runs$/)
+  // /runs 现在重定向到概览（D-62）
+  await expect(page).toHaveURL(/\/(\?.*)?$/)
 })
 
 test('⑦ /runs/:id 取到 404：复用同一个 404 组件，文案按上下文变化', async ({ page }) => {

@@ -192,7 +192,7 @@ test('⑦ 只有 pre_check 角色的 Tester：无可用 Tester 时置灰并在 T
   })
 
   // 站内切走再切回：提交页真卸载再重挂 → 重新拉目录（补丁还在，整页刷新会丢）
-  await page.getByRole('link', { name: '运行列表' }).click()
+  await page.getByRole('link', { name: '概览' }).click()
   await expect(page.getByText('全部 Run')).toBeVisible()
   await page.getByRole('link', { name: '提交运行' }).click()
   await expect(page).toHaveURL(/\/submit$/)

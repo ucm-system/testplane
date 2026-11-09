@@ -9,13 +9,19 @@ import type {
 } from 'react'
 import { cn } from '@/lib/utils'
 
-/** 输入控件的公共外观（原型 .fde-input / .fde-select / .fde-textarea）。 */
+/**
+ * 输入控件的公共外观（对齐 shadcn Input，见 docs/research/shadcn-visual-specs.md §2.7）：
+ *  - `h-9 px-3 rounded-md border border-line bg-transparent`：**透明底**，只靠 1px 描边 + `shadow-xs`；
+ *    （原来那层 `bg-surface-2` 灰底让每个控件都像"灰砖"，是"糙"的第二大来源）
+ *  - 焦点 `border-ring + ring-[3px] ring-ring/50`；禁用 `opacity-50`；无效 `border-danger + ring-danger/20`。
+ */
 const FIELD =
-  'w-full rounded-md border border-line bg-surface-2 px-3 text-sm text-fg placeholder:text-fg-3 ' +
-  'transition-[background-color,border-color,box-shadow] duration-150 ease-out ' +
-  'hover:border-line-strong focus:border-primary focus:bg-surface focus:outline-none ' +
-  'focus:shadow-[0_0_0_3px_var(--color-ring)] disabled:cursor-not-allowed disabled:opacity-60 ' +
-  'aria-[invalid=true]:border-danger aria-[invalid=true]:bg-danger-weak/40 aria-[invalid=true]:focus:border-danger'
+  'w-full min-w-0 rounded-md border border-line bg-transparent px-3 py-1 text-sm text-fg shadow-xs ' +
+  'placeholder:text-fg-3 transition-[color,box-shadow,border-color] duration-150 ease-out ' +
+  'outline-none hover:border-line-strong ' +
+  'focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 ' +
+  'disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 ' +
+  'aria-[invalid=true]:border-danger aria-[invalid=true]:ring-[3px] aria-[invalid=true]:ring-danger/20'
 
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(function Input(
   { className, ...rest },
@@ -70,16 +76,16 @@ export function Field({ label, hint, error, required, className, children, htmlF
       {label ? (
         <Label htmlFor={controlId}>
           {label}
-          {required ? <span className="ml-0.5 text-danger">*</span> : null}
+          {required ? <span className="ml-0.5 text-danger-text">*</span> : null}
         </Label>
       ) : null}
       {control}
       {error ? (
-        <p role="alert" className="text-2xs text-danger-text">
+        <p role="alert" className="text-xs text-danger-text">
           {error}
         </p>
       ) : hint ? (
-        <p className="text-2xs leading-relaxed text-fg-3">{hint}</p>
+        <p className="text-xs leading-relaxed text-fg-3">{hint}</p>
       ) : null}
     </div>
   )

@@ -19,7 +19,7 @@ export interface EmptyStateProps extends Omit<HTMLAttributes<HTMLDivElement>, 't
 export function EmptyState({ title, description, action, icon, className, ...rest }: EmptyStateProps) {
   return (
     <div className={cn('flex flex-col items-center justify-center gap-2 px-6 py-12 text-center', className)} {...rest}>
-      <span className="grid size-9 place-items-center rounded-full bg-surface-3 text-fg-3" aria-hidden>
+      <span className="grid size-10 place-items-center rounded-full bg-surface-3 text-fg-3" aria-hidden>
         {icon ?? <Inbox className="size-4" />}
       </span>
       <p className="text-sm font-medium text-fg-2">{title}</p>
@@ -60,7 +60,7 @@ export function ErrorState({ error, onRetry, className, compact = false }: Error
       )}
     >
       <div className="flex flex-wrap items-center gap-2">
-        <AlertTriangle className={cn('size-4 shrink-0', forbidden ? 'text-warn' : 'text-danger')} aria-hidden />
+        <AlertTriangle className={cn('size-4 shrink-0', forbidden ? 'text-warn-text' : 'text-danger-text')} aria-hidden />
         <Badge tone={forbidden ? 'warn' : 'err'} className="font-mono">
           {error.code}
         </Badge>
@@ -73,7 +73,7 @@ export function ErrorState({ error, onRetry, className, compact = false }: Error
           <Badge tone="muted">不可重试</Badge>
         )}
         {retry ? (
-          <Button size="sm" variant="secondary" icon={<RefreshCw className="size-3" aria-hidden />} onClick={retry}>
+          <Button size="sm" variant="secondary" icon={<RefreshCw className="size-4" aria-hidden />} onClick={retry}>
             重试
           </Button>
         ) : null}
@@ -81,8 +81,8 @@ export function ErrorState({ error, onRetry, className, compact = false }: Error
       {error.trace_id ? <p className="font-mono text-2xs text-fg-3">trace_id: {error.trace_id}</p> : null}
       {detail && !compact ? (
         <details className="group">
-          <summary className="cursor-pointer text-2xs text-fg-3 hover:text-fg-2">查看 detail</summary>
-          <pre className="mt-1 max-h-48 overflow-auto rounded-sm bg-surface/70 px-2 py-1.5 font-mono text-2xs leading-relaxed text-fg-2">
+          <summary className="cursor-pointer text-xs text-fg-3 hover:text-fg-2">查看 detail</summary>
+          <pre className="mt-1 max-h-48 overflow-auto rounded-sm bg-surface px-2 py-1.5 font-mono text-2xs leading-relaxed text-fg-2">
             {detail}
           </pre>
         </details>
@@ -113,11 +113,11 @@ export function Banner({ tone = 'warn', role = 'status', title, children, action
   return (
     <div
       role={role}
-      className={cn('flex flex-wrap items-start gap-x-3 gap-y-1 rounded-lg border px-4 py-2.5', BANNER_TONE[tone], className)}
+      className={cn('flex flex-wrap items-start gap-x-3 gap-y-1 rounded-lg border px-4 py-3', BANNER_TONE[tone], className)}
     >
       <div className="min-w-0 flex-1">
-        <p className="text-xs font-medium text-fg">{title}</p>
-        {children ? <p className="mt-0.5 text-2xs leading-relaxed text-fg-2">{children}</p> : null}
+        <p className="text-sm font-medium text-fg">{title}</p>
+        {children ? <p className="mt-1 text-xs leading-relaxed text-fg-2">{children}</p> : null}
       </div>
       {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
     </div>
@@ -129,7 +129,7 @@ export function Banner({ tone = 'warn', role = 'status', title, children, action
 export function LoadingBlock({ label = '加载中…' }: { label?: string }) {
   return (
     <div className="flex items-center justify-center gap-2 px-4 py-10 text-xs text-fg-3" role="status">
-      <RefreshCw className="size-3.5 animate-spin" aria-hidden />
+      <RefreshCw className="size-4 animate-spin" aria-hidden />
       {label}
     </div>
   )

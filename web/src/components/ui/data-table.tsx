@@ -88,7 +88,7 @@ export function DataTable<TData>({
         <TBody>
           {table.getRowModel().rows.length === 0 ? (
             <tr>
-              <td colSpan={columns.length} className="px-4 py-10 text-center text-sm text-fg-3">
+              <td colSpan={columns.length} className="px-6 py-10 text-center text-sm text-fg-3">
                 {empty ?? '没有数据'}
               </td>
             </tr>

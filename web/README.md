@@ -190,7 +190,7 @@ dev 部署与 mock 模式都没有 `/auth/*`：`/me` 无 `csrf_token` → mode=d
 - **断点**：`>1024` 三列；`768–1024` 收右栏（`grid-cols-[240px_minmax(0,1fr)]`）；`<768` 单列堆叠、左栏走抽屉、页头由 grid 切成 flex 单行。
 - **页头对齐**（用户最较真的两条）：页头与 body **共用同一套列宽**，品牌列 240px 带 `border-r`、
   用户列 288px 带 `border-l` —— 于是左分隔线落在 **x=240**（左栏右边缘）、右分隔线落在 **x=vw−288**（右栏左边缘，
-  1280 宽时 = 992）。`tests/layout.spec.ts` 与 `tests/layout-audit.mjs`（Lead 的 DOM 实测脚本，35 项）都断言这些坐标，不靠肉眼：
+  1280 宽时 = 992）。`tests/layout.spec.ts` 与 `tests/layout-audit.mjs`（DOM 实测脚本，60+ 项）都断言这些坐标，不靠肉眼：
   `DEMO_BASE=http://127.0.0.1:8133 node tests/layout-audit.mjs`（先 `VITE_USE_MOCK=1 pnpm build`，再 `pnpm exec vite preview --port 8133`）。
 - **根字号必须 16px**：Tailwind 的 spacing / 尺寸类都是 rem，`html{font-size:14px}` 会把 `h-14` 缩成 49px、
   侧栏 240 缩成 210 —— "左栏差 30px / 页头高 49" 就是这个坑。正文 14px 由 `body` 给，别动根字号；
@@ -199,26 +199,51 @@ dev 部署与 mock 模式都没有 `/auth/*`：`/me` 无 `csrf_token` → mode=d
   （不随主内容滚走）。
 - 页头品牌是 **SVG 字标**（`components/app/Wordmark.tsx`，从原型原样搬来，`useId()` 生成渐变 id 防串色），
   不是 `<img favicon> + 文字`；页头**不放产品级按钮**（新建 Run / 提交运行都在左导航）。
-- 页头标题 15px/600（"当前在哪"），页面内对象名用 h1 19px/600。
+- 页头标题 16px/600（"当前在哪"），页面内对象名用 h1 20px/600（`tracking-tight`）。
 
-### 字号层级（原型 README 那张表）
+### 字号层级（token 标尺：11 / 12 / 14 / 16 / 18 / 20 / 24 / 30）
+
+> 只允许这 8 档。**禁止 13 / 15 / 17 这类"半档"**——`tests/ui-audit.mjs` 会在渲染结果里抓它们。
 
 | 位置 | 字号 / 字重 |
 |---|---|
-| 页面内 h1（对象名） | 19px / 600 |
-| 品牌字标 | 26px 高，字 17–20px / 650 |
-| 卡片标题 | 15px / 600 |
+| 页面内 h1（对象名） | 20px / 600 + `tracking-tight` |
+| 品牌字标 | 26px 高，字 17–20px / 650（Albert Sans，仅字标） |
+| 卡片标题 / 页头标题 | 16px / 600 + `tracking-tight` |
 | 表格正文 | 14px；表头 12px / 500（中文表头） |
-| 说明文字 | 12.5px；徽标 / 标签 12.5px |
-| KPI 数字 | 30px / 600 + `tabular-nums` + `-0.03em` |
+| 说明文字 / 徽标 / 标签 | 12px；元信息（trace_id、行号、计数）11px |
+| KPI 数字 | 30px / 600 + `tabular-nums` + `tracking-tight` |
+
+### UI 规范审计（可重复，可当门禁）
+
+```bash
+corepack pnpm@11 dev --port 5173            # 或指到真后端
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:5173 node tests/ui-audit.mjs
+# 改前基线留档：UI_AUDIT_PHASE=before node tests/ui-audit.mjs → .data/ui-audit/ui-audit-report-before.md
+```
+
+断言字号标尺、裸色值、文本对比度（≥4.5:1）、焦点环、圆角/阴影 token、可点元素
+≥24/32px、间距栅格；输出 8 页 × 3 视口截图到 `.data/ui-audit/<phase>/` 与一份
+P0/P1/P2 报告。**有 P0 就退出码 1**。设计与口径见
+[`docs/research/shadcn-visual-specs.md`](../docs/research/shadcn-visual-specs.md)。
+
 
 ### 字体（自托管，不赌系统字体）
 
-`design/prototype/assets/fonts/*.woff2` → `web/public/fonts/`，`src/styles/fonts.css` 原样两个 `@font-face`
-（`font-display: swap`），`index.css` 里 `@import "./styles/fonts.css"` 且 `--font-sans` 用原型同序栈
-（Albert Sans → Noto Sans SC → 系统兜底）。运行时零外网请求。
+`web/public/fonts/` + `src/styles/fonts.css` 两个 `@font-face`（`font-display: swap`），
+`index.css` 里 `@import "./styles/fonts.css"` 且 `--font-sans` 用 **Inter → Noto Sans SC → 系统兜底**。
+运行时零外网请求。
 
-> `web/public/fonts/*.woff2` 是 `design/prototype/assets/fonts/` 的**副本**：改字体要同步两处（原型是设计基准）。
+- **Inter**（`fonts/inter-latin-var.woff2`，48 KB latin 可变）：UI 正文与数据。为屏幕 12–14px 设计，
+  等宽数字稳、与 Noto Sans SC 的 x-height 更接近。换字体的一手对比见
+  [`docs/research/shadcn-visual-specs.md`](../docs/research/shadcn-visual-specs.md) §4。
+- **Noto Sans SC**（`fonts/noto-sans-sc-var.woff2`，151 KB 子集）：中文。子集缺字回落系统中文体。
+- **Albert Sans**（`fonts/albert-sans-latin.woff2`，32 KB）：**只给品牌字标**
+  （`components/app/Wordmark.tsx` 的 SVG `<text>`），不再承担正文；几何无衬线在 12–14px 的
+  密集表格里字腔太开、行高更松。
+
+> `design/prototype/assets/fonts/` 是原型侧的字体副本；那边的旧字体栈（Albert Sans 打头）
+> 以原型为准，但 **web/ 已切到 Inter**，改字体时不要盲目同步这两处。
 
 
 ### 结果优先的信息架构（用户反馈）
@@ -259,7 +284,7 @@ dev 部署与 mock 模式都没有 `/auth/*`：`/me` 无 `csrf_token` → mode=d
 |---|---|---|
 | 类型来源 | `api/types.ts` **按 `server/api/openapi.yaml` 手写**（每个类型标注 schema 名） | `openapi-typescript` 生成并入库，CI 校验 diff |
 | 数据层 | 约 50 行 `useAsync`（无缓存层） | 换成 TanStack Query，query key 按 web-and-delivery §3 |
-| 字体 | **自托管** Albert Sans + Noto Sans SC 子集（`public/fonts/` + `src/styles/fonts.css`），已在用 | — |
+| 字体 | **自托管** Inter（UI）+ Albert Sans（字标）+ Noto Sans SC 子集（`public/fonts/` + `src/styles/fonts.css`），已在用 | — |
 | 提交页 YAML 编辑 | `textarea` + 解析校验 | CodeMirror 6（按行标错、`?from=<run>` 回填） |
 | 执行环境 | 契约已有 `GET /profiles`；提交页仍是可编辑文本框（默认 `k8s-npu`），管理台可维护 | 提交页改下拉（一行改动） |
 | 报告页 / 指标表 | 报告页**已做**（`/runs/:id/report`：counts / Task 明细 / 失败清单 / `report.md` 原文）；指标表仍不做（契约明确不聚合） | 需要聚合视图时另开票 |
@@ -294,3 +319,4 @@ dev 部署与 mock 模式都没有 `/auth/*`：`/me` 无 `csrf_token` → mode=d
 | 2026-11-05 | port-forward `127.0.0.1:8081`（kind 内 `testplaned`） | 只读探测：`/meta`、`/me`、`/clusters`、`/queue-status`、`/runs?limit=3`、`/testers`、`/tasks?limit=2` 全部 200 且形状与契约一致；据此把 `types.ts` 全量对齐 openapi.yaml | 差异见上面「与后端实测的差异」表：`GET /runs/{id}` 空 body、`task_counts` 未返回、提交体平级写法，均在 backend-core 修 |
 | 2026-11-05 | **契约 fixture**（本地 18083，按 openapi 形状手写的假后端）+ `pnpm dev` 代理 | 真实模式（`VITE_USE_MOCK=0`）端到端跑通：`/`、`/runs`、`/runs/:id`、`/submit`、`/testers`、`/clusters` **0 运行时错误**；`/me` 身份（dev·admin）进来、列表 `task_counts` 进度（2 / 2）、Tester `parameters` map→数组（2 参数）、详情 Deployment ID / Pod 拓扑 / `report.md` 链接、Attempt + `X-Log-Offset`/`X-Log-Coverage` 日志、Volcano 不可达降级都验到了；代理对 SSE 不缓冲（`text/event-stream` 逐帧到） | 差异：无（fixture 就是按契约写的） |
 | 待办 | 真后端（8081） | 提交（含 deploy）→ 详情 → 事件流 → Testers → Clusters 全链路 | 等 backend-core 报「改完」后填这一行 |
+

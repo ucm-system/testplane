@@ -23,12 +23,12 @@ function classify(line: string): LineKind {
 }
 
 const LINE_CLASS: Record<LineKind, string> = {
-  plain: 'text-slate-300',
-  time: 'text-slate-300',
-  error: 'text-[#fca5a5]',
-  restart: 'text-[#fcd34d]',
-  gap: 'text-[#fca5a5]',
-  ok: 'text-[#6ee7b7]',
+  plain: 'text-log-time',
+  time: 'text-log-time',
+  error: 'text-log-error',
+  restart: 'text-log-warn',
+  gap: 'text-log-error',
+  ok: 'text-log-ok',
 }
 
 /** 毫秒时间戳 → `HH:mm:ss`（“最后更新”用） */
@@ -159,13 +159,13 @@ export function LogViewer({
               ))}
             </div>
           ) : lines.length === 0 ? (
-            <p className="px-4 py-6 text-center text-xs text-slate-400">还没有日志</p>
+            <p className="px-4 py-6 text-center text-xs text-log-muted">还没有日志</p>
           ) : (
             <div
               ref={follow.ref}
               onScroll={follow.onScroll}
               data-testid={`${testIdPrefix}-scroller`}
-              className="max-h-[22rem] overflow-auto px-4 py-3 font-mono text-[11.5px] leading-[1.7]"
+              className="max-h-[44rem] overflow-auto px-4 py-3 font-mono text-2xs leading-[1.7]"
               role="log"
               aria-live="off"
             >
@@ -180,10 +180,10 @@ export function LogViewer({
                       data-testid="log-marker"
                       data-marker-tone={markerTone}
                       className={cn(
-                        'my-1.5 flex items-center justify-center gap-2 rounded-sm bg-white/[0.06] px-2 py-1 text-center text-[11px]',
-                        markerTone === 'warn' && 'text-warn',
-                        markerTone === 'danger' && 'text-[#fca5a5]',
-                        markerTone === 'neutral' && 'text-slate-400',
+                        'my-1.5 flex items-center justify-center gap-2 rounded-sm bg-white/[0.06] px-2 py-1 text-center text-2xs',
+                        markerTone === 'warn' && 'text-log-warn',
+                        markerTone === 'danger' && 'text-log-error',
+                        markerTone === 'neutral' && 'text-log-muted',
                       )}
                     >
                       <span className="h-px flex-1 bg-white/10" aria-hidden />
@@ -207,7 +207,7 @@ export function LogViewer({
                   >
                     {match ? (
                       <>
-                        <span className="text-slate-500">{match[0].trim()}</span>
+                        <span className="text-log-muted">{match[0].trim()}</span>
                         {line.slice(match[0].length)}
                       </>
                     ) : (

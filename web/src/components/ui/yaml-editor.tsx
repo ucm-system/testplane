@@ -11,6 +11,7 @@ import CodeMirror, {
   keymap,
 } from '@uiw/react-codemirror'
 import { yaml } from '@codemirror/lang-yaml'
+import { Check, Copy, FileCode } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /**
@@ -48,6 +49,10 @@ export interface YamlEditorProps {
   placeholder?: string
   /** 左侧行号（默认开） */
   showLineNumbers?: boolean
+  /** 顶部工具条标题（缺省用 aria-label）；样式对齐 shadcn `InputGroup`：`block-start` 工具条 + `block-end` 提示条 */
+  title?: string
+  /** 底部提示行右侧文案（例如「2 空格缩进 · Ctrl/⌘+Enter 提交」） */
+  hint?: string
   /** YAML 解析错误位置：给了就把该行/该列标成错误并滚过去 */
   error?: YamlEditorError | null
 }
@@ -153,7 +158,7 @@ const YAML_KEYMAP = keymap.of([{ key: 'Tab', run: insertIndent }])
 const YAML_THEME = EditorView.theme({
   '&': {
     height: '100%',
-    fontSize: '12.5px',
+    fontSize: '12px',
     lineHeight: '1.7',
     backgroundColor: 'transparent',
     color: 'var(--color-fg)',
@@ -168,7 +173,7 @@ const YAML_THEME = EditorView.theme({
     border: 'none',
     borderRight: '1px solid var(--color-line-soft)',
   },
-  '.cm-lineNumbers .cm-gutterElement': { padding: '0 6px 0 8px', minWidth: '24px' },
+  '.cm-lineNumbers .cm-gutterElement': { padding: '0 6px 0 8px', minWidth: '24px', fontSize: '12px' },
   '.cm-yaml-error-gutter': { width: '14px' },
   '.cm-yaml-error-gutter .cm-gutterElement': { display: 'grid', placeItems: 'center', padding: 0 },
   '.cm-yaml-error-dot': { color: 'var(--color-danger)', fontSize: '9px', lineHeight: '1.7' },
@@ -190,10 +195,21 @@ export function YamlEditor({
   placeholder,
   showLineNumbers = true,
   'aria-label': ariaLabel,
+  title,
+  hint,
   error = null,
 }: YamlEditorProps) {
   const viewRef = useRef<EditorView | null>(null)
   const [mounted, setMounted] = useState(false)
+  // 可拖拽高度：CodeMirror 没有 native textarea 的 resize handle，所以由外层容器提供 CSS `resize: vertical`。
+  // 高度**不让 React 接管**（不写 style 属性）：只在挂了之后命令式设一次初始高度，之后用户拖成多少就是多少，
+  // 否则每次 onChange 重渲染都会被 `rows` 算出来的高度覆盖回去——这正是"拖一下就弹回去"的原因。
+  const rowsHeight = Math.round(rows * 1.7 * 12.5 + 16)
+  const boxRef = useRef<HTMLDivElement | null>(null)
+  // 底部提示条要显示的光标位置（1-based），与 CodeMirror 的 selection 同步
+  const [cursor, setCursor] = useState({ line: 1, col: 1 })
+  // 复制按钮的「已复制」反馈
+  const [copied, setCopied] = useState(false)
 
   const extensions = useMemo(
     () => [
@@ -203,6 +219,13 @@ export function YamlEditor({
       yamlErrorDecorations,
       yamlErrorGutter,
       YAML_THEME,
+      // 光标位置 → 底部提示条（只在这个编辑器里用，不影响别处的 CM 实例）
+      EditorView.updateListener.of((update) => {
+        if (!update.selectionSet && !update.docChanged) return
+        const head = update.state.selection.main.head
+        const line = update.state.doc.lineAt(head)
+        setCursor({ line: line.number, col: head - line.from + 1 })
+      }),
       EditorView.contentAttributes.of({
         'aria-label': ariaLabel ?? 'YAML',
         ...(error ? { 'aria-invalid': 'true' } : {}),
@@ -236,23 +259,62 @@ export function YamlEditor({
     })
   }, [error, value, mounted])
 
+  // 把用户拖出来的高度记进 state（否则每次重渲染被 rows 算出来的高度覆盖回原样）。
+  // 只跟 1px 以上的变化，避免 ResizeObserver 与 setState 之间的抖动循环。
+  useEffect(() => {
+    const el = boxRef.current
+    if (!el || el.style.height) return
+    el.style.height = `${rowsHeight}px`
+  }, [rowsHeight])
+
+  const copyValue = async () => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // 剪贴板被浏览器策略拒绝时不打扰用户：编辑器里本来就能 Ctrl/Cmd+C
+    }
+  }
+
   return (
     <div
       className={cn(
-        'relative overflow-hidden rounded-md border bg-surface-2',
+        'relative flex flex-col overflow-hidden rounded-lg border bg-surface',
+        // 用户拖拽改高度：`resize-y` 是 CSS 原生把手，`min-h` 兜住拖太小、`max-h` 防止拖到遮住页面
+        'resize-y min-h-28 max-h-[70vh]',
         'transition-[border-color,box-shadow] duration-150 focus-within:shadow-[0_0_0_3px_var(--color-ring)]',
         error ? 'border-danger focus-within:border-danger' : 'border-line focus-within:border-primary',
         className,
       )}
-      style={{ height: `calc(${rows} * 1.7 * 12.5px + 16px)` }}
+      ref={boxRef}
       data-testid="yaml-editor"
       data-yaml-error={error ? `${error.line}:${error.col}` : undefined}
     >
+      {/* block-start 工具条（对齐 shadcn InputGroup block-start）：文件名 + 光标位置 + 复制 */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-line bg-surface-2 px-3 py-1.5">
+        <FileCode className="size-3.5 shrink-0 text-fg-3" aria-hidden />
+        <span className="truncate font-mono text-xs font-medium text-fg">{title ?? ariaLabel ?? 'YAML'}</span>
+        <span className="ml-auto shrink-0 text-2xs tabular-nums text-fg-3" data-testid="yaml-editor-cursor">
+          第 {cursor.line} 行，第 {cursor.col} 列
+        </span>
+        <button
+          type="button"
+          onClick={() => void copyValue()}
+          aria-label={copied ? '已复制 YAML' : '复制 YAML'}
+          className="inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-fg-3 transition-colors hover:bg-muted hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        >
+          {copied ? <Check className="size-3.5 text-success-text" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
+        </button>
+      </div>
+
+      {/* 编辑区：撑满工具条之间的空间（`min-h-0` 才能让 flex 子项正常收缩） */}
+      <div className="min-h-0 flex-1">
       <CodeMirror
         value={value}
         onChange={(next) => onChange(next)}
-        height="100%"
-        style={{ height: '100%' }}
+          height="100%"
+          style={{ height: '100%' }}
         className="h-full"
         placeholder={placeholder}
         theme="light"
@@ -270,11 +332,25 @@ export function YamlEditor({
           searchKeymap: false,
         }}
         extensions={extensions}
-        onCreateEditor={(view) => {
-          viewRef.current = view
-          setMounted(true)
-        }}
-      />
+          onCreateEditor={(view) => {
+            viewRef.current = view
+            setMounted(true)
+          }}
+        />
+      </div>
+
+      {/* block-end 提示条（对齐 shadcn InputGroup block-end）：解析状态 + 操作提示 */}
+      <div className="flex shrink-0 items-center gap-2 border-t border-line bg-surface-2 px-3 py-1.5 text-2xs">
+        {error ? (
+          <span className="text-danger-text">YAML 解析失败：第 {error.line} 行，第 {error.col} 列</span>
+        ) : (
+          <span className="inline-flex items-center gap-1 text-fg-3">
+            <span className="size-1.5 rounded-full bg-success" aria-hidden />
+            YAML 可解析
+          </span>
+        )}
+        <span className="ml-auto truncate text-fg-3">{hint ?? '拖动右下角可调整高度'}</span>
+      </div>
     </div>
   )
 }

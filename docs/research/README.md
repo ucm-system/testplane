@@ -13,13 +13,14 @@
 | [volcano-queue.md](volcano-queue.md) | 排队展示的真实来源（Jenkins 下游 → Genet `/api/open/queue` → Volcano CRD）、字段映射与坑 | D-49、`impl/control-plane.md §C-4.8`、`views/06-physical-view.md §2.1` |
 | [genet-deploy-plan.md](genet-deploy-plan.md) | 在本机 kind 里部署 Genet 的可行性：内网镜像、cert-manager 硬依赖、固定 chart、最小 values | `deploy/genet-local/README.md` |
 | [aisbench-real-run.md](aisbench-real-run.md) | 真 ais_bench 的兼容性与 tokenizer 注入：镜像内部事实、对被测算服务的硬要求、`mounts` 的实际语义、`precheck: auto` 缺镜像、真实日志体积 | wayfinder #55、`testers/aisbench-sla/`、#52（日志口径） |
+| [nfs-shared-mount.md](nfs-shared-mount.md) | NFS 挂进 Tester Pod：三种形态（内联 `nfs` / PV+PVC / CSI）对比、`restricted:latest` 下的实际准入结果、`root_squash` 与 uid 10001 的真实关系、`fsGroup` 为何对普通 NFS 无效、kind 上起 NFS server 的前提、`MOUNT_UNAVAILABLE` 的唯一产出点 | wayfinder #69、地图 #66、`impl/execution.md §3.4`、D-60 |
 
 ## 引用约定
 
 - **`R-G:行号`** = help 于 `genet-lifecycle.md` 的该行（"R-G" 读作 *Research-Genet*）。
   例：`R-G:294` 指 [genet-lifecycle.md](genet-lifecycle.md) 第 294 行。
 - **`R-O:行号`** = `genet-oidc.md`；**`R-V:行号`** = `volcano-queue.md`；**`R-D:行号`** = `genet-deploy-plan.md`；
-  **`R-A:行号`** = `aisbench-real-run.md`。
+  **`R-A:行号`** = `aisbench-real-run.md`；**`R-N:行号`** = `nfs-shared-mount.md`。
   （新笔记请沿用 "<短名>:行号" 的形式，并在本文件登记。）
 - **`<G>/path:行号`** = **上游 Genet 仓库**里的文件与行号。上游是独立仓库，不在本仓库内；
   引用时请写成 `<G>/backend/internal/handlers/helm.go:2906` 这种**全路径**，并在下面这段里说明

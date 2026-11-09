@@ -1,85 +1,54 @@
 import { Link } from 'react-router-dom'
+import { ArrowUpRight, Plus, Server } from 'lucide-react'
 import { api } from '@/api'
-import type { QueueStatus, RunSummary } from '@/api/types'
+import type { QueueStatus } from '@/api/types'
 import { KpiCard } from '@/components/app/KpiCard'
-import { RightRail, RailCard } from '@/components/app/RightRail'
-import { RunStatusBadge, WaitingReasonTag } from '@/components/app/StatusBadge'
+import { RunsTable } from '@/components/app/RunsTable'
 import { Button } from '@/components/ui/button'
-import { Card, CardHeader } from '@/components/ui/card'
-import { KpiSkeleton, TableSkeleton } from '@/components/ui/skeleton'
-import { EmptyState, ErrorState } from '@/components/ui/states'
-import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
+import { KpiSkeleton } from '@/components/ui/skeleton'
+import { ErrorState } from '@/components/ui/states'
 import { useAsync } from '@/hooks/useAsync'
-import { formatDateTime, formatDuration, formatNumber, runDuration } from '@/lib/utils'
+import { formatNumber } from '@/lib/utils'
 
-function taskProgress(run: RunSummary): string {
-  const counts = run.task_counts
-  if (!counts) return '—'
-  return `${counts.succeeded} / ${counts.total}`
-}
-
+/**
+ * 概览（D-62：与运行列表合并）。
+ *
+ * 一页两段，**都是主内容**：
+ *  1. KPI 四卡 + 一行「排队中的 Task」摘要（原来在右栏；右栏为了让宽表占满整幅宽度而取消）；
+ *  2. 全量 Run 表（真分页 + Excel 式列筛选，条件全在 URL 上）—— 原来 `/runs` 那一整套，
+ *     现在直接长在概览上，不再有独立列表页（`/runs` 只做兼容重定向）。
+ *
+ * 数据分三路拉、互不阻塞：`getDashboardStats`（KPI）、`getQueueStatus`（排队摘要）、
+ * `RunsTable` 自己的 `listRuns` + `listRunFacets`（表与列筛选候选值）。
+ * KPI 先出来、表后出来（或反过来）都是正常现象，两边各有 skeleton。
+ */
 export function DashboardPage() {
   const { data, loading, error, reload } = useAsync(async () => {
-    const [stats, runs, queue] = await Promise.all([
-      api.getDashboardStats(),
-      api.listRuns({ limit: 8 }),
-      api.getQueueStatus(),
-    ])
-    return { stats, runs: runs.items, queue }
+    const [stats, queue] = await Promise.all([api.getDashboardStats(), api.getQueueStatus()])
+    return { stats, queue }
   }, [])
 
   const stats = data?.stats
-  const runs = data?.runs ?? []
   const queue: QueueStatus | null = data?.queue ?? null
+  const waitingTasks = queue?.waiting?.tasks ?? []
 
   return (
     <>
-      <RightRail>
-        <RailCard title="快捷操作" tone="muted">
-          <div className="flex flex-col gap-2">
-            <Link to="/runs" className="block">
-              <Button className="w-full">查看运行列表</Button>
-            </Link>
-            <Link to="/clusters" className="block">
-              <Button className="w-full">看集群与队列</Button>
-            </Link>
-          </div>
-        </RailCard>
-
-        <RailCard title="排队中的 Task" tone="warn" sub={queue?.waiting?.tasks?.length ? `${queue.waiting.tasks.length} 个` : undefined}>
-          {queue?.waiting?.tasks?.length ? (
-            <ul className="flex flex-col divide-y divide-line-soft">
-              {(queue.waiting.tasks ?? []).slice(0, 5).map((task) => (
-                <li key={task.task_id} className="flex items-center justify-between gap-2 py-2 first:pt-0 last:pb-0">
-                  <div className="min-w-0">
-                    <p className="truncate text-xs text-fg" title={task.name}>
-                      {task.name}
-                    </p>
-                    <p className="font-mono text-2xs text-fg-3">{task.run_id}</p>
-                  </div>
-                  <WaitingReasonTag reason={task.waiting_reason} />
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="text-2xs text-fg-3">当前没有排队中的 Task。</p>
-          )}
-        </RailCard>
-
-        <RailCard title="这页怎么看" tone="muted">
-          <p>队列满了 = 在等资源；队列空着却还在排队 = 卡在平台自己的并发名额上。</p>
-          <p className="mt-2">这里的数字是打开页面时那一次的结果，不会自己跳：想确认最新情况，重新打开这一页。</p>
-        </RailCard>
-      </RightRail>
-
-      {/* 看板是「新建 Run」的入口之一（B12）；页面级操作放页头行，不塞进卡片 */}
+      {/* 页面级动作放页头行：新建 Run / Tester 目录（原右栏「快捷操作」并到这里） */}
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-2xs text-fg-3">打开页面时刷新的数字，不会自己跳</span>
-        <Link to="/submit" className="ml-auto">
-          <Button variant="primary" data-testid="new-run">
-            新建 Run
-          </Button>
-        </Link>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <Link to="/testers">
+            <Button size="sm" variant="ghost" icon={<Server className="size-3" aria-hidden />} data-testid="go-testers">
+              Tester 目录
+            </Button>
+          </Link>
+          <Link to="/submit">
+            <Button variant="primary" data-testid="new-run" icon={<Plus className="size-3.5" aria-hidden />}>
+              新建 Run
+            </Button>
+          </Link>
+        </div>
       </div>
 
       {error ? <ErrorState error={error} onRetry={reload} /> : null}
@@ -122,73 +91,38 @@ export function DashboardPage() {
         )}
       </section>
 
-      <Card>
-        <CardHeader
-          tone="ok"
-          title="最近 Run"
-          sub={stats ? `共 ${stats.total_runs} 个` : undefined}
-          actions={
-            <Link to="/runs" className="text-xs text-primary-text hover:underline">
-              查看全部
-            </Link>
-          }
-        />
-        {loading && runs.length === 0 ? (
-          <TableSkeleton rows={5} cols={6} />
-        ) : runs.length === 0 ? (
-          <EmptyState
-            title="还没有 Run"
-            description="提交第一份 Manifest 后，这里会显示最近 8 个 Run 的状态与耗时。"
-            action={
-              <Link to="/submit">
-                <Button variant="primary" size="sm">
-                  去提交
-                </Button>
-              </Link>
-            }
-          />
+      {/* 原右栏「排队中的 Task」压成一行：谁在排队 + 去看队列 */}
+      <div
+        data-testid="queue-summary"
+        className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface px-4 py-2.5 text-2xs text-fg-3 shadow-xs"
+      >
+        <span className="text-fg-2">排队中的 Task：{waitingTasks.length} 个</span>
+        {waitingTasks.length > 0 ? (
+          <>
+            <span aria-hidden>·</span>
+            <span className="min-w-0 truncate" title={waitingTasks.map((task) => task.name).join('、')}>
+              {waitingTasks
+                .slice(0, 3)
+                .map((task) => task.name)
+                .join('、')}
+              {waitingTasks.length > 3 ? ` 等 ${waitingTasks.length} 个` : ''}
+            </span>
+          </>
         ) : (
-          <TableWrap>
-            <Table>
-              <THead>
-                <TR className="hover:bg-transparent">
-                  <TH>Run</TH>
-                  <TH>名称</TH>
-                  <TH>状态</TH>
-                  <TH>Task</TH>
-                  <TH>耗时</TH>
-                  <TH>创建时间</TH>
-                </TR>
-              </THead>
-              <TBody>
-                {runs.map((run) => (
-                  <TR key={run.id}>
-                    <TD className="font-mono text-2xs">
-                      <Link to={`/runs/${run.id}`} className="text-primary-text hover:underline">
-                        {run.id}
-                      </Link>
-                    </TD>
-                    <TD className="text-fg">{run.name}</TD>
-                    <TD>
-                      <RunStatusBadge status={run.status} />
-                    </TD>
-                    <TD className="tabular-nums">{taskProgress(run)}</TD>
-                    <TD className="tabular-nums">{formatDuration(runDuration(run))}</TD>
-                    <TD className="text-2xs text-fg-3">{formatDateTime(run.submitted_at)}</TD>
-                  </TR>
-                ))}
-              </TBody>
-            </Table>
-          </TableWrap>
+          <span>队列是空的，没有卡住的任务</span>
         )}
-        <div className="flex items-center justify-between border-t border-line-soft px-5 py-3 text-2xs text-fg-3">
-          <span>状态流转由服务端推送，UI 只读</span>
-          <Link to="/clusters" className="text-primary-text hover:underline">
-            看集群与队列
-          </Link>
-        </div>
-      </Card>
+        <Link
+          to="/clusters"
+          className="ml-auto inline-flex h-6 items-center gap-1 text-primary-text hover:underline"
+          data-testid="queue-link"
+        >
+          看队列
+          <ArrowUpRight className="size-3" aria-hidden />
+        </Link>
+      </div>
 
+      {/* 全量 Run 表（原运行列表页整套；真分页 + 列筛选，条件都在 URL 上） */}
+      <RunsTable />
     </>
   )
 }
