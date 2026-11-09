@@ -22,9 +22,8 @@ on_failure: continue
 entry: /tester/run.sh
 
 # 镜像由 CI 构建产出（见 build/Dockerfile 与 README 的构建节）。平台与任何运行环境都不 build（§6.2）。
-# 0.2.0 起 = 真实 ais_bench 模式：build/Dockerfile.aisbench（基础镜像自带 ais_bench 3.1.20260330）；
-# build/Dockerfile 是同一份 run.sh 的 stub 小镜像，两个 Dockerfile 的构建上下文都是 **Tester 目录**
-# （与 .github/workflows/release.yml 的发版矩阵一致）。
+# 只有一种发布镜像：build/Dockerfile（FROM 官方 ais_bench 基础镜像，自带 ais_bench 3.1.20260330）。
+# stub 只用于离线冒烟（tests/Dockerfile.stub，不进发布矩阵），构建上下文都是 **Tester 目录**。
 # 0.4.0：密钥只走 env、sla_max_concurrency 需实测并发达标、指标名不再编码统计量/单位。
 image: ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0
 
@@ -42,10 +41,10 @@ concurrency:
 # 本 Tester 不向平台声明挂载点，是因为需要哪个共享存储、挂到容器内什么路径，取决于
 # Execution Profile 提供的挂载能力与调用方约定的容器内路径；声明成固定 mount_path 反而会
 # 把某个 Profile 的目录布局写死。需要时请由 Profile 挂载，并在 args 里给出容器内绝对路径：
-#   --model_path=/models/Qwen3-32B        （tokenizer/权重，工具要求它存在，生成数据集时用）
+#   --model_path=/models/Qwen3-32B        （容器内模型/权重路径，由平台 sharedMounts 挂载提供）
 #   --dataset_path=/data/sla_datasets     （生成的前缀数据集落盘目录，可写）
 #   --dataset=/data/gsm8k/test.jsonl      （现成数据集，跳过生成、跳过 tokenizer）
-# 离线冒烟（镜像自带桩）用 --dataset=/tester/fixtures/smoke_dataset.jsonl + --work_path=/tester/tool。
+# 离线冒烟（stub 镜像）用 --dataset=/tester/fixtures/smoke_dataset.jsonl + --work_path=/tmp/aisbench-ws。
 mounts: []
 
 # 参数清单：仅供 Agent 与人类阅读，平台不渲染、不校验（§5.4）。
@@ -83,11 +82,9 @@ parameters:
   model_path:
     type: string
     description: |
-      容器内 tokenizer/权重路径。工具的 ais_bench 模型配置必须带它（报错 UTILS-FILE-002），
-      且工具会校验该目录真实存在。生成前缀数据集时要读 tokenizer；用现成 --dataset 时不读，
-      但路径仍需存在。由 Profile 挂载提供，平台不改写（§10.4）。
-      **验证用 0.2.0 镜像自带** `/models/Qwen3-0.6B`（15MB tokenizer，仅本地/kind 验证镜像有，
-      生产镜像不带，靠 Profile 挂载）——所以本机验证时 service.model_path 写 /models/Qwen3-0.6B。
+      容器内模型/权重路径，由**平台统一挂载**提供（D-63 `sharedMounts`，默认 `/models`），
+      约定形如 `/models/<模型名>`；平台与 Tester 都不校验存在性、不改写路径（§10.4）。
+      工具的 ais_bench 模型配置必须带它；真缺了由 ais_bench 自己报 UTILS-FILE-002。
       注意它是**公共参数**（§5.4.1），只能在 manifest 的 service.model_path 给，不能写进 args。
 
   input_len:

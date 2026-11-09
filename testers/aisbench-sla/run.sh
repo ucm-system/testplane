@@ -83,7 +83,7 @@ usage() {
 公共参数（§5.4.1，平台会自动追加）:
   --url=<OpenAI 兼容 base URL>   必填，形如 http://host:8000/v1（末段 /v1 会去掉再交给工具）
   --model_name=<服务端模型名>
-  --model_path=<容器内 tokenizer/权重路径>   工具要求该目录存在
+  --model_path=<容器内模型/权重路径>   原样透传给 ais_bench；由平台统一挂载提供（默认 /models），Tester 不校验存在性
 
 负载与搜索:
   --input_len=2048 --output_len=32 --data_num=64
@@ -100,11 +100,13 @@ usage() {
   --aisbench_extra_args=<追加参数> --point_timeout=0
   --prefix_warmup=per-point|once|none --no_stream=true|false
 
-示例（离线冒烟，用镜像自带的 stub_aisbench）:
-  --url=http://127.0.0.1:18080/v1 --model_name=mock-llm --model_path=/tester/tool \
+示例（离线冒烟）:
+  # stub 只在 **tests/Dockerfile.stub** 构建的测试镜像里（发布镜像不带 stub，
+  # 真镜像用镜像自带的 ais_bench）。测试镜像里：
+  --url=http://127.0.0.1:18080/v1 --model_name=mock-llm --model_path=/models/Qwen3-0.6B \
   --input_len=128 --output_len=8 --data_num=8 --sla=ttft.avg:100000 \
   --start=1 --max=4 --max_probes=2 --dataset=/tester/fixtures/smoke_dataset.jsonl \
-  --aisbench_cmd=/tester/tool/tests/stub_aisbench.py --work_path=/tester/tool
+  --aisbench_cmd=/tester/tool/tests/stub_aisbench.py --work_path=/tmp/aisbench-ws
 EOF
 }
 
@@ -668,7 +670,7 @@ fi
 rm -f "${WORK_PATH}/.testplane-write-probe" 2>/dev/null || true
 
 # --- ais_bench 侧接线：让 work_path 下的「影子源码根」被真实 ais_bench 认到 --------
-# 背景见 build/Dockerfile.aisbench 头部注释：平台 Job 的根文件系统只读，写不了
+# 背景见 build/Dockerfile 头部注释：平台 Job 的根文件系统只读，写不了
 # /benchmark，所以 work_path 通常是 /tmp/aisbench-ws。但 ais_bench 有两处路径
 # 默认锚在它自己的源码根上，必须各接一根线：
 #   1) 数据集：ais_bench 把**相对**数据集路径拼在 AIS_BENCH_DATASETS_CACHE 下

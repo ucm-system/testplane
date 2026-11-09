@@ -59,9 +59,8 @@ jobs:
             printf '{"image":"server","dockerfile":"deploy/docker/server.Dockerfile","context":"."},'
             printf '{"image":"web","dockerfile":"deploy/docker/web.Dockerfile","context":"."}'
             # Tester：上下文是 testers/<name>/（不是仓库根）
-            # 一个 Tester 可以有多个变体镜像：build/Dockerfile（默认）与 build/Dockerfile.<variant>
-            # （例如 aisbench-sla 的真 ais_bench 镜像 Dockerfile.aisbench）。变体镜像名带后缀
-            # tester-<name>-<variant>，不和默认镜像抢同一个 tag。
+            # build/Dockerfile 是该 Tester 的唯一发布镜像。若将来确有变体，可加 build/Dockerfile.<variant>，
+            # 镜像名会带后缀 tester-<name>-<variant>，不和默认镜像抢同一个 tag。
             for d in $(ls -1 testers); do
               if [ -f "testers/$d/build/Dockerfile" ]; then
                 printf ',{"image":"tester-%s","dockerfile":"testers/%s/build/Dockerfile","context":"testers/%s"}' "$d" "$d" "$d"

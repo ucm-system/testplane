@@ -14,7 +14,7 @@
 # 直接跑（在容器里）：
 #   OUTPUT_DIR=/workspace/output bash /tests/smoke.sh
 # 从宿主机一键跑：
-#   pwsh testers/aisbench-sla/tests/smoke.ps1        # 负责 docker run + 宿主侧断言
+#   docker run --rm --entrypoint bash <stub-img> -lc "cd /tester && bash tests/smoke.sh"
 #   Linux/macOS 等价命令见 README「离线冒烟」里的 docker run 一行。
 #
 # 环境变量：OUTPUT_DIR（默认 /workspace/output）、MOCK_PORT（默认 18080）、
@@ -62,13 +62,13 @@ fi
 BASE_ARGS=(
   --url="http://127.0.0.1:${PORT}/v1"
   --model_name=mock-llm
-  --model_path="${TOOL}"
+  --model_path="/models/Qwen3-0.6B"
   --input_len=128 --output_len=8 --data_num=8
   --sla=ttft.avg:100000
   --max="${MAX_CONCURRENCY}" --max_probes="${MAX_PROBES}"
   --dataset="${DATASET}"
   --aisbench_cmd="${TOOL}/tests/stub_aisbench.py"
-  --work_path="${TOOL}"
+  --work_path="/tmp/aisbench-ws"
 )
 
 # run_case <输出目录> <说明> <start> <request_rate> <额外 env...>

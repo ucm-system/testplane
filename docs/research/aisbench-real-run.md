@@ -1,3 +1,7 @@
+> **状态（2026-11-09 更新）**：Tester 已收敛成**单一发布镜像** `build/Dockerfile`（`FROM ghcr.io/aisbench/aisbench_benchmark:…`），
+> tokenizer / 模型路径由平台 `sharedMounts`（D-63）挂到 `/models`，Tester 不准备也不校验；stub 只存在于 `tests/Dockerfile.stub`。
+> 下文提到 `Dockerfile.aisbench` 的地方已按此更新。
+
 # 真实 ais_bench 的兼容性与 tokenizer 注入
 
 > wayfinder research ticket **#55** 的产物。研究对象：把外部仓库 `D:\Vibe_Workspace\aisbench-sla`
@@ -56,7 +60,7 @@ $ echo $HOME
 /root
 ```
 
-ticket 写的是「非 root（uid 10001）」，**只对 `testers/aisbench-sla/build/Dockerfile.aisbench`
+ticket 写的是「非 root（uid 10001）」，**只对 `testers/aisbench-sla/build/Dockerfile`
 构建出来的派生镜像成立**（那里有 `USER ${TESTER_UID}:${TESTER_GID}`），官方镜像本身是 root。
 因此「uid 10001 能不能写 `/benchmark`」这个问题在官方镜像里是假问题，真正的问题在派生镜像里。
 
@@ -98,7 +102,7 @@ Python 3.12.3   transformers 5.12.1   requests 2.34.2
 ```
 
 transformers 4.57.6 → 5.12.1 是主版本跃迁，`AutoTokenizer` 行为与缓存布局都可能变。
-**建议钉 0330 版**（`Dockerfile.aisbench` 的 `FROM` 已经钉的这一版）。
+**建议钉 0330 版**（`build/Dockerfile` 的 `FROM` 已经钉的这一版）。
 
 ### 1.4 工具链
 
@@ -406,7 +410,7 @@ for i, m := range spec.Mounts {
 **分两件事，别混成一件：**
 
 1. **本地/kind 验证 → 用 ①（烤进验证镜像）**。理由：零集群依赖、可复现、15MB 可以接受，
-   而且**已经建好了**：[`build/Dockerfile.aisbench`](../../testers/aisbench-sla/build/Dockerfile.aisbench)
+   而且**已经建好了**：[`build/Dockerfile`](../../testers/aisbench-sla/build/Dockerfile)（2026-11-09 起这是**唯一**发布镜像；`Dockerfile.aisbench` 已删除，stub 只留在 `tests/Dockerfile.stub` 供离线冒烟）
    已经 `COPY testers/aisbench-sla/build/models/Qwen3-0.6B /models/Qwen3-0.6B`，
    `build/models/` 在 [`build/.gitignore`](../../testers/aisbench-sla/build/.gitignore) 里不入库。
    镜像 `ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.2.0`（6.43GB）已在本机，§5/§6 的真跑全用它。
