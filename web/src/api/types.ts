@@ -449,6 +449,33 @@ export interface Tester {
 
 /* ================================================================ 集群 / 队列 */
 
+/** `SharedMount` schema：平台级统一共享挂载的一条（D-63/D-65）。 */
+export interface SharedMount {
+  /** volume 名（渲染前会 sanitize 并去重）；≤63 字节 */
+  name: string
+  /** 容器内绝对路径（如 `/models`）；不得命中平台保留路径 */
+  mount_path: string
+  /** 默认 `true`（模型权重是只读输入） */
+  read_only: boolean
+  /** 集群里已存在的 PVC 名；内联 `volumes[].nfs` 会被 PodSecurity `restricted` 拒绝 */
+  claim_name: string
+  /** `false` = 保留记录但不注入 */
+  enabled: boolean
+  created_at?: Timestamp | null
+  updated_at?: Timestamp | null
+}
+
+/** `SharedMountUpsert` schema：POST/PUT 的请求体（PUT 省略字段 = 保留旧值；`name` 不可改）。 */
+export interface SharedMountWrite {
+  name: string
+  mount_path: string
+  claim_name: string
+  read_only?: boolean
+  enabled?: boolean
+}
+
+/** PUT 的局部更新：`name` 不在里面（不可改） */
+export type SharedMountPatch = Partial<Omit<SharedMountWrite, 'name'>>
 /** `Cluster` schema：集群概要（不返回凭据）。 */
 export interface Cluster {
   name: string

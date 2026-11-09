@@ -111,8 +111,12 @@ test('admin：键盘 ←/→ 切换页签到 Audit', async ({ page }) => {
   await profilesTab.focus()
   await expect(profilesTab).toHaveAttribute('aria-selected', 'true')
 
-  // 方向键切页签（不是 Tab 键）
+  // 方向键切页签（不是 Tab 键）：Profiles → Clusters → 挂载点 → Secrets → Audit。
+  // 这里逐档走，中途断言"挂载点"这一档也在键盘可达序列里（票 #90 新加的页签）。
   await page.keyboard.press('ArrowRight') // Clusters
+  await expect(page.getByRole('tab', { name: 'Clusters' })).toHaveAttribute('aria-selected', 'true')
+  await page.keyboard.press('ArrowRight') // 挂载点
+  await expect(page.getByRole('tab', { name: '挂载点' })).toHaveAttribute('aria-selected', 'true')
   await page.keyboard.press('ArrowRight') // Secrets
   await page.keyboard.press('ArrowRight') // Audit
   const auditTab = page.getByRole('tab', { name: 'Audit' })

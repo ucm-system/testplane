@@ -23,6 +23,9 @@ import type {
   Cluster,
   ClusterWrite,
   DashboardStats,
+  SharedMount,
+  SharedMountPatch,
+  SharedMountWrite,
   Deploy,
   DeployLogEntry,
   DeployLogGap,
@@ -97,6 +100,57 @@ function nowIso(): string {
 
 function delay(ms = 180): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** 平台保留路径（D-63）：这些目录由平台写入，映射进来会互相踩 */
+const RESERVED_MOUNT_PATHS = ['/workspace/output', '/workspace/input', '/tmp', '/tester']
+
+function sharedMountValidation(issues: ValidationIssue[]): ApiClientError {
+  return new ApiClientError(400, {
+    code: 'VALIDATION_ERROR',
+    message: '共享挂载未通过校验',
+    detail: { issues },
+    retryable: false,
+    trace_id: `mock-${Math.random().toString(16).slice(2, 10)}`,
+  })
+}
+
+/**
+ * 与后端一致的校验（D-65）：名称/路径/PVC 必填、路径必须 `/` 开头且不得命中保留路径、
+ * 路径不得与其它挂载重复（`self` 是编辑中的那条，排除自身）。
+ * 错误码只有 `REQUIRED` / `CONFLICT` 两种，`path` 指到具体字段，方便前端做字段级红字。
+ */
+function validateSharedMount(body: SharedMountWrite, self: string | null): ValidationIssue[] {
+  const issues: ValidationIssue[] = []
+  const name = (body.name ?? '').trim()
+  const mountPath = (body.mount_path ?? '').trim()
+  const claimName = (body.claim_name ?? '').trim()
+
+  if (!name) issues.push({ path: 'name', code: 'REQUIRED', message: '名称必填' })
+  if (name.length > 63) issues.push({ path: 'name', code: 'CONFLICT', message: '名称不得超过 63 字节' })
+  if (!mountPath) {
+    issues.push({ path: 'mount_path', code: 'REQUIRED', message: 'Pod 内路径必填' })
+  } else if (!mountPath.startsWith('/')) {
+    issues.push({ path: 'mount_path', code: 'CONFLICT', message: '路径必须以 / 开头（容器内绝对路径）' })
+  } else if (RESERVED_MOUNT_PATHS.some((reserved) => mountPath === reserved || mountPath.startsWith(`${reserved}/`))) {
+    issues.push({
+      path: 'mount_path',
+      code: 'CONFLICT',
+      message: `路径命中平台保留路径（${RESERVED_MOUNT_PATHS.join(', ')}），请换一个`,
+    })
+  }
+  if (!claimName) issues.push({ path: 'claim_name', code: 'REQUIRED', message: 'PVC 名必填' })
+
+  if (self === null && name && state.sharedMounts.some((mount) => mount.name === name)) {
+    issues.push({ path: 'name', code: 'CONFLICT', message: `名称 ${name} 已存在` })
+  }
+  if (mountPath && mountPath.startsWith('/')) {
+    const clash = state.sharedMounts.find((mount) => mount.name !== self && mount.mount_path === mountPath)
+    if (clash) {
+      issues.push({ path: 'mount_path', code: 'CONFLICT', message: `路径已被 ${clash.name} 占用` })
+    }
+  }
+  return issues
 }
 
 function notFound(what: string): never {
@@ -303,12 +357,15 @@ interface MockState {
   /** `/admin/*` 的数据（P1） */
   profiles: ExecutionProfile[]
   adminClusters: AdminCluster[]
+  /** 平台级统一共享挂载（D-65）：运行时真源，默认空 */
+  sharedMounts: SharedMount[]
   secrets: AdminSecret[]
   audit: AuditEntry[]
   timers: Map<string, ReturnType<typeof setInterval>>
 }
 
 const state: MockState = {
+  sharedMounts: [],
   runs: [],
   tasks: {},
   logs: {},
@@ -2248,6 +2305,68 @@ export const mockApi: Api = {
 
   /* ---------------------------------------------------------------- /admin/*（P1） */
 
+  /* ---------------------------------------------------------------- 共享挂载（D-65） */
+
+  /** viewer+ 只读视图：只回启用中的行 */
+  async listSharedMounts(): Promise<SharedMount[]> {
+    await delay(90)
+    return clone(state.sharedMounts.filter((mount) => mount.enabled))
+  },
+
+  /** admin 视图：含停用行 */
+  async listAdminSharedMounts(): Promise<SharedMount[]> {
+    await delay(90)
+    return clone(state.sharedMounts)
+  },
+
+  async createAdminSharedMount(body: SharedMountWrite): Promise<SharedMount> {
+    await delay(160)
+    const issues = validateSharedMount(body, null)
+    if (issues.length > 0) throw sharedMountValidation(issues)
+    const mount: SharedMount = {
+      name: body.name.trim(),
+      mount_path: body.mount_path.trim(),
+      claim_name: body.claim_name.trim(),
+      read_only: body.read_only ?? true,
+      enabled: body.enabled ?? true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+    state.sharedMounts.push(mount)
+    return clone(mount)
+  },
+
+  async updateAdminSharedMount(name: string, body: SharedMountPatch): Promise<SharedMount> {
+    await delay(160)
+    const current = state.sharedMounts.find((mount) => mount.name === name)
+    if (!current) notFound(`共享挂载 ${name}`)
+    const merged: SharedMountWrite = {
+      name,
+      mount_path: body.mount_path ?? current.mount_path,
+      claim_name: body.claim_name ?? current.claim_name,
+      read_only: body.read_only ?? current.read_only,
+      enabled: body.enabled ?? current.enabled,
+    }
+    // 校验时把"自己"排除掉，否则改自己会撞自己的路径
+    const issues = validateSharedMount(merged, name)
+    if (issues.length > 0) throw sharedMountValidation(issues)
+    Object.assign(current, {
+      mount_path: merged.mount_path.trim(),
+      claim_name: merged.claim_name.trim(),
+      read_only: merged.read_only ?? current.read_only,
+      enabled: merged.enabled ?? current.enabled,
+      updated_at: new Date().toISOString(),
+    })
+    return clone(current)
+  },
+
+  async deleteAdminSharedMount(name: string): Promise<void> {
+    await delay(140)
+    const index = state.sharedMounts.findIndex((mount) => mount.name === name)
+    // 重复删 404（契约）
+    if (index < 0) notFound(`共享挂载 ${name}`)
+    state.sharedMounts.splice(index, 1)
+  },
   async listAdminClusters(): Promise<AdminCluster[]> {
     await delay(90)
     return clone(state.adminClusters)

@@ -37,6 +37,9 @@ import type {
   RunFacets,
   RunFacetsQuery,
   RunSummary,
+  SharedMount,
+  SharedMountPatch,
+  SharedMountWrite,
   SecretWrite,
   SubmitResult,
   Task,
@@ -109,6 +112,36 @@ export const realApi: Api = {
       })}`,
     )
     return asPage<RunSummary>(data)
+  },
+
+  /* ---------------------------------------------------------------- 共享挂载（D-65） */
+
+  /** `GET /shared-mounts`：viewer+ 只读视图，**只回启用中**的行 */
+  async listSharedMounts(): Promise<SharedMount[]> {
+    const data = await request<unknown>('/shared-mounts')
+    return asArray<unknown>(data).map((item) => item as SharedMount)
+  },
+
+  /** `GET /admin/shared-mounts`：admin 视图，含停用行 */
+  async listAdminSharedMounts(): Promise<SharedMount[]> {
+    const data = await request<unknown>('/admin/shared-mounts')
+    return asArray<unknown>(data).map((item) => item as SharedMount)
+  },
+
+  createAdminSharedMount(body: SharedMountWrite): Promise<SharedMount> {
+    return request<SharedMount>('/admin/shared-mounts', { method: 'POST', body: JSON.stringify(body) })
+  },
+
+  /** `name` 走路径，**不可改**；body 省略的字段后端保留旧值 */
+  updateAdminSharedMount(name: string, body: SharedMountPatch): Promise<SharedMount> {
+    return request<SharedMount>(`/admin/shared-mounts/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    })
+  },
+
+  async deleteAdminSharedMount(name: string): Promise<void> {
+    await request<void>(`/admin/shared-mounts/${encodeURIComponent(name)}`, { method: 'DELETE' })
   },
 
   /** 表头下拉的候选值：过滤参数与 listRuns 完全一致，计数不受当前页限制 */
