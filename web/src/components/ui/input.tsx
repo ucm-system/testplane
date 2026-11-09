@@ -31,7 +31,7 @@ export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputE
 })
 
 export function Textarea({ className, ...rest }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return <textarea className={cn(FIELD, 'py-2 leading-relaxed', className)} {...rest} />
+  return <textarea className={cn(FIELD, 'py-2 leading-[16px]', className)} {...rest} />
 }
 
 export function Select({ className, children, ...rest }: SelectHTMLAttributes<HTMLSelectElement>) {
@@ -85,7 +85,7 @@ export function Field({ label, hint, error, required, className, children, htmlF
           {error}
         </p>
       ) : hint ? (
-        <p className="text-xs leading-relaxed text-fg-3">{hint}</p>
+        <p className="text-xs leading-[16px] text-fg-3">{hint}</p>
       ) : null}
     </div>
   )

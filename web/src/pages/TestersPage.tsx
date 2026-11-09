@@ -81,7 +81,7 @@ export function TestersPage() {
 
   return (
     <>
-      <p className="text-2xs leading-relaxed text-fg-3">
+      <p className="text-2xs leading-[16px] text-fg-3">
         Tester 随镜像内置，平台启动时扫描目录自动发现；参数清单是写给写 Run 的人看的说明书，平台不会照着它做校验。
       </p>
 

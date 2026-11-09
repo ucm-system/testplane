@@ -716,7 +716,7 @@ export function AdminPage() {
         <Banner role="alert" tone="warn" title="无权限：本页仅 admin 可见">
           当前角色 {auth.role ?? '未知'}；需要 admin 角色才能维护 Profile / 集群 / Secret 与查看审计。
         </Banner>
-        <p className="text-2xs leading-relaxed text-fg-3">
+        <p className="text-2xs leading-[16px] text-fg-3">
         管理台只维护「东西在哪」：Profile 指定集群与队列，集群条目只记 kubeconfig 文件名，Secret 只登记引用（凭据不经过浏览器）；新建、编辑、删除都会记一条审计，在 Audit 页签里可查。
       </p>
 

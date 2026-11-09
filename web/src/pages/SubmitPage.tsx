@@ -621,14 +621,14 @@ export function SubmitPage() {
                   className="flex flex-col gap-0.5 rounded-md border border-danger/25 bg-danger-weak px-3 py-2"
                 >
                   {deployParse.fields.map((item) => (
-                    <li key={item.field} className="text-2xs leading-relaxed text-danger-text">
+                    <li key={item.field} className="text-2xs leading-[16px] text-danger-text">
                       <code className="mr-1.5 font-mono">deploy.{item.field}</code>
                       {item.message}
                     </li>
                   ))}
                 </ul>
               ) : null}
-              <p className="text-2xs leading-relaxed text-fg-3">
+              <p className="text-2xs leading-[16px] text-fg-3">
                 平台只校 YAML 结构并转交 Genet；部署失败会终止整个 Run，不会创建任何 Task。一个 Deploy 可能拉起多个 Pod
                 （多节点 / PD 分离），各自有日志且测试期间仍在追加。
               </p>
@@ -644,7 +644,7 @@ export function SubmitPage() {
               <Field label="模型路径（可选）" className="sm:col-span-3">
                 <Input value={modelPath} onChange={(e) => setModelPath(e.target.value)} placeholder="/data/models/qwen3-32b" />
               </Field>
-              <p className="text-2xs leading-relaxed text-fg-3 sm:col-span-3">
+              <p className="text-2xs leading-[16px] text-fg-3 sm:col-span-3">
                 这三个字段就是平台要注入的公共参数来源：不部署时它们由你来填。
               </p>
             </div>
@@ -776,7 +776,7 @@ export function SubmitPage() {
           {noTasks ? (
             <p
               data-testid="task-empty-hint"
-              className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-relaxed text-warn-text"
+              className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-[16px] text-warn-text"
             >
               至少需要 1 个测试 Task（Pre-Check 由平台注入，不计入测试）
             </p>
@@ -786,7 +786,7 @@ export function SubmitPage() {
           {noTesters ? (
             <p
               data-testid="tester-empty-hint"
-              className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-relaxed text-warn-text"
+              className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-[16px] text-warn-text"
             >
               当前没有可用的 Tester；只有 pre_check 角色的 Tester 不能作为测试 Task
             </p>
@@ -800,7 +800,7 @@ export function SubmitPage() {
               className="rounded-md border border-danger/30 bg-danger-weak px-3 py-2"
             >
               {taskAreaIssues.map((issue, index) => (
-                <p key={`${issue.path}-${index}`} className="text-2xs leading-relaxed text-danger-text">
+                <p key={`${issue.path}-${index}`} className="text-2xs leading-[16px] text-danger-text">
                   <code className="mr-1.5 font-mono">{issue.path}</code>
                   {issue.message}
                 </p>
@@ -809,7 +809,7 @@ export function SubmitPage() {
           ) : null}
 
           {precheck === 'auto' ? (
-            <div className="rounded-md border border-line-soft bg-surface-2 px-3 py-2 text-2xs leading-relaxed text-fg-2">
+            <div className="rounded-md border border-line-soft bg-surface-2 px-3 py-2 text-2xs leading-[16px] text-fg-2">
               <span className="font-medium text-fg">auto：</span>
               平台取注册表中唯一一个 <code className="font-mono">role=pre_check</code> 的 Tester 注入为 Task#1；0 个或多个都拒绝提交。
               {precheckTester ? (
@@ -983,7 +983,7 @@ export function SubmitPage() {
           <span className="ml-auto text-2xs font-normal text-fg-3 group-open:hidden">点开</span>
         </summary>
         <div className="flex flex-col gap-3 border-t border-line-soft px-5 py-4">
-          <p className="rounded-md border border-line-soft bg-surface-2 p-3 text-2xs leading-relaxed text-fg-2">
+          <p className="rounded-md border border-line-soft bg-surface-2 p-3 text-2xs leading-[16px] text-fg-2">
             每个 Task 只有一个「参数」输入框，照 Tester 文档写成一整串即可（平台只做切分，不校验含义）。
             点参数旁的「复制」会把它追加到当前 Task 的参数末尾，不会覆盖已写的内容。
           </p>
@@ -1030,7 +1030,7 @@ export function SubmitPage() {
                       {railCopied === 'placeholder' ? '已加入参数' : '复制整段'}
                     </button>
                   </div>
-                  <pre className="mt-1 overflow-x-auto rounded-md border border-line-soft bg-surface-2 px-2 py-1.5 font-mono text-2xs leading-relaxed text-fg-2">
+                  <pre className="mt-1 overflow-x-auto rounded-md border border-line-soft bg-surface-2 px-2 py-1.5 font-mono text-2xs leading-[16px] text-fg-2">
                     {activeTester.placeholder}
                   </pre>
                 </div>
@@ -1050,7 +1050,7 @@ export function SubmitPage() {
             </div>
           )}
 
-          <p className="border-t border-line-soft pt-3 text-2xs leading-relaxed text-fg-3">
+          <p className="border-t border-line-soft pt-3 text-2xs leading-[16px] text-fg-3">
             不用自己写的参数：<code className="font-mono">--url</code> / <code className="font-mono">--model_name</code> /{' '}
             <code className="font-mono">--model_path</code> 由平台自动补在参数末尾，再写一遍会被拒绝。
           </p>

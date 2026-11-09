@@ -51,8 +51,8 @@ export function SiteHeader() {
         <img
           src="/brand.webp"
           alt="TestPlane"
-          width={700}
-          height={177}
+          width={252}
+          height={64}
           decoding="async"
           className="h-6 w-auto select-none"
         />

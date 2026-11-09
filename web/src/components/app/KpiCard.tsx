@@ -50,7 +50,7 @@ export function KpiCard({ label, value, hint, tone = 'muted', className }: KpiCa
       <p className={cn('mt-2 text-3xl font-semibold leading-none tabular-nums tracking-tight', VALUE_TONE[tone])}>
         {value}
       </p>
-      {hint ? <p className="mt-2 text-xs leading-snug text-fg-3">{hint}</p> : null}
+      {hint ? <p className="mt-2 text-xs leading-[18px] text-fg-3">{hint}</p> : null}
     </div>
   )
 }

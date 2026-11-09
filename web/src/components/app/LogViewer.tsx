@@ -165,7 +165,7 @@ export function LogViewer({
               ref={follow.ref}
               onScroll={follow.onScroll}
               data-testid={`${testIdPrefix}-scroller`}
-              className="max-h-[44rem] overflow-auto px-4 py-3 font-mono text-2xs leading-[1.7]"
+              className="max-h-[44rem] overflow-auto px-4 py-3 font-mono text-2xs leading-[22px]"
               role="log"
               aria-live="off"
             >

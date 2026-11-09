@@ -137,7 +137,7 @@ export function FormErrorSummary({ error, issues = [], onJumpTo, className }: Fo
         </ul>
       ) : null}
 
-      <p className="text-2xs leading-relaxed text-fg-3">
+      <p className="text-2xs leading-[16px] text-fg-3">
         这个摘要不会自动消失。改完再点「校验」或「提交」；如果一连串问题只报了一条，先修这条再看下一轮。
       </p>
     </div>
