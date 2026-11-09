@@ -23,7 +23,7 @@ export function EmptyState({ title, description, action, icon, className, ...res
         {icon ?? <Inbox className="size-4" />}
       </span>
       <p className="text-sm font-medium text-fg-2">{title}</p>
-      {description ? <p className="max-w-md text-xs leading-relaxed text-fg-3">{description}</p> : null}
+      {description ? <p className="max-w-md text-xs leading-[16px] text-fg-3">{description}</p> : null}
       {action ? <div className="mt-2">{action}</div> : null}
     </div>
   )
@@ -82,7 +82,7 @@ export function ErrorState({ error, onRetry, className, compact = false }: Error
       {detail && !compact ? (
         <details className="group">
           <summary className="cursor-pointer text-xs text-fg-3 hover:text-fg-2">查看 detail</summary>
-          <pre className="mt-1 max-h-48 overflow-auto rounded-sm bg-surface px-2 py-1.5 font-mono text-2xs leading-relaxed text-fg-2">
+          <pre className="mt-1 max-h-48 overflow-auto rounded-sm bg-surface px-2 py-1.5 font-mono text-2xs leading-[16px] text-fg-2">
             {detail}
           </pre>
         </details>
@@ -117,7 +117,7 @@ export function Banner({ tone = 'warn', role = 'status', title, children, action
     >
       <div className="min-w-0 flex-1">
         <p className="text-sm font-medium text-fg">{title}</p>
-        {children ? <p className="mt-1 text-xs leading-relaxed text-fg-2">{children}</p> : null}
+        {children ? <p className="mt-1 text-xs leading-[16px] text-fg-2">{children}</p> : null}
       </div>
       {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
     </div>

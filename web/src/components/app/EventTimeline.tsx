@@ -126,7 +126,7 @@ export function EventTimeline({
                 className={cn('mt-1.5 size-1.5 shrink-0 rounded-full', DOT[event.type] ?? 'bg-line-strong')}
                 aria-hidden
               />
-              <p className="min-w-0 flex-1 text-2xs leading-relaxed text-fg-2">{eventText(event)}</p>
+              <p className="min-w-0 flex-1 text-2xs leading-[16px] text-fg-2">{eventText(event)}</p>
             </li>
           ))}
         </ol>

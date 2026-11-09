@@ -107,8 +107,8 @@ export function AppSidebar() {
                 <img
                   src="/brand.webp"
                   alt="TestPlane"
-                  width={700}
-                  height={177}
+                  width={252}
+                  height={64}
                   decoding="async"
                   data-testid="sidebar-brand"
                   className="h-8 w-auto select-none group-data-[collapsible=icon]:hidden"
@@ -117,8 +117,8 @@ export function AppSidebar() {
                   src="/brand-icon.webp"
                   alt=""
                   aria-hidden
-                  width={128}
-                  height={128}
+                  width={56}
+                  height={56}
                   decoding="async"
                   data-testid="sidebar-brand-icon"
                   className="hidden size-7 shrink-0 select-none group-data-[collapsible=icon]:block"
@@ -196,7 +196,7 @@ export function AppSidebar() {
 
         <p
           className={cn(
-            'px-2 pb-1 text-2xs leading-relaxed text-fg-3',
+            'px-2 pb-1 text-2xs leading-[16px] text-fg-3',
             'group-data-[collapsible=icon]:hidden',
           )}
         >

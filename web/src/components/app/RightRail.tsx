@@ -83,7 +83,7 @@ export function RailCard({
         {title}
       </h2>
       {sub ? <p className="mt-1 text-xs text-fg-3">{sub}</p> : null}
-      <div className="mt-3 text-sm leading-relaxed text-fg-2">{children}</div>
+      <div className="mt-3 text-sm leading-[16px] text-fg-2">{children}</div>
     </section>
   )
 }

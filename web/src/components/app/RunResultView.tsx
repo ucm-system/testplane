@@ -123,7 +123,7 @@ export function RunResultView({ run }: { run: Run }) {
           actions={<RunStatusBadge status={run.status} />}
         />
         <CardBody className="flex flex-col gap-4">
-          <p className="text-sm leading-relaxed text-fg">{verdict.text}</p>
+          <p className="text-sm leading-[16px] text-fg">{verdict.text}</p>
           <dl className="grid grid-cols-2 gap-3 sm:grid-cols-5">
             {[
               ['Task 总数', counts?.total ?? 0, 'muted'],

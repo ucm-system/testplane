@@ -76,7 +76,7 @@ export function Drawer({
             <h2 id={titleId} className="text-lg font-semibold leading-none text-fg">
               {title}
             </h2>
-            {description ? <p className="mt-2 text-sm leading-relaxed text-fg-2">{description}</p> : null}
+            {description ? <p className="mt-2 text-sm leading-[16px] text-fg-2">{description}</p> : null}
           </div>
           <button
             type="button"

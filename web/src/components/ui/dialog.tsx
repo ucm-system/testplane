@@ -105,7 +105,7 @@ export function Dialog({
                 {title}
               </RadixDialog.Title>
               {description ? (
-                <RadixDialog.Description id={descId} className="mt-2 text-sm leading-relaxed text-fg-2">
+                <RadixDialog.Description id={descId} className="mt-2 text-sm leading-[16px] text-fg-2">
                   {description}
                 </RadixDialog.Description>
               ) : null}
