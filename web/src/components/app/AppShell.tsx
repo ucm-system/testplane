@@ -46,7 +46,7 @@ export function AppShell() {
 
         <main
           id="main"
-          className="flex min-w-0 flex-1 flex-col gap-4 p-6 max-[768px]:p-4"
+          className="flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto p-6 max-[768px]:p-4 [&>*]:shrink-0"
         >
           <Suspense
             fallback={

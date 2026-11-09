@@ -62,6 +62,9 @@ const MEASURE = () => {
     sidebarInner: round(r(inner)),
     inset: round(r(inset)),
     main: round(r(main)),
+    mainOverflowY: main ? getComputedStyle(main).overflowY : null,
+    mainScrollTop: main ? main.scrollTop : null,
+    mainScrollable: main ? main.scrollHeight > main.clientHeight + 1 : false,
     mainCount: document.querySelectorAll('main').length,
     sideBeforeMain,
     sidebarState: sidebarRoot ? sidebarRoot.getAttribute('data-state') : null,
@@ -97,7 +100,23 @@ async function audit(page, label, width, height) {
   if (desktop) {
     push(`${label}: DOM 里侧栏先于主内容`, m.sideBeforeMain, `sideBeforeMain=${m.sideBeforeMain}`)
   }
-  push(`${label}: 页头 sticky`, m.headerPos === 'sticky', `pos=${m.headerPos}`)
+  // 页头固定、内容在 main 里滚：先滚 200px 再量一次页头位置
+  const scrolled = await page.evaluate(() => {
+    const el = document.querySelector('main')
+    if (el) el.scrollTop = 200
+    return el ? el.scrollTop : 0
+  })
+  const mAfterScroll = await page.evaluate(MEASURE)
+  push(`${label}: 滚动发生在 main 内部`, m.mainOverflowY === 'auto' && (m.mainScrollable ? scrolled > 0 : true), `overflowY=${m.mainOverflowY} scrollTop=${scrolled}`)
+  push(
+    `${label}: 内容滚动后页头位置不变（不再「顶一下」）`,
+    mAfterScroll.header?.top === m.header?.top && mAfterScroll.header?.height === m.header?.height,
+    `top=${m.header?.top}→${mAfterScroll.header?.top}`
+  )
+  await page.evaluate(() => {
+    const el = document.querySelector('main')
+    if (el) el.scrollTop = 0
+  })
   push(`${label}: 页头高=56（h-14）`, m.header?.height === 56, `h=${m.header?.height}`)
   push(`${label}: main min-width=0`, m.mainMinW === '0px', `minW=${m.mainMinW}`)
   push(`${label}: 页头与内容区等宽`, m.header?.width === m.main?.width, `header=${m.header?.width} main=${m.main?.width}`)

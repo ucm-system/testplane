@@ -40,7 +40,7 @@ export function SiteHeader() {
   const { title } = titleFor(pathname)
 
   return (
-    <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center gap-2.5 border-b border-border/60 bg-background px-4">
+    <header className="flex h-14 shrink-0 items-center gap-2.5 border-b border-border/60 bg-background px-4">
       <SidebarTrigger />
       {/* 移动端侧栏在 sheet 里，页头留一个品牌入口（≥md 时品牌在侧栏顶部，这里隐藏） */}
       <Link to="/" aria-label="TestPlane 首页" className="flex shrink-0 items-center md:hidden">
