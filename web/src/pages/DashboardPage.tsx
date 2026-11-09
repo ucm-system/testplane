@@ -36,7 +36,6 @@ export function DashboardPage() {
     <>
       {/* 页面级动作放页头行：新建 Run / Tester 目录（原右栏「快捷操作」并到这里） */}
       <div className="flex flex-wrap items-center gap-3">
-        <span className="text-2xs text-fg-3">打开页面时刷新的数字，不会自己跳</span>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <Link to="/testers">
             <Button size="sm" variant="ghost" icon={<Server className="size-3" aria-hidden />} data-testid="go-testers">
@@ -108,9 +107,7 @@ export function DashboardPage() {
               {waitingTasks.length > 3 ? ` 等 ${waitingTasks.length} 个` : ''}
             </span>
           </>
-        ) : (
-          <span>队列是空的，没有卡住的任务</span>
-        )}
+        ) : null}
         <Link
           to="/clusters"
           className="ml-auto inline-flex h-6 items-center gap-1 text-primary-text hover:underline"

@@ -277,9 +277,6 @@ export function RunsTable() {
 
   return (
     <>
-      <p className="text-2xs leading-relaxed text-fg-3">
-        跳过 = 没跑，失败 = 跑了但没通过，两者不混用；点表头的漏斗按列筛选（可多选），条件都在地址栏里，复制链接给别人看到的和你一样。
-      </p>
 
       <Card>
         <CardHeader
