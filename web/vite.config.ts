@@ -26,7 +26,7 @@ export default defineConfig(({ mode }) => {
     proxyTimeout: 0,
     configure: (proxy) => {
       proxy.on('proxyRes', (proxyRes) => {
-        if (prefix === '/api') {
+        if (prefix.startsWith('/api')) {
           proxyRes.headers['cache-control'] = 'no-cache, no-transform'
           proxyRes.headers['x-accel-buffering'] = 'no'
         }
@@ -46,7 +46,9 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       strictPort: true,
       proxy: {
-        '/api': proxyTo('/api'),
+        // 只代理**带版本前缀**的真实接口：/api/v1/…；
+        // 否则会把站内页面 `/api`（API 参考）也一并转发出去，导致该路由 404/500。
+        '/api/v1': proxyTo('/api/v1'),
         '/healthz': proxyTo('/healthz'),
         '/readyz': proxyTo('/readyz'),
         '/metrics': proxyTo('/metrics'),

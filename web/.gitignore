@@ -2,3 +2,6 @@
 .data/
 test-results/
 playwright-report/
+
+# 由 scripts/sync-spec.mjs 从 server/api/openapi.yaml 生成（不入库）
+src/generated/

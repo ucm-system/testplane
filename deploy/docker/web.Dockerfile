@@ -34,6 +34,10 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile --config.minimumReleaseAge=0 --allow-build=esbuild
 
 COPY web/ ./
+
+# 前端 prebuild 会跑 scripts/sync-spec.mjs 把「唯一机读契约」同步进 src/generated/。
+# 本阶段只 COPY 了 web/，所以契约要单独拷到脚本约定的 ./server-api/openapi.yaml。
+COPY server/api/openapi.yaml ./server-api/openapi.yaml
 # `pnpm build` = `tsc -b && vite build`：类型错误会让镜像构建失败（前端也有门禁）。
 RUN pnpm --config.verifyDepsBeforeRun=false --config.minimumReleaseAge=0 run build
 
