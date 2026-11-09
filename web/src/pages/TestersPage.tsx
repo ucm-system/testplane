@@ -128,7 +128,7 @@ export function TestersPage() {
                         <button
                           type="button"
                           data-testid="tester-version"
-                          className="rounded-sm font-mono text-2xs text-primary underline-offset-2 hover:underline"
+                          className="inline-flex h-6 items-center rounded-sm font-mono text-2xs text-primary underline-offset-2 hover:underline"
                           onClick={() => setOpenName(group.name)}
                         >
                           {tester.version}

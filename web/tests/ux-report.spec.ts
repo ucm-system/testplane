@@ -13,14 +13,16 @@ import { expect, test } from '@playwright/test'
 
 test.describe.configure({ mode: 'serial' })
 
-test('① 报告页页头：标题「报告」+ 副标题「report.json 与产物」', async ({ page }) => {
+test('① 报告页页头：标题「报告」（副标题已删：面包屑足够说明位置）', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
   await page.goto('/runs/r-20261105-0003/report')
 
   const appHeader = page.locator('header').first()
   await expect(appHeader.locator('h1')).toHaveText('报告')
-  await expect(appHeader).toContainText('report.json 与产物')
+  // 页头只留面包屑 + 当前页名（用户 2026-11-09：『集群忙不忙、谁在排队……』这类副标题删掉）
+  await expect(appHeader).not.toContainText('report.json 与产物')
+  await expect(appHeader.locator('h1')).toHaveCount(1)
 
   // C7：右栏的「原始文件」卡已删除（直链在页头就有）
   await expect(page.getByText('原始文件')).toHaveCount(0)
@@ -53,7 +55,7 @@ test('② 报告 404：只出现一个空状态 + 倒计时重试，不渲染 Ta
   await expect(page.getByText('NOT_FOUND')).toHaveCount(0)
   await expect(page.getByText('Task 明细')).toHaveCount(0)
   await expect(page.getByText('失败清单')).toHaveCount(0)
-  await expect(page.getByText('report.md 原文')).toHaveCount(0)
+  await expect(page.getByTestId('report-artifacts')).toHaveCount(0)
 })
 
 test('③ 指标表懒加载 + 按 labels 分组 + 无结果时的空态文案', async ({ page }) => {

@@ -1,6 +1,19 @@
 /* 自托管字体：随服务一起部署，运行时不需要外网。
-   Latin 用 Albert Sans（风格站同款），中文用 Noto Sans SC 子集（仅收录页面用到的字）。
-   子集里没有的字会回落到系统中文体，不会出现豆腐块。 */
+   · UI 正文：Inter（latin 可变字体，覆盖 400/500/600 三档），为屏幕小字号设计——
+     高 x-height、数字等宽稳、与 Noto Sans SC 的 x-height 更接近，中英混排不跳。
+     依据见 docs/research/shadcn-visual-specs.md §4。
+   · 展示型：Albert Sans（**只给字标 TestPlane 用**，见 components/app/Wordmark.tsx）。
+     几何无衬线在标语/大字上更好看，但不适合 12–14px 的表格与表单。
+   · 中文：Noto Sans SC 子集（仅收录页面用到的字）。子集里没有的字回落到系统中文体，不会出豆腐块。
+   体积：Inter 48 KB + Albert Sans 32 KB + Noto SC 151 KB，均为 woff2 首屏按需加载。 */
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/inter-latin-var.woff2") format("woff2");
+}
 
 @font-face {
   font-family: "Albert Sans";

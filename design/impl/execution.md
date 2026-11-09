@@ -688,3 +688,9 @@ Pod / Node 走 `v1` 原生资源（Pod 资源请求与 conditions、节点 `allo
 | **E-Q5** | NFS UID 约定：镜像 UID 不统一 | 默认 10001；有 `run_as_user` 时按该值建目录；都失败依赖 `fsGroup` + `0770`，并把"容忍目录已存在"写进契约 |
 | **E-Q6** | 配额统计成本：NFS 上每分钟全量 walk 在数百并发下开销可观 | 默认 60s/Attempt，>200 活跃分 10 批；后续可改 Tester 上报 + 平台抽查 |
 | **E-Q7** | Deploy 日志保留期与容量（日志不随 Pod 回收，磁盘有限） | 与 Run 产物同保留期，不提前删；单 Run Deploy 日志软上限 2 GiB，超出后续分段只记 head 并标 `truncated` |
+### §7.4 统一共享挂载的渲染注入与启动 preflight（D-63）
+
+- **渲染**：`executor/render.go` 把平台级 `sharedMounts` 每条渲染成 `volume`（**PVC source**，`persistentVolumeClaim.claimName`）+ `volumeMount`；**不生成**内联 `volumes[].nfs`（`restricted:latest` 会拒绝，研究 #69 实测）。`Profile.sharedMounts=false` 时整段跳过。
+- **volume 名去重**：`sanitizeLabel` 之后不同 name 可能撞名（K8s 会以 `Duplicate value` 拒绝整份 Pod），渲染期统一分配唯一名；平台保留 + 统一挂载路径并成一套集合（`domain.ReservedMountPaths`），Tester `mounts[]` 撞任一 → 渲染期 `ErrSpecInvalid`、提交期 400。
+- **启动 preflight**：按 `TESTPLANE_SHARED_MOUNTS` 逐条 `get pvc`，**只告警不 fail-fast**（D-63 ④），日志带 namespace；缺 PVC 时 Pod 会 Pending，由 Tester 报"权重路径不存在"。
+- **权限**：NFS 导出侧目录 `0755`、文件 `0644`（uid 10001 原样透传；`root_squash` 不压 10001；`fsGroup` 对普通 NFS 卷无效）。

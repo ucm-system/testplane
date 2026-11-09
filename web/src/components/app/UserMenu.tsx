@@ -127,7 +127,7 @@ export function UserMenu() {
       {open ? (
         <div
           role="menu"
-          className="absolute right-0 top-full z-50 mt-1.5 w-60 rounded-lg border border-line bg-surface p-1.5 shadow-pop"
+          className="absolute right-0 top-full z-50 mt-1.5 w-60 rounded-md border border-line bg-surface p-1 shadow-overlay"
         >
           <div className="px-2 py-1.5">
             <p className="truncate text-xs font-medium text-fg">{subject || '未登录'}</p>
@@ -142,14 +142,14 @@ export function UserMenu() {
                 {groups.slice(0, 5).map((group) => (
                   <span
                     key={group}
-                    className="rounded-full bg-surface-3 px-1.5 py-0.5 font-mono text-[10px] leading-none text-fg-3"
+                    className="rounded-full bg-surface-3 px-1.5 py-0.5 font-mono text-2xs leading-none text-fg-3"
                     title={group}
                   >
                     {group}
                   </span>
                 ))}
                 {groups.length > 5 ? (
-                  <span className="text-[10px] text-fg-3">等 {groups.length} 个</span>
+                  <span className="text-2xs text-fg-3">等 {groups.length} 个</span>
                 ) : null}
               </p>
             ) : null}

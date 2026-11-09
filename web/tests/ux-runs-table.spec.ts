@@ -45,7 +45,7 @@ test.beforeEach(async ({ page }) => {
 
 test('① 分页栏：共 N 条 / 每页条数 / 页码 / 下一页都进 URL', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 })
-  await page.goto('/runs')
+  await page.goto('/')
   await expect(page.getByText('全部 Run')).toBeVisible()
   await spyApi(page)
 
@@ -87,7 +87,7 @@ test('① 分页栏：共 N 条 / 每页条数 / 页码 / 下一页都进 URL', 
 
 test('② 表头漏斗：勾选提交人后请求带多值参数，行数变化，aria-expanded 正确，Esc 可关', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 })
-  await page.goto('/runs')
+  await page.goto('/')
   await expect(page.getByTestId('pagination-total')).toBeVisible({ timeout: 15_000 })
   await spyApi(page)
 
@@ -136,7 +136,7 @@ test('② 表头漏斗：勾选提交人后请求带多值参数，行数变化�
 })
 
 test('③ 改筛选回到第 1 页；page 超界显示空态并可回第 1 页', async ({ page }) => {
-  await page.goto('/runs?page_size=10&page=2')
+  await page.goto('/?page_size=10&page=2')
   await expect(page.getByTestId('pagination-total')).toBeVisible({ timeout: 15_000 })
   await expect(page).toHaveURL(/page=2/)
 
@@ -148,7 +148,7 @@ test('③ 改筛选回到第 1 页；page 超界显示空态并可回第 1 页',
   await expect(page).not.toHaveURL(/page=2/)
 
   // 超界页：直接给一个很大的 page
-  await page.goto('/runs?page=99')
+  await page.goto('/?page=99')
   const outOfRange = page.getByTestId('page-out-of-range')
   await expect(outOfRange).toBeVisible({ timeout: 15_000 })
   await expect(outOfRange).toContainText('超出范围')
@@ -159,7 +159,7 @@ test('③ 改筛选回到第 1 页；page 超界显示空态并可回第 1 页',
 
 test('④ 空结果态：筛选到没有数据时给出空态与「清除过滤」', async ({ page }) => {
   // 提交人里没有的谁，直接给 URL
-  await page.goto('/runs?submitter=不存在的提交人')
+  await page.goto('/?submitter=不存在的提交人')
   await expect(page.getByTestId('runs-empty')).toBeVisible({ timeout: 15_000 })
   await expect(page.getByTestId('runs-empty')).toContainText('没有 Run')
   await expect(page.getByTestId('pagination-total')).toHaveText('共 0 条')
@@ -170,7 +170,7 @@ test('④ 空结果态：筛选到没有数据时给出空态与「清除过滤�
 })
 
 test('⑤ q 只在本页内查找：文案写清「在当前页内」，且不改变 total', async ({ page }) => {
-  await page.goto('/runs?page_size=10')
+  await page.goto('/?page_size=10')
   await expect(page.getByTestId('pagination-total')).toBeVisible({ timeout: 15_000 })
   const totalBefore = await page.getByTestId('pagination-total').innerText()
 
@@ -186,7 +186,7 @@ test('⑤ q 只在本页内查找：文案写清「在当前页内」，且不�
 })
 
 test('⑥ 列筛选候选值随其它列变化（facets 每次筛选都重拉）', async ({ page }) => {
-  await page.goto('/runs')
+  await page.goto('/')
   await expect(page.getByTestId('pagination-total')).toBeVisible({ timeout: 15_000 })
   await spyApi(page)
 
@@ -208,4 +208,34 @@ test('⑥ 列筛选候选值随其它列变化（facets 每次筛选都重拉）
   // facets 请求确实带了当前过滤条件
   const facetCalls = await page.evaluate(() => (window as unknown as { __facets: Array<Record<string, unknown>> }).__facets)
   expect(String(facetCalls.at(-1)?.submitter)).toContain('dev')
+})
+
+test('⑦ D-62：/runs 兼容重定向到概览，query 原样保留且筛选生效', async ({ page }) => {
+  await page.goto('/runs?status=completed_with_errors&page=1&page_size=10&submitter=陈一鸣')
+  // URL 落到概览，参数一个不少
+  await expect(page).toHaveURL(/\/\?.*status=completed_with_errors/)
+  await expect(page).toHaveURL(/page_size=10/)
+  await expect(page).toHaveURL(/submitter=/)
+  // 列表页已经不存在：表格长在概览上，筛选确实生效
+  await expect(page.getByText('全部 Run')).toBeVisible()
+  await expect(page.getByTestId('pagination-total')).toBeVisible({ timeout: 15_000 })
+  const total = await page.getByTestId('pagination-total').innerText()
+  expect(total).toMatch(/^共 \d+ 条$/)
+  // 已应用的筛选 chip 还在（说明参数被识别成筛选，而不是被忽略）
+  await expect(page.getByText('状态：completed_with_errors')).toBeVisible()
+})
+
+test('⑦ D-62：导航里没有「运行列表」，概览页同时有 KPI 与全量 Run 表', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText('进行中 Run')).toBeVisible({ timeout: 15_000 })
+
+  const labels = (await page.locator('nav[aria-label="主导航"] a').allInnerTexts()).map((text) => text.trim())
+  expect(labels).toContain('概览')
+  expect(labels).not.toContain('运行列表')
+
+  // 同屏：KPI 四卡 + 队列摘要 + 全量表 + 分页栏
+  await expect(page.locator('[aria-label="概览指标"] > *')).toHaveCount(4)
+  await expect(page.getByTestId('queue-summary')).toBeVisible()
+  await expect(page.getByTestId('data-table')).toBeVisible()
+  await expect(page.getByTestId('pagination')).toBeVisible()
 })

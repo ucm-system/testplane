@@ -24,6 +24,10 @@ export interface DialogProps {
 /**
  * 模态弹窗：基于 `@radix-ui/react-dialog`（focus trap + 关闭后焦点归还触发按钮）。
  *
+ * 视觉（见 docs/research/shadcn-visual-specs.md §2.6）：`rounded-xl` + `shadow-overlay`，
+ * 标题 18px（`text-lg font-semibold`，比正文大一档），描述 `text-sm text-fg-2`，
+ * 头/身/脚统一 `px-6`，分隔线只留一条（表头与底栏），底栏不再染灰。
+ *
  * 对外 props 与改造前完全一致（`open` / `onClose` / `title` / `description` / `footer` / `size` /
  * `dismissible`），所以「重跑 Run」「取消 Run」「取消 Task」「管理台删除」这些调用点不用改；
  * 无障碍细节交给 Radix：`role="dialog"` + `aria-modal` + Tab 循环 + Esc + 遮罩点击。
@@ -67,7 +71,7 @@ export function Dialog({
       }}
     >
       <RadixDialog.Portal>
-        <RadixDialog.Overlay className="fixed inset-0 z-50 animate-fade-in bg-[rgb(15_23_42_/_0.45)]" />
+        <RadixDialog.Overlay className="fixed inset-0 z-50 animate-fade-in bg-foreground/40" />
         <RadixDialog.Content
           /* 显式写出来：背景对读屏软件必须不可达（Radix 默认也会给，但别被透传的属性盖掉） */
           aria-modal="true"
@@ -91,17 +95,17 @@ export function Dialog({
           }}
           className={cn(
             'fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100vh-3rem)] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2',
-            'animate-fade-in flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-modal',
+            'animate-fade-in flex-col overflow-hidden rounded-xl border border-line bg-surface shadow-overlay',
             SIZES[size],
           )}
         >
-          <header className="flex items-start gap-3 border-b border-line-soft px-5 py-4">
+          <header className="flex items-start gap-3 border-b border-line-soft px-6 py-4">
             <div className="min-w-0 flex-1">
-              <RadixDialog.Title id={titleId} className="text-sm font-semibold text-fg">
+              <RadixDialog.Title id={titleId} className="text-lg font-semibold leading-none text-fg">
                 {title}
               </RadixDialog.Title>
               {description ? (
-                <RadixDialog.Description id={descId} className="mt-1 text-xs leading-relaxed text-fg-2">
+                <RadixDialog.Description id={descId} className="mt-2 text-sm leading-relaxed text-fg-2">
                   {description}
                 </RadixDialog.Description>
               ) : null}
@@ -111,16 +115,16 @@ export function Dialog({
                 <button
                   type="button"
                   aria-label="关闭"
-                  className="-mr-1 rounded-md p-1 text-fg-3 transition-colors hover:bg-line-soft hover:text-fg"
+                  className="-mr-1 rounded-sm p-1 text-fg-3 outline-none transition-colors hover:bg-line-soft hover:text-fg focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                 >
                   <X className="size-4" aria-hidden />
                 </button>
               </RadixDialog.Close>
             ) : null}
           </header>
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">{children}</div>
           {footer ? (
-            <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line-soft bg-surface-2 px-5 py-3">
+            <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-line-soft px-6 py-4">
               {footer}
             </footer>
           ) : null}

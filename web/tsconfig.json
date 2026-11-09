@@ -1,4 +1,12 @@
 {
+  "compilerOptions": {
+    /* 只为工具链（shadcn CLI / 编辑器）能解析 `@/*`：真正的编译参数在 tsconfig.app.json。
+       根 config 是 solution 形态（files: []），这里写 paths 不影响 `tsc -b`。 */
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
   "files": [],
   "references": [
     { "path": "./tsconfig.app.json" },

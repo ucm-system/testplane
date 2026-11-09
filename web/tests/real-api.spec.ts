@@ -25,7 +25,7 @@ test('real backend: /healthz + runs list 非空', async ({ page, request }) => {
   expect(Array.isArray(body.items)).toBe(true)
   expect(body.items!.length).toBeGreaterThan(0)
 
-  await page.goto('/runs')
+  await page.goto('/')
   await expect(page.getByText('全部 Run')).toBeVisible()
   await expect(page.locator('tbody a[href^="/runs/"]').first()).toBeVisible()
 })

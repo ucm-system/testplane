@@ -49,7 +49,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         toastOptions={{
           classNames: {
             toast:
-              'group flex w-[min(22rem,calc(100vw-2rem))] items-start gap-2.5 rounded-md border-0 bg-ink px-3.5 py-2.5 text-xs text-white shadow-modal',
+              'group flex w-[min(22rem,calc(100vw-2rem))] items-start gap-2.5 rounded-md border-0 bg-ink px-3.5 py-2.5 text-xs text-white shadow-overlay',
             title: 'font-medium',
             description: '!mt-0.5 break-words text-2xs !text-white/70',
             actionButton: '!rounded-sm !bg-white/15 !px-2 !py-1 text-2xs !text-white hover:!bg-white/25',

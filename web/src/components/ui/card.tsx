@@ -13,21 +13,27 @@ const DOT: Record<Tone, string> = {
 }
 
 /** 卡头浅染底（原型 `.fde-card-hd.hg-*` 的 6–8% 语义色），让版面有冷暖而不是一片白 */
+// 卡头不染底色（P0-2）：层次靠圆点 + 字重 + 一条发丝分隔线，而不是浅色底块。
+// 之前薄荷绿/浅蓝/浅琥珀的卡头会把"层次信号"变成"颜色信号"，整页看着花。
 const HEADER_TONE: Record<Tone, string> = {
-  ok: 'bg-success-weak',
-  warn: 'bg-warn-weak',
-  err: 'bg-danger-weak',
-  info: 'bg-primary-weak',
-  primary: 'bg-primary-weak',
-  muted: 'bg-surface-2',
+  ok: 'bg-transparent',
+  warn: 'bg-transparent',
+  err: 'bg-transparent',
+  info: 'bg-transparent',
+  primary: 'bg-transparent',
+  muted: 'bg-transparent',
 }
 
+/**
+ * 卡片（对齐 shadcn Card，见 docs/research/shadcn-visual-specs.md §2.2）：
+ * `rounded-xl`(14) + 1px `--border` + `shadow-xs`（只有 1px 的浮起量）。
+ * overflow-hidden：染底卡头 / 表头底色 / 行 hover 都是直角矩形，必须裁在圆角里（T39）。
+ */
 export function Card({ className, ...rest }: HTMLAttributes<HTMLElement>) {
   return (
     <section
       className={cn(
-        // overflow-hidden：染底卡头 / 表头底色 / 行 hover 都是直角矩形，必须裁在 12px 圆角里（T39）
-        'min-w-0 overflow-hidden rounded-lg border border-line-soft bg-surface shadow-card',
+        'min-w-0 overflow-hidden rounded-xl border border-line bg-surface text-fg shadow-xs',
         'transition-shadow duration-150 ease-out',
         className,
       )}
@@ -57,24 +63,24 @@ export function CardHeader({ title, sub, tone, actions, className, id }: CardHea
         className,
       )}
     >
-      <h2 id={id} className="flex items-center text-[15px] font-semibold leading-tight text-fg">
+      <h2 id={id} className="flex items-center text-base font-semibold leading-none text-fg">
         {tone ? <span className={cn('mr-2 inline-block size-1.5 rounded-full', DOT[tone])} aria-hidden /> : null}
         {title}
       </h2>
-      {sub ? <span className="text-[12.5px] leading-snug text-fg-3">{sub}</span> : null}
+      {sub ? <span className="text-xs leading-snug text-fg-3">{sub}</span> : null}
       {actions ? <div className="ml-auto flex flex-wrap items-center gap-2">{actions}</div> : null}
     </header>
   )
 }
 
 export function CardBody({ className, ...rest }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('px-5 py-4', className)} {...rest} />
+  return <div className={cn('px-6 py-4', className)} {...rest} />
 }
 
 export function CardFooter({ className, ...rest }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn('flex flex-wrap items-center gap-2 border-t border-line-soft px-6 py-3 text-[12.5px] text-fg-3', className)}
+      className={cn('flex flex-wrap items-center gap-2 border-t border-line-soft px-6 py-3 text-xs text-fg-3', className)}
       {...rest}
     />
   )
