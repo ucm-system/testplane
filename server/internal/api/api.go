@@ -44,6 +44,9 @@ type Deps struct {
 	// Clock 是业务时间来源（05 §6.5）；nil 时用 domain.SystemClock。
 	// 提交时间戳、run_id 日期段、resolved 快照时间都走它（票 #31）。
 	Clock domain.Clock
+	// SharedMountsFn 是平台级统一共享挂载的**运行时来源**（D-65，读 shared_mounts 表）。
+	// nil 时退回 Config.SharedMounts（启动种子）——测试与未接线场景。
+	SharedMountsFn func(ctx context.Context) ([]domain.SharedMountSpec, error)
 }
 
 // Server 持有 HTTP 层依赖。
@@ -63,6 +66,8 @@ type Server struct {
 	authn          *auth.Authenticator
 	version        string
 	now            func() time.Time
+	// sharedMounts 是 D-65 的运行时挂载来源（nil → 用 cfg.SharedMounts）。
+	sharedMounts func(ctx context.Context) ([]domain.SharedMountSpec, error)
 }
 
 // New 构造 API Server。
@@ -91,12 +96,14 @@ func New(d Deps) *Server {
 	// 都走它；runtime 机制（Ticker/Timeout）仍用 time.Now()。
 	s.now = s.clock.Now
 	s.authn = s.buildAuthenticator()
+	s.sharedMounts = d.SharedMountsFn
 	s.submit = &Submitter{
 		resolver:       d.Resolver,
 		profiles:       d.Store.Profiles,
 		logger:         lg,
 		clock:          s.clock,
 		SharedMounts:   d.Config.SharedMounts,
+		SharedMountsFn: d.SharedMountsFn,
 		MaxTasks:       d.Config.RunMaxTasks,
 		DefaultTimeout: d.Config.TaskTimeoutDefault,
 		MaxTimeout:     d.Config.TaskTimeoutMax,
@@ -155,6 +162,10 @@ func (s *Server) Handler() http.Handler {
 			r.Get("/admin/secrets", s.handleAdminListSecretRefs)
 			r.Post("/admin/secrets", s.handleAdminCreateSecretRef)
 			r.Post("/admin/secrets/{name}/rotate", s.handleAdminRotateSecret)
+			r.Get("/admin/shared-mounts", s.handleAdminListSharedMounts)
+			r.Post("/admin/shared-mounts", s.handleAdminCreateSharedMount)
+			r.Put("/admin/shared-mounts/{name}", s.handleAdminUpdateSharedMount)
+			r.Delete("/admin/shared-mounts/{name}", s.handleAdminDeleteSharedMount)
 			r.Get("/admin/audit", s.handleAdminListAudit)
 			r.Delete("/admin/runs/{run_id}/artifacts", s.handleAdminCleanupArtifacts)
 		})
@@ -171,8 +182,6 @@ func (s *Server) Handler() http.Handler {
 		// 列筛选候选值（Excel 式表头下拉，D-61）。必须注册在 /runs/{id} 之前更直观
 		// （chi 本身静态段优先，不依赖顺序）。
 		r.Get("/runs/facets", s.handleRunFacets)
-		r.Get("/runs/{id}", s.handleGetRun)
-		r.Get("/runs", s.handleListRuns)
 		r.Get("/runs/{id}", s.handleGetRun)
 		r.Get("/runs/{id}/tasks", s.handleListRunTasks)
 		r.Get("/runs/{id}/events", s.handleRunEvents)
@@ -201,6 +210,8 @@ func (s *Server) Handler() http.Handler {
 		r.Get("/testers/{name}", s.handleGetTester)
 		r.Get("/testers/{name}/versions/{version}", s.handleGetTesterVersion)
 
+		// 平台级统一共享挂载的只读视图（D-65）：viewer+ 可见，"这次 Run 会挂什么"。
+		r.Get("/shared-mounts", s.handleListSharedMounts)
 		r.Get("/profiles", s.handleListProfiles)
 		r.Get("/clusters", s.handleListClusters)
 		r.Get("/queue-status", s.handleQueueStatus)

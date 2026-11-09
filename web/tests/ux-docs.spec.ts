@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -111,15 +111,18 @@ test('② /docs：五节真内容都在，目录锚点可跳', async ({ page }) 
   await page.screenshot({ path: join(OUT_DIR, 'docs-1440.png'), fullPage: true })
 })
 
-test('③ /api：端点来自 openapi.yaml（52 个）、搜索过滤生效、下载给出契约原文', async ({ page }) => {
+test('③ /api：端点来自 openapi.yaml（数量与契约一致）、搜索过滤生效、下载给出契约原文', async ({ page }) => {
   mkdirSync(OUT_DIR, { recursive: true })
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.goto('/api')
   await expect(page.getByTestId('api-page')).toBeVisible({ timeout: 20_000 })
 
-  // 端点数与 tools/contract 对齐（52）
+  // 端点数不写死：从生成的契约文件现场数一遍再比 UI（否则每次加端点都要改这条断言）
+  const spec = readFileSync(new URL('../src/generated/openapi.yaml', import.meta.url), 'utf8')
+  const expected = (spec.match(/^ {4}(get|post|put|patch|delete):/gm) ?? []).length
+  expect(expected).toBeGreaterThan(50)
   const count = page.getByTestId('api-endpoint-count')
-  await expect(count).toHaveText('共 52 个端点')
+  await expect(count).toHaveText(`共 ${expected} 个端点`)
 
   // 按 tag 分组
   await expect(page.locator('[data-testid^="api-group-"]').first()).toBeVisible()

@@ -2276,6 +2276,152 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /api/v1/shared-mounts:
+    get:
+      operationId: listSharedMounts
+      summary: 平台级统一共享挂载的只读视图（viewer+）
+      description: |
+        D-65 / 07 §5.1：回答"我这次提交的 Run 会挂哪些共享挂载"——**只回启用中**的行。
+        这些挂载点由 executor 渲染进所有 Tester Job（含 Pre-Check）；平台不创建 PV/PVC，
+        `claim_name` 必须是集群里已存在的 PVC。
+      tags: [testers]
+      responses:
+        '200':
+          description: 启用中的共享挂载
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SharedMountList'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/v1/admin/shared-mounts:
+    get:
+      operationId: listAdminSharedMounts
+      summary: 共享挂载列表（admin，含停用行）
+      description: |
+        D-65：`shared_mounts` 表是运行时真源（`TESTPLANE_SHARED_MOUNTS` 只是首次启动种子）。
+        写操作记 `audit_log`（`object_type=shared_mount`）。
+      tags: [admin]
+      responses:
+        '200':
+          description: 全部共享挂载
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SharedMountList'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      operationId: createAdminSharedMount
+      summary: 新建共享挂载（admin）
+      description: |
+        D-65。`read_only` 默认 `true`、`enabled` 默认 `true`。
+        校验失败 → 400 `VALIDATION_ERROR`，`detail.issues[].code`：
+        `CONFLICT`（`mount_path` 命中保留路径或已被占用、`name` 已存在）/ `REQUIRED`（缺 `claim_name`、
+        `mount_path` 非绝对路径）。`name` 已存在走 409 `CONFLICT`（改用 PUT）。
+      tags: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SharedMountUpsert'
+      responses:
+        '201':
+          description: 已创建
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SharedMount'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/admin/shared-mounts/{name}:
+    put:
+      operationId: updateAdminSharedMount
+      summary: 更新共享挂载（admin）
+      description: |
+        D-65：按 `name` 定位（name 不可改），不存在 404 `NOT_FOUND`；
+        省略的字段保留旧值。写完之后**下一次渲染立即生效**（渲染侧不缓存）。
+      tags: [admin]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SharedMountUpsert'
+      responses:
+        '200':
+          description: 已更新
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SharedMount'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      operationId: deleteAdminSharedMount
+      summary: 删除共享挂载（admin）
+      description: |
+        D-65：删除只影响**之后**的渲染——已提交 Run 的 Task 快照已冻结，不受影响。
+      tags: [admin]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/v1/admin/audit:
     get:
       operationId: listAdminAudit
@@ -4751,6 +4897,61 @@ components:
         next_cursor:
           type: [string, 'null']
         has_more:
+          type: boolean
+
+    SharedMount:
+      type: object
+      description: |
+        平台级统一共享挂载的一条（D-63/D-65）。平台只认 PVC 名（`claim_name`），
+        不创建 PV/PVC、不解析 NFS/CephFS/CSI 的协议字段。
+      required: [name, mount_path, read_only, claim_name, enabled]
+      properties:
+        name:
+          type: string
+          description: volume 名（渲染前会 sanitize 并去重）
+        mount_path:
+          type: string
+          description: 容器内绝对路径（如 `/models`）；不得命中平台保留路径
+        read_only:
+          type: boolean
+          description: 默认 `true`（模型权重是只读输入）
+        claim_name:
+          type: string
+          description: 集群里已存在的 PVC 名；内联 `volumes[].nfs` 会被 PodSecurity `restricted` 拒绝
+        enabled:
+          type: boolean
+          description: '`false` = 保留记录但不注入'
+
+    SharedMountList:
+      type: object
+      description: 共享挂载列表信封
+      required: [items, has_more]
+      additionalProperties: true
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SharedMount'
+        next_cursor:
+          type: [string, 'null']
+        has_more:
+          type: boolean
+
+    SharedMountUpsert:
+      type: object
+      description: POST/PUT 的请求体（PUT 省略字段 = 保留旧值；`name` 不可改）
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: volume 名，≤63 字节；PUT 时若给出必须与路径上的 name 一致
+        mount_path:
+          type: string
+        read_only:
+          type: boolean
+        claim_name:
+          type: string
+        enabled:
           type: boolean
 
     TesterList:

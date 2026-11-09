@@ -232,8 +232,13 @@ extraEnv: []
 extraEnvFrom: []
 extraVolumes: []
 extraVolumeMounts: []
-# ---- 统一共享挂载（D-63）----
-# 平台级配置：全局注入所有 Tester Job（含 Pre-Check）；Execution Profile 可关闭（sharedMounts: false）。
+# ---- 统一共享挂载（D-63 / D-65）----
+# 注入点：全局注入所有 Tester Job（含 Pre-Check）；Execution Profile 可关闭（sharedMounts: false）。
+#
+# **D-65 起运行时可管理**：这里的 `sharedMounts` 只作为**首次启动的种子**（`shared_mounts` 表为空时导入一次，
+# 之后不再覆盖）。日常改挂载点请走管理台/API（`/admin/shared-mounts` 的 GET/POST/PUT/DELETE），
+# 改完对**下一次渲染**立即生效，不需要重新 helm upgrade 或重启。
+# 想让 helm 覆盖管理面记录 = 反过来改 DB（不推荐）；要重置成种子，先清空 shared_mounts 表再重启。
 # **平台只认 claimName**（PVC 名），不理解 NFS/CephFS/CSI 协议；PV/PVC 由集群提供。
 # 便利通道：下面 `extraObjects` 可以直接贴 NFS PV+PVC 的 YAML（原样渲染，平台不解析）。
 #

@@ -329,6 +329,26 @@ CREATE TABLE execution_profiles (
   updated_at             timestamptz NOT NULL DEFAULT now()
 );
 
+**`shared_mounts` 的数据源优先级（D-65）**：本表是**运行时真源**（executor 渲染所有 Tester Job 时读
+`enabled = true` 的行）；`TESTPLANE_SHARED_MOUNTS` 只在**表为空时**作为首次启动的种子导入一次，之后不再覆盖。
+历史 Run 不受删除影响：Task 已冻结自己的 `mounts` 快照，渲染发生在提交之后的新 Attempt。
+
+CREATE TABLE shared_mounts (                                 -- D-65：运行时可管理的平台级统一共享挂载
+  name        text PRIMARY KEY,                           -- volume 名（渲染前会 sanitize/去重）
+  mount_path  text NOT NULL,                              -- 容器内绝对路径（如 /models）
+  read_only   boolean NOT NULL DEFAULT true,              -- 默认只读：模型权重是只读输入
+  claim_name  text NOT NULL,                              -- 集群里已存在的 PVC 名（平台不创建 PV/PVC）
+  enabled     boolean NOT NULL DEFAULT true,              -- false = 保留记录但不注入
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  created_by  text NOT NULL DEFAULT 'system:seed',        -- 首次启动的 env 种子 / 管理面操作人
+  updated_by  text NOT NULL DEFAULT 'system:seed',
+  CONSTRAINT shared_mounts_path_uq UNIQUE (mount_path),   -- 同一路径只允许一条（挂两次是配置错误）
+  CONSTRAINT shared_mounts_claim_ck CHECK (btrim(claim_name) <> ''),
+  CONSTRAINT shared_mounts_path_ck  CHECK (mount_path LIKE '/%')
+);
+CREATE INDEX shared_mounts_enabled_idx ON shared_mounts (enabled) WHERE enabled;  -- 渲染只读启用行
+
 CREATE TABLE secret_refs (
   name         text PRIMARY KEY,                            -- Manifest 里写的字符串
   namespace    text NOT NULL,
