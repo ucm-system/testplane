@@ -11,7 +11,7 @@
 image:
   repository: ghcr.io/ucm-system/testplane-server
   # ← 由 `deploy/docker/build-push.ps1 -Push` 打印的 digest（钉死，不用可变 tag）
-  digest: "sha256:491aec754928a286b09896213be2d6ab3d514ad76623f09eb88be8f9cab41852"
+  digest: "sha256:f91cef0daaa7d0d60d2b26a3da6546dd824e3a7261b34ac001d2a815c9165dee"
   pullPolicy: IfNotPresent
   # 公开仓库的 GHCR 镜像匿名可拉；私有包才需要 pull secret
   # pullSecrets:

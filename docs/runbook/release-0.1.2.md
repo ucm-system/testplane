@@ -6,10 +6,10 @@
 
 | 镜像 | index digest |
 |---|---|
-| `ghcr.io/ucm-system/testplane-server:0.1.2` | `__SERVER_DIGEST__` |
-| `ghcr.io/ucm-system/testplane-web:0.1.2` | `__WEB_DIGEST__` |
-| `ghcr.io/ucm-system/testplane-tester-endpoint-probe:0.1.2` | `__PROBE_DIGEST__` |
-| `ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.1.2` | `__SLA_DIGEST__` |
+| `ghcr.io/ucm-system/testplane-server:0.1.2` | `sha256:f91cef0daaa7d0d60d2b26a3da6546dd824e3a7261b34ac001d2a815c9165dee` |
+| `ghcr.io/ucm-system/testplane-web:0.1.2` | `sha256:16d169d77f207c31dba63a9493243a02f19b09ad98e8c3c202580063d4e985b3` |
+| `ghcr.io/ucm-system/testplane-tester-endpoint-probe:0.1.2` | `sha256:0bbb95922e75338dd838aff39dccf67896dbe7296dfbc85aa89e1a2a67a6fbc0` |
+| `ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.1.2` | `sha256:2b2f9fbf3878b43b765b6ba9e538f5530fc222a9b4e5da5de934e060851c7023` |
 
 ## 1. 运行列表：真分页 + Excel 式列筛选（D-61）
 
