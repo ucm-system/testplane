@@ -320,33 +320,8 @@
    `prefers-reduced-motion: reduce` 时**整段动画关闭**（不是只把时长压到最小）。
    --------------------------------------------------------------------------- */
 
-@utility notfound-float {
-  animation: notfound-float 4.2s ease-in-out infinite;
-}
 
-@keyframes notfound-float {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-6px);
-  }
-}
-
-@utility notfound-dash {
-  animation: notfound-dash 2.6s linear infinite;
-}
-
-@keyframes notfound-dash {
-  to {
-    stroke-dashoffset: -160;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
-  .notfound-float,
-  .notfound-dash {
-    animation: none !important;
-  }
+
 }

@@ -21,9 +21,13 @@ export interface NotFoundPageProps {
  * —— 同页两个 main landmark 会让"跳到主内容"的目标变歧义，读屏也会重复播报。
  * 改用 `<section aria-labelledby>`，并把 `document.title` 设成「404 · 页面不存在」。
  *
- * 视觉只用本仓库的设计令牌（Tailwind + `Card` / `Button`），插画是**内联 SVG**，
- * 不引图片资源；动效是 CSS 动画，`prefers-reduced-motion: reduce` 时由 `index.css`
- * 里的同名工具类覆盖成 `animation: none`（不是只把时长调到 0.001ms）。
+ * **版式（用户 2026-11-09 定稿）**：插画在**左**，右侧只放两个动作按钮。
+ * 「404 / 这个地址没有对应的页面 / 可能是链接过期了……」那两行文字**不再显示**（图里已经写着 404，
+ * 文字与图并排像没对齐的两栏）。文字没有丢：`h1` 与说明留成 `sr-only`，
+ * 读屏与 SEO 仍拿得到「404 + 上下文」——是"视觉上删掉"，不是"语义上删掉"。
+ *
+ * 图是用户提供的插画：`public/404.webp`（760px / 69KB；源图 1254px PNG 1MB，转 webp 后才入库，
+ * 别为一张 404 图把首屏撑大 1MB）。装饰性 `<img alt="">` + `aria-hidden`。
  */
 export function NotFoundPage({
   title = '这个地址没有对应的页面',
@@ -39,57 +43,44 @@ export function NotFoundPage({
 
   return (
     <section aria-labelledby="not-found-title" data-testid="not-found" className="min-w-0">
-      <Card className="px-6 py-10 sm:px-10 sm:py-12">
-        <div className="grid items-center gap-8 md:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
-          <div className="min-w-0">
-            <p className="font-mono text-2xs uppercase tracking-[0.32em] text-fg-3">page not found</p>
-            <h1 id="not-found-title" className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-              {/*
-                大字 404 是**标题的一部分**（读屏念出来是「404 这个地址没有对应的页面」），
-                所以不 aria-hidden —— 它不是装饰，是这页的身份。
-              */}
-              <span className="text-[76px] font-semibold leading-[0.85] tracking-[-0.05em] text-fg">404</span>
-              <span className="text-lg font-semibold leading-snug text-fg-2">{title}</span>
-            </h1>
-            <p className="mt-3 max-w-md text-sm leading-relaxed text-fg-2">{description}</p>
+      <Card className="px-6 py-8 sm:px-10 sm:py-10">
+        <div className="flex flex-col items-center gap-8 md:flex-row md:items-center md:gap-12">
+          {/* 主视觉：左 */}
+          <img
+            src="/404.webp"
+            alt=""
+            aria-hidden
+            width={760}
+            height={760}
+            decoding="async"
+            data-testid="not-found-art"
+            className="w-full max-w-[16rem] shrink-0 select-none sm:max-w-[20rem] md:max-w-[22rem]"
+          />
 
-            <div className="mt-6 flex flex-wrap items-center gap-2">
+          {/* 右侧只有动作；标题与说明对读屏可见（sr-only），视觉上由图承担 */}
+          <div className="min-w-0 md:flex-1">
+            <h1 id="not-found-title" className="sr-only">
+              404 {title}
+            </h1>
+            <p className="sr-only">{description}</p>
+
+            <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
               <Link to="/" data-testid="not-found-home">
-                <Button variant="primary" icon={<ArrowLeft className="size-3.5" aria-hidden />}>
+                <Button
+                  variant="primary"
+                  icon={<ArrowLeft className="size-3.5" aria-hidden />}
+                  className="w-full sm:w-auto"
+                >
                   回到概览
                 </Button>
               </Link>
               <Link to="/runs" data-testid="not-found-runs">
-                <Button icon={<List className="size-3.5" aria-hidden />}>打开最近 Run 列表</Button>
+                <Button icon={<List className="size-3.5" aria-hidden />} className="w-full sm:w-auto">
+                  打开最近 Run 列表
+                </Button>
               </Link>
             </div>
           </div>
-
-          {/* 轻量插画：纸飞机沿虚线航线飞走。纯内联 SVG + CSS 动效，不依赖任何图片文件。 */}
-          <svg
-            viewBox="0 0 320 200"
-            className="mx-auto h-40 w-full max-w-[320px] text-fg-3"
-            role="img"
-            aria-labelledby="not-found-art"
-          >
-            <title id="not-found-art">一架纸飞机沿着虚线航线飞走，表示这个页面已经不存在</title>
-            <ellipse cx="160" cy="182" rx="88" ry="9" className="fill-surface-3" />
-            <path
-              d="M16 158 C 92 158 86 84 156 92 S 236 96 286 40"
-              fill="none"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeDasharray="7 9"
-              className="notfound-dash stroke-line-strong"
-            />
-            <circle cx="16" cy="158" r="5" className="fill-warn" />
-            <circle cx="46" cy="150" r="2.5" className="fill-line-strong" />
-            <circle cx="104" cy="120" r="2.5" className="fill-line-strong" />
-            <g className="notfound-float">
-              <path d="M286 40 L318 22 L300 58 L293 45 Z" className="fill-primary" />
-              <path d="M300 58 L293 45 L286 40 L299 44 Z" className="fill-primary-text opacity-60" />
-            </g>
-          </svg>
         </div>
       </Card>
     </section>
