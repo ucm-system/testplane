@@ -28,15 +28,15 @@ import { cn, formatClock } from '@/lib/utils'
  * 切 Pod / 切页签 / 卸载都会清掉。
  */
 
-const TERMINAL_BG = '#0b1220'
+const TERMINAL_BG = 'var(--color-terminal)'
 
 /** 深色终端里按行着色：错误红、告警/重启琥珀、成功绿，时间戳稍亮。 */
 function lineClass(line: string): string {
-  if (/\b(ERROR|FATAL|panic|OOMKilled)\b/i.test(line)) return 'text-[#fca5a5]'
-  if (/\b(WARN|WARNING|restart|timeout|retry)\b/i.test(line)) return 'text-[#fcd34d]'
-  if (/\b(ready|listening|succeeded|recovered)\b/i.test(line)) return 'text-[#6ee7b7]'
-  if (/^\d{2}:\d{2}:\d{2}/.test(line)) return 'text-[#cbd5e1]'
-  return 'text-[#94a3b8]'
+  if (/\b(ERROR|FATAL|panic|OOMKilled)\b/i.test(line)) return 'text-log-error'
+  if (/\b(WARN|WARNING|restart|timeout|retry)\b/i.test(line)) return 'text-log-warn'
+  if (/\b(ready|listening|succeeded|recovered)\b/i.test(line)) return 'text-log-ok'
+  if (/^\d{2}:\d{2}:\d{2}/.test(line)) return 'text-log-time'
+  return 'text-log-muted'
 }
 
 /** gap 的时间戳只显示到秒，省得一行被塞满。 */
@@ -48,7 +48,7 @@ function formatGapTime(value: string): string {
 
 function LogBlock({ entry }: { entry: DeployLogEntry }) {
   return (
-    <pre className="whitespace-pre-wrap break-all font-mono text-[12.5px] leading-[1.7]">
+    <pre className="whitespace-pre-wrap break-all font-mono text-xs leading-[1.7]">
       {entry.text.split('\n').map((line, index) => {
         // 与 LogViewer 同一套语义：标记行是分隔条，不是正文；内容原样保留。
         const markerTone = logMarkerTone(line)
@@ -61,10 +61,10 @@ function LogBlock({ entry }: { entry: DeployLogEntry }) {
               'block',
               markerTone
                 ? cn(
-                    'my-1 rounded-sm bg-white/[0.06] px-2 py-1 text-center text-[11.5px]',
-                    markerTone === 'warn' && 'text-[#fcd34d]',
-                    markerTone === 'danger' && 'text-[#fca5a5]',
-                    markerTone === 'neutral' && 'text-[#94a3b8]',
+                    'my-1 rounded-sm bg-white/[0.06] px-2 py-1 text-center text-2xs',
+                    markerTone === 'warn' && 'text-log-warn',
+                    markerTone === 'danger' && 'text-log-error',
+                    markerTone === 'neutral' && 'text-log-muted',
                   )
                 : lineClass(line),
             )}
@@ -404,7 +404,7 @@ export function DeployLogsPanel({
               className={cn(
                 'flex h-7 items-center gap-1.5 rounded-md px-2.5 font-mono text-xs transition-colors duration-150',
                 selectedPod === item.name
-                  ? 'bg-surface font-medium text-fg shadow-card'
+                  ? 'bg-surface font-medium text-fg shadow-xs'
                   : 'text-fg-2 hover:bg-surface-2',
               )}
               title={`${item.name}${(item.restarts ?? 0) > 0 ? ` · 重启 ${item.restarts} 次` : ''}`}
@@ -470,7 +470,7 @@ export function DeployLogsPanel({
       </div>
 
       <div className="overflow-hidden rounded-lg border border-line" style={{ background: TERMINAL_BG }}>
-        <div className="flex flex-wrap items-center gap-2 border-b border-white/10 px-3 py-2 text-2xs text-[#94a3b8]">
+        <div className="flex flex-wrap items-center gap-2 border-b border-white/10 px-3 py-2 text-2xs text-log-muted">
           <ScrollText className="size-3.5" aria-hidden />
           <span className="font-mono">deploy/logs/{logFileName}</span>
           <span className="font-mono" data-testid="deploy-log-last-updated">
@@ -515,12 +515,12 @@ export function DeployLogsPanel({
 
         <div ref={follow.ref} onScroll={follow.onScroll} data-testid="deploy-log-scroller" className="max-h-[24rem] overflow-auto px-3 py-2 pb-3">
           {data.entries.length === 0 ? (
-            <p className="py-6 text-center font-mono text-xs text-[#94a3b8]">（这段区间没有日志行）</p>
+            <p className="py-6 text-center font-mono text-xs text-log-muted">（这段区间没有日志行）</p>
           ) : (
             data.entries.map((entry, index) => (
               <div key={`${entry.pod}-${entry.offset}`}>
                 {index > 0 ? (
-                  <p className="mb-1 font-mono text-[11px] text-[#64748b]">
+                  <p className="mb-1 font-mono text-2xs text-log-muted">
                     ── {entry.pod} · {entry.container} · 从第 {entry.offset} 行 ──
                   </p>
                 ) : null}
@@ -532,7 +532,7 @@ export function DeployLogsPanel({
           {gaps.map((gap) => (
             <p
               key={`${gap.pod}-${gap.from}`}
-              className="my-2 rounded-sm border border-dashed border-[#f59e0b]/60 bg-[#f59e0b]/10 px-2 py-1 font-mono text-[11.5px] text-[#fcd34d]"
+              className="my-2 rounded-sm border border-dashed border-warn/60 bg-warn/10 px-2 py-1 font-mono text-2xs text-log-warn"
             >
               ⚠ 此处不连续：{gap.reason}（{formatGapTime(gap.from)} → {formatGapTime(gap.to)}，Pod {gap.pod}）
             </p>
@@ -541,12 +541,12 @@ export function DeployLogsPanel({
 
         {data.truncated ? (
           <div className="flex items-center justify-end gap-2 border-t border-white/10 px-3 py-2">
-            {moreError ? <span className="mr-auto text-2xs text-[#fca5a5]">{moreError}</span> : null}
+            {moreError ? <span className="mr-auto text-2xs text-log-error">{moreError}</span> : null}
             <Button
               size="sm"
               variant="ghost"
               data-testid="deploy-log-load-more"
-              className="text-[#cbd5e1] hover:bg-white/10 hover:text-white"
+              className="text-log-time hover:bg-white/10 hover:text-white"
               loading={loadingMore}
               onClick={() => void loadMore()}
             >

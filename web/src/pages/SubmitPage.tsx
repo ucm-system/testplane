@@ -489,7 +489,7 @@ export function SubmitPage() {
             <button
               type="button"
               data-testid="toast-copy-run-id"
-              className="rounded-sm bg-white/15 px-1.5 py-0.5 text-2xs text-white hover:bg-white/25"
+              className="inline-flex h-6 items-center rounded-sm bg-white/15 px-2 text-2xs text-white hover:bg-white/25"
               onClick={() => void navigator.clipboard?.writeText(runId)}
             >
               复制 ID
@@ -497,7 +497,7 @@ export function SubmitPage() {
             <button
               type="button"
               data-testid="toast-open-run"
-              className="rounded-sm bg-white/15 px-1.5 py-0.5 text-2xs text-white hover:bg-white/25"
+              className="inline-flex h-6 items-center rounded-sm bg-white/15 px-2 text-2xs text-white hover:bg-white/25"
               onClick={() => navigate(`/runs/${runId}`)}
             >
               查看详情
@@ -596,6 +596,8 @@ export function SubmitPage() {
                 onChange={setDeployYaml}
                 rows={7}
                 aria-label="deploy 段 YAML"
+                title="deploy.yaml"
+                hint="2 空格缩进 · Ctrl/⌘+Enter 提交"
                 error={lintPos}
               />
               {/*
@@ -971,9 +973,9 @@ export function SubmitPage() {
       {/* 参数说明：原来在右栏，右栏取消后就地搬到主内容，默认折叠（说明性内容，不占首屏） */}
       <details
         data-testid="submit-tester-help"
-        className="group rounded-lg border border-line-soft bg-surface shadow-card"
+        className="group rounded-xl border border-line bg-surface shadow-xs"
       >
-        <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-3 text-[15px] font-semibold text-fg [&::-webkit-details-marker]:hidden">
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-3 text-base font-semibold text-fg [&::-webkit-details-marker]:hidden">
           参数说明
           <span className="text-2xs font-normal text-fg-3">
             {activeTester ? `${activeTester.name} v${activeTester.version}` : '跟着当前 Task 选中的 Tester 走'}
@@ -1018,7 +1020,7 @@ export function SubmitPage() {
                         appendToArgs(activeTest.key, activeTester.placeholder ?? '')
                         flashRailCopied('placeholder')
                       }}
-                      className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-2xs text-fg-3 transition-colors hover:bg-line-soft hover:text-fg"
+                      className="inline-flex h-6 items-center gap-1 rounded-sm px-2 text-2xs text-fg-3 transition-colors hover:bg-line-soft hover:text-fg"
                     >
                       {railCopied === 'placeholder' ? (
                         <Check className="size-3 text-success" aria-hidden />
@@ -1028,7 +1030,7 @@ export function SubmitPage() {
                       {railCopied === 'placeholder' ? '已加入参数' : '复制整段'}
                     </button>
                   </div>
-                  <pre className="mt-1 overflow-x-auto rounded-md border border-line-soft bg-surface-2 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-fg-2">
+                  <pre className="mt-1 overflow-x-auto rounded-md border border-line-soft bg-surface-2 px-2 py-1.5 font-mono text-2xs leading-relaxed text-fg-2">
                     {activeTester.placeholder}
                   </pre>
                 </div>

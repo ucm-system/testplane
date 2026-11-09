@@ -2,33 +2,51 @@
 @import "./styles/fonts.css";
 
 /* =============================================================================
-   TestPlane 主题 —— 语义 token 来自设计原型，不另起一套视觉
-   来源：design/prototype/assets/tokens.css（基础令牌）
-        design/prototype/assets/holy-grail.css（最终生效的 slate 家族覆盖）
-   纪律：业务组件只用语义类名（bg-surface / text-fg-2 / border-line …），
-        不在组件里写裸 hex。
+   TestPlane 主题 —— shadcn 语义 token（Tailwind v4，oklch）
+   规格来源：docs/research/shadcn-visual-specs.md（一手抄录自 shadcn registry + theming 文档）
+   纪律：
+     1. 颜色只写 oklch（不写 hex），业务组件只写语义类名；
+     2. `--radius: 0.625rem` 是唯一真源，圆角一律由它派生；
+     3. 阴影只有两级：`shadow-xs`（静置面）与 `shadow-overlay`（浮层）；
+     4. 焦点环统一 `ring-[3px] ring-ring/50`（组件）+ `outline` 兜底（其它可聚焦元素）。
+
+   ── 旧语义名 → shadcn token 的映射（100+ 调用点不用改）────────────────────────
+     --color-canvas      → 页面底            ≈ oklch(0.985)（shadcn 的 background 更白，这里留
+                                              一层极浅的分隔，避免白卡与白底糊成一片）
+     --color-surface     → --card            oklch(1 0 0)
+     --color-surface-2   → --muted           oklch(0.97 0 0)（表头 / 代码块 / 内嵌块）
+     --color-surface-3   → 分段轨道 / 骨架    oklch(0.955)
+     --color-line        → --border          oklch(0.922)
+     --color-line-soft   → 极浅分隔 / hover 底
+     --color-line-strong → 强调描边
+     --color-fg          → --foreground
+     --color-fg-2        → 次要文字（比 muted-foreground 深一档，正文里的"值"用它）
+     --color-fg-3        → --muted-foreground（**刚好 4.73:1**，AA 线；不能再暗）
+     --color-fg-4        → 装饰（点/线/图标），**不用于文字**
+     --color-ink         → shadcn 的 --primary（近黑）。品牌蓝另走 --color-primary。
+     --color-primary     → 品牌强调色（链接 / 选中 / 焦点环 / 徽标底）= blue-600
+     --color-primary-*   → 弱底 / 胶囊底 / 弱底上的文字（50 / 100 / 700 三档）
    ========================================================================== */
 
 @theme {
-  /* ---------- 字体：自托管 Albert Sans + Noto Sans SC，尾部系统兜底 ----------
-     T35：不赌用户系统字体；顺序与 design/prototype/assets/fonts.css 一致 */
-  --font-sans: "Albert Sans", "Noto Sans SC", "Segoe UI Variable Text", "Segoe UI",
-    system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI",
-    "Microsoft YaHei", sans-serif;
-  --font-mono: "Cascadia Mono", "JetBrains Mono", ui-monospace, "SFMono-Regular",
-    Menlo, Consolas, monospace;
+  /* ---------- 字体：Inter（latin 自托管）+ Noto Sans SC，尾巴系统兜底 ---------- */
+  --font-sans: "Inter", "Noto Sans SC", "Segoe UI Variable Text", "Segoe UI", system-ui,
+    -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei",
+    sans-serif;
+  --font-mono: "Cascadia Mono", "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas,
+    monospace;
 
-  /* ---------- 字号（tokens.css --fde-fz-*）：11 起，1.2 左右递进 ---------- */
+  /* ---------- 字号标尺（对齐 shadcn/Tailwind：12 14 16 18 20 24 30，11 只给 2xs 元信息） ---------- */
   --text-2xs: 11px;
   --text-2xs--line-height: 1.45;
   --text-xs: 12px;
   --text-xs--line-height: 1.5;
-  --text-sm: 13px;
-  --text-sm--line-height: 1.55;
-  --text-base: 14px;
-  --text-base--line-height: 1.55;
-  --text-lg: 16px;
-  --text-lg--line-height: 1.5;
+  --text-sm: 14px;
+  --text-sm--line-height: 1.5;
+  --text-base: 16px;
+  --text-base--line-height: 1.5;
+  --text-lg: 18px;
+  --text-lg--line-height: 1.4;
   --text-xl: 20px;
   --text-xl--line-height: 1.35;
   --text-2xl: 24px;
@@ -36,67 +54,114 @@
   --text-3xl: 30px;
   --text-3xl--line-height: 1.2;
 
-  /* ---------- 圆角（holy-grail.css）：卡片 12 / 按钮输入 8 / 胶囊 999 ---------- */
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  /* ---------- 圆角：--radius 派生（shadcn theming §Radius Scale） ---------- */
+  --radius: 0.625rem; /* 10px 基准 */
+  --radius-xs: calc(var(--radius) * 0.4); /* 4  */
+  --radius-sm: calc(var(--radius) * 0.6); /* 6  */
+  --radius-md: calc(var(--radius) * 0.8); /* 8  */
+  --radius-lg: var(--radius); /* 10 */
+  --radius-xl: calc(var(--radius) * 1.4); /* 14 */
+  --radius-2xl: calc(var(--radius) * 1.8); /* 18（shadcn 组件里偶有 rounded-2xl） */
+  --radius-3xl: calc(var(--radius) * 2.2); /* 22 */
+  --radius-4xl: calc(var(--radius) * 2.6); /* 26 */
 
-  /* ---------- 颜色 ---------- */
-  /* 底 / 面 / 线 */
-  --color-canvas: #f1f5f9; /* 页面底色 */
-  --color-surface: #ffffff; /* 卡片、页头、侧栏 */
-  --color-surface-2: #f8fafc; /* 表头、代码块、内嵌块 */
-  --color-surface-3: #f1f5f9; /* 分段控件轨道 */
-  --color-line: #e5e7eb;
-  --color-line-soft: #f3f4f6;
-  --color-line-strong: #d1d5db;
+  /* ---------- 颜色：中性阶（shadcn neutral） ---------- */
+  --color-background: oklch(1 0 0);
+  --color-foreground: oklch(0.145 0 0);
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.145 0 0);
+  --color-popover: oklch(1 0 0);
+  --color-popover-foreground: oklch(0.145 0 0);
+  --color-muted: oklch(0.97 0 0);
+  --color-muted-foreground: oklch(0.556 0 0);
+  --color-secondary: oklch(0.97 0 0);
+  --color-secondary-foreground: oklch(0.205 0 0);
+  --color-accent: oklch(0.97 0 0);
+  --color-accent-foreground: oklch(0.205 0 0);
+  --color-border: oklch(0.922 0 0);
+  --color-input: oklch(0.922 0 0);
+  /* shadcn 组件用的是 `primary-foreground` / `destructive` 这两套名字，
+     我们内部叫 `-fg` / `danger`：两边都留，`npx shadcn add` 出来的组件才能直接吃到色。 */
+  --color-primary-foreground: var(--color-primary-fg);
+  --color-destructive: var(--color-danger);
+  --color-destructive-foreground: oklch(0.985 0 0);
+
+  /* 侧栏与图表：shadcn Sidebar / Chart 组件会引用这几组 token，
+     没定义就会渲染成透明/继承（组件"看着像没样式"）。值取 shadcn neutral 默认。 */
+  --color-sidebar: oklch(0.985 0 0);
+  --color-sidebar-foreground: oklch(0.145 0 0);
+  --color-sidebar-primary: oklch(0.205 0 0);
+  --color-sidebar-primary-foreground: oklch(0.985 0 0);
+  --color-sidebar-accent: oklch(0.97 0 0);
+  --color-sidebar-accent-foreground: oklch(0.205 0 0);
+  --color-sidebar-border: oklch(0.922 0 0);
+  --color-sidebar-ring: oklch(0.708 0 0);
+  --color-chart-1: oklch(0.646 0.222 41.116);
+  --color-chart-2: oklch(0.6 0.118 184.704);
+  --color-chart-3: oklch(0.398 0.07 227.392);
+  --color-chart-4: oklch(0.828 0.189 84.429);
+  --color-chart-5: oklch(0.769 0.188 70.08);
+
+  /* 底 / 面 / 线（旧名别名） */
+  --color-canvas: oklch(0.985 0 0); /* 页面底 */
+  --color-surface: var(--color-card); /* 卡片、页头、侧栏 */
+  --color-surface-2: var(--color-muted); /* 表头、代码块、内嵌块 */
+  --color-surface-3: oklch(0.955 0 0); /* 分段控件轨道、骨架 */
+  --color-line: var(--color-border);
+  --color-line-soft: oklch(0.965 0 0);
+  --color-line-strong: oklch(0.87 0 0);
 
   /* 文字 */
-  --color-fg: #1e293b;
-  --color-fg-2: #4b5563;
-  --color-fg-3: #667085; /* AA：白底 4.9:1（原型评审把 #9ca3af 换掉的就是这个位置） */
-  --color-fg-4: #98a2b3; /* 只给点 / 细线 / 分隔等装饰用，**不要**用于文字 */
-  --color-ink: #111827; /* 主按钮：墨黑比蓝色沉稳 */
+  --color-fg: var(--color-foreground);
+  --color-fg-2: oklch(0.439 0 0); /* 6.9:1 —— 正文里的"值/次要文字" */
+  --color-fg-3: oklch(0.53 0 0); /* shadcn 的 muted-foreground(0.556) 在灰底上只有 4.34:1，
+                                            差一点点过不了 AA；压到 0.53 → 白底 5.28 / 灰底 4.84。
+                                            这一档只降 3%，肉眼几乎无差，但把"任何底面都过 AA"钉死了。 */
+  --color-fg-4: oklch(0.708 0 0); /* 装饰用（点/线/图标），**不用于文字** */
+  --color-ink: oklch(0.205 0 0); /* 主按钮（shadcn 的 primary） */
+  --color-ink-fg: oklch(0.985 0 0);
 
-  /* 主色 */
-  --color-primary: #3b82f6;
-  --color-primary-fg: #ffffff;
-  --color-primary-weak: #eff6ff;
-  --color-primary-chip: #dbeafe;
-  --color-primary-text: #1d4ed8;
-  --color-ring: rgba(59, 130, 246, 0.2);
+  /* 品牌强调色（链接 / 选中 / 焦点环）= blue-600 */
+  --color-primary: oklch(0.546 0.245 262.881);
+  --color-primary-fg: oklch(0.985 0 0);
+  --color-primary-weak: oklch(0.97 0.014 254.604); /* blue-50 */
+  --color-primary-chip: oklch(0.932 0.032 255.585); /* blue-100 */
+  --color-primary-text: oklch(0.488 0.243 264.376); /* blue-700，7.4:1 */
+  --color-ring: var(--color-primary);
 
-  /* 语义四谱：弱底（panel）/ 胶囊底（badge）/ 弱底上的文字 */
-  --color-info: #3b82f6;
-  --color-info-weak: #eff6ff;
-  --color-info-chip: #dbeafe;
-  --color-info-text: #1d4ed8;
+  /* 语义四谱：弱底（panel）/ 胶囊底（badge）/ 弱底上的文字（700 档，保证 AA） */
+  --color-info: var(--color-primary);
+  --color-info-weak: var(--color-primary-weak);
+  --color-info-chip: var(--color-primary-chip);
+  --color-info-text: var(--color-primary-text);
 
-  --color-success: #10b981;
-  --color-success-weak: #ecfdf5;
-  --color-success-chip: #d1fae5;
-  --color-success-text: #047857;
+  --color-success: oklch(0.696 0.17 162.48); /* emerald-500 */
+  --color-success-weak: oklch(0.979 0.021 166.113); /* emerald-50 */
+  --color-success-chip: oklch(0.95 0.052 163.051); /* emerald-100 */
+  --color-success-text: oklch(0.508 0.118 165.612); /* emerald-700，5.7:1 */
 
-  --color-warn: #f59e0b;
-  --color-warn-weak: #fffbeb;
-  --color-warn-chip: #fef3c7;
-  --color-warn-text: #b45309;
+  --color-warn: oklch(0.769 0.188 70.08); /* amber-500 */
+  --color-warn-weak: oklch(0.987 0.022 95.277); /* amber-50 */
+  --color-warn-chip: oklch(0.962 0.059 95.617); /* amber-100 */
+  --color-warn-text: oklch(0.555 0.163 48.998); /* amber-700，4.8:1 */
 
-  --color-danger: #ef4444;
-  --color-danger-weak: #fef2f2;
-  --color-danger-chip: #fee2e2;
-  --color-danger-text: #b91c1c;
+  --color-danger: oklch(0.577 0.245 27.325); /* red-600：4.76:1，文字与按钮底都能用 */
+  --color-danger-weak: oklch(0.971 0.013 17.38); /* red-50 */
+  --color-danger-chip: oklch(0.936 0.032 17.717); /* red-100 */
+  --color-danger-text: oklch(0.505 0.213 27.518); /* red-700，6.4:1 */
 
-  /* 日志终端（design/impl/web-and-delivery.md §4.3：底 #0b1220） */
-  --color-terminal: #0b1220;
-  --color-terminal-line: #1e293b;
+  /* 日志终端（深色面 + 四个日志级别色，全部 ≥4.5:1 在 terminal 底上） */
+  --color-terminal: oklch(0.18 0.03 258);
+  --color-terminal-line: oklch(0.28 0.04 260);
+  --color-log-error: oklch(0.808 0.114 19.571); /* red-300 */
+  --color-log-warn: oklch(0.879 0.169 91.605); /* amber-300 */
+  --color-log-ok: oklch(0.845 0.143 164.978); /* emerald-300 */
+  --color-log-time: oklch(0.869 0.022 252.894); /* slate-300 */
+  --color-log-muted: oklch(0.704 0.04 256.788); /* slate-400 */
 
-  /* ---------- 阴影：只用 sm / md 两档 ---------- */
-  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.05);
-  --shadow-pop: 0 4px 12px rgba(15, 23, 42, 0.08);
-  --shadow-modal: 0 10px 30px rgba(15, 23, 42, 0.12);
+  /* ---------- 阴影：只有两级 ---------- */
+  --shadow-xs: 0 1px 2px 0 oklch(0 0 0 / 0.05);
+  --shadow-overlay: 0 10px 30px -6px oklch(0 0 0 / 0.18), 0 2px 8px -2px oklch(0 0 0 / 0.08);
 
   /* ---------- 动效：一律 150ms ease-out，不超 200ms ---------- */
   --animate-fade-in: fade-in 150ms ease-out;
@@ -143,6 +208,8 @@
     line-height: 1.55;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+    /* Inter 的等宽数字在小字号表格里更稳；中文由 Noto Sans SC 接管 */
+    font-variant-numeric: normal;
   }
 
   body {
@@ -160,15 +227,25 @@
     margin: 0;
   }
 
-  /* 统一焦点环：3px 主色环，不用 outline:none 裸奔（§6 键盘可达） */
+  /* 标题统一收字距（shadcn 的 tracking-tight = -0.025em）：
+     不靠每个组件各写一遍 tracking-*，保证整站标题节奏一致。 */
+  h1,
+  h2,
+  h3,
+  h4 {
+    letter-spacing: -0.025em;
+  }
+
+  /* 焦点环兜底：组件自己用 `focus-visible:ring-[3px]` 覆盖掉这层 outline；
+     没覆盖到的可聚焦元素（自定义 button / summary / 链接）仍然有 2px 主色描边。 */
   :focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 3px var(--color-ring);
-    border-radius: var(--radius-sm);
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
   }
 
   ::selection {
-    background: var(--color-primary-chip);
+    background: var(--color-primary);
+    color: var(--color-primary-fg);
   }
 
   ::-webkit-scrollbar {
@@ -201,23 +278,19 @@
    design/impl/web-and-delivery.md §5 允许这类视图用原子类或局部样式。
    --------------------------------------------------------------------------- */
 
+/* 骨架：shadcn 是 `animate-pulse bg-accent`（纯灰脉冲），不做扫光渐变 */
 @utility skeleton {
-  background-image: linear-gradient(
-    90deg,
-    var(--color-surface-3) 25%,
-    #f7f8fa 37%,
-    var(--color-surface-3) 63%
-  );
-  background-size: 400% 100%;
-  animation: skeleton-shimmer 1.4s ease infinite;
+  background-color: var(--color-surface-3);
+  animation: skeleton-pulse 1.6s ease-in-out infinite;
 }
 
-@keyframes skeleton-shimmer {
-  0% {
-    background-position: 100% 50%;
-  }
+@keyframes skeleton-pulse {
+  0%,
   100% {
-    background-position: 0 50%;
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
   }
 }
 

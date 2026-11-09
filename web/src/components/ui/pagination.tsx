@@ -8,6 +8,10 @@ import { cn } from '@/lib/utils'
  *
  * 左：`共 N 条` + 每页条数；右：首页 / 上一页 / 页码（最多 7 个，含省略号）/ 下一页 / 末页。
  * 页码窗口算法与 Excel / GitHub 一致：当前页尽量居中，两端固定露出首末页。
+ *
+ * 视觉对齐 shadcn Pagination（见 docs/research/shadcn-visual-specs.md §2.10）：
+ * 页码是 32×32 的方块按钮，**当前页用描边 + shadow-xs 表示**（不是实心蓝块），
+ * 与别处的按钮共用同一套规格；省略号用图标而不是字符。
  */
 
 export const PAGE_SIZES = [10, 20, 50] as const
@@ -62,19 +66,19 @@ export function Pagination({
     <div
       data-testid="pagination"
       className={cn(
-        'flex flex-wrap items-center gap-3 border-t border-line-soft px-5 py-3 text-2xs text-fg-3',
+        'flex flex-wrap items-center gap-3 border-t border-line-soft px-6 py-3 text-xs text-fg-3',
         className,
       )}
     >
       <span data-testid="pagination-total">共 {total} 条</span>
-      <label className="flex items-center gap-1.5">
+      <label className="flex items-center gap-2">
         <span>每页</span>
         <Select
           aria-label="每页条数"
           data-testid="page-size"
           value={String(pageSize)}
           onChange={(event) => onPageSizeChange(Number(event.target.value))}
-          className="h-7 w-[4.5rem] text-2xs"
+          className="h-8 w-[4.5rem] text-xs"
         >
           {PAGE_SIZES.map((size) => (
             <option key={size} value={size}>
@@ -96,7 +100,7 @@ export function Pagination({
           aria-label="首页"
           disabled={!canPrev}
           onClick={() => onPageChange(1)}
-          icon={<ChevronsLeft className="size-3" aria-hidden />}
+          icon={<ChevronsLeft className="size-4" aria-hidden />}
         >
           <span className="sr-only">首页</span>
         </Button>
@@ -107,14 +111,14 @@ export function Pagination({
           aria-label="上一页"
           disabled={!canPrev}
           onClick={() => onPageChange(page - 1)}
-          icon={<ChevronLeft className="size-3" aria-hidden />}
+          icon={<ChevronLeft className="size-4" aria-hidden />}
         >
           <span className="sr-only">上一页</span>
         </Button>
 
         {pages.map((item, index) =>
           item === 'gap' ? (
-            <span key={`gap-${index}`} className="px-1 text-fg-3" aria-hidden>
+            <span key={`gap-${index}`} className="grid size-8 place-items-center text-fg-3" aria-hidden>
               …
             </span>
           ) : (
@@ -127,10 +131,11 @@ export function Pagination({
               disabled={disabled}
               onClick={() => onPageChange(item)}
               className={cn(
-                'h-7 min-w-7 rounded-sm px-1.5 text-2xs tabular-nums transition-colors duration-150',
+                'inline-flex size-8 items-center justify-center rounded-md text-xs tabular-nums transition-colors duration-150',
+                'outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50',
                 item === page
-                  ? 'bg-primary text-white'
-                  : 'text-fg-2 hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30',
+                  ? 'border border-line bg-surface font-medium text-fg shadow-xs'
+                  : 'border border-transparent text-fg-2 hover:bg-line-soft hover:text-fg',
               )}
             >
               {item}
@@ -145,7 +150,7 @@ export function Pagination({
           aria-label="下一页"
           disabled={!canNext}
           onClick={() => onPageChange(page + 1)}
-          icon={<ChevronRight className="size-3" aria-hidden />}
+          icon={<ChevronRight className="size-4" aria-hidden />}
         >
           <span className="sr-only">下一页</span>
         </Button>
@@ -156,7 +161,7 @@ export function Pagination({
           aria-label="末页"
           disabled={!canNext}
           onClick={() => onPageChange(totalPages)}
-          icon={<ChevronsRight className="size-3" aria-hidden />}
+          icon={<ChevronsRight className="size-4" aria-hidden />}
         >
           <span className="sr-only">末页</span>
         </Button>

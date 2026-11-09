@@ -18,6 +18,9 @@ import { cn } from '@/lib/utils'
  *
  * 计数来自 `GET /runs/facets`（facet 语义：自己那维不参与自己的计数），
  * 所以这里**不做任何本地计数**，只渲染后端给的数字。
+ *
+ * 视觉对齐 shadcn Popover（docs/research/shadcn-visual-specs.md §2.8）：`rounded-md` + `shadow-overlay`，
+ * 菜单项 `rounded-sm px-2 py-1.5 text-xs`，hover 整行浅灰块。
  */
 export interface FacetFilterProps {
   /** 列名（用于 aria-label 与面板标题，例如「提交人」） */
@@ -70,12 +73,14 @@ export function FacetFilter({ label, selected, buckets, renderValue, onApply, wi
           aria-controls={open ? contentId : undefined}
           title={active ? `${label}：已筛选 ${selected.length} 项` : `按${label}筛选`}
           className={cn(
-            'ml-1 inline-flex size-5 shrink-0 items-center justify-center rounded-sm align-middle',
-            'transition-colors duration-150 hover:bg-line-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30',
+            // 表头漏斗：命中区 24 → 28，外层再用 -m-1 p-1 把可点区域补到 32（不动表头行高）。
+        'ml-1 inline-flex size-8 shrink-0 items-center justify-center rounded-sm align-middle',
+            'outline-none transition-colors duration-150 hover:bg-line-soft',
+            'focus-visible:ring-[3px] focus-visible:ring-ring/50',
             active ? 'text-primary' : 'text-fg-3',
           )}
         >
-          <Filter className={cn('size-3', active && 'fill-current')} aria-hidden />
+          <Filter className={cn('size-3.5', active && 'fill-current')} aria-hidden />
         </button>
       </Popover.Trigger>
 
@@ -83,10 +88,10 @@ export function FacetFilter({ label, selected, buckets, renderValue, onApply, wi
         <Popover.Content
           id={contentId}
           data-testid={`facet-panel-${label}`}
-          sideOffset={6}
+          sideOffset={4}
           align="start"
           className={cn(
-            'z-50 flex w-64 flex-col overflow-hidden rounded-lg border border-line bg-surface shadow-pop',
+            'z-50 flex w-64 flex-col overflow-hidden rounded-md border border-line bg-surface text-fg shadow-overlay',
             widthClass,
           )}
           onOpenAutoFocus={(event) => {
@@ -98,21 +103,21 @@ export function FacetFilter({ label, selected, buckets, renderValue, onApply, wi
         >
           <div className="border-b border-line-soft p-2">
             <div className="relative">
-              <Search className="pointer-events-none absolute left-2 top-1/2 size-3 -translate-y-1/2 text-fg-3" aria-hidden />
+              <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-fg-3" aria-hidden />
               <Input
                 id={`${contentId}-search`}
                 value={keyword}
                 onChange={(event) => setKeyword(event.target.value)}
                 aria-label={`搜索${label}候选值`}
                 placeholder="搜索值…"
-                className="h-8 pl-7 text-2xs"
+                className="h-8 pl-8 text-xs"
               />
             </div>
           </div>
 
           <ul role="group" aria-label={`${label}候选值`} className="max-h-56 overflow-y-auto p-1">
             {visible.length === 0 ? (
-              <li className="px-2 py-3 text-2xs text-fg-3">没有匹配的值</li>
+              <li className="px-2 py-3 text-xs text-fg-3">没有匹配的值</li>
             ) : (
               visible.map((bucket) => {
                 const checked = draft.includes(bucket.value)
@@ -120,13 +125,13 @@ export function FacetFilter({ label, selected, buckets, renderValue, onApply, wi
                   <li key={bucket.value}>
                     <label
                       data-testid={`facet-option-${label}-${bucket.value}`}
-                      className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-2xs hover:bg-surface-2"
+                      className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-line-soft"
                     >
                       <input
                         type="checkbox"
                         checked={checked}
                         onChange={() => toggle(bucket.value)}
-                        className="size-3.5 shrink-0 accent-primary"
+                        className="size-4 shrink-0 accent-primary"
                         aria-label={`${renderValue?.(bucket.value) ?? bucket.value}，${bucket.count} 条`}
                       />
                       <span className={cn('min-w-0 flex-1 truncate', checked ? 'text-fg' : 'text-fg-2')}>
@@ -141,7 +146,7 @@ export function FacetFilter({ label, selected, buckets, renderValue, onApply, wi
             )}
           </ul>
 
-          <div className="flex items-center gap-2 border-t border-line-soft bg-surface-2 px-2 py-2">
+          <div className="flex items-center gap-2 border-t border-line-soft px-2 py-2">
             <Button
               size="sm"
               variant="ghost"

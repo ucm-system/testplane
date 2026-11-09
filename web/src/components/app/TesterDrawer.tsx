@@ -80,7 +80,7 @@ export function TesterParamTable({
                         setCopied(param.name)
                         window.setTimeout(() => setCopied((prev) => (prev === param.name ? null : prev)), 1500)
                       }}
-                      className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-2xs text-fg-3 transition-colors hover:bg-line-soft hover:text-fg"
+                      className="inline-flex h-6 items-center gap-1 rounded-sm px-2 text-2xs text-fg-3 transition-colors hover:bg-line-soft hover:text-fg"
                     >
                       {copied === param.name ? (
                         <Check className="size-3 text-success" aria-hidden />
@@ -178,7 +178,7 @@ export function TesterDrawer({
                   data-testid="drawer-copy-placeholder"
                   aria-label="复制 args 示例"
                   onClick={() => copy(detail.data?.placeholder ?? '')}
-                  className="inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-2xs text-fg-3 transition-colors hover:bg-line-soft hover:text-fg"
+                  className="inline-flex h-6 items-center gap-1 rounded-sm px-2 text-2xs text-fg-3 transition-colors hover:bg-line-soft hover:text-fg"
                 >
                   {copiedKey === detail.data.placeholder ? (
                     <Check className="size-3 text-success" aria-hidden />
@@ -188,7 +188,7 @@ export function TesterDrawer({
                   {copiedKey === detail.data.placeholder ? (onCopyParam ? '已加入参数' : '已复制') : '复制'}
                 </button>
               </div>
-              <pre className="mt-1 overflow-x-auto rounded-md border border-line-soft bg-surface-2 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-fg-2">
+              <pre className="mt-1 overflow-x-auto rounded-md border border-line-soft bg-surface-2 px-2 py-1.5 font-mono text-2xs leading-relaxed text-fg-2">
                 {detail.data.placeholder}
               </pre>
             </div>

@@ -14,7 +14,7 @@ async function ensureExecutionView(page: import('@playwright/test').Page): Promi
 }
 
 test('runs list -> detail task table -> submit dry-run error', async ({ page }) => {
-  await page.goto('/runs')
+  await page.goto('/')
   await expect(page.getByText('全部 Run')).toBeVisible()
 
   const firstRun = page.locator('tbody a[href^="/runs/"]').first()
@@ -148,24 +148,34 @@ function parseRgb(value: string): [number, number, number] {
 
 /**
  * 评审 #13：弱化文字色必须过 AA（4.5:1）。
- * 原型评审就是因为 `#9ca3af`（2.5:1）把这一档换成了 `#667085`，别再退回去。
+ *
+ * 只断言**对比度达标**，不断言具体色值字面量 —— 设计 tokens 由视觉精修维护（可以是 oklch / rgb / hex），
+ * 测试只关心"读得清"。颜色先画到 canvas 再取像素，这样 oklch、color-mix、rgb 都能得到真实 sRGB。
  */
 test('对比度：--color-fg-3 在白底上 ≥ 4.5:1（AA）', async ({ page }) => {
-  await page.goto('/runs')
+  await page.goto('/')
   const token = await page.evaluate(() => {
-    const root = getComputedStyle(document.documentElement)
     const probe = document.createElement('span')
     probe.style.color = 'var(--color-fg-3)'
     document.body.appendChild(probe)
     const resolved = getComputedStyle(probe).color
     probe.remove()
-    return { raw: root.getPropertyValue('--color-fg-3').trim(), resolved }
+
+    // 画到 canvas 上再读像素：把任何 CSS 颜色语法（oklch / color() / rgb / hex）换算成 sRGB
+    const canvas = document.createElement('canvas')
+    canvas.width = 1
+    canvas.height = 1
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = resolved
+    ctx.fillRect(0, 0, 1, 1)
+    const [r, g, b] = Array.from(ctx.getImageData(0, 0, 1, 1).data)
+    return { resolved, rgb: [r, g, b] }
   })
 
-  const ratio = contrastRatio(parseRgb(token.resolved), [255, 255, 255])
+  const [r, g, b] = token.rgb as [number, number, number]
+  const ratio = contrastRatio([r, g, b], [255, 255, 255])
   // eslint-disable-next-line no-console
-  console.log(`fg-3 ${token.raw} → ratio=${ratio.toFixed(2)}:1`)
-  expect(token.raw.toLowerCase()).toBe('#667085')
+  console.log(`fg-3 ${token.resolved} → rgb(${r},${g},${b}) ratio=${ratio.toFixed(2)}:1`)
   expect(ratio, '弱化文字与白底的对比度必须 ≥ 4.5:1').toBeGreaterThanOrEqual(4.5)
 })
 

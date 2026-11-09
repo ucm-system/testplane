@@ -18,7 +18,9 @@ import { runStatusMeta } from '@/lib/status'
 import { formatDateTime, formatDuration, formatRelative, runDuration } from '@/lib/utils'
 
 /**
- * 运行列表（D-61：真分页 + Excel 式表头列筛选）。
+ * 全量 Run 表（D-62：从运行列表页搬到概览，与 KPI 同页共存）。
+ *
+ * D-61：真分页 + Excel 式表头列筛选。
  *
  * 数据全来自服务端：
  *  - `GET /runs?page=&page_size=&status=a,b&submitter=dev,qa&kind=&tester=` → 一页 items + `total`
@@ -62,7 +64,7 @@ function progress(run: RunSummary): string {
   return `${counts.succeeded} / ${counts.total}`
 }
 
-export function RunsPage() {
+export function RunsTable() {
   const [params, setParams] = useSearchParams()
 
   const page = Math.max(1, Number(params.get('page') ?? 1) || 1)
@@ -336,7 +338,7 @@ export function RunsPage() {
                 type="button"
                 onClick={() => applyFacet(chip.key, filters[chip.key].filter((value) => value !== chip.value))}
                 aria-label={`清除 ${FACET_LABEL[chip.key]} 过滤 ${chip.value}`}
-                className="inline-flex items-center gap-1 rounded-full border border-line bg-surface px-2 py-0.5 text-fg-2 transition-colors hover:border-line-strong hover:text-fg"
+                className="inline-flex h-6 items-center gap-1 rounded-full border border-line bg-surface px-2 text-fg-2 transition-colors hover:border-line-strong hover:text-fg"
               >
                 <span className="font-mono">
                   {FACET_LABEL[chip.key]}：{chip.value}
@@ -349,7 +351,7 @@ export function RunsPage() {
                 type="button"
                 onClick={() => updateQuery({ q: null })}
                 aria-label="清除页内查找"
-                className="inline-flex items-center gap-1 rounded-full border border-line bg-surface px-2 py-0.5 text-fg-2 transition-colors hover:border-line-strong hover:text-fg"
+                className="inline-flex h-6 items-center gap-1 rounded-full border border-line bg-surface px-2 text-fg-2 transition-colors hover:border-line-strong hover:text-fg"
               >
                 <span className="font-mono">页内查找：{search}</span>
                 <X className="size-3" aria-hidden />

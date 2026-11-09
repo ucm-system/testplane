@@ -38,7 +38,7 @@ export function RightRail({ children }: { children: ReactNode }) {
     return createPortal(
       <details
         data-testid="rail-inline-details"
-        className="group rounded-lg border border-line-soft bg-surface shadow-card"
+        className="group rounded-xl border border-line bg-surface shadow-xs"
       >
         <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-medium text-fg [&::-webkit-details-marker]:hidden">
           <ChevronDown className="size-4 text-fg-3 transition-transform group-open:rotate-180" aria-hidden />
@@ -77,13 +77,13 @@ export function RailCard({
     muted: 'bg-fg-3',
   } as const
   return (
-    <section className={cn('min-w-0 rounded-lg border border-line-soft bg-surface p-5 shadow-card', className)}>
-      <h2 className="flex items-center text-[15px] font-semibold text-fg">
+    <section className={cn('min-w-0 rounded-xl border border-line bg-surface p-5 shadow-xs', className)}>
+      <h2 className="flex items-center text-base font-semibold text-fg">
         {tone ? <span className={cn('mr-2 inline-block size-1.5 rounded-full', DOT[tone])} aria-hidden /> : null}
         {title}
       </h2>
-      {sub ? <p className="mt-0.5 text-[12.5px] text-fg-3">{sub}</p> : null}
-      <div className="mt-3 text-[13px] leading-relaxed text-fg-2">{children}</div>
+      {sub ? <p className="mt-1 text-xs text-fg-3">{sub}</p> : null}
+      <div className="mt-3 text-sm leading-relaxed text-fg-2">{children}</div>
     </section>
   )
 }

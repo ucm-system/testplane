@@ -135,7 +135,7 @@ export function RunResultView({ run }: { run: Run }) {
               <div key={String(label)} className="rounded-md border border-line-soft bg-surface-2 px-3 py-2">
                 <dt className="text-2xs text-fg-3">{label}</dt>
                 <dd className="mt-1 flex items-baseline gap-2">
-                  <span className="text-[22px] font-semibold tabular-nums leading-none text-fg">{value}</span>
+                  <span className="text-xl font-semibold tabular-nums leading-none text-fg">{value}</span>
                   <Badge tone={tone as 'muted'}>{String(label)}</Badge>
                 </dd>
               </div>
@@ -145,13 +145,17 @@ export function RunResultView({ run }: { run: Run }) {
       </Card>
 
       {/* 2) 失败项：只列失败的，给错误码与原因；0 失败时压成一行绿字，不再用红色大块占屏（C6） */}
+      {/* 2) 失败项：只列失败的，给错误码与原因；0 失败时压成一行中性提示（C6）。
+          原来是淡绿底 + 绿字，夹在两张白卡之间像一块"成功贴纸"，与整体的描边/近黑语言不搭；
+          现在改成描边 + 中性文字 + 绿点：语义靠点与勾号，不靠整条色块。 */}
       {report.data && report.data.failures.length === 0 ? (
         <p
           data-testid="run-result-no-failures"
           role="status"
-          className="flex items-center gap-2 rounded-lg border border-success/25 bg-success-weak px-4 py-2 text-xs font-medium text-success-text"
+          className="flex items-center gap-2 rounded-xl border border-line bg-transparent px-4 py-2.5 text-xs font-medium text-fg-2"
         >
-          <Check className="size-3.5" aria-hidden />
+          <span className="size-1.5 shrink-0 rounded-full bg-success" aria-hidden />
+          <Check className="size-3.5 text-success-text" aria-hidden />
           无失败项
         </p>
       ) : (
@@ -249,10 +253,11 @@ export function RunResultView({ run }: { run: Run }) {
           <div className="flex flex-col gap-2 px-5 py-3" data-testid="artifact-groups">
             {ARTIFACT_GROUPS.map((group) => {
               const rows = groups[group.key]
+              // 默认折叠（用户 2026-11-09）：三组加起来动辄十几个文件，展开会把下面内容全推下去；
+              // 折叠后只留「组名 + 数量 + 说明」，点开才看文件表，数量仍然一眼可见。
               return (
                 <details
                   key={group.key}
-                  open
                   data-testid={`artifact-group-${group.key}`}
                   className="group rounded-md border border-line-soft"
                 >

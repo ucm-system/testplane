@@ -44,8 +44,8 @@ web/
 
 | 路由 | 页面 | 右栏 | 数据来源 | 原型截图 |
 |---|---|---|---|---|
-| `/dashboard` | 概览：队列 / 排队 Task / 概况 / 最近 Run；右上「新建 Run」 | 快捷操作 + 排队中的 Task + 这页怎么看 | `GET /board`（**P1**；P0 用 `/queue-status`，30s 轮询，无 SSE） | `dashboard.png` |
-| `/runs` | Run 列表：搜索、状态分段、游标分页 | 终态语义图例 | `GET /runs?cursor=` | `runs.png` |
+| `/` | **概览 = 系统状态 + 全量 Run 表**（D-62）：KPI 四卡（进行中 / 排队中 / 成功率 / Tester 数）+ **完整 Run 表格**（Excel 式列筛选 + offset 分页 + 深链 URL）；右上「新建 Run」。**不再有独立的运行列表页** | 无（宽表，右栏取消；排队信息并入 KPI 区） | `GET /runs?page=&page_size=`、`GET /runs/facets`、`GET /queue-status`（30s 轮询） | `dashboard.png` |
+| `/runs` | **仅作兼容重定向**：`/runs?<query>` → `/?<query>`（保留全部筛选与分页参数，旧链接与文档不失效）；`/runs/{id}` 详情不变 | — | — | `runs.png` |
 | `/tasks` | 跨 Run Task 列表：状态、Tester、耗时、错误码 | `waiting_reason` 说明 | `GET /tasks?cursor=` | 复用 `runs.png` 表格形态 |
 | `/runs/$runId` | 详情：概要 kv、执行链路图、节点详情（Deploy / Task） | 事件时间线（首屏 `GET /runs/{id}/events/history`，之后由 SSE 增量） | `GET /runs/{id}` + `events/history` + SSE | `run-detail.png` |
 | `/runs/$runId?tab=report` | 报告：指标表（按 labels 分组）、`report.md`、产物下载 | 报告分工说明 | `GET /tasks/{id}/attempts/{n}/result`、`GET /runs/{id}/report.md`、`GET /runs/{id}/artifacts`、`GET /runs/{id}/files?path=` | `run-detail.png` 的「结果指标」卡 |

@@ -78,7 +78,7 @@ export function FormErrorSummary({ error, issues = [], onJumpTo, className }: Fo
       tabIndex={-1}
       data-testid="form-error-summary"
       className={cn(
-        'flex flex-col gap-3 rounded-lg border border-danger/30 bg-danger-weak px-5 py-4 shadow-card outline-none',
+        'flex flex-col gap-3 rounded-lg border border-danger/30 bg-danger-weak px-5 py-4 shadow-xs outline-none',
         'focus-visible:ring-2 focus-visible:ring-danger/40',
         className,
       )}

@@ -20,6 +20,10 @@ export interface TabsProps<T extends string> {
 /**
  * 轻量页签（shadcn Tabs 的等价物）：受控、无位移动画。
  *
+ * 视觉（见 docs/research/shadcn-visual-specs.md §2.5）：沿用本项目的**下划线式**
+ * （整条 tablist 有 border-b），但把尺寸/字重/焦点环对齐 shadcn：
+ * `h-9` 行高、`text-sm font-medium`、hover 只变字色、选中项下划线 2px、焦点 `ring-[3px] ring-ring/50`。
+ *
  * 键盘可达性（评审 #13）：roving tabindex + `←/→/Home/End` 切页签，Tab 键只落在当前页签上；
  * 页签用 `role="tab"` + `aria-selected`，面板侧用 `role="tabpanel"` + `aria-labelledby`（见 `tabPanelProps`）。
  * `aria-controls` **只给活动页签**：面板按需挂载，非活动页签指向不存在的 id 会成为悬空引用。
@@ -92,13 +96,16 @@ export function Tabs<T extends string>({ value, onChange, items, className, aria
             tabIndex={active ? 0 : -1}
             onClick={() => onChange(item.value)}
             className={cn(
-              '-mb-px flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2 text-xs font-medium transition-colors duration-150',
-              active ? 'border-primary text-primary-text' : 'border-transparent text-fg-3 hover:text-fg-2',
+              '-mb-px flex h-9 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 text-sm font-medium transition-colors duration-150',
+              'outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50',
+              active
+                ? 'border-primary text-fg'
+                : 'border-transparent text-fg-2 hover:border-line hover:text-fg',
             )}
           >
             {item.label}
             {item.count === undefined ? null : (
-              <span className="rounded-full bg-surface-3 px-1.5 text-2xs text-fg-3">{item.count}</span>
+              <span className="rounded-full bg-surface-3 px-1.5 text-2xs tabular-nums text-fg-3">{item.count}</span>
             )}
           </button>
         )

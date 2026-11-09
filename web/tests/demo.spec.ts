@@ -69,7 +69,7 @@ test('演示：提交服务形态 Run → 详情 → 报告 → 集群 → 管�
   const runUrl = new URL(page.url()).pathname
 
   /* 3) 运行列表（新 Run 出现）—— 站内导航，别刷新，否则 mock 状态重置 */
-  await page.getByRole('link', { name: '运行列表' }).click()
+  await page.getByRole('link', { name: '概览' }).click()
   await expect(page.getByText('全部 Run')).toBeVisible()
   await expect(page.getByText(runName).first()).toBeVisible({ timeout: 20_000 })
   await shot('03-runs')
@@ -90,7 +90,7 @@ test('演示：提交服务形态 Run → 详情 → 报告 → 集群 → 管�
   /* 5) 报告页（站内点「查看报告」） */
   await page.locator('[data-testid="open-report"]').click()
   await expect(page.getByText('Task 明细')).toBeVisible()
-  await expect(page.getByText('report.md 原文')).toBeVisible()
+  await expect(page.getByTestId('report-md')).toBeVisible()
   await shot('05-report')
 
   /* 6) 集群与队列（Volcano 队列卡片，reason 原文） */

@@ -32,6 +32,14 @@ test('终态 Run：默认结果视图（结论/失败项/产物/报告），执�
   await expect(page.getByTestId('run-result-verdict')).toContainText('部分失败')
   await expect(page.getByTestId('run-result-failures')).toContainText('TESTER_NONZERO_EXIT')
 
+  // 产物分组默认折叠（用户 2026-11-09）：先断言收起，再点开断言文件显式列全
+  for (const key of ['deploy', 'tests', 'reports']) {
+    const group = page.getByTestId(`artifact-group-${key}`)
+    await expect(group).toBeVisible()
+    await expect(group, '产物分组默认应折叠').not.toHaveAttribute('open', '')
+    await group.locator('summary').click()
+  }
+
   // 产物下载**显式列全**（不是只有 report.md）
   const downloads = page.locator('[data-testid="artifact-download"]')
   expect(await downloads.count()).toBeGreaterThan(3)
@@ -48,7 +56,7 @@ test('终态 Run：默认结果视图（结论/失败项/产物/报告），执�
   // 折叠不是隐藏：切到「执行细节」能拿回链路/Task/Attempt
   await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByText('Task 列表')).toBeVisible()
-  await expect(page.getByText('Deploy 日志')).toBeVisible()
+  await expect(page.getByText('Deploy 日志', { exact: true })).toBeVisible()
 
   // 切回结果
   await page.getByRole('tab', { name: '结果' }).click()
@@ -72,7 +80,7 @@ test('执行链路：箭头只出现在节点之间（末尾无箭头；单节�
   await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
   await page.setViewportSize({ width: 1440, height: 1000 })
 
-  await page.goto('/runs')
+  await page.goto('/')
   await page.locator('tbody a[href="/runs/r-20261105-0002"]').first().click()
   // 终态 Run 默认「结果」视图，链路在「执行细节」里
   await page.getByRole('tab', { name: '执行细节' }).click()
@@ -98,7 +106,7 @@ test('执行链路：箭头只出现在节点之间（末尾无箭头；单节�
       return id === 'r-20261105-0002' ? { ...run, tasks: [] } : run
     }
   })
-  await page.getByRole('link', { name: '运行列表' }).click()
+  await page.getByRole('link', { name: '概览' }).click()
   await expect(page.getByText('全部 Run')).toBeVisible()
   await page.locator('tbody a[href="/runs/r-20261105-0002"]').first().click()
   await page.getByRole('tab', { name: '执行细节' }).click()

@@ -4,9 +4,10 @@ import { join } from 'node:path'
 
 /**
  * 布局与页头对齐的**量化**回归（用户连追三轮的点，别用"看着像"糊过去）：
- *  - 三列 `grid-cols-[240px_minmax(0,1fr)_288px]`，`<main>` 在 DOM 里先于两侧栏；
- *  - 页头左分隔线落在 x=240（=左栏右边缘），右分隔线落在 x=vw−288（=右栏左边缘）；
- *  - 1024 以下收右栏，768 以下堆叠。
+ *  - shadcn dashboard-01 骨架：`SidebarProvider` + `AppSidebar variant="inset"` + `SidebarInset`；
+ *  - 侧栏容器 256（内层 240，inset p-2），右侧内容区贴到 `vw-8`（inset 的 8px 页边距）；
+ *  - 页头 sticky h-14，里面没有竖分隔线；品牌字标与导航项文字左边缘都在 x=24；
+ *  - 768 以下侧栏收进 sheet（不渲染桌面侧栏）。
  * 同时截三张响应式图 + 一张 Deploy 日志面板图。
  */
 
@@ -14,70 +15,85 @@ const OUT_DIR = join(process.cwd(), '.data', 'layout')
 
 test.describe.configure({ mode: 'serial' })
 
-test('三列布局与页头分隔线对齐（1280 / 900 / 480）', async ({ page }) => {
+test('两列布局：侧栏 256 + inset 内容区（1280 / 900 / 480）', async ({ page }) => {
   test.setTimeout(120_000)
   mkdirSync(OUT_DIR, { recursive: true })
   await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
 
-  /* ---------- 1280：三列 ---------- */
+  /* ---------- 1280：两列（左侧导航 + 主内容；D-62 之后不再有右栏） ---------- */
   await page.setViewportSize({ width: 1280, height: 900 })
   await page.goto('/')
   await expect(page.getByText('进行中 Run')).toBeVisible()
-  await page.waitForTimeout(500)
+  await page.waitForTimeout(600)
 
   const boxes = await page.evaluate(() => {
     const q = (sel: string) => document.querySelector(sel) as HTMLElement | null
-    const rect = (el: Element | null) => (el ? el.getBoundingClientRect() : null)
-    const header = q('header')
-    const headerKids = header ? Array.from(header.children).map((el) => rect(el)) : []
-    const body = q('main')?.parentElement ?? null
-    const bodyKids = body ? Array.from(body.children).map((el) => el.tagName + ':' + (el.getAttribute('aria-label') ?? el.id)) : []
+    const rect = (el: Element | null) => {
+      if (!el) return null
+      const b = el.getBoundingClientRect()
+      return {
+        left: Math.round(b.left),
+        right: Math.round(b.right),
+        top: Math.round(b.top),
+        bottom: Math.round(b.bottom),
+        width: Math.round(b.width),
+        height: Math.round(b.height),
+      }
+    }
     return {
       vw: window.innerWidth,
-      headerCols: headerKids.map((r) => (r ? { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width) } : null)),
-      bodyOrder: bodyKids,
-      left: rect(q('aside[aria-label="主导航"]')),
+      vh: window.innerHeight,
+      rail: document.querySelector('[data-rail]')?.getAttribute('data-rail'),
+      header: rect(q('header')),
+      sidebar: rect(q('[data-slot="sidebar-container"]')),
+      inner: rect(q('[data-slot="sidebar-inner"]')),
+      state: q('[data-slot="sidebar"]')?.getAttribute('data-state'),
       main: rect(q('main')),
-      right: rect(q('aside[aria-label="辅助信息"]')),
+      mainCount: document.querySelectorAll('main').length,
+      railAside: Boolean(q('aside[aria-label="辅助信息"]')),
     }
   })
 
-  // DOM 顺序：main 必须在两侧栏之前
-  expect(boxes.bodyOrder[0]).toBe('MAIN:main')
-
-  // 左分隔线 = 左栏右边缘 = 240
-  expect(boxes.headerCols[0]?.width).toBe(240)
-  expect(Math.round(boxes.left!.left)).toBe(0)
-  expect(Math.round(boxes.left!.right)).toBe(240)
-  expect(boxes.headerCols[0]?.right).toBe(240)
-
-  // 右分隔线 = 视口宽 − 288（1280 → 992）
-  expect(boxes.vw - Math.round(boxes.right!.left)).toBe(288)
-  expect(boxes.headerCols[2]?.left).toBe(boxes.vw - 288)
-
-  // 三列同高（items-stretch）：main 与两侧栏顶边对齐
-  expect(Math.round(boxes.main!.top)).toBe(Math.round(boxes.left!.top))
+  // shadcn dashboard-01 骨架：侧栏 256 + inset 内容区（右边距 8），全页一个 main
+  expect(boxes.mainCount).toBe(1)
+  expect(boxes.rail).toBe('off')
+  expect(boxes.railAside).toBe(false)
+  expect(boxes.state).toBe('expanded')
+  expect(boxes.sidebar!.left).toBe(0)
+  expect(boxes.sidebar!.right).toBe(256)
+  expect(boxes.sidebar!.width).toBe(256)
+  expect(boxes.inner!.width).toBe(240)
+  expect(boxes.sidebar!.height).toBe(boxes.vh)
+  expect(boxes.header!.height).toBe(56)
+  expect(boxes.main!.left).toBe(256)
+  expect(boxes.main!.right).toBe(boxes.vw - 8)
+  expect(boxes.main!.top).toBe(boxes.header!.bottom)
+  expect(boxes.header!.width).toBe(boxes.main!.width)
 
   console.log('measured@1280', JSON.stringify(boxes))
-  await page.screenshot({ path: join(OUT_DIR, '01-three-columns-1280.png'), fullPage: true })
+  await page.screenshot({ path: join(OUT_DIR, '01-two-columns-1280.png'), fullPage: true })
 
-  /* ---------- 900：收右栏（两列） ---------- */
+  /* ---------- 900：同样是侧栏 256 + 主内容 ---------- */
   await page.setViewportSize({ width: 900, height: 900 })
   await page.waitForTimeout(400)
-  await expect(page.locator('aside[aria-label="辅助信息"]')).toBeHidden()
   const twoCol = await page.evaluate(() => ({
     mainLeft: Math.round((document.querySelector('main') as HTMLElement).getBoundingClientRect().left),
-    navWidth: Math.round((document.querySelector('aside[aria-label="主导航"]') as HTMLElement).getBoundingClientRect().width),
+    mainRight: Math.round((document.querySelector('main') as HTMLElement).getBoundingClientRect().right),
+    navWidth: Math.round((document.querySelector('[data-slot="sidebar-container"]') as HTMLElement).getBoundingClientRect().width),
+    vw: window.innerWidth,
   }))
-  expect(twoCol.navWidth).toBe(240)
-  expect(twoCol.mainLeft).toBe(240)
+  expect(twoCol.navWidth).toBe(256)
+  expect(twoCol.mainLeft).toBe(256)
+  expect(twoCol.mainRight).toBe(twoCol.vw - 8)
   await page.screenshot({ path: join(OUT_DIR, '02-two-columns-900.png'), fullPage: true })
 
-  /* ---------- 480：堆叠（左栏收起、走抽屉） ---------- */
+  /* ---------- 480：桌面侧栏不渲染（走 sheet 抽屉），主内容占满 ---------- */
   await page.setViewportSize({ width: 480, height: 900 })
   await page.waitForTimeout(400)
-  await expect(page.locator('aside[aria-label="主导航"]')).toBeHidden()
-  const stacked = await page.evaluate(() => Math.round((document.querySelector('main') as HTMLElement).getBoundingClientRect().left))
+  await expect(page.locator('[data-slot="sidebar"]')).toBeHidden()
+  const stacked = await page.evaluate(() =>
+    Math.round((document.querySelector('main') as HTMLElement).getBoundingClientRect().left),
+  )
   expect(stacked).toBe(0)
   await page.screenshot({ path: join(OUT_DIR, '03-stacked-480.png'), fullPage: true })
 })
@@ -91,7 +107,7 @@ test('Deploy 日志面板：Pod 分页签 + gap 显式标记', async ({ page }) 
   // 这条 seeded Run 有 Deploy 阶段与多个 Pod；终态默认是「结果」视图，先切到「执行细节」
   await page.goto('/runs/r-20261105-0003')
   await page.getByRole('tab', { name: '执行细节' }).click()
-  await expect(page.getByText('Deploy 日志')).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByText('Deploy 日志', { exact: true })).toBeVisible({ timeout: 20_000 })
 
   const panel = page.locator('section', { hasText: 'Deploy 日志' }).first()
   // 契约收窄后没有「全部 Pod」页签：`?pod=` 必选，页签就是具体 Pod 名
@@ -125,7 +141,7 @@ test('Deploy 日志：pod 页签带参 + tail/offset 二选一 + next_offset 续
   // mock 模式不发 HTTP 请求，所以给 `mockApi.getDeployLogs` 装个探针，记录每次调用的入参
   await page.goto('/runs/r-20261105-0006')
   await page.getByRole('tab', { name: '执行细节' }).click()
-  await expect(page.getByText('Deploy 日志')).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByText('Deploy 日志', { exact: true })).toBeVisible({ timeout: 20_000 })
   await page.evaluate(async () => {
     const mod = (await import('/src/api/mock.ts')) as unknown as {
       mockApi: { getDeployLogs: (...args: unknown[]) => Promise<unknown> }
@@ -207,33 +223,33 @@ test('Deploy 日志：pod 页签带参 + tail/offset 二选一 + next_offset 续
 })
 
 /**
- * 页头分隔线：**有栏页面两条（240 / vw−288），无栏页面只剩一条（240）**。
- *
- * 右栏现在只有概览页保留（其余页面单栏铺满），所以约束分两套：
- *  - 有栏（/）：竖线 x ∈ {240, vw−288}，不允许第三条；
- *  - 无栏（/runs）：竖线只有 {240}，且 main 右边界贴住视口（没有第 3 列）。
- * 另外：品牌块左内边距与左栏导航项文字左边缘对齐（都是 24px 的节奏）。
+ * 页头与侧栏的线（shadcn 骨架之后**页头里没有竖线**）：
+ *  - 侧栏自成一列，右边界 x=256；页头里不再有 1px 分隔线（透明描边的小按钮不算线）；
+ *  - 品牌字标（侧栏顶部）与左栏导航项文字左边缘对齐（都是 24px 的节奏）。
  */
-test('页头分隔线：有栏页面 240 与 vw−288，无栏页面只剩 240', async ({ page }) => {
+test('页头没有竖分隔线，侧栏右边界=256，品牌与导航左边缘对齐', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
 
   const measure = () =>
     page.evaluate(() => {
-      const header = document.querySelector('header')!
+      const header = document.querySelector('header')
       const lines: number[] = []
       // 只看"整条竖线"：高度接近页头（>=40px）的边框，或 1px 宽且够高的 div。
-      // 徽标/头像那种小圆角边框不算分隔线。
-      for (const el of Array.from(header.querySelectorAll('*'))) {
+      // 透明描边（ghost 按钮的 border-transparent）不算分隔线。
+      for (const el of Array.from(header!.querySelectorAll('*'))) {
         const cs = getComputedStyle(el)
         const r = el.getBoundingClientRect()
         if (r.height < 40) continue
-        if (parseFloat(cs.borderLeftWidth) > 0) lines.push(Math.round(r.left))
-        if (parseFloat(cs.borderRightWidth) > 0) lines.push(Math.round(r.right))
+        const transparent = /rgba\(0, 0, 0, 0\)|transparent/.test(cs.borderLeftColor)
+        if (!transparent && parseFloat(cs.borderLeftWidth) > 0) lines.push(Math.round(r.left))
+        if (!transparent && parseFloat(cs.borderRightWidth) > 0) lines.push(Math.round(r.right))
         if (Math.round(r.width) === 1) lines.push(Math.round(r.left))
       }
-      const wordmark = header.querySelector('svg[role="img"]')!.getBoundingClientRect()
+      const wordmark = document
+        .querySelector('[data-slot="sidebar-header"] svg[role="img"]')!
+        .getBoundingClientRect()
       const navItemText = (() => {
-        const item = document.querySelector('aside[aria-label="主导航"] a')
+        const item = document.querySelector('nav[aria-label="主导航"] a')
         if (!item) return null
         const cs = getComputedStyle(item)
         const r = item.getBoundingClientRect()
@@ -242,7 +258,7 @@ test('页头分隔线：有栏页面 240 与 vw−288，无栏页面只剩 240',
       const main = document.querySelector('main')!.getBoundingClientRect()
       return {
         vw: window.innerWidth,
-        rail: document.querySelector('[data-rail]')?.getAttribute('data-rail'),
+        rail: document.querySelector('[data-rail]')!.getAttribute('data-rail'),
         lines: [...new Set(lines)].sort((a, b) => a - b),
         wordmarkLeft: Math.round(wordmark.left),
         navItemText,
@@ -253,44 +269,30 @@ test('页头分隔线：有栏页面 240 与 vw−288，无栏页面只剩 240',
     })
 
   for (const width of [1280, 1440]) {
-    // ---------- 有栏：概览 ----------
     await page.setViewportSize({ width, height: 900 })
     await page.goto('/')
     await expect(page.getByText('进行中 Run')).toBeVisible()
-    await page.waitForTimeout(300)
-    const withRail = await measure()
+    await page.waitForTimeout(400)
+    const m = await measure()
 
-    expect(withRail.rail).toBe('on')
-    expect(withRail.hasRailAside).toBe(true)
-    const wantRail = [240, withRail.vw - 288].sort((a, b) => a - b)
-    expect(withRail.lines, "有栏页面的页头竖线应只有 " + JSON.stringify(wantRail)).toEqual(wantRail)
-    expect(Math.abs(withRail.wordmarkLeft - (withRail.navItemText ?? 0))).toBeLessThanOrEqual(2)
-    expect(withRail.wordmarkLeft).toBe(24)
-
-    // ---------- 无栏：运行列表 ----------
-    await page.goto('/runs')
-    await expect(page.getByText('全部 Run')).toBeVisible()
-    await page.waitForTimeout(300)
-    const noRail = await measure()
-
-    expect(noRail.rail).toBe('off')
-    expect(noRail.hasRailAside).toBe(false)
-    expect(noRail.lines, '无栏页面的页头竖线只剩 240 一条').toEqual([240])
-    // 主内容左右边界：左贴 240，右贴视口（没有第 3 列）
-    expect(noRail.mainLeft).toBe(240)
-    expect(noRail.mainRight).toBe(noRail.vw)
+    expect(m.rail).toBe('off')
+    expect(m.hasRailAside).toBe(false)
+    expect(m.lines, '页头里不再有竖分隔线（侧栏自成一列）').toEqual([])
+    expect(Math.abs(m.wordmarkLeft - (m.navItemText ?? 0))).toBeLessThanOrEqual(2)
+    expect(m.wordmarkLeft).toBe(24)
+    // 侧栏 256 + inset 8px 页边距
+    expect(m.mainLeft).toBe(256)
+    expect(m.mainRight).toBe(m.vw - 8)
   }
 
   await page.setViewportSize({ width: 1280, height: 900 })
-  await page.goto('/runs')
-  await expect(page.getByText('全部 Run')).toBeVisible()
-  await page.waitForTimeout(400)
-  await page.screenshot({ path: join(OUT_DIR, '06-header-divider-1280.png'), fullPage: false })
-
   await page.goto('/')
   await expect(page.getByText('进行中 Run')).toBeVisible()
+  await page.waitForTimeout(500)
+  await page.screenshot({ path: join(OUT_DIR, '06-overview-1280.png'), fullPage: false })
+  await page.setViewportSize({ width: 1024, height: 900 })
   await page.waitForTimeout(400)
-  await page.screenshot({ path: join(OUT_DIR, '06b-rail-overview-1280.png'), fullPage: true })
+  await page.screenshot({ path: join(OUT_DIR, '07-overview-1024.png'), fullPage: true })
 })
 
 /**
