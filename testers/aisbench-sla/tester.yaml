@@ -1,5 +1,5 @@
 name: aisbench-sla
-version: 0.4.0
+version: 0.5.0
 display_name: AISBench 前缀缓存 SLA 搜索
 description: |
   用前缀缓存 SLA 搜索找出「满足延迟约束的最大并发」与「最高输出吞吐」。
@@ -25,7 +25,7 @@ entry: /tester/run.sh
 # 只有一种发布镜像：build/Dockerfile（FROM 官方 ais_bench 基础镜像，自带 ais_bench 3.1.20260330）。
 # stub 只用于离线冒烟（tests/Dockerfile.stub，不进发布矩阵），构建上下文都是 **Tester 目录**。
 # 0.4.0：密钥只走 env、sla_max_concurrency 需实测并发达标、指标名不再编码统计量/单位。
-image: ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.4.0
+image: ghcr.io/ucm-system/testplane-tester-aisbench-sla:0.5.0
 
 resources:
   cpu: "2"
