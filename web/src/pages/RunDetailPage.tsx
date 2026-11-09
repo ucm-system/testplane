@@ -216,7 +216,7 @@ const RETRY_PLAN_REASON: Record<string, string> = {
         {manifest ? (
           <details className="rounded-md border border-line-soft bg-surface-2 px-3 py-2" open>
             <summary className="flex h-6 cursor-pointer items-center text-2xs text-fg-2">实际提交给部署方的参数（原文快照）</summary>
-            <pre className="mt-2 overflow-x-auto font-mono text-2xs leading-relaxed text-fg-2">{manifest}</pre>
+            <pre className="mt-2 overflow-x-auto font-mono text-2xs leading-[16px] text-fg-2">{manifest}</pre>
           </details>
         ) : null}
       </CardBody>
@@ -694,7 +694,7 @@ function TaskPanels({ run, onReload }: { run: Run; onReload: () => void }) {
           <p>
             当前状态：<TaskStatusBadge status={pendingCancel?.status ?? 'pending'} />
           </p>
-          <p className="text-2xs leading-relaxed text-fg-3">
+          <p className="text-2xs leading-[16px] text-fg-3">
             状态以服务端推送为准：确认后本页会重新拉一次 Run 与 Task 详情，不做乐观点更新。
           </p>
         </div>
@@ -1255,7 +1255,7 @@ export function RunDetailPage() {
               </section>
             ) : null}
 
-            <p className="border-t border-line-soft pt-2 text-2xs leading-relaxed text-fg-3">
+            <p className="border-t border-line-soft pt-2 text-2xs leading-[16px] text-fg-3">
               底部的确认会创建新 Run：<code className="font-mono">retry_of</code> 指向当前 Run，已成功的 Task
               复用结果不重复执行（Manifest 摘要 <code className="font-mono">{retryPlan.manifest_digest}</code>）。
             </p>

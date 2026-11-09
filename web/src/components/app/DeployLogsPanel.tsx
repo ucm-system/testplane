@@ -48,7 +48,7 @@ function formatGapTime(value: string): string {
 
 function LogBlock({ entry }: { entry: DeployLogEntry }) {
   return (
-    <pre className="whitespace-pre-wrap break-all font-mono text-xs leading-[1.7]">
+    <pre className="whitespace-pre-wrap break-all font-mono text-xs leading-[22px]">
       {entry.text.split('\n').map((line, index) => {
         // 与 LogViewer 同一套语义：标记行是分隔条，不是正文；内容原样保留。
         const markerTone = logMarkerTone(line)

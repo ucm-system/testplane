@@ -67,7 +67,7 @@ export function CardHeader({ title, sub, tone, actions, className, id }: CardHea
         {tone ? <span className={cn('mr-2 inline-block size-1.5 rounded-full', DOT[tone])} aria-hidden /> : null}
         {title}
       </h2>
-      {sub ? <span className="text-xs leading-snug text-fg-3">{sub}</span> : null}
+      {sub ? <span className="text-xs leading-[18px] text-fg-3">{sub}</span> : null}
       {actions ? <div className="ml-auto flex flex-wrap items-center gap-2">{actions}</div> : null}
     </header>
   )

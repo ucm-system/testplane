@@ -59,7 +59,7 @@ export function ClustersPage() {
 
       {data.error ? <ErrorState error={data.error} onRetry={data.reload} /> : null}
 
-      <p className="text-2xs leading-relaxed text-fg-3">
+      <p className="text-2xs leading-[16px] text-fg-3">
         平台不参与调度：这一页只回答「卡在平台名额，还是卡在 K8s / Volcano」；只显示集群地址与最近一次连通性结论，不显示凭据。
       </p>
 
@@ -172,7 +172,7 @@ export function ClustersPage() {
             <p className="text-xs text-fg-2">
               Volcano 快照不可用{volcano.detail ? <span className="ml-1 font-mono text-2xs text-fg-3">{volcano.detail}</span> : null}
             </p>
-            <p className="text-2xs leading-relaxed text-fg-3">
+            <p className="text-2xs leading-[16px] text-fg-3">
               这一块降级不影响平台槽位与排队原因（上面两块照常）。平台不展示历史数字，等下一次采样成功再看队列水位。
             </p>
             {volcano.stale ? (
@@ -207,7 +207,7 @@ export function ClustersPage() {
                     <TD className="max-w-[26rem]">
                       {/* 契约改了：reason 是 PodGroup conditions[-1].message 原文，不是枚举 —— 原样渲染，不翻译 */}
                       {item.reason ? (
-                        <span className="block break-all font-mono text-2xs leading-relaxed text-fg-2" title={item.reason}>
+                        <span className="block break-all font-mono text-2xs leading-[16px] text-fg-2" title={item.reason}>
                           {item.reason}
                         </span>
                       ) : (

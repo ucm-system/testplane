@@ -422,7 +422,7 @@ export function ReportPage() {
             <div ref={metricsCardRef} />
             {!metricsRequested ? (
               <CardBody>
-                <p className="text-xs leading-relaxed text-fg-3">
+                <p className="text-xs leading-[16px] text-fg-3">
                   指标按需加载：点上面的「展开指标」，或把这一块滚进视野。报告文件本身不聚合指标。
                 </p>
               </CardBody>

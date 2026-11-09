@@ -63,7 +63,7 @@ export function TesterParamTable({
                   <span className="font-mono text-2xs text-fg">{param.name}</span>
                   <p className="mt-0.5 font-mono text-2xs text-fg-3">{snippet}</p>
                 </TD>
-                <TD className="align-top text-2xs leading-relaxed text-fg-3 whitespace-normal">
+                <TD className="align-top text-2xs leading-[16px] text-fg-3 whitespace-normal">
                   {param.description ?? '—'}
                   {param.required ? <Badge tone="warn" className="ml-1.5">必填</Badge> : null}
                 </TD>
@@ -147,7 +147,7 @@ export function TesterDrawer({
       ) : detail.data ? (
         <div className="flex flex-col gap-4" data-testid="tester-drawer">
           {detail.data.description ? (
-            <p className="text-xs leading-relaxed text-fg-2">{detail.data.description}</p>
+            <p className="text-xs leading-[16px] text-fg-2">{detail.data.description}</p>
           ) : null}
 
           <dl className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
@@ -188,7 +188,7 @@ export function TesterDrawer({
                   {copiedKey === detail.data.placeholder ? (onCopyParam ? '已加入参数' : '已复制') : '复制'}
                 </button>
               </div>
-              <pre className="mt-1 overflow-x-auto rounded-md border border-line-soft bg-surface-2 px-2 py-1.5 font-mono text-2xs leading-relaxed text-fg-2">
+              <pre className="mt-1 overflow-x-auto rounded-md border border-line-soft bg-surface-2 px-2 py-1.5 font-mono text-2xs leading-[16px] text-fg-2">
                 {detail.data.placeholder}
               </pre>
             </div>
@@ -221,7 +221,7 @@ export function TesterDrawer({
             )}
           </div>
 
-          <p className="rounded-md border border-line-soft bg-surface-2 p-3 text-2xs leading-relaxed text-fg-3">
+          <p className="rounded-md border border-line-soft bg-surface-2 p-3 text-2xs leading-[16px] text-fg-3">
             Tester 随镜像内置，平台启动时扫描目录自动发现 —— 控制台不提供上传或注册入口。
           </p>
         </div>

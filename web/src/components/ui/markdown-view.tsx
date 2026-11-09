@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils'
  * 选 `react-markdown` 的理由：默认**不渲染原始 HTML**（不引入 `dangerouslySetInnerHTML`），
  * 也就不需要再挂 DOMPurify；`remark-gfm` 只补表格/删除线/任务列表这几样报告里真会用到的。
  *
- * 尺寸按 shadcn 的排版习惯：正文 14px、标题 `tracking-tight`、段落 `leading-relaxed`，
+ * 尺寸按 shadcn 的排版习惯：正文 14px、标题 `tracking-tight`、段落 `leading-[16px]`，
  * 表格沿用仓里的 `border-line` 发丝线。颜色只管语义（`text-fg` / `muted-foreground`），
  * 不顺带把 markdown 里的 HTML class 当样式通道。
  */
@@ -25,7 +25,7 @@ export function MarkdownView({
     <div
       data-testid={testId}
       className={cn(
-        'max-h-[32rem] overflow-auto text-sm leading-relaxed text-fg-2',
+        'max-h-[32rem] overflow-auto text-sm leading-[16px] text-fg-2',
         '[&_h1]:mb-2 [&_h1]:mt-4 [&_h1]:text-lg [&_h1]:font-semibold [&_h1]:tracking-tight [&_h1]:text-fg',
         '[&_h2]:mb-2 [&_h2]:mt-4 [&_h2]:text-base [&_h2]:font-semibold [&_h2]:tracking-tight [&_h2]:text-fg',
         '[&_h3]:mb-1.5 [&_h3]:mt-3 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:text-fg',
