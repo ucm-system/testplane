@@ -5,8 +5,8 @@ description: |
   一个镜像三种角色（--role=api|controller|collector|all）、产物落 RWX PVC、
   部署阶段对接 Genet 的 Helm release 语义、调度复用 Volcano 队列。
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.2
+appVersion: "0.1.2"
 kubeVersion: ">=1.27.0-0"
 keywords:
   - testplane
