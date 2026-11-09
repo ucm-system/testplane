@@ -10,6 +10,9 @@ import type {
   ExecutionProfile,
   ProfileWrite,
   SecretWrite,
+  SharedMount,
+  SharedMountPatch,
+  SharedMountWrite,
 } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -25,11 +28,12 @@ import { useAsync } from '@/hooks/useAsync'
 import { useIdentity } from '@/hooks/useIdentity'
 import { formatDateTime, formatDuration } from '@/lib/utils'
 
-type TabKey = 'profiles' | 'clusters' | 'secrets' | 'audit'
+type TabKey = 'profiles' | 'clusters' | 'mounts' | 'secrets' | 'audit'
 
 const TAB_ITEMS: Array<{ value: TabKey; label: string }> = [
   { value: 'profiles', label: 'Profiles' },
   { value: 'clusters', label: 'Clusters' },
+  { value: 'mounts', label: '挂载点' },
   { value: 'secrets', label: 'Secrets' },
   { value: 'audit', label: 'Audit' },
 ]
@@ -509,6 +513,436 @@ function ClustersTab() {
   )
 }
 
+/* ---------------------------------------------------------------- 挂载点（D-65） */
+
+/** 平台保留路径（与后端 D-63 一致）：这些目录由平台自己写 */
+const RESERVED_MOUNT_PATHS = ['/workspace/output', '/workspace/input', '/tmp', '/tester']
+
+/** 一段可直接复制到集群里 apply 的 PV + PVC（这是用户最容易填错的地方：Pod 里不能直接写 NFS 地址） */
+const PV_PVC_YAML = `# 1) 先在集群里建 PV + PVC（NFS 示例）
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: models-pv
+spec:
+  capacity:
+    storage: 500Gi
+  accessModes:
+    - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 10.0.0.10
+    path: /export/models
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: models-pvc        # ← 这里填到这个页面的「PVC 名」
+  namespace: testplane
+spec:
+  accessModes:
+    - ReadOnlyMany
+  storageClassName: ""    # 静态绑定：留空表示不动态供给
+  resources:
+    requests:
+      storage: 500Gi
+`
+
+const EMPTY_MOUNT: SharedMountWrite = {
+  name: '',
+  mount_path: '',
+  claim_name: '',
+  read_only: true,
+  enabled: true,
+}
+
+/** 前端校验：与后端同一套规则（必填 / 绝对路径 / 保留路径），返回 path → message */
+function validateMount(draft: SharedMountWrite): Record<string, string> {
+  const errors: Record<string, string> = {}
+  if (!draft.name.trim()) errors.name = '名称必填'
+  else if (draft.name.trim().length > 63) errors.name = '名称不得超过 63 字节'
+  const path = draft.mount_path.trim()
+  if (!path) errors.mount_path = 'Pod 内路径必填'
+  else if (!path.startsWith('/')) errors.mount_path = '路径必须以 / 开头（容器内绝对路径）'
+  else if (RESERVED_MOUNT_PATHS.some((reserved) => path === reserved || path.startsWith(`${reserved}/`)))
+    errors.mount_path = `路径命中平台保留路径（${RESERVED_MOUNT_PATHS.join(', ')}），请换一个`
+  if (!draft.claim_name.trim()) errors.claim_name = 'PVC 名必填'
+  return errors
+}
+
+function MountsTab() {
+  const toast = useToast()
+  const mounts = useAsync(() => api.listAdminSharedMounts(), [])
+  const [draft, setDraft] = useState<SharedMountWrite | null>(null)
+  const [editing, setEditing] = useState<string | null>(null)
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<ApiErrorBody | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<SharedMount | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [toggling, setToggling] = useState<string | null>(null)
+
+  const openCreate = () => {
+    setEditing(null)
+    setFieldErrors({})
+    setError(null)
+    setDraft({ ...EMPTY_MOUNT })
+  }
+
+  const openEdit = (mount: SharedMount) => {
+    setEditing(mount.name)
+    setFieldErrors({})
+    setError(null)
+    setDraft({
+      name: mount.name,
+      mount_path: mount.mount_path,
+      claim_name: mount.claim_name,
+      read_only: mount.read_only,
+      enabled: mount.enabled,
+    })
+  }
+
+  /** 后端 400 的 `detail.issues[]` → 字段级红字（path 就是字段名） */
+  const applyServerIssues = (e: unknown): boolean => {
+    const err = toApiError(e)
+    const issues = (err.detail as { issues?: Array<{ path?: string; message?: string }> } | null)?.issues
+    if (Array.isArray(issues) && issues.length > 0) {
+      const next: Record<string, string> = {}
+      for (const issue of issues) {
+        const key = issue.path ?? ''
+        if (key) next[key] = issue.message ?? '不符合要求'
+      }
+      setFieldErrors(next)
+      return true
+    }
+    setError(err)
+    return false
+  }
+
+  const save = async () => {
+    if (!draft) return
+    const local = validateMount(draft)
+    setFieldErrors(local)
+    if (Object.keys(local).length > 0) return
+    setSaving(true)
+    setError(null)
+    try {
+      if (editing) {
+        const patch: SharedMountPatch = {
+          mount_path: draft.mount_path,
+          claim_name: draft.claim_name,
+          read_only: draft.read_only,
+          enabled: draft.enabled,
+        }
+        await api.updateAdminSharedMount(editing, patch)
+        toast({ title: `挂载点已更新：${editing}`, tone: 'ok' })
+      } else {
+        await api.createAdminSharedMount(draft)
+        toast({ title: `挂载点已创建：${draft.name}`, description: '下一次渲染立即生效，不用重启', tone: 'ok' })
+      }
+      setDraft(null)
+      setEditing(null)
+      mounts.reload()
+    } catch (e) {
+      if (!applyServerIssues(e)) toast({ title: '保存失败', tone: 'err' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 表格里勾「启用」= 直接 PUT（局部更新，只带 enabled） */
+  const toggleEnabled = async (mount: SharedMount, next: boolean) => {
+    setToggling(mount.name)
+    setError(null)
+    try {
+      await api.updateAdminSharedMount(mount.name, { enabled: next })
+      toast({ title: `${mount.name} 已${next ? '启用' : '停用'}`, tone: next ? 'ok' : 'warn' })
+      mounts.reload()
+    } catch (e) {
+      if (!applyServerIssues(e)) toast({ title: '切换启用状态失败', tone: 'err' })
+    } finally {
+      setToggling(null)
+    }
+  }
+
+  const remove = async () => {
+    if (!pendingDelete) return
+    setDeleting(true)
+    setError(null)
+    try {
+      await api.deleteAdminSharedMount(pendingDelete.name)
+      toast({ title: `已删除挂载点：${pendingDelete.name}`, tone: 'warn' })
+      setPendingDelete(null)
+      mounts.reload()
+    } catch (e) {
+      setError(toApiError(e))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const copyYaml = async () => {
+    try {
+      await navigator.clipboard.writeText(PV_PVC_YAML)
+      toast({ title: 'PV + PVC YAML 已复制', description: '在集群里 kubectl apply 之后，回来填 PVC 名', tone: 'ok' })
+    } catch {
+      toast({ title: '复制失败', description: '浏览器不允许写剪贴板，请手动选中复制', tone: 'err' })
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* 页内说明：这段是用户最容易被误导的地方，必须写在表格上面 */}
+      <Card data-testid="mounts-explainer">
+        <CardHeader
+          tone="warn"
+          title="Pod 里不能直接填 NFS 地址"
+          sub="restricted PodSecurity 会以 restricted volume type “nfs” 拒绝建 Pod —— 这里只填集群里已存在的 PVC 名"
+          actions={
+            <Button size="sm" variant="ghost" data-testid="copy-pv-pvc" onClick={() => void copyYaml()}>
+              复制 PV + PVC YAML
+            </Button>
+          }
+        />
+        <CardBody className="flex flex-col gap-2">
+          <p className="text-xs leading-relaxed text-fg-2">
+            平台不创建 PV/PVC，也不解析 NFS / CephFS / CSI 的协议字段：它只把 claim_name 渲染成
+            volumes[].persistentVolumeClaim，挂进所有 Tester Job（含 Pre-Check）。
+            改完保存就生效，不需要重启，也不用 helm upgrade。
+          </p>
+          <pre
+            data-testid="pv-pvc-yaml"
+            className="max-h-72 overflow-auto rounded-lg border border-line bg-surface-2 p-3 font-mono text-2xs leading-relaxed text-fg-2"
+          >
+            {PV_PVC_YAML}
+          </pre>
+          <p className="text-2xs text-fg-3">在集群里 <code className="font-mono">kubectl apply</code> 之后，这里填 PVC 名即可。</p>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader
+          tone="info"
+          title="挂载点"
+          sub="运行时资源：增删改下一次渲染立即生效"
+          actions={
+            <Button size="sm" icon={<Plus className="size-3" aria-hidden />} data-testid="new-mount" onClick={openCreate}>
+              新建挂载点
+            </Button>
+          }
+        />
+
+        {error ? (
+          <CardBody className="pb-0">
+            <ErrorState error={error} compact />
+          </CardBody>
+        ) : null}
+
+        {mounts.error ? (
+          <CardBody>
+            <ErrorState error={mounts.error} onRetry={mounts.reload} />
+          </CardBody>
+        ) : mounts.loading && !mounts.data ? (
+          <TableSkeleton rows={3} cols={7} />
+        ) : (mounts.data ?? []).length === 0 ? (
+          <EmptyState
+            data-testid="mounts-empty"
+            title="还没有挂载点"
+            description="未配置时不会阻断 Pod —— Tester 自己会报路径不存在。"
+          />
+        ) : (
+          <TableWrap>
+            <Table>
+              <THead>
+                <TR className="hover:bg-transparent">
+                  <TH>启用</TH>
+                  <TH>名称</TH>
+                  <TH>Pod 内路径</TH>
+                  <TH>只读</TH>
+                  <TH>PVC 名</TH>
+                  <TH>更新时间</TH>
+                  <TH className="text-right">操作</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {(mounts.data ?? []).map((mount) => (
+                  <TR key={mount.name} data-testid={`mount-row-${mount.name}`}>
+                    <TD>
+                      <label className="inline-flex cursor-pointer items-center gap-1.5">
+                        <input
+                          type="checkbox"
+                          role="switch"
+                          checked={mount.enabled}
+                          disabled={toggling === mount.name}
+                          aria-label={`${mount.enabled ? '停用' : '启用'} ${mount.name}`}
+                          data-testid={`mount-enabled-${mount.name}`}
+                          className="size-3.5 accent-primary"
+                          onChange={(event) => void toggleEnabled(mount, event.target.checked)}
+                        />
+                        <span className="text-2xs text-fg-3">{mount.enabled ? '启用' : '未启用'}</span>
+                      </label>
+                    </TD>
+                    <TD className="font-mono text-2xs text-fg">{mount.name}</TD>
+                    <TD className="font-mono text-2xs text-fg-2">{mount.mount_path}</TD>
+                    <TD className="text-2xs">{mount.read_only ? '只读' : '读写'}</TD>
+                    <TD className="font-mono text-2xs text-fg-2">{mount.claim_name}</TD>
+                    <TD className="whitespace-nowrap text-2xs text-fg-3">
+                      {mount.updated_at ? formatDateTime(mount.updated_at) : '—'}
+                    </TD>
+                    <TD className="text-right">
+                      <span className="inline-flex gap-1">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`编辑 ${mount.name}`}
+                          data-testid={`edit-mount-${mount.name}`}
+                          onClick={() => openEdit(mount)}
+                        >
+                          <Pencil className="size-3.5" aria-hidden />
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`删除 ${mount.name}`}
+                          data-testid={`delete-mount-${mount.name}`}
+                          onClick={() => setPendingDelete(mount)}
+                        >
+                          <Trash2 className="size-3.5" aria-hidden />
+                        </Button>
+                      </span>
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          </TableWrap>
+        )}
+        <CardFooter>
+          <span>只读挂载是默认值：模型权重、数据集这类输入不该被 Tester 写坏。</span>
+        </CardFooter>
+      </Card>
+
+      {/* 新建 / 编辑 */}
+      <Dialog
+        open={draft !== null}
+        onClose={() => {
+          setDraft(null)
+          setEditing(null)
+          setFieldErrors({})
+        }}
+        title={editing ? `编辑挂载点：${editing}` : '新建挂载点'}
+        description="保存后下一次渲染立即生效，不需要重启。"
+        footer={
+          <>
+            <Button
+              onClick={() => {
+                setDraft(null)
+                setEditing(null)
+                setFieldErrors({})
+              }}
+            >
+              取消
+            </Button>
+            <Button variant="primary" data-testid="save-mount" loading={saving} onClick={() => void save()}>
+              保存
+            </Button>
+          </>
+        }
+      >
+        {draft ? (
+          <div className="grid gap-3">
+            <Field label="名称" required error={fieldErrors.name} hint={editing ? '名称不可改' : 'volume 名，会渲染进 Pod spec'}>
+              <Input
+                value={draft.name}
+                disabled={Boolean(editing)}
+                aria-invalid={Boolean(fieldErrors.name)}
+                data-testid="mount-name"
+                onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+              />
+            </Field>
+            <Field label="Pod 内路径" required error={fieldErrors.mount_path} hint="容器内绝对路径，例如 /models">
+              <Input
+                value={draft.mount_path}
+                aria-invalid={Boolean(fieldErrors.mount_path)}
+                data-testid="mount-path"
+                placeholder="/models"
+                onChange={(event) => setDraft({ ...draft, mount_path: event.target.value })}
+              />
+            </Field>
+            <Field label="PVC 名" required error={fieldErrors.claim_name} hint="集群里已存在的 PVC；不要填 NFS 地址">
+              <Input
+                value={draft.claim_name}
+                aria-invalid={Boolean(fieldErrors.claim_name)}
+                data-testid="mount-claim"
+                placeholder="models-pvc"
+                onChange={(event) => setDraft({ ...draft, claim_name: event.target.value })}
+              />
+            </Field>
+            <label className="flex items-center gap-2 text-xs text-fg-2">
+              <input
+                type="checkbox"
+                data-testid="mount-read-only"
+                checked={draft.read_only ?? true}
+                onChange={(event) => setDraft({ ...draft, read_only: event.target.checked })}
+                className="size-3.5 accent-primary"
+              />
+              只读挂载（默认开：模型权重是只读输入）
+            </label>
+            <label className="flex items-center gap-2 text-xs text-fg-2">
+              <input
+                type="checkbox"
+                data-testid="mount-enabled"
+                checked={draft.enabled ?? true}
+                onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}
+                className="size-3.5 accent-primary"
+              />
+              启用（关掉=保留记录但不注入）
+            </label>
+          </div>
+        ) : null}
+      </Dialog>
+
+      {/* 删除二次确认 */}
+      <Dialog
+        open={pendingDelete !== null}
+        onClose={() => {
+          setPendingDelete(null)
+          setError(null)
+        }}
+        title="删除这个挂载点？"
+        description="只影响之后提交的 Run，已在跑的 Pod 不受影响。"
+        footer={
+          <>
+            <Button
+              onClick={() => {
+                setPendingDelete(null)
+                setError(null)
+              }}
+            >
+              取消
+            </Button>
+            <Button variant="danger" data-testid="confirm-delete-mount" loading={deleting} onClick={() => void remove()}>
+              确认删除
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-2 text-xs text-fg-2">
+          <p>
+            将被删除：<span className="font-mono text-fg">{pendingDelete?.name}</span>
+          </p>
+          {pendingDelete ? (
+            <p className="break-all text-2xs text-fg-3">
+              路径：{pendingDelete.mount_path} · PVC：{pendingDelete.claim_name}
+            </p>
+          ) : null}
+          <p className="text-2xs text-fg-3">只影响之后提交的 Run；已提交 Run 的 Task 快照已冻结，不受影响。</p>
+          {error ? <ErrorState error={error} compact /> : null}
+        </div>
+      </Dialog>
+    </div>
+  )
+}
 /* ---------------------------------------------------------------- Secrets */
 
 const EMPTY_SECRET: SecretWrite = { name: '', namespace: 'testplane', secret_name: '', key: '', description: '' }
@@ -747,6 +1181,7 @@ export function AdminPage() {
       <section {...tabPanelProps('admin', tab)}>
         {tab === 'profiles' ? <ProfilesTab /> : null}
         {tab === 'clusters' ? <ClustersTab /> : null}
+        {tab === 'mounts' ? <MountsTab /> : null}
         {tab === 'secrets' ? <SecretsTab /> : null}
         {tab === 'audit' ? <AuditTab /> : null}
       </section>

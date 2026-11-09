@@ -30,6 +30,9 @@ import type {
   RunFacets,
   RunFacetsQuery,
   RunSummary,
+  SharedMount,
+  SharedMountPatch,
+  SharedMountWrite,
   SecretWrite,
   SubmitResult,
   Task,
@@ -74,6 +77,14 @@ export interface Api {
 
   /* Run */
   listRuns(query?: RunListQuery): Promise<Page<RunSummary>>
+
+  /* 共享挂载（D-65）：listSharedMounts 是 viewer 可读的只读视图（只回启用中），
+     其余四个是 admin 写接口 */
+  listSharedMounts(): Promise<SharedMount[]>
+  listAdminSharedMounts(): Promise<SharedMount[]>
+  createAdminSharedMount(body: SharedMountWrite): Promise<SharedMount>
+  updateAdminSharedMount(name: string, body: SharedMountPatch): Promise<SharedMount>
+  deleteAdminSharedMount(name: string): Promise<void>
 
   /** `GET /runs/facets`：表头列筛选的候选值与计数（过滤参数与 listRuns 同名同义） */
   listRunFacets(query?: RunFacetsQuery): Promise<RunFacets>
