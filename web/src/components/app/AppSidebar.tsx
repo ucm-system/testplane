@@ -2,7 +2,6 @@ import { useEffect } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { BookOpen, Boxes, GitFork, Layers, List, PlusCircle, Server, ShieldCheck, Terminal } from 'lucide-react'
 import { USE_MOCK } from '@/api'
-import { Wordmark } from '@/components/app/Wordmark'
 import {
   Sidebar,
   SidebarContent,
@@ -98,13 +97,32 @@ export function AppSidebar() {
           <SidebarMenuItem>
             <SidebarMenuButton asChild size="lg" tooltip="TestPlane" className="group-data-[collapsible=icon]:mx-auto">
               <Link to="/" aria-label="TestPlane 首页" className="flex items-center gap-2">
-                <Wordmark className="w-auto! text-fg group-data-[collapsible=icon]:hidden" height={24} />
-                <span
+                {/*
+                  品牌图（用户提供的徽章 + 字标，一张整图）：
+                  展开态用完整 lockup `brand.webp`（760px / 30KB），
+                  折叠成 icon rail 时换成裁好的飞机图标 `brand-icon.webp`（128px / 6KB）——
+                  整图缩到 48px 宽会把字标压成一条黑线。
+                  源图 2172×724 PNG 815KB，转 webp 后两张加起来 36KB。
+                */}
+                <img
+                  src="/brand.webp"
+                  alt="TestPlane"
+                  width={700}
+                  height={177}
+                  decoding="async"
+                  data-testid="sidebar-brand"
+                  className="h-8 w-auto select-none group-data-[collapsible=icon]:hidden"
+                />
+                <img
+                  src="/brand-icon.webp"
+                  alt=""
                   aria-hidden
-                  className="hidden size-8 shrink-0 place-items-center rounded-md bg-primary-chip text-sm font-semibold text-primary-text group-data-[collapsible=icon]:grid"
-                >
-                  TP
-                </span>
+                  width={128}
+                  height={128}
+                  decoding="async"
+                  data-testid="sidebar-brand-icon"
+                  className="hidden size-7 shrink-0 select-none group-data-[collapsible=icon]:block"
+                />
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>

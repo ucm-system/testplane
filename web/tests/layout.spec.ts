@@ -245,9 +245,11 @@ test('页头没有竖分隔线，侧栏右边界=256，品牌与导航左边缘�
         if (!transparent && parseFloat(cs.borderRightWidth) > 0) lines.push(Math.round(r.right))
         if (Math.round(r.width) === 1) lines.push(Math.round(r.left))
       }
-      const wordmark = document
-        .querySelector('[data-slot="sidebar-header"] svg[role="img"]')!
-        .getBoundingClientRect()
+      // 品牌现在是用户提供的 lockup 图片（`/brand.webp`），不再是内联 SVG 字标
+      const brandImg = document.querySelector('[data-slot="sidebar-header"] img')
+      const wordmark = brandImg
+        ? brandImg.getBoundingClientRect()
+        : document.querySelector('[data-slot="sidebar-header"] svg[role="img"]')!.getBoundingClientRect()
       const navItemText = (() => {
         const item = document.querySelector('nav[aria-label="主导航"] a')
         if (!item) return null

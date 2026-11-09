@@ -1,7 +1,6 @@
 import { Link, useLocation } from 'react-router-dom'
 import { ChevronRight, Plus } from 'lucide-react'
 import { UserMenu } from '@/components/app/UserMenu'
-import { Wordmark } from '@/components/app/Wordmark'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/shadcn/separator'
 import { SidebarTrigger } from '@/components/ui/shadcn/sidebar'
@@ -49,7 +48,14 @@ export function SiteHeader() {
       <SidebarTrigger />
       {/* 移动端侧栏在 sheet 里，页头留一个品牌入口（≥md 时品牌在侧栏顶部，这里隐藏） */}
       <Link to="/" aria-label="TestPlane 首页" className="flex shrink-0 items-center md:hidden">
-        <Wordmark className="text-fg" height={20} />
+        <img
+          src="/brand.webp"
+          alt="TestPlane"
+          width={700}
+          height={177}
+          decoding="async"
+          className="h-6 w-auto select-none"
+        />
       </Link>
       <Separator orientation="vertical" className="hidden h-4 md:block" />
 
