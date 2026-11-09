@@ -113,8 +113,19 @@ func run() error {
 	}
 	logger.Info("Tester 注册表就绪", "dir", testersDir, "count", reg.Len())
 
-	// ---- 统一共享挂载 preflight（D-63 ④：缺失只告警，不拒绝启动、不阻断 Pod）----
-	preflightSharedMounts(ctx, cfg, logger)
+	// ---- 统一共享挂载（D-65）：表是运行时真源，env 只做首次启动的种子 ----
+	if imported, err := st.SharedMounts.SeedIfEmpty(ctx, cfg.SharedMounts); err != nil {
+		logger.Warn("统一共享挂载种子导入失败（继续启动，管理面仍可用）", "err", err)
+	} else if imported > 0 {
+		logger.Info("统一共享挂载种子已导入（TESTPLANE_SHARED_MOUNTS → shared_mounts）", "imported", imported)
+	} else if len(cfg.SharedMounts) > 0 {
+		logger.Info("统一共享挂载已有管理面记录，跳过 env 种子（D-65：DB 是真源）")
+	}
+	// 渲染/提交校验的运行时来源：读 DB 里启用中的行。
+	sharedMountsFn := sharedMountsFromStore(st)
+
+	// ---- 统一共享挂载 preflight（D-63 ④ / D-65：缺失只告警，不拒绝启动、不阻断 Pod）----
+	preflightSharedMounts(ctx, cfg, st, logger)
 
 	// ---- 报告 ----
 	reportWriter := &report.Writer{
@@ -189,7 +200,8 @@ func run() error {
 		Config: cfg, Store: st, Machines: machines,
 		Resolver: reg, Logger: logger,
 		WebUI: webui.FS(), Version: version,
-		Volcano: volcanoProvider,
+		Volcano:        volcanoProvider,
+		SharedMountsFn: sharedMountsFn,
 	})
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -271,6 +283,7 @@ func buildController(ctx context.Context, cfg *config.Config, st *store.Store,
 			Namespace:                    namespace,
 			StoragePVC:                   cfg.StoragePVC,
 			SharedMounts:                 cfg.SharedMounts,
+			SharedMountsFn:               sharedMountsFromStore(st),
 			SharedMountsDisabledProfiles: disabledSharedMountProfiles(cfg),
 			StorageRoot:                  cfg.StorageRoot,
 			MaxGlobalConcurrency:         cfg.MaxGlobalConcurrency,
@@ -417,13 +430,30 @@ func disabledSharedMountProfiles(cfg *config.Config) map[string]bool {
 	return out
 }
 
+// sharedMountsFromStore 返回 D-65 的运行时来源闭包：读 shared_mounts 里启用中的行。
+//
+// 渲染与提交校验都走它（api.Deps.SharedMountsFn / orchestrator.Config.SharedMountsFn），
+// 因此管理面写入**下一次渲染即生效**；本侧不缓存，也就不存在缓存失效问题。
+func sharedMountsFromStore(st *store.Store) func(context.Context) ([]domain.SharedMountSpec, error) {
+	return func(ctx context.Context) ([]domain.SharedMountSpec, error) {
+		return st.SharedMounts.EffectiveSpecs(ctx, nil)
+	}
+}
+
 // preflightSharedMounts 检查每个统一挂载的 claimName 是否存在（D-63 ④）。
 //
 // **只告警，不 fail-fast**：存储是集群运维的事，平台只认 PVC 名（§10.4）；
 // 缺了由 Tester 自己报"权重路径不存在"，而不是让整个控制面起不来。
-func preflightSharedMounts(ctx context.Context, cfg *config.Config, logger *slog.Logger) {
-	if len(cfg.SharedMounts) == 0 {
-		logger.Info("统一共享挂载未配置（D-63），Tester Job 不注入 /models")
+func preflightSharedMounts(ctx context.Context, cfg *config.Config, st *store.Store, logger *slog.Logger) {
+	// D-65：DB 是运行时真源；只有表为空时才用 env 种子（预检口径与渲染一致）。
+	effective := cfg.SharedMounts
+	if st != nil {
+		if rows, err := st.SharedMounts.EffectiveSpecs(ctx, nil); err == nil && len(rows) > 0 {
+			effective = rows
+		}
+	}
+	if len(effective) == 0 {
+		logger.Info("统一共享挂载未配置（D-63/D-65），Tester Job 不注入 /models")
 		return
 	}
 	ns := os.Getenv("TESTPLANE_EXECUTOR_NAMESPACE")
@@ -435,7 +465,7 @@ func preflightSharedMounts(ctx context.Context, cfg *config.Config, logger *slog
 		logger.Warn("统一共享挂载 preflight 跳过：K8s 客户端不可用", "err", err)
 		return
 	}
-	for _, sm := range cfg.SharedMounts {
+	for _, sm := range effective {
 		if _, perr := client.CoreV1().PersistentVolumeClaims(ns).Get(ctx, sm.ClaimName, metav1.GetOptions{}); perr != nil {
 			logger.Warn("统一共享挂载的 PVC 不存在（继续启动：Pod 会 Pending，由 Tester 报路径不存在）",
 				"mountPath", sm.MountPath, "claimName", sm.ClaimName, "namespace", ns, "err", perr)

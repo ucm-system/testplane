@@ -626,6 +626,12 @@ func TestAdminRBAC_NonAdminForbidden(t *testing.T) {
 		{http.MethodPost, "/api/v1/admin/secrets/x/rotate", "", operator},
 		{http.MethodGet, "/api/v1/admin/audit", "", operator},
 		{http.MethodDelete, "/api/v1/admin/runs/r-x/artifacts", "", operator},
+		// D-65：共享挂载管理面同样要求 admin。
+		{http.MethodGet, "/api/v1/admin/shared-mounts", "", operator},
+		{http.MethodPost, "/api/v1/admin/shared-mounts",
+			`{"name":"rbac-sm","mount_path":"/rbac-sm","claim_name":"pvc"}`, operator},
+		{http.MethodPut, "/api/v1/admin/shared-mounts/rbac-sm", `{"enabled":false}`, operator},
+		{http.MethodDelete, "/api/v1/admin/shared-mounts/rbac-sm", "", operator},
 	}
 	for _, c := range cases {
 		rec := do(c.method, c.path, c.body, c.bearer)
@@ -642,6 +648,11 @@ func TestAdminRBAC_NonAdminForbidden(t *testing.T) {
 	rec = do(http.MethodGet, "/api/v1/secrets", "", viewer)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer GET /secrets 应 403（07 §2.3），得到 %d\nbody=%s", rec.Code, rec.Body.String())
+	}
+	// D-65：只读视图 viewer 可读（"这次 Run 会挂什么"不该要 admin）。
+	rec = do(http.MethodGet, "/api/v1/shared-mounts", "", viewer)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("viewer GET /shared-mounts 应 200，得到 %d\nbody=%s", rec.Code, rec.Body.String())
 	}
 	admin := token([]string{"tp-admins"}, "root-alice")
 	rec = do(http.MethodGet, "/api/v1/admin/audit?limit=1", "", admin)

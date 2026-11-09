@@ -199,6 +199,23 @@ type Submitter struct {
 	// SharedMounts 是平台级统一共享挂载（D-63）：Tester 自己的 mounts[] 与它同路径
 	// → 提交期 400 CONFLICT（不做只读交集）。
 	SharedMounts []domain.SharedMountSpec
+	// SharedMountsFn 是 D-65 的运行时来源（读 shared_mounts 表）；nil 时用 SharedMounts。
+	SharedMountsFn func(ctx context.Context) ([]domain.SharedMountSpec, error)
+}
+
+// sharedMountsFor 解析本次提交生效的共享挂载（D-65：DB 优先，失败回落启动种子）。
+func (s *Submitter) sharedMountsFor(ctx context.Context) []domain.SharedMountSpec {
+	if s.SharedMountsFn == nil {
+		return s.SharedMounts
+	}
+	specs, err := s.SharedMountsFn(ctx)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("读取 shared_mounts 失败，回落到启动种子", "err", err)
+		}
+		return s.SharedMounts
+	}
+	return specs
 }
 
 // now 返回业务时间（UTC）。**不要**在提交链路里直调 time.Now()。
@@ -362,7 +379,7 @@ func (s *Submitter) Prepare(ctx context.Context, body []byte, submittedBy string
 
 	// 5.5 统一共享挂载冲突校验（D-63 ⑤，#74 保留路径合并）：
 	// Tester 的 mounts[].mount_path 与平台保留 / 统一挂载路径相同 → 400 + issue CONFLICT。
-	if conflicts := domain.MountPathConflicts(collectSpecMounts(specs), s.SharedMounts); len(conflicts) > 0 {
+	if conflicts := domain.MountPathConflicts(collectSpecMounts(specs), s.sharedMountsFor(ctx)); len(conflicts) > 0 {
 		issues := make([]domain.ValidationIssue, 0, len(conflicts))
 		for p, reason := range conflicts {
 			issues = append(issues, domain.ValidationIssue{

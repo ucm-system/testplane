@@ -3,5 +3,5 @@
 # 统计：design/views/07-api.md §5 端点表 + §2.4 认证表 + §5.5 运维段。
 # 删除/新增设计端点后本文件必须显式更新，且 diff 要 review。
 
-design_endpoints=52
-sha256=e0f8bf985499b3453b5986ad631da0524994c558b9a15bacea0ec0fa4ab29f98
+design_endpoints=57
+sha256=db829aaa4e8af5496577619434a73b4f32ef654edac2cd6ff5a03b895ac2f16c

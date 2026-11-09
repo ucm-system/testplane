@@ -282,6 +282,7 @@ X-Log-Coverage: 2026-11-05T01:00:00Z/2026-11-05T01:32:10Z
 | `GET` | `/clusters` | 集群概要（不返回凭据） |
 | `GET` | `/secrets` | Secret 名称与说明（operator） |
 | `GET` | `/queue-status` | 平台槽位 + Volcano 等待原因 |
+| `GET` | `/shared-mounts` | 平台级统一共享挂载的只读视图（viewer+；只回启用中的，回答"这次 Run 会挂什么"，D-65） |
 | `GET` | `/meta` | `{version, api_version, features}` |
 
 **`/queue-status` 的语义（D-49）**：`slots` 是平台自身的槽位（endpoint 独占 / 全局并发）；`waiting` 是平台侧排队（按 `waiting_reason` 六值分组）；`volcano` 是**集群调度器视角**的队列快照，直接读 CRD，**不经 Genet**。三者必须分开展示，不能相加成"一个排队数"。`volcano.available=false` 时 `detail` 取四态之一（`crd_missing`/`rbac_forbidden`/`scheduler_unavailable`/`disabled`），且 **不可达不等于 0 排队**；多集群时 `queues[].name` 用 `"<cluster>/<queue>"`。`volcano.queues[].pending_jobs` 是该队列下 `phase=Pending` 的 PodGroup 计数（不是 `queue.status.pending`），`longest_wait_seconds` 取 `now - min(podgroup.creationTimestamp)`（phase ∈ Pending/Inqueue）。
@@ -292,12 +293,21 @@ X-Log-Coverage: 2026-11-05T01:00:00Z/2026-11-05T01:32:10Z
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| `GET` | `/admin/shared-mounts` | 平台级统一共享挂载列表（含停用行，D-65） |
+| `POST` | `/admin/shared-mounts` | 新建 `{name, mount_path, read_only?, claim_name, enabled?}`（默认只读、默认启用） |
+| `PUT` | `/admin/shared-mounts/{name}` | 改 `mount_path` / `read_only` / `claim_name` / `enabled`（name 不可改） |
+| `DELETE` | `/admin/shared-mounts/{name}` | 删除；只影响之后的渲染（已提交 Run 的 Task 快照不变） |
 | `POST/PUT/DELETE` | `/admin/profiles` | Profile 维护 |
 | `POST/PUT/DELETE` | `/admin/clusters` | 集群登记（`kubeconfig_key`） |
 | `GET/POST` | `/admin/secrets` | 引用列表/登记 |
 | `POST` | `/admin/secrets/{name}/rotate` | 轮换校验 + 审计 |
 | `GET` | `/admin/audit` | 审计（`actor`、`action`、时间） |
 | `DELETE` | `/admin/runs/{id}/artifacts` | 人工清理产物 |
+
+**`/shared-mounts` 的语义（D-63/D-65）**：这些挂载点由 executor 渲染进**所有** Tester Job（含 Pre-Check），
+`shared_mounts` 表是运行时真源（`TESTPLANE_SHARED_MOUNTS` 只是首次启动的种子）。平台**不创建** PV/PVC——存储供给归集群运维，
+管理面只填一个已存在的 `claim_name`（内联 `volumes[].nfs` 会被 PodSecurity `restricted` 拒绝）。校验失败 → 400
+`VALIDATION_ERROR`，`detail.issues[].code` 为 `CONFLICT`（路径/名字冲突）或 `REQUIRED`（缺 `claim_name`）。
 
 ### 5.5 运维
 

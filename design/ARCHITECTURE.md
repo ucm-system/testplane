@@ -1246,7 +1246,29 @@ task:
 - 路径如何可达由 Tester 决定：镜像内置、Profile 提供的挂载点、或 Tester 自行下载。
 - **统一共享挂载是平台级配置（D-63），不在 `tester.yaml` 里**：`sharedMounts`（`name/mountPath/readOnly/claimName`）来自 Helm values → 平台配置，全局注入所有 Tester Job（含 Pre-Check），Execution Profile 可用 `sharedMounts: false` 关闭；Tester 自己的 `mounts[]` 与平台保留路径（`/workspace/output`、`/workspace/input`、`/tmp`、`/tester`）或统一挂载路径同路径 → 提交期 400（`VALIDATION_ERROR` + issue `CONFLICT`），不做只读交集。
 
-Tester 若需要额外挂载点，在 `tester.yaml` 的 `mounts` 中声明：`name`（volume 名，可省略自动生成）/ `mount_path`（容器内绝对路径）/`read_only` / `source`（承载该挂载点的 PVC 名，缺省用平台 storage PVC）。平台按声明渲染 volume；**没有 `required` 字段**，也不做"Profile 是否供给"的提交期校验——挂载失败是**运行期**事实（Pod `FailedMount` / `FailedAttachVolume`），由 executor 观测后报 `MOUNT_UNAVAILABLE`（§附录 D）。
+- **平台级统一共享挂载（D-63/D-65）可以在管理台维护**：填 `name` / `mount_path` / `read_only` / `claim_name`，对所有 Tester 容器自动生效（含 Pre-Check）。平台**不创建** PV/PVC——那是存储供给，属集群运维；界面只需要填一个已存在的 PVC 名。可复制的 PV/PVC 样例：
+
+  ```yaml
+  apiVersion: v1
+  kind: PersistentVolume
+  metadata: { name: models-pv }
+  spec:
+    capacity: { storage: 500Gi }
+    accessModes: [ReadOnlyMany]
+    nfs: { server: 10.0.0.10, path: /export/models }
+  ---
+  apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata: { name: models-pvc, namespace: testplane }
+  spec:
+    accessModes: [ReadOnlyMany]
+    resources: { requests: { storage: 500Gi } }
+    volumeName: models-pv
+  ```
+
+  （NFS 直接内联在 **Pod** 的 `volumes[].nfs` 会被 PodSecurity `restricted` 拒绝；先在 PVC 层绑定就没问题——平台引用的始终是 PVC 名。）
+
+- Tester 若需要额外挂载点，在 `tester.yaml` 的 `mounts` 中声明：`name`（volume 名，可省略自动生成）/ `mount_path`（容器内绝对路径）/`read_only` / `source`（承载该挂载点的 PVC 名，缺省用平台 storage PVC）。平台按声明渲染 volume；**没有 `required` 字段**，也不做"Profile 是否供给"的提交期校验——挂载失败是**运行期**事实（Pod `FailedMount` / `FailedAttachVolume`），由 executor 观测后报 `MOUNT_UNAVAILABLE`（§附录 D）。
 - 平台不得为"帮你找数据集"而引入资源登记与解析逻辑——那会把平台变成数据管理系统的重复实现。
 - **统一共享挂载（D-63）不改变"路径不透明"裁决**：平台只认 PVC 名（`claimName`），**不理解 NFS / CephFS / CSI 的协议字段**；`/models`、`/mnt/model` 只是默认路径，不构成平台语义；PV/PVC 的生命周期属于集群运维（chart 的 `extraObjects` 只做原样渲染，不是存储编排）。
 
@@ -1895,4 +1917,5 @@ env:                          # 运行期环境变量声明（§12.4）
 | D-62 | **概览与运行列表合并**（用户 2026-11-06 拍板）：概览页直接承载**全量 Run 表**（Excel 式列筛选 + offset 分页 + 深链 URL），取消独立的运行列表页；`/runs` 退化为**兼容重定向**到 `/?<query>`（保留筛选与分页参数，旧链接不失效），`/runs/{id}` 详情路由不变。概览右栏取消（宽表需要整幅宽度），「排队中的 Task」并入 KPI 区。代价：概览首屏多两个请求（`total` 与 `facets`），且「一屏看完状态」的定位变成「状态 + 可操作的表格」。 |
 | D-63 | **Tester 统一共享挂载**（票 #66 地图 / 用户 2026-11-06 拍板）：① **作用域** = 全局默认（所有 Tester Job，含 Pre-Check），**Execution Profile 可用 `sharedMounts: false` 关闭**；② **载体只用 PVC**——内联 `volumes[].nfs` 会被 PodSecurity `restricted:latest` 的卷类型白名单拒绝（研究 #69 实测 API Server 原文为 `restricted volume type "nfs"`），因此平台**不新增任何 volume source 类型**，统一挂载复用 `MountSpec.Source`（PVC claim 名）这条路径；③ **配置是平台级列表** `sharedMounts: [{name, mountPath, readOnly, claimName}]`（Helm values → 平台配置），默认给 **`/models` 与 `/mnt/model` 两条独立条目**（可指向同一或不同 PVC），**可任意追加**；默认 `readOnly: true`；④ **缺失不阻断**：未配置或 claimName 不存在 → 启动时告警日志，不拒绝启动、不阻断 Pod，由 Tester 自己报"权重路径不存在"；⑤ **冲突一律提交期拒绝**：与 `tester.yaml.mounts` 或平台保留路径（§5.6 单一常量）同 `mount_path` → 400 `VALIDATION_ERROR` + issue `CONFLICT`；**不做只读交集**；⑥ **PV/PVC 由集群提供**（默认）：平台只认 `claimName`、不解析 NFS 协议；chart 另提供**通用 `extraObjects`（任意 YAML 原样渲染）** 作为便利通道，运维把 NFS PV/PVC 的 YAML 贴进去即可——平台仍不理解 NFS，守住 §10.4 边界。权限必读：NFS 导出侧目录 0755 / 文件 0644（uid 10001 原样透传，`fsGroup` 对普通 NFS 卷无效）。 |
 | D-64 | **结果/报告页的信息分工**（用户 2026-11-09）：① **产物清单只放结果页**（Run 详情「结果」tab），报告页（`/runs/{id}/report`）不再重复列产物——报告页只放计数、指标、Task 明细、失败清单与 `report.md`；② 结果页的产物按来源分三组（部署日志 / 测试日志 / 报告与数据）**默认折叠**，只显示组名与数量，点开才展开文件表（一次 Run 常有几十个文件，展开会把页面推走一屏）；③ `report.md` 用 **Markdown 渲染**（`react-markdown` + `remark-gfm`，默认不渲染原始 HTML，无需额外的 HTML 消毒）而不是 `<pre>` 原文；④ `report.md` 的 YAML/代码块仍以等宽字体呈现。 |
+|| D-65 | **平台级统一共享挂载从"纯启动配置"升级为运行时可管理资源**（票 #67）：① `shared_mounts` 表是**运行时真源**，executor 渲染所有 Tester Job（含 Pre-Check）时读"启用中的行"；`TESTPLANE_SHARED_MOUNTS` 降级为**首次启动的种子**（表为空时导入一次，之后不再覆盖，管理面记录优先）。② 管理面 4 个端点（`/admin/shared-mounts` 的 GET/POST/PUT/DELETE）+ 一个 viewer 可读的 `GET /shared-mounts`（回答"这次 Run 会挂什么"，只回启用中的）；**平台不创建 PV/PVC**——存储供给超出 §10.4 边界，界面只填 `claimName`。③ 注入点不变（D-63）：仍由 executor 渲染进所有 Tester Job，Profile 的 `sharedMounts: false` 仍走 `TESTPLANE_SHARED_MOUNTS_DISABLED_PROFILES`（渲染层置 `JobSpec.SharedMountsDisabled`）。④ 校验：`mount_path` 绝对路径、不得命中保留路径（`domain.ReservedMountPaths`）、name/path 唯一、`claim_name` 非空（内联 `volumes[].nfs` 会被 PodSecurity `restricted` 拒绝，平台只能引用 PVC）；违反 → 400 `VALIDATION_ERROR` + `detail.issues[].code=CONFLICT`。⑤ 写入即审计（沿用管理面的 `InAuditedTx` 同事务写法）；**不缓存**渲染数据源，写入对下一次渲染立即生效（将来若加缓存，写路径必须显式失效）。⑥ `read_only` 默认 `true`。 | `07-api.md §5.1/§5.4`、`03-data-view.md §3.2`、`openapi.yaml` `SharedMount` |
 || D-60 | **Tester 目录的"同名多版本"与挂载声明口径**（票 #60）：① `GET /testers` **默认每个 name 只回最新版本**，`include_retired=true` 时回全部版本（`orphaned=true` 保留为旧别名）；条目新增 `latest`（该 name 的最高版本，比较规则 = `domain.VersionLess`，全仓唯一真源）与 `retired`（目录里已不存在、只剩库里的历史版本 = `testers.orphaned`）。② **历史版本永不删除**：`testers` 行不删，`orphaned` 只标记；历史 Run/Task 继续按 `name@version` 解析，报告与 Task 详情里的 `tester.version` 保持提交时冻结的值（可追溯性，§5.7）。③ `tester.yaml.mounts` 的字段以**实现为准**收敛为 `name / mount_path / read_only / source`（`source` = 承载该挂载点的 PVC 名，缺省用平台 storage PVC），**没有 `required`**；`MOUNT_UNAVAILABLE` 是**运行期**观测（Pod `FailedMount`/`FailedAttachVolume`），不是提交期校验——提交期无法可靠判断 Profile/StorageClass 能否供给。 | `07-api.md §5.1`、`ARCHITECTURE §5.6/§10.4`、`openapi.yaml` `Tester` |

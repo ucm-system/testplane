@@ -32,6 +32,8 @@ type Store struct {
 	Audits    *AuditRepo
 	Profiles  *ProfileRepo
 	Artifacts *ArtifactRepo
+	// SharedMounts 是平台级统一共享挂载（D-65，运行时可管理）。
+	SharedMounts *SharedMountRepo
 
 	// notifier 可为 nil：置位后，提交与 ClaimForExecution 会在提交后 NOTIFY。
 	notifier *Notifier
@@ -85,6 +87,7 @@ func New(ctx context.Context, dsn string, maxConns int32) (*Store, error) {
 	s.Audits = &AuditRepo{s: s}
 	s.Profiles = &ProfileRepo{s: s}
 	s.Artifacts = &ArtifactRepo{s: s}
+	s.SharedMounts = &SharedMountRepo{s: s}
 	return s, nil
 }
 

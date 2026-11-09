@@ -43,6 +43,10 @@ type Config struct {
 	StoragePVC string
 	// SharedMounts 是平台级统一共享挂载（D-63）：全局默认注入所有 Tester Job。
 	SharedMounts []domain.SharedMountSpec
+	// SharedMountsFn 是 D-65 的运行时来源：每次渲染读"启用中的挂载点"（store 提供）。
+	// 为 nil 时退回 SharedMounts（静态配置，测试/未接线场景）。
+	// 解析顺序：FN → 失败或 nil 时回落 SharedMounts → 都空则不注入。
+	SharedMountsFn func(ctx context.Context) ([]domain.SharedMountSpec, error)
 	// SharedMountsDisabledProfiles 是**关闭**统一挂载的 Profile 名集合（D-63 ③）。
 	// 来源：TESTPLANE_SHARED_MOUNTS_DISABLED_PROFILES（DB 列尚未落地，见报告）。
 	SharedMountsDisabledProfiles map[string]bool
@@ -631,7 +635,7 @@ func (c *Controller) dispatchOne(ctx context.Context, cand Candidate) error {
 	}
 	attempt := claimed.Attempt(task.ID, run.ID)
 
-	spec, err := c.jobSpec(run, task, attempt)
+	spec, err := c.jobSpec(ctx, run, task, attempt)
 	if err != nil {
 		return c.failAttempt(ctx, attempt, &domain.Failure{
 			Code:      domain.CodeInternalError,
@@ -662,8 +666,43 @@ func (c *Controller) dispatchOne(ctx context.Context, cand Candidate) error {
 	return nil
 }
 
+// effectiveSharedMounts 解析本次渲染**实际生效**的平台级共享挂载（D-65）。
+//
+//   - 优先 DB（SharedMountsFn）：管理面写入后下一次渲染即生效（本侧不缓存，
+//     所以不存在"写过期的缓存"问题；若将来加缓存，写路径必须显式失效）；
+//   - FN 未接线或读库失败 → 回落静态 SharedMounts（启动种子），并打警告；
+//   - Profile 的 sharedMounts:false 由渲染层（JobSpec.SharedMountsDisabled）兜底。
+//
+// 生效集合打一行 info 日志，排查"这个 Run 到底挂了什么"时不用翻库。
+func (c *Controller) effectiveSharedMounts(ctx context.Context, task TaskView) []domain.SharedMountSpec {
+	// 裸 &Controller{}（单测）没有 logf：静默日志，不影响行为。
+	logf := c.logf
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	shared := c.cfg.SharedMounts
+	if c.cfg.SharedMountsFn != nil {
+		got, err := c.cfg.SharedMountsFn(ctx)
+		if err != nil {
+			logf("orchestrator: 读取 shared_mounts 失败，回落到启动种子: %v", err)
+		} else {
+			shared = got
+		}
+	}
+	if c.cfg.SharedMountsDisabledProfiles[task.Profile] {
+		logf("orchestrator: profile %s 关闭统一挂载（D-63 ③），task %s 不注入", task.Profile, task.ID)
+		return shared
+	}
+	names := make([]string, 0, len(shared))
+	for _, sm := range shared {
+		names = append(names, sm.Name+"="+sm.ClaimName+":"+sm.MountPath)
+	}
+	logf("orchestrator: task %s 生效的共享挂载 %v", task.ID, names)
+	return shared
+}
+
 // jobSpec 把 TaskView + RunView 投影成 ports.JobSpec（execution §2.1 的输入）。
-func (c *Controller) jobSpec(run RunView, task TaskView, attempt AttemptRef) (ports.JobSpec, error) {
+func (c *Controller) jobSpec(ctx context.Context, run RunView, task TaskView, attempt AttemptRef) (ports.JobSpec, error) {
 	timeout := task.TimeoutSeconds
 	if timeout <= 0 {
 		timeout = int(c.cfg.TaskTimeoutDefault / time.Second)
@@ -693,7 +732,7 @@ func (c *Controller) jobSpec(run RunView, task TaskView, attempt AttemptRef) (po
 		ServiceAccount:       c.cfg.ServiceAccount,
 		Resources:            task.Resources,
 		Mounts:               task.Mounts,
-		SharedMounts:         c.cfg.SharedMounts,
+		SharedMounts:         c.effectiveSharedMounts(ctx, task),
 		SharedMountsDisabled: c.cfg.SharedMountsDisabledProfiles[task.Profile],
 		OutputDir:            outputDir,
 		StoragePVC:           c.cfg.StoragePVC,
