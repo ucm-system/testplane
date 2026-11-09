@@ -8,6 +8,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ucm-system/testplane/server/internal/domain"
 )
 
 // Role 是进程角色（单二进制多角色，05 §1）。
@@ -52,6 +55,9 @@ type Config struct {
 	// StoragePVC 是产物 RWX PVC 名（TESTPLANE_STORAGE_PVC，默认 testplane-storage），
 	// Job 渲染时挂到 /workspace/output（execution §3.1）。
 	StoragePVC string
+	// SharedMounts 是平台级统一共享挂载（D-63，TESTPLANE_SHARED_MOUNTS JSON 数组）。
+	// 默认空 = 不注入；Helm values 里给两条（/models、/mnt/model）。
+	SharedMounts []domain.SharedMountSpec
 	// ClusterName 是本实例对接的集群名（TESTPLANE_CLUSTER_NAME，默认 cluster-01），
 	// 写进 attempts.executor_ref.cluster，与 clusters 表的种子对齐。
 	ClusterName string
@@ -185,6 +191,11 @@ func Load() (*Config, error) {
 		JobGCEnabled:       envBool("TESTPLANE_JOB_GC_ENABLED", true),
 		APIPrefix:          "/api/v1",
 	}
+	shared, smErr := ParseSharedMounts(env("TESTPLANE_SHARED_MOUNTS", "[]"))
+	if smErr != nil {
+		return nil, smErr
+	}
+	c.SharedMounts = shared
 
 	if raw := env("TESTPLANE_SESSION_TTL", ""); raw != "" {
 		d, err := time.ParseDuration(strings.TrimSpace(raw))
@@ -539,4 +550,50 @@ func envBool(name string, def bool) bool {
 	default:
 		return def
 	}
+}
+
+// ParseSharedMounts 解析 TESTPLANE_SHARED_MOUNTS（JSON 数组，D-63）。
+//
+// 形态：
+//
+//	[{"name":"models","mountPath":"/models","readOnly":true,"claimName":"testplane-models"},
+//	 {"name":"model-alt","mountPath":"/mnt/model","claimName":"testplane-models"}]
+//
+// 规则：claimName 必填；mountPath 绝对且不与平台保留路径冲突；name 唯一；readOnly **默认 true**
+// （只有显式写 false 才可写）。空/`[]` 表示不注入。
+func ParseSharedMounts(raw string) ([]domain.SharedMountSpec, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "[]" {
+		return nil, nil
+	}
+	var items []struct {
+		Name      string `json:"name"`
+		MountPath string `json:"mountPath"`
+		ReadOnly  *bool  `json:"readOnly"` // 指针：区分"未写（默认 true）"与"显式 false"
+		ClaimName string `json:"claimName"`
+	}
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return nil, fmt.Errorf("config: TESTPLANE_SHARED_MOUNTS 不是合法 JSON 数组: %w", err)
+	}
+	out := make([]domain.SharedMountSpec, 0, len(items))
+	for i, it := range items {
+		ro := true
+		if it.ReadOnly != nil {
+			ro = *it.ReadOnly
+		}
+		out = append(out, domain.SharedMountSpec{
+			Name: it.Name, MountPath: it.MountPath, ReadOnly: ro, ClaimName: it.ClaimName,
+		})
+		_ = i
+	}
+	normalized, err := domain.NormalizeSharedMounts(out)
+	if err != nil {
+		return nil, fmt.Errorf("config: TESTPLANE_SHARED_MOUNTS: %w", err)
+	}
+	return normalized, nil
+}
+
+// SharedMountReservedPaths 返回"平台保留 + 统一挂载"路径集合（提交期冲突校验用，D-63 ⑤）。
+func (c *Config) SharedMountReservedPaths() map[string]string {
+	return domain.ReservedMountPaths(c.SharedMounts)
 }

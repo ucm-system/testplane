@@ -56,11 +56,12 @@ const (
 	// TesterContainerName 是唯一容器名（execution §2.2）。
 	TesterContainerName = "tester"
 	// OutputMountPath 是可写产物挂载点，其余路径只读（§3.3）。
-	OutputMountPath = "/workspace/output"
+	// 平台保留挂载点统一来自 domain（#74：registry 与 render 曾有两套不一致的集合）。
+	OutputMountPath = domain.WorkspaceOutputPath
 	// InputMountPath 是可选输入只读挂载点。
-	InputMountPath = "/workspace/input"
+	InputMountPath = domain.WorkspaceInputPath
 	// TmpMountPath 配合只读根：/tmp 必须是可写 emptyDir（§2.1、§3.3）。
-	TmpMountPath = "/tmp"
+	TmpMountPath = domain.TmpPath
 	// DefaultEntry 是 Tester 契约规定的容器内入口（§10 校验项 4）。
 	DefaultEntry = "/tester/run.sh"
 	// TestplaneUID / TestplaneGID 是默认运行身份（§2.2、§3.5）。
@@ -549,7 +550,49 @@ func buildMounts(spec ports.JobSpec, subPath string) ([]corev1.VolumeMount, []co
 		})
 	}
 
-	used := map[string]struct{}{OutputMountPath: {}, TmpMountPath: {}, InputMountPath: {}}
+	// volume 名去重：`sanitizeLabel` 之后不同 name 可能撞成同一个（研究 #69 点出的既有隐患），
+	// K8s 会以 "Duplicate value" 拒绝整份 Pod。这里统一分配唯一名。
+	volNames := map[string]int{"output": 0, "tmp": 0, "input": 0}
+	uniqueVolumeName := func(base string) string {
+		name := sanitizeLabel(base)
+		if name == "" {
+			name = "mnt"
+		}
+		if n := volNames[name]; n > 0 {
+			volNames[name] = n + 1
+			return fmt.Sprintf("%s-%d", name, n+1)
+		}
+		volNames[name] = 1
+		return name
+	}
+
+	// 统一共享挂载（D-63）：平台级注入，Profile 关闭时不注入。
+	// 用 PVC source（内联 nfs 会被 restricted PSA 拒绝），平台不理解 NFS 协议（§10.4）。
+	shared := spec.SharedMounts
+	if spec.SharedMountsDisabled {
+		shared = nil
+	}
+	for i, sm := range shared {
+		if sm.MountPath == "" || !path.IsAbs(sm.MountPath) {
+			return nil, nil, fmt.Errorf("%w: sharedMounts[%d].mountPath must be absolute", ErrSpecInvalid, i)
+		}
+		if sm.ClaimName == "" {
+			return nil, nil, fmt.Errorf("%w: sharedMounts[%d].claimName is empty", ErrSpecInvalid, i)
+		}
+		name := uniqueVolumeName(sm.Name)
+		mounts = append(mounts, corev1.VolumeMount{Name: name, MountPath: sm.MountPath, ReadOnly: sm.ReadOnly})
+		volumes = append(volumes, corev1.Volume{
+			Name: name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: sm.ClaimName,
+					ReadOnly:  sm.ReadOnly,
+				},
+			},
+		})
+	}
+
+	used := domain.ReservedMountPaths(shared)
 	for i, m := range spec.Mounts {
 		if m.MountPath == "" {
 			return nil, nil, fmt.Errorf("%w: mounts[%d].mount_path is empty", ErrSpecInvalid, i)
@@ -561,15 +604,12 @@ func buildMounts(spec ports.JobSpec, subPath string) ([]corev1.VolumeMount, []co
 			return nil, nil, fmt.Errorf("%w: mounts[%d].mount_path %q conflicts with a platform mount",
 				ErrSpecInvalid, i, m.MountPath)
 		}
-		used[m.MountPath] = struct{}{}
+		used[m.MountPath] = "tester mount"
 		name := m.Name
 		if name == "" {
 			name = fmt.Sprintf("mnt-%d", i)
 		}
-		name = sanitizeLabel(name)
-		if name == "" {
-			name = fmt.Sprintf("mnt-%d", i)
-		}
+		name = uniqueVolumeName(name)
 		claim := m.Source
 		if claim == "" {
 			claim = spec.StoragePVC

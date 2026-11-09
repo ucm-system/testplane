@@ -96,6 +96,7 @@ func New(d Deps) *Server {
 		profiles:       d.Store.Profiles,
 		logger:         lg,
 		clock:          s.clock,
+		SharedMounts:   d.Config.SharedMounts,
 		MaxTasks:       d.Config.RunMaxTasks,
 		DefaultTimeout: d.Config.TaskTimeoutDefault,
 		MaxTimeout:     d.Config.TaskTimeoutMax,

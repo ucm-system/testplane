@@ -232,3 +232,46 @@ extraEnv: []
 extraEnvFrom: []
 extraVolumes: []
 extraVolumeMounts: []
+# ---- 统一共享挂载（D-63）----
+# 平台级配置：全局注入所有 Tester Job（含 Pre-Check）；Execution Profile 可关闭（sharedMounts: false）。
+# **平台只认 claimName**（PVC 名），不理解 NFS/CephFS/CSI 协议；PV/PVC 由集群提供。
+# 便利通道：下面 `extraObjects` 可以直接贴 NFS PV+PVC 的 YAML（原样渲染，平台不解析）。
+#
+# 权限必读（NFS 导出侧，研究 #69 实测）：
+#   - 目录 0755、文件 0644（或整体 chown -R 10001:10001）；
+#   - root_squash 只压 uid 0，**不影响** uid 10001；文件 0600 由 root 拥有时 10001 读不到；
+#   - fsGroup 对普通 NFS 卷**无效**（不会 chown/chgrp），别指望它改属主。
+sharedMounts:
+  - name: models
+    mountPath: /models
+    readOnly: true
+    claimName: testplane-models
+  - name: model-alt
+    mountPath: /mnt/model
+    readOnly: true
+    claimName: testplane-models
+# 关闭统一挂载的 Execution Profile 名（逗号分隔；D-63 ③ 的 DB 列落地前的等效开关）
+sharedMountsDisabledProfiles: []
+
+# ---- 任意 YAML 原样渲染（D-63 ⑥ 便利通道）----
+# 例：把 NFS PV+PVC 贴进来（平台不理解 NFS，只是渲染）：
+# extraObjects:
+#   - |
+#     apiVersion: v1
+#     kind: PersistentVolume
+#     metadata:
+#       name: testplane-models
+#     spec:
+#       capacity: {storage: 100Gi}
+#       accessModes: [ReadOnlyMany]
+#       nfs: {server: 192.168.1.10, path: /export/models, readOnly: true}
+#   - |
+#     apiVersion: v1
+#     kind: PersistentVolumeClaim
+#     metadata:
+#       name: testplane-models
+#       namespace: testplane
+#     spec:
+#       accessModes: [ReadOnlyMany]
+#       resources: {requests: {storage: 100Gi}}
+extraObjects: []

@@ -41,6 +41,11 @@ type Config struct {
 	Namespace string
 	// StoragePVC 是产物 RWX PVC 名（Execution Profile 的 output_pvc）。
 	StoragePVC string
+	// SharedMounts 是平台级统一共享挂载（D-63）：全局默认注入所有 Tester Job。
+	SharedMounts []domain.SharedMountSpec
+	// SharedMountsDisabledProfiles 是**关闭**统一挂载的 Profile 名集合（D-63 ③）。
+	// 来源：TESTPLANE_SHARED_MOUNTS_DISABLED_PROFILES（DB 列尚未落地，见报告）。
+	SharedMountsDisabledProfiles map[string]bool
 	// StorageRoot 是 controller 侧看到的 NFS 挂载点（换算 subPath 用，execution §3.1）。
 	StorageRoot string
 	// ServiceAccount 为空则不渲染（Tester 不得调 K8s API，§5.10）。
@@ -673,25 +678,27 @@ func (c *Controller) jobSpec(run RunView, task TaskView, attempt AttemptRef) (po
 		outputDir = root + "/" + subPath
 	}
 	return ports.JobSpec{
-		RunID:          run.ID,
-		TaskID:         task.ID,
-		AttemptID:      attempt.AttemptID,
-		AttemptNo:      attempt.AttemptNo,
-		TesterName:     task.TesterName,
-		TesterVersion:  task.TesterVersion,
-		TesterRole:     task.TesterRole,
-		Image:          task.Image,
-		Entry:          task.Entry,
-		Args:           append([]string(nil), task.Args...),
-		Env:            task.Env,
-		Namespace:      c.cfg.Namespace,
-		ServiceAccount: c.cfg.ServiceAccount,
-		Resources:      task.Resources,
-		Mounts:         task.Mounts,
-		OutputDir:      outputDir,
-		StoragePVC:     c.cfg.StoragePVC,
-		TimeoutSeconds: timeout,
-		SecretEnv:      append([]string(nil), task.SecretEnv...),
+		RunID:                run.ID,
+		TaskID:               task.ID,
+		AttemptID:            attempt.AttemptID,
+		AttemptNo:            attempt.AttemptNo,
+		TesterName:           task.TesterName,
+		TesterVersion:        task.TesterVersion,
+		TesterRole:           task.TesterRole,
+		Image:                task.Image,
+		Entry:                task.Entry,
+		Args:                 append([]string(nil), task.Args...),
+		Env:                  task.Env,
+		Namespace:            c.cfg.Namespace,
+		ServiceAccount:       c.cfg.ServiceAccount,
+		Resources:            task.Resources,
+		Mounts:               task.Mounts,
+		SharedMounts:         c.cfg.SharedMounts,
+		SharedMountsDisabled: c.cfg.SharedMountsDisabledProfiles[task.Profile],
+		OutputDir:            outputDir,
+		StoragePVC:           c.cfg.StoragePVC,
+		TimeoutSeconds:       timeout,
+		SecretEnv:            append([]string(nil), task.SecretEnv...),
 	}, nil
 }
 
