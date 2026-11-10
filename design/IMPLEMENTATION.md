@@ -1,5 +1,7 @@
-# TestPlane 实现技术方案（P0）
+# Argus 实现技术方案（P0）
 
+> **注：本文为 v1 时期提案，v2.0 落地以 [`design/ARCHITECTURE.md`](ARCHITECTURE.md) 为准，本文已完成术语与机制同步**（Argus 更名与术语对调、内置 deploy/clean runner、线性串行管道、exports 收割、整 Task 重试，见 ARCHITECTURE §0.2 与附录 E D-66～D-73）。
+>
 > **文档类型：** 实现方案（Implementation Plan）
 > **文档效力：** 本文不新增设计裁决。凡与 [`ARCHITECTURE.md`](ARCHITECTURE.md) 冲突，以 ARCHITECTURE 为准；实现中发现文档有缺口或自相矛盾，记入本文 §12，按 ARCHITECTURE §15 先改文档再改代码，不做"代码先行"。
 > **变更规则：** 本文随实现演进而改，不涉及契约字段，不需要升 `schema_version`。
@@ -23,21 +25,22 @@
 
 | 文档 | 覆盖 |
 |---|---|
-| [`impl/control-plane.md`](impl/control-plane.md) | 数据模型、状态机、调度与并发、编排流程、API 契约、SSE、认证授权、配置 |
-| [`impl/execution.md`](impl/execution.md) | Job 渲染、挂载、生命周期观测、超时取消、清理、日志采集、产物校验、Genet 适配、Registry、Volcano 可见性 |
+| [`impl/control-plane.md`](impl/control-plane.md) | 数据模型、状态机、调度与并发、编排流程（管道推进 / exports 收割 / clean finally）、API 契约、SSE、认证授权、配置 |
+| [`impl/execution.md`](impl/execution.md) | Job 渲染、挂载、生命周期观测、超时取消、清理、日志采集、产物校验、内置 deploy/clean runner 与 Genet 交互契约（deploy-state.json）、Registry、Volcano 可见性 |
+| [`impl/agent-integration.md`](impl/agent-integration.md) | `argus` CLI 与 MCP Server（P1）：子命令、工具表、SSE 等待、`next_action`、泄漏重放入口 |
 | [`impl/web-and-delivery.md`](impl/web-and-delivery.md) | Web UI 落地、样式复用、构建集成、镜像与 CI、Helm、可观测性、测试策略、环境与灰度、P1 扩展点 |
 | [`views/`](views/) | **4+1 设计视图**：用例 / 逻辑（状态机与接口）/ 数据表 / 进程时序 / 开发视图 / 部署视图 / API 契约（开发基线） |
 
 ### 1.3 本文不含
 
 - 需求论证、用户画像、排期与人力（ARCHITECTURE §0.2 已排除）。
-- Tester 内部如何调 AISBench / EvalScope（§5.2）。
+- Runner 内部如何调 AISBench / EvalScope（§5.2）。
 - Genet 内部如何渲染 Helm（§9.1）。
 - AISBench / EvalScope 等工具自身的能力边界。
 
 ### 1.4 编号约定
 
-`§x.y` = ARCHITECTURE 章节（附录 E 的 `D-01…D-29` 是**设计裁决编号**）；`I-x` = 本文；`C-x` / `E-x` / `W-x` / `D-x` = 三份分册的章节（分册的 `D-x` 是"交付"章节，与附录 E 的 `D-29` 不同源，引用时会写全文档名）；`K-x` = 本文 §11 的待拍板决策；`G-x` = 本文 §12 的文档缺口。
+`§x.y` = ARCHITECTURE 章节（附录 E 的 `D-01…D-73` 是**设计裁决编号**，其中 D-66～D-73 为 v2 新增）；`I-x` = 本文；`C-x` / `E-x` / `W-x` / `D-x` = 分册的章节（分册的 `D-x` 是"交付"章节，与附录 E 的 `D-x` 不同源，引用时会写全文档名）；`K-x` = 本文 §11 的待拍板决策；`G-x` = 本文 §12 的文档缺口。
 
 ---
 
@@ -61,8 +64,10 @@
                                      ▼                     ▼
                               ┌─────────────┐      ┌──────────────┐
                               │ K8s Job     │      │ deploy Pods  │
-                              │ (Tester)    │      │ (Genet 部署) │
-                              └──────┬──────┘      └──────┬───────┘
+                              │ (runner)    │      │ (Genet 渲染， │
+                              └──────┬──────┘      │  经内置 deploy│
+                                     │ subPath 挂载  │  runner 拉起)│
+                                     ▼             └──────┬───────┘
                                      │ subPath 挂载          │
                                      ▼                     ▼
                               ┌──────────────────────────────────┐
@@ -70,23 +75,32 @@
                               └──────────────────────────────────┘
 ```
 
-一次 Run 的主干（详见 C-5）：
+一次 Task 的主干（详见 C-5）：
 
 ```text
-提交 → 校验 → SUBMITTED → QUEUED
-   → [有 deploy] DEPLOYING（Genet 排队/部署，最长 72h 可配）→ 拿权威 Endpoint
-   → TESTING：pre_check（平台注入）通过后，其余 Task 一起入池（非独占可并行，独占排队）
-        每个 Task：QUEUED（端点槽位）→ PREPARING（创建 Job）→ RUNNING（Pod）
-                  → 终态（校验 result.json / 收集日志 / 写 Task report）
-   → CLEANUP（按 cleanup.policy 卸载服务、收尾日志）
-   → 终态 SUCCEEDED / COMPLETED_WITH_ERRORS / SERVICE_UNAVAILABLE / FAILED
+提交 → 校验（deploy XOR service、exports/consumes 闭合、input 结构校验）
+   → SUBMITTED → QUEUED → RUNNING（平台无独立 DEPLOYING / CLEANUP 阶段，D-70）
+   → RUNNING 内部 = runner 管道严格串行、按序推进：
+        [service-deploy?]（内置，调 Genet 拉起；排队/部署经 deploy-state.json 呈现，窗口最长 72h 可配）
+        → [pre_check?]（precheck: auto 注入的第一个测试类 runner，探活过门）
+        → [test…]（用户 runner，逐个执行）
+        → [service-clean?]（内置，finally 语义：成功/失败/取消/超时全路径执行）
+     每个 runner：QUEUED（仅外接模式端点槽位 / 全局 permit）→ PREPARING（创建 Job）
+                 → RUNNING（Pod）→ 终态（产物三选一校验（D-74）、收割 exports.env、写 runner report）
+   → Task 终态 succeeded / failed（含 v1 COMPLETED_WITH_ERRORS 语义）/ service_unavailable / canceled
 ```
+
+三条贯穿全局的约束，后面每个模块都受它约束：
+
+1. **状态只能经状态机写**：只有 `store.Transition*` 能改状态，且与业务写在同一事务（§12.5 No Hidden State）；`FAILED` 是 runner 终态，没有 runner 级重试回路（D-69），重试 = 整 Task 新 attempt 全量重跑（§7.8）。
+2. **产物不搬运**：容器 `/workspace/output` 直接是最终存储路径 `<storage-root>/<task_id>/attempts/<n>/runners/<seq>/`（§6.8），平台只校验、收割 exports 与索引。
+3. **平台不做判断**：不解析输入语义、不聚合指标、不判定达标、不解释 exports 键含义（§13.1）；与 Genet 的交互全部由内置 deploy/clean runner 执行，平台只读 `deploy-state.json` 与 exports（D-70）。
 
 三条贯穿全局的约束，后面每个模块都受它约束：
 
 1. **状态只能经状态机写**：只有 `store.Transition*` 能改状态，且与业务写在同一事务（§12.5 No Hidden State）。
 2. **产物不搬运**：容器 `/workspace/output` 直接是最终存储路径（§6.8），平台只校验与索引。
-3. **平台不做判断**：不校验 Tester 参数、不聚合指标、不判定达标（§13.1）。
+3. **平台不做判断**：不校验 Runner 参数、不聚合指标、不判定达标（§13.1）。
 
 ---
 
@@ -101,7 +115,7 @@
 | 契约 | **OpenAPI 3.1 spec-first**，`oapi-codegen` 生成 server 接口与类型 | 与 "Contract Driven"、API First 一致；错误码与附录 D 同源 |
 | 存储 | **PostgreSQL 16**，`pgx/v5` + `sqlc` + `golang-migrate` | §12.5 已裁决；显式 SQL 便于控制事务与锁 |
 | K8s | `client-go`（typed + dynamic） | Job/Pod/Lease 用 typed；Volcano CRD 用 dynamic |
-| 日志 | `log/slog`（JSON） | 无额外依赖；字段含 run/task/attempt |
+| 日志 | `log/slog`（JSON） | 无额外依赖；字段含 task_id / attempt_no / runner_seq |
 | 指标 | `prometheus/client_golang` | §12.6 要求 `/metrics` |
 | 认证 | `coreos/go-oidc` + 服务令牌（JWT/JWKS） | §12.1 复用统一身份源 |
 | 前端 | **React 19 + TypeScript + Vite 7 + TanStack Router + TanStack Query** | SPA 直连 REST（§11.4）；路由与数据缓存清晰 |
@@ -119,19 +133,19 @@
 | 契约生成 | OpenAPI 双向生成成熟 | 同样成熟 | 平 |
 | 团队栈 | 若团队以 Python 为主，学习成本存在 | 若团队已有测试工具链是 Python，复用便利 | **唯一需要拍板的点（§11 K-1）** |
 
-**结论：** 控制面用 Go；Tester 继续各自选语言，两者不共享运行时。若团队明确要求 Python，替换成本集中在 `store/executor/informer`，数据模型、API、契约、状态机设计全部不变。
+**结论：** 控制面用 Go；Runner 继续各自选语言，两者不共享运行时。若团队明确要求 Python，替换成本集中在 `store/executor/informer`，数据模型、API、契约、状态机设计全部不变。
 
 ### 3.3 明确不引入的东西
 
 | 不引入 | 理由 |
 |---|---|
-| Redis / Kafka / 消息队列 | 状态必须落库（§12.5）；任务量级（每日百级 Run）用 DB 队列足够；引入即第二个状态源与新的运维面 |
+| Redis / Kafka / 消息队列 | 状态必须落库（§12.5）；任务量级（每日百级 Task）用 DB 队列足够；引入即第二个状态源与新的运维面 |
 | 独立 BFF / 后端聚合层 | §11.4 明确禁止；UI 直连 REST |
 | sidecar 采集日志 | 平台无权改 Genet 的 Deployment（§8.6）；且 sidecar 随 Pod 消失，正是要避免的 |
 | 通用 ORM | 状态机的 CAS、行锁、`SKIP LOCKED` 需要显式 SQL；`sqlc` 生成静态查询，类型安全且可读 |
 | K8s Operator / CRD 作为权威状态 | 会让状态出现两个权威源：CRD 与 PG。P0 用普通 Job + 内部状态机，CRD 只读 |
 | 自建 Prometheus / Loki | §6.9、§8.6、§12.6 均明确不新增监控组件；指标转发给既有系统是另一件事 |
-| 运行时上传 Tester / 运行时 build | §5.6、§6.2、§6.4 明确禁止；只认 CI 产出的镜像 |
+| 运行时上传 Runner / 运行时 build | §5.6、§6.2、§6.4 明确禁止；只认 CI 产出的镜像 |
 
 ### 3.4 选型风险
 
@@ -140,7 +154,7 @@
 | Go 团队不熟 | 交付变慢 | M0 先钉骨架与接口；复杂点集中在 executor，可单独结对 |
 | 前端自研组件工作量 | UI 比预期慢 | 用 shadcn/ui 现成组件 + Tailwind 主题映射原型色板；只对日志/链路图这类专用视图自研 |
 | OpenAPI 生成产物臃肿 | 编译与审查成本 | 按 tag 分文件生成；生成物不进 code review |
-| PG 作为队列的争用 | 大 Run 抢锁 | 短事务 + `SKIP LOCKED`；并发由端点槽位与全局 permit 限流；压测在 M6 |
+| PG 作为队列的争用 | 大 Task 抢锁 | 短事务 + `SKIP LOCKED`；并发由端点槽位与全局 permit 限流；压测在 M6 |
 
 ---
 
@@ -152,9 +166,9 @@
 |---|---|---|
 | `api` | REST、SSE、鉴权、校验、读投影 | 无状态，可水平扩 |
 | `controller` | 调度、编排、状态机推进、对账、报告生成、日志文件写入 | 单实例（Lease 选主） |
-| `collector` | Tester 与 Deploy Pod 的日志跟随 | 可多副本：全局 Lease 选主 + 每个 Job 一个 Lease 分片（E-7.3） |
+| `collector` | Runner 与 Deploy Pod 的日志跟随 | 可多副本：全局 Lease 选主 + 每个 Job 一个 Lease 分片（E-7.3） |
 
-启动：`testplaned --role=api|controller|collector|all`。P0 默认 `all`（单 Pod 跑三种角色），部署时可用同一镜像拆成三个 Deployment 独立扩缩。角色拆分不需要改代码，只改启动参数与副本数。
+启动：`argusd --role=api|controller|collector|all`。P0 默认 `all`（单 Pod 跑三种角色），部署时可用同一镜像拆成三个 Deployment 独立扩缩。角色拆分不需要改代码，只改启动参数与副本数。
 
 **P0 部署形态：** 1 副本 `all`（或 controller+collector 1 副本 + api 2 副本）。HA 不追求多主：controller 与 collector 通过 K8s `Lease` 选主，租约 15s、续约 5s；leader 失效后新 leader 从 DB 重建状态并进入对账（C-3.5）。
 
@@ -163,7 +177,7 @@
 ```text
 启动：加载配置 → 校验（DB/存储可写/K8s 可达）→ 迁移版本检查
      → controller：Lease 抢主 → 加载注册表（扫描由 admin 触发，启动不自动改库）→ 启动 informer → 启动调度/对账/超时循环
-     → collector：Lease 抢主 → 恢复未完成 Run 的采集任务
+     → collector：Lease 抢主 → 恢复未完成 Task 的采集任务
      → api：监听（readyz = DB ping + 存储可写 + 迁移版本匹配；**不含 K8s API**——K8s 抖动不应摘掉仍能读历史报告的 api，§12.5 状态与产物分离）
 关闭：摘流（/readyz 先失败）→ 停止接受新任务 → 等在途事务结束（≤10s）
      → 关闭事件写入器 → 退出。运行中的 Job 不删（由对账接管）
@@ -173,17 +187,17 @@
 
 | 故障 | 表现 | 平台行为 |
 |---|---|---|
-| controller 崩溃 | 无推进 | Lease 过期后新 leader 接管；RUNNING/PREPARING 的 Attempt 全部进对账（C-3.5），不假定失败 |
+| controller 崩溃 | 无推进 | Lease 过期后新 leader 接管；RUNNING/PREPARING 的 runner 执行记录全部进对账（C-3.5），不假定失败 |
 | api 崩溃 | 请求 5xx/探针摘除 | 多副本自动摘流；SSE 客户端自动重连并按 `Last-Event-ID` 回放 |
 | DB 不可用 | 读写失败 | `/readyz` 失败；controller 暂停推进；Job 继续跑，恢复后按状态对账 |
-| K8s API 不可达 | 无法建/查 Job | Task 停在 PREPARING 或按 `retry_on` 判 `EXECUTOR_UNAVAILABLE`；不误判 Tester 失败 |
-| NFS 不可写 | 产物写不进 | 创建 Attempt 前做可写探测；失败即 `EXECUTOR_UNAVAILABLE`（可重试）；Profile 挂载缺失才是 `MOUNT_UNAVAILABLE`（不可重试，E-3.4） |
-| Genet 不可用 | 部署失败 | 归 `FAILED`（平台侧），与 `SERVICE_UNAVAILABLE`（受理但未就绪）严格区分 |
+| K8s API 不可达 | 无法建/查 Job | 当前 runner 停在 PREPARING，记 `EXECUTOR_UNAVAILABLE`（可重试错误，用于 §9.3 重放与告警分级）；不误判 runner 失败 |
+| NFS 不可写 | 产物写不进 | 创建 attempt 输入落档前做可写探测；失败即 `EXECUTOR_UNAVAILABLE`；Profile 挂载缺失才是 `MOUNT_UNAVAILABLE`（不可重试，E-3.4） |
+| Genet 不可用 | 部署失败 | 由 service-deploy runner 在其内部判定：Genet 调用失败 → `DEPLOY_FAILED`（Task `failed`）；受理但未就绪/超窗 → `DEPLOY_BLOCKED`（`service_unavailable`）。平台不直连 Genet，只读 deploy-state.json（D-70） |
 | collector 崩溃 | 日志断档 | 恢复后写 `log gap` 标记，允许丢日志、不允许伪造连续（§8.6） |
 
 ### 4.4 部署形态
 
-Helm chart（`deploy/helm/testplane/`）：Deployment + Service + Ingress + ConfigMap/Secret + ServiceAccount/RBAC + PVC（RWX NFS）+ NetworkPolicy + PDB。PostgreSQL 作为外部依赖只给连接参数，chart 不内置数据库（K-9）。资源清单见 web-and-delivery §9。
+Helm chart（`deploy/helm/argus/`）：Deployment + Service + Ingress + ConfigMap/Secret + ServiceAccount/RBAC + PVC（RWX NFS）+ NetworkPolicy + PDB。PostgreSQL 作为外部依赖只给连接参数，chart 不内置数据库（K-9）。资源清单见 web-and-delivery §9。
 
 ---
 
@@ -191,23 +205,23 @@ Helm chart（`deploy/helm/testplane/`）：Deployment + Service + Ingress + Conf
 
 ```text
 server/
-├── cmd/testplaned/            # 唯一入口：角色由 --role 决定
-├── cmd/tpctl/                 # P1：CLI（P0 不建）
+├── cmd/argusd/            # 唯一入口：角色由 --role 决定
+├── cmd/argus/                 # P1：CLI（P0 不建）
 ├── api/openapi.yaml           # 契约源头（OpenAPI 3.1）
 ├── internal/
 │   ├── api/                   # 路由、中间件、handler、SSE、错误映射
 │   ├── domain/                # 纯类型与规则：状态枚举、转移表、校验规则（零 IO）
 │   ├── store/                 # pgx + sqlc 生成代码、事务与锁、事件写入
-│   ├── orchestrator/          # 提交校验、precheck 注入、Run 推进、abort、cleanup
-│   ├── scheduler/             # 候选选取、端点槽位、全局并发、超时 watchdog
+│   ├── orchestrator/          # 提交校验、管道组装（deploy/precheck/clean 注入）、Task 推进、exports 收割、abort、clean finally
+│   ├── scheduler/             # 待执行 runner 选取、外接模式端点槽位、全局并发、超时 watchdog
 │   ├── executor/k8s/          # Job 渲染、informer、对账、取消与清理
 │   ├── executor/storage/      # 目录预创建、subPath、配额统计
-│   ├── executor/artifacts/    # result.json 校验、产物候选清单
-│   ├── registry/              # testers/ 扫描、Schema 校验、版本不可覆盖
-│   ├── genet/                 # Genet client + fake（开发与测试用）
+│   ├── executor/artifacts/    # 产物契约校验（D-74 三选一）、产物候选清单
+│   ├── registry/              # runners/ 扫描、Schema 校验、版本不可覆盖
+│   ├── deploystate/           # deploy-state.json 解析与归档（v2 平台不再直连 Genet；genet-local 假后端供联调）
 │   ├── logcollect/            # Pod 日志跟随、分段、重启/gap 标记
 │   ├── schedview/             # Volcano / Node 只读视图（waiting_reason 输入）
-│   ├── report/                # Task/Run report、report.md 模板
+│   ├── report/                # Task / runner report、report.md 模板
 │   ├── events/                # state_events → events.jsonl / SSE 广播
 │   ├── auth/                  # OIDC、会话、RBAC、服务令牌
 │   ├── copy/                  # 用户可见中文文案（状态/错误码），前端字体子集采集源
@@ -215,7 +229,7 @@ server/
 │   ├── config/                # 配置结构与校验
 │   └── metrics/               # Prometheus collector
 ├── migrations/                # golang-migrate，只加不删
-└── schemas/                   # tester.schema.json / result.schema.json / manifest.schema.json
+└── schemas/                   # runner.schema.json / result.schema.json / manifest.schema.json
 ```
 
 **依赖方向（单向，禁止反向）：**
@@ -223,10 +237,10 @@ server/
 ```text
 api → orchestrator / scheduler → domain / store
                         ↘ executor / genet / registry / report / events / logcollect
-domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks 状态（只回写 attempts 的物理事实，由 controller 在事务内推进状态机）。
+domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks 状态（只回写 task_runners 的物理事实，由 controller 在事务内推进状态机）。
 ```
 
-**判断归属的口诀：** 定义"测试怎么做"→ Tester；定义"在哪跑、怎么起停"→ executor；定义"谁在什么情况下变成什么"→ orchestrator + store；定义"能看到什么"→ api + web。
+**判断归属的口诀：** 定义"测试怎么做"→ Runner；定义"在哪跑、怎么起停"→ executor；定义"谁在什么情况下变成什么"→ orchestrator + store；定义"能看到什么"→ api + web。
 
 ---
 
@@ -235,16 +249,16 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 模块 | 关键实现点 | 文档 |
 |---|---|---|
 | 状态机 | 8 态转移表、CAS、事件、重启恢复 | C-3 |
-| 调度 | 端点槽位互斥、全局并发、Pre-Check 门控与并行、`waiting_reason` | C-4 |
-| 编排 | 提交校验、precheck 注入、abort_run、cleanup | C-5 |
-| 取消/超时/重试 | API 到 Job 删除的闭环、竞态 | C-6、E-5 |
-| 报告与产物 | result.json 校验、report 生成、下载与日志读取 | C-7、E-8 |
-| API | 端点表、词法切分、公共参数注入、错误码 | C-8 |
+| 调度 | 外接模式端点槽位互斥、全局并发、`waiting_reason` | C-4 |
+| 编排 | 提交校验、管道组装（deploy/precheck/clean 注入）、串行推进、exports 收割、abort_task、clean finally | C-5 |
+| 取消/超时/重试 | API 到 Job 删除的闭环、竞态、整 Task 重试（新 attempt） | C-6、E-5 |
+| 报告与产物 | 产物三选一校验（D-74）、exports 收割、report 生成、下载与日志读取 | C-7、E-8 |
+| API | 端点表（/tasks、/runners）、input 结构校验、exports 注入、错误码 | C-8 |
 | SSE | 事件模型、回放、多副本广播 | C-9 |
 | 认证授权 | OIDC、RBAC、审计 | C-10 |
 | Executor | Job 渲染、informer、挂载、清理 | E-2~E-6 |
-| 日志采集 | Tester 与 Deploy 两类日志、重启与缺口 | E-7 |
-| Genet | 部署、状态、Endpoint、失败归类 | E-9 |
+| 日志采集 | runner 与部署 Pod 两类日志、重启与缺口 | E-7 |
+| Genet | 内置 deploy/clean runner 交互契约、deploy-state.json 读取与归档、失败归类 | E-9 |
 | Registry | 扫描、校验、不可覆盖、同步 | E-10 |
 | 队列可见性 | Volcano 只读、排队原因 | E-11 |
 | Web UI | 页面映射、SSE 合并、日志查看、提交页 | W-1~W-7 |
@@ -256,13 +270,14 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 
 | 数据 | 存放 | 权威性 | 备注 |
 |---|---|---|---|
-| Run / Task / Attempt / 状态事件 | PostgreSQL | 唯一权威 | 状态机单写者，事件 append-only |
-| Tester 注册信息 | PostgreSQL | 以库为准，来源是 `testers/` 目录 + admin 同步 | 版本不可覆盖（§5.7） |
+| Task / attempt / runner 执行记录 / 状态事件 | PostgreSQL | 唯一权威 | 状态机单写者，事件 append-only；执行记录由 `(task_id, attempt_no, seq)` 定位（D-68） |
+| Runner 注册信息 | PostgreSQL | 以库为准，来源是 `runners/` 目录 + admin 同步 | 版本不可覆盖（§5.7） |
 | Execution Profile / Cluster | PostgreSQL | admin 维护 | 集群凭据只存 Secret 引用 |
 | 报告与产物 | NFS `<storage-root>/` | 文件为准，DB 只存索引 | 容器直写最终路径（§6.8） |
-| `events.jsonl` | NFS，Run 目录 | **派生**：库为准，文件可重建 | 单个 writer 追加 |
+| `events.jsonl` | NFS，Task 目录 | **派生**：库为准，文件可重建 | 单个 writer 追加 |
 | Secret 明文 | 只在 Secret Store | 平台只存引用 | **平台不读明文**（K-5：日志不脱敏，无需反查替换） |
-| 指标（result.json metrics） | 文件 | P0 不落库 | P1 若需跨 Run 查询再加索引表（§13） |
+| exports 收割落档 | PostgreSQL + NFS | 库 + 文件（`attempts/<n>/exports/`） | 每次注入可还原（§5.12） |
+| 指标（result.json metrics） | 文件 | P0 不落库 | P1 若需跨 Task 查询再加索引表（§13） |
 
 **一致性边界：** 一切都以 PG 事务为原子单位。事务提交后允许"文件还没写完"（report、jsonl），由 writer 幂等补齐并写 `state_events` 标记；反之不允许"文件有了、库里没有"。
 
@@ -275,11 +290,11 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | 里程碑 | 内容 | 演示 / DoD | 对应 §14.1 |
 |---|---|---|---|
 | **M0 骨架与契约** | 仓库布局、`api/openapi.yaml` 骨架、迁移、配置、`/healthz`、`/readyz`、CI（lint/test/build） | `make dev` 起服务 + 迁移成功；OpenAPI 可 lint | API 契约（部分） |
-| **M1 提交与状态机** | Manifest 校验、Run/Task 落库、状态机与事件、SSE、Registry 同步、Tester 列表 | 提交 `service` 模式 Run；非法 Manifest 返回字段级错误；Task 停在 QUEUED（尚无 Executor）；SSE 能收到事件 | Run 提交、Task 状态机、Registry、API |
-| **M2 Executor** | Job 渲染、informer、Attempt 生命周期、产物校验、超时与取消 | kind 里跑 `endpoint-probe` 对 mock OpenAI 服务：成功/失败/超时/取消四态可复现；删除 Job 后 Pod 消失 | K8s Executor、Tester 契约、产物持久化、超时取消 |
-| **M3 Genet 与编排闭环** | Deploy/状态/Endpoint、precheck 自动注入、abort_run、cleanup、Run 终态、Task/Run report | mock Genet 全链路：`SUCCEEDED` / `COMPLETED_WITH_ERRORS` / `SERVICE_UNAVAILABLE` / `FAILED` 四终态各一例 | Genet、Pre-Check、失败策略、报告、失败隔离 |
-| **M4 日志** | Tester stdout/stderr 采集、Deploy 多 Pod 采集、重启/gap 标记、200MB 分段、pods.json | 人为重启 Pod 与服务，日志中可见重启标记与分段；Run 结束后日志仍可读 | 产物与日志、Deploy 日志 |
-| **M5 Web UI** | 全部 P0 页面：列表、详情（执行链路 + 事件）、报告、日志、提交（两形态）、Tester 目录、环境、取消/重试 | 对照 `design/prototype/` 逐页走查；所有操作均有对应 API（无 UI 独有逻辑） | Web UI、API First |
+| **M1 提交与状态机** | Manifest 校验（deploy XOR service、exports/consumes、input 结构校验）、Task/attempt/task_runners 落库、状态机与事件、SSE、Registry 同步、Runner 目录 | 提交外接模式（`service`）Task；非法 Manifest 返回字段级错误（带行号）；runner 停在 PENDING（尚无 Executor）；SSE 能收到事件 | Task 提交、runner 状态机、Registry、API |
+| **M2 Executor** | Job Spec 2.0 渲染（args 恒空、input/output 挂载、AG_* env）、informer、runner 执行记录生命周期、产物校验、exports 收割、超时与取消 | kind 里跑 `endpoint-probe` 对 mock OpenAI 服务：成功/失败/超时/取消四态可复现；删除 Job 后 Pod 消失 | K8s Executor、Runner 契约、exports、产物持久化、超时取消 |
+| **M3 内置 runner 与编排闭环** | service-deploy / service-clean 内置 runner（genet-local 联调）、precheck 自动注入、串行管道推进、abort_task、clean finally、整 Task 重试（新 attempt）、Task 终态、Task/runner report | genet-local 全链路：`succeeded` / `failed` / `service_unavailable` / `canceled` 四终态各一例 + 泄漏重放 `argus clean --task` 各一例 | 部署模式、Pre-Check、失败策略、报告、失败隔离、泄漏重放 |
+| **M4 日志** | Runner stdout/stderr 采集、Deploy 多 Pod 采集、重启/gap 标记、200MB 分段、pods.json | 人为重启 Pod 与服务，日志中可见重启标记与分段；Task 结束后日志仍可读 | 产物与日志、部署 Pod 日志 |
+| **M5 Web UI** | 全部 P0 页面：列表、详情（执行链路 + 事件）、报告、日志、提交（两形态）、Runner 目录、环境、取消/重试 | 对照 `design/prototype/` 逐页走查；所有操作均有对应 API（无 UI 独有逻辑） | Web UI、API First |
 | **M6 加固与验收** | 对账与 HA 选主、配额、审计、指标、压测、故障注入、文档收尾 | §14.1 17 项逐条给出证据（§9）；压测 P95 < 300ms；杀 controller 后自动恢复 | 全部 |
 
 **排期建议：** M0–M1 约 2 周，M2–M3 约 3 周，M4–M5 约 3 周，M6 约 1.5 周（按 2–3 人估算，仅用于讨论，不是承诺）。
@@ -290,21 +305,21 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 
 | # | 验收项 | 证据形态 | 里程碑 |
 |---|---|---|---|
-| 1 | Run 提交与完整状态链 | e2e 用例 `TestRunLifecycle_*`（成功 / 部分失败 / 服务不可用 / 取消） | M3 |
-| 2 | Task 独立提交 | e2e：`POST /tasks`（`service` 模式）产物结构与 Run 内一致 | M3 |
-| 3 | Genet 适配三项 | mock Genet 单测 + 契约测试；`blocked` 与调用失败分支各一例 | M3 |
-| 4 | Pre-Check 注入与阻断 | e2e：`precheck: auto` 注入 Task#1；可重试失败 → 其余 SKIPPED + 终态 `SERVICE_UNAVAILABLE`；不可重试（401）→ `COMPLETED_WITH_ERRORS` | M3 |
-| 5 | Registry 发现与校验 | 单测：非法 `tester.yaml` 字段级报错；`pre_check` 未声明 `abort_run` 被拒 | M1 |
-| 6 | Tester 契约（入口/argv/输出/result.json） | golden 用例 + 真实镜像跑通 | M2 |
-| 7 | Tester 独立运行 | 在无平台机器上 `docker run <image> --url=...` 产出合法 `result.json` | M2 |
-| 8 | K8s Executor（超时/取消） | kind e2e：超时判 `TASK_TIMEOUT`；取消 30s 内 Job/Pod 消失 | M2 |
+| 1 | Task 提交与完整状态链 | e2e 用例 `TestTaskLifecycle_*`（成功 / 部分失败 / 服务不可用 / 取消） | M3 |
+| 2 | 外接模式提交 | e2e：`POST /tasks`（`service` 块）静态导出注入全部 runner，产物结构与部署模式一致 | M3 |
+| 3 | 内置 deploy/clean runner 三项 | genet-local 单测 + 契约测试；deploy-state.json 归类 `DEPLOY_BLOCKED` 与 `DEPLOY_FAILED` 分支各一例 | M3 |
+| 4 | Pre-Check 注入与阻断 | e2e：`precheck: auto` 注入管道第一个测试类 runner；可重试失败 → 后续 SKIPPED（传播到 clean 为止）+ 终态 `service_unavailable`；不可重试（401）→ `failed` | M3 |
+| 5 | Registry 发现与校验 | 单测：非法 `runner.yaml` 字段级报错；`pre_check` 未声明 `abort_task` 被拒 | M1 |
+| 6 | Runner 契约（entry/输入文件/AG_* env/输出（D-74 三选一）/exports.env） | golden 用例 + 真实镜像跑通 | M2 |
+| 7 | Runner 独立运行 | 在无平台机器上 `docker run <image> <entry> --params-file ... --url=...` 产出三选一产物至少其一（D-74） | M2 |
+| 8 | K8s Executor（超时/取消） | kind e2e：超时判 `RUNNER_TIMEOUT`；取消 30s 内 Job/Pod 消失 | M2 |
 | 9 | 状态机与重启恢复 | 单测转移表全覆盖；e2e 杀 controller 后状态最终一致 | M2/M6 |
-| 10 | Attempt 与重试 | 单测 + e2e：`retry_on` 命中才重试，历史 Attempt 不被覆盖 | M2 |
-| 11 | 失败策略 | e2e：`abort_run` 在**多个 Task 并行**时终止其余未完成 Task（`RUNNING→CANCELED`、`PENDING/QUEUED→SKIPPED`） | M3 |
-| 12 | Run 编排全链路 | M3 的四终态用例 | M3 |
+| 10 | attempt 模型与整 Task 重试 | 单测 + e2e：`POST /tasks/{id}/retry` 产生新 attempt 全量重跑含 fresh deploy；超出上限 `ATTEMPT_EXHAUSTED`；历史 attempt 不被覆盖；无 runner 级重试回路 | M3 |
+| 11 | 失败策略 | e2e：`abort_task` 终止本 attempt 内未执行 runner（`PENDING/QUEUED→SKIPPED`，传播到 clean 为止）并执行 service-clean；`continue` 失败后后续 runner 继续跑 | M3 |
+| 12 | Task 编排全链路 | M3 的四终态用例 | M3 |
 | 13 | 报告结构 | JSON Schema 校验 report / result；`SKIPPED` 带 reason、`FAILED` 带错误码 | M3 |
-| 14 | 产物持久化 | 删除 Pod 后仍可下载 `result.json` 与 `raw/` | M2 |
-| 15 | 失败隔离 | 两 Task 的 Run，一个失败一个成功，终态 `COMPLETED_WITH_ERRORS` | M3 |
+| 14 | 产物持久化 | 删除 Pod 后仍可下载 `result.json`/`result.html`/`result.csv` 与 `raw/` | M2 |
+| 15 | 失败隔离 | 同一 Task 内一个 `continue` runner 失败、其余成功，终态 `failed`（v1 COMPLETED_WITH_ERRORS 语义并入） | M3 |
 | 16 | Web UI | Playwright 冒烟：提交→详情→日志→取消；每操作对应 API | M5 |
 | 17 | API 契约与错误码 | OpenAPI lint + 生成客户端编译 + 附录 D 全码有测试 | M1/M6 |
 
@@ -314,10 +329,10 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 
 | 风险 | 概率/影响 | 处置 |
 |---|---|---|
-| **Genet 契约未定**（请求/响应/状态枚举/幂等/Pod 选择器） | 高/高 | 先出 adapter 接口 + Fake Genet，把契约谈判作为 M3 前置；不猜接口 |
+| **Genet 契约未定**（请求/响应/状态枚举/幂等/Pod 选择器） | 高/高 | genet-local 假后端 + deploy-state.json 契约先行，把谈判作为 service-deploy runner 实现前置；不猜接口 |
 | NFS UID 与目录预创建冲突（容器 UID 10001 vs NFS root squash） | 中/高 | M0 在真实环境验证；chart 提供 `runAsUser`/`fsGroup` 配置；文档化准入条件 |
 | 日志量超预期（性能测试 Pod 日志大） | 中/中 | 200MB 分段 + 配额；采集背压时丢日志并标记 gap，绝不阻塞状态推进 |
-| 单 controller 成为吞吐瓶颈 | 低/中 | 状态推进是毫秒级事务；M6 压测 20 并发 Task；必要时按 Run 分片（预留字段） |
+| 单 controller 成为吞吐瓶颈 | 低/中 | 状态推进是毫秒级事务；M6 压测 20 并发 Task；必要时按 Task 分片（预留字段） |
 | Web UI 范围蔓延（做成了 BI） | 中/中 | 严格按 §11.3 与非目标；看板 P1；不做图表库 |
 | 文档与实现漂移 | 中/中 | PR 模板要求对应 §14.1 验收项；§12 的缺口先改文档 |
 | OpenAPI 与实现不一致 | 中/低 | 生成类型 + 契约测试（web-and-delivery §13） |
@@ -327,53 +342,53 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 
 ## 11. 已拍板决策（2026-11-04）
 
-12 项实现层选择已由团队拍板。下表只记结论与落地影响；备选方案与代价见 git 历史。
+12 项实现层选择已由团队拍板（2026-11-04，v1 时期）。下表只记结论与落地影响；备选方案与代价见 git 历史。**v2.0（D-66～D-73）修订说明：K-12 已被 D-69 取代（Task 内 runner 严格串行）；K-3/K-11 的"Tester/Run"按新术语读作"Runner/Task"；K-6 的展示载体改为 deploy-state.json（不再是平台 DEPLOYING 阶段）。**
 
 | ID | 事项 | 决定 | 落地影响 |
 |---|---|---|---|
 | **K-1** | 控制面语言 | **Go** | 按本文 §3/§5 落地；Python 方案不再维护 |
 | **K-2** | 前端样式 | **Tailwind CSS + shadcn/ui**；原型只作风格参考 | W 分册改写：组件树加 `components/ui`，主题变量映射原型色板；不再"原样引入原型 CSS" |
-| **K-3** | Tester 发布 | **镜像内构建，不做运行时更新** | 删 `POST /admin/testers/sync`；启动时扫描镜像内 `/app/testers` 并校验；新 Tester = 新平台镜像，CI 先于运行时拦住坏 `tester.yaml` |
+| **K-3** | Runner 发布 | **镜像内构建，不做运行时更新** | 删 `POST /admin/runners/sync`；启动时扫描镜像内 `/app/runners` 并校验；新 Runner = 新平台镜像，CI 先于运行时拦住坏 `runner.yaml` |
 | **K-4** | 多集群凭据 | 同意：kubeconfig 由 Secret 挂载，DB 只存文件名/连通性 | 维持 C-2.3/E-10 的落法 |
 | **K-5** | 日志脱敏 | **不脱敏，日志明文** | 移除 collector 读 Secret、RBAC `secrets get`、`redactions_total`；与 §12.4 冲突，见 G-9 |
-| **K-6** | Deploy 超时 | **默认 72h（可配）**，必须支持 Genet 排队 | `TESTPLANE_DEPLOY_TIMEOUT=72h`；新增 `deploy.queued` 状态/排队时长展示与取消语义；见 G-4 |
+| **K-6** | Deploy 超时 | **默认 72h（可配）**，必须支持 Genet 排队 | `AG_DEPLOY_TIMEOUT=72h`（v2：窗口由 service-deploy runner 的执行时限承载，排队经 deploy-state.json 呈现）；见 G-4 |
 | **K-7** | P0 副本数 | 单副本起步 | 维持 |
 | **K-8** | 指标存储 | P0 不落库；**P1 可选 MongoDB** | 加 P1 扩展行；P0 仍读 `result.json` |
 | **K-9** | PostgreSQL | 外部实例 | 维持 |
-| **K-10** | `result.json` | **字段不限制，Tester 自维护**；技术上限只防 OOM | 允许未知字段；体积上限改为可配的 `TESTPLANE_RESULT_MAX_BYTES`（默认 100 MiB），超限仍 `RESULT_INVALID`；P1 可把指标写 MongoDB |
-| **K-11** | Run 名称 | 不唯一；**对外一律用 id** | 维持；API/UI/报告引用全用 id |
-| **K-12** | Run 内并行 | **平台提供能力，是否并行由 Tester 维护者决定**（`endpoint_exclusive` 即开关） | 调度器不做 Run 级串行/并行开关；独占声明决定排队，共享声明允许并行 |
+| **K-10** | `result.json` | **字段不限制，Runner 自维护**；技术上限只防 OOM（v2 追注：D-74 后 result.json 与 html/csv 三选一，本上限仅约束 result.json） | 允许未知字段；体积上限改为可配的 `AG_RESULT_MAX_BYTES`（默认 100 MiB），超限仍 `RESULT_INVALID`；P1 可把指标写 MongoDB |
+| **K-11** | Task 名称 | 不唯一；**对外一律用 id** | 维持；API/UI/报告引用全用 id |
+| **K-12** | ~~Run 内并行~~ | **（v2 已取代，见 D-69）** Task 内 runner 严格串行，线性管道取代门控+并发 | 调度器只在外接模式处理 `endpoint_exclusive` 端点槽位；本表保留作历史追溯 |
 
 ### 11.1 决策带来的验收变化
 
-- **Deploy 排队**（K-6）：Run 在 `DEPLOYING` 可能持续数小时到数天。P0 必须展示"排队中/部署中 + 已等待时长 + 可取消"（新增验收点，落 E-9/C-5.3）。
-- **日志明文**（K-5）：接受"凭据可能出现在日志"的风险；Tester 契约里"不得主动打印凭据"保留，但平台不再兜底替换。
-- **Tester 不动态更新**（K-3）：注册表只随平台镜像发布；`TESTPLANE_TESTERS_DIR` 只用于开发/灰度覆盖，不提供 API 触发同步。
+- **Deploy 排队**（K-6）：部署可能持续数小时到数天（v2 由 service-deploy runner 的 deploy-state.json 承载，平台无 DEPLOYING 阶段）。P0 必须展示"queued/accepted/deploying + 已等待时长 + 可取消"（落 E-9/C-5.3）。
+- **日志明文**（K-5）：接受"凭据可能出现在日志"的风险；Runner 契约里"不得主动打印凭据"保留，但平台不再兜底替换。
+- **Runner 不动态更新**（K-3）：注册表只随平台镜像发布；`AG_RUNNERS_DIR` 只用于开发/灰度覆盖，不提供 API 触发同步。
 
 ---
 
 ## 12. 实现中发现的文档缺口与不一致
 
-按 ARCHITECTURE §15，"认为文档有误，先改文档再改代码"。以下缺口已在 **ARCHITECTURE v0.3–v0.5** 回写一部分，保留本表作追溯与实现对照；标"待回写"的仍需下一版修订。
+按 ARCHITECTURE §15，"认为文档有误，先改文档再改代码"。以下缺口已在 **ARCHITECTURE v0.3–v0.5** 回写一部分，保留本表作追溯与实现对照；标"待回写"的仍需下一版修订。**v2.0 注：G-2 / G-3 / G-6 / G-11 / G-13 涉及的机制已被 D-66～D-73 重构（终态并入 `failed`、严格串行、argv→输入文件、`cleanup.policy` 取消），按 v2 不再适用，保留仅作历史追溯。**
 
 | ID | 位置 | 问题 | 实现默认 | 建议修订 |
 |---|---|---|---|---|
 | **G-1** | §7.1 图 vs §7.6 | 图中 `PENDING/QUEUED → CANCELED`，§7.6 正文写"标记 `SKIPPED`，reason: canceled" | 按正文：未开始的 Task 取消 = `SKIPPED(reason=canceled)`；`CANCELED` 只用于已拿到槽位/已启动的 | **已回写 v0.3**：图已删两条箭头 |
 | **G-2** | §7.5 | 只写了"pre_check 失败且错误可重试"归 `SERVICE_UNAVAILABLE`，未写不可重试（4xx/认证）时归哪类终态 | 严格按文义：可重试失败 → `SERVICE_UNAVAILABLE`；不可重试 → `COMPLETED_WITH_ERRORS`（失败 Task 带错误码与 `retryable`） | **已回写 v0.3**：§7.5 补不可重试归属 |
 | **G-3** | §7.4 / §6.7 | 未写明"Pre-Check 在前"与"非独占可并行"如何共存（谁先进、是否要串行） | **Pre-Check 门控 + 并行**：Pre-Check 通过后其余 Task 批量入池，不新增串行规则（K-12） | **已回写 v0.3**：§7.4 补顺序与并发说明 |
-| **G-4** | §9.1 / §10.1 | Deploy 没有超时、排队状态与取消语义的定义；实际 Genet 部署要排队（数小时到数天） | `TESTPLANE_DEPLOY_TIMEOUT` 默认 **72h**、Profile 可覆盖；Genet 返回 `queued` 时 Run 保持 `DEPLOYING` 并展示排队时长，可取消；调用失败不自动重试（避免重复部署） | **部分回写 v0.3**：§7.4/§9.1 已补排队、窗口与取消；Manifest 仍不加入 `deploy.timeout_seconds`（走平台配置） |
-| **G-5** | 附录 D | Pod 级失败（OOMKilled / Evicted / Unschedulable）没有专属错误码 | OOM/Evicted → `INTERNAL_ERROR`（`detail.k8s_reason` 保留原文）；**`Unschedulable` 不判失败**，保持 `pending` + `waiting_reason`，超时后按 `TASK_TIMEOUT` 收口（§6.9） | 视需要补 `EXECUTOR_POD_ERROR` / `CONTAINER_OOM_KILLED`；`RESOURCE_EXHAUSTED` 只用于提交/配额拒绝 |
+| **G-4** | §9.1 / §10.1 | Deploy 没有超时、排队状态与取消语义的定义；实际 Genet 部署要排队（数小时到数天） | `AG_DEPLOY_TIMEOUT` 默认 **72h**、Profile 可覆盖；Genet 返回 `queued` 时 Run 保持 `DEPLOYING` 并展示排队时长，可取消；调用失败不自动重试（避免重复部署） | **部分回写 v0.3**：§7.4/§9.1 已补排队、窗口与取消；Manifest 仍不加入 `deploy.timeout_seconds`（走平台配置） |
+| **G-5** | 附录 D | Pod 级失败（OOMKilled / Evicted / Unschedulable）没有专属错误码 | OOM/Evicted → `INTERNAL_ERROR`（`detail.k8s_reason` 保留原文）；**`Unschedulable` 不判失败**，保持 `pending` + `waiting_reason`，超时后按 `RUNNER_TIMEOUT` 收口（§6.9） | 视需要补 `EXECUTOR_POD_ERROR` / `CONTAINER_OOM_KILLED`；`RESOURCE_EXHAUSTED` 只用于提交/配额拒绝 |
 | **G-6** | §5.4.1 第 4 条 | "子串粗筛"会把 `--url_extra=` 误判为 `--url` | 按**词法切分后的 token 精确匹配**（`--url=` 前缀或独立 token `--url`），错误码不变 | 把"子串粗筛"改为"token 精确匹配" |
-| **G-7** | §12.7 | 单 Attempt 10 GiB 配额的执行方式未定义 | collector 每 60s `du` 扫描 + 超限即删 Job、判 `ARTIFACT_QUOTA_EXCEEDED` | 补充执行方式与判定时机 |
+| **G-7** | §12.7 | 单 attempt 10 GiB 配额的执行方式未定义 | collector 每 60s `du` 扫描 + 超限即删 Job、判 `ARTIFACT_QUOTA_EXCEEDED` | 补充执行方式与判定时机 |
 | **G-8** | §8.1 | `events.jsonl` 与库中事件的关系未定义 | 库为权威；`events.jsonl` 由单 writer 追加，重启后按 `seq` 幂等补齐 | 明确"派生文件、可重建" |
-| **G-9** | §12.4 | §12.4 要求"平台对已知 secret 值做脱敏替换"，但团队已拍板 **日志明文、不脱敏**（K-5） | 按 K-5：平台不读 Secret 做替换，日志原样落盘；Tester 契约里的"不得主动打印凭据"保留 | **已回写 v0.3**：§12.4 改为"平台不做日志脱敏、Tester 不得主动打印"；安全风险由团队显式接受 |
+| **G-9** | §12.4 | §12.4 要求"平台对已知 secret 值做脱敏替换"，但团队已拍板 **日志明文、不脱敏**（K-5） | 按 K-5：平台不读 Secret 做替换，日志原样落盘；Runner 契约里的"不得主动打印凭据"保留 | **已回写 v0.3**：§12.4 改为"平台不做日志脱敏、Runner 不得主动打印"；安全风险由团队显式接受 |
 | **G-10** | §6.5 | Profile 引用 `cluster`，但没有集群凭据的登记模型 | 新增 `clusters` 对象（api_server、kubeconfig 文件名、连通性状态），kubeconfig 由 Secret 挂载到 `CLUSTERS_DIR`（W-10），**不入库** | 属新增内部对象，不是契约字段，可在 ARCHITECTURE 补一段 |
 | **G-11** | §10.1 `precheck: auto` | "用注入的 url/model_name 生成 args"与"公共参数统一末尾注入"存在歧义 | auto 时 pre_check Task 的 `args` 为空，公共参数按 §5.4.1 注入 | 明确写"args 为空，公共参数照常注入" |
 | **G-12** | §8.4 | 状态字符串示例为小写，§7 全大写 | 库/API/报告统一**小写 token**（`pending`…），前端展示大写徽标 | **已回写 v0.3**：§7.1 加大写/小写约定 |
 | **G-13** | §8.6 vs §10.1 | §8.6 写"`cleanup.policy` 决定产物保留多久"，但 §10.1 的取值 `always/on_failure/never` 是**卸载语义**，无法表达"保留多久" | `cleanup.policy` 只管被测服务是否卸载；产物/日志保留由平台保留期配置（默认 30 天）统一决定 | **已回写 v0.3**：§8.6 改为"policy 只决定卸载" |
 | **G-14** | §11.4 | 只说"状态推送使用 SSE"，未定义事件类型与回放语义 | 事件类型与信封在 C-9 定义；SSE 支持 `Last-Event-ID` 回放，非日志通道 | 在 §11.4 补一句事件契约的位置 |
-| **G-15** | §5.4 / 附录 C vs `testers/endpoint-probe/tester.yaml` | 该文件的 `placeholder` 是多行说明+注释，`parameters.url.description` 里还写"退出码 2"；而 §5.4 定义 `placeholder` 为"一段可直接抄的示例命令行"，§5.8 只有 0 / 非 0 两种退出语义 | 平台取 `placeholder` 首行作 UI 占位；退出码一律按 0 / 非 0 归类，忽略注释里的"2" | 修 `tester.yaml`：`placeholder` 收敛为一行命令，删掉退出码 2 的说法 |
-| **G-16** | §5.7、§7.7 | 镜像引用可以是可变 tag（同一 `image:1.0` 背后可能是新代码），"镜像引用未变"不足以判定两次执行等价；ARCHITECTURE 未要求记录实际 digest | 执行层把 K8s `imageID` 解析为 `attempts.image_digest` 落库并写入报告；P1 续跑复用以 **digest** 为准（缺失时退回引用并给出警告） | 回写 §5.7/§7.7：可追溯性以"引用 + 实际 digest"为准；续跑复用优先比较 digest |
+| **G-15** | §5.4 / 附录 C vs `runners/endpoint-probe/runner.yaml` | 该文件的 `placeholder` 是多行说明+注释，`parameters.url.description` 里还写"退出码 2"；而 §5.4 定义 `placeholder` 为"一段可直接抄的示例命令行"，§5.8 只有 0 / 非 0 两种退出语义 | 平台取 `placeholder` 首行作 UI 占位；退出码一律按 0 / 非 0 归类，忽略注释里的"2" | 修 `runner.yaml`：`placeholder` 收敛为一行命令，删掉退出码 2 的说法 |
+| **G-16** | §5.7、§7.7 | 镜像引用可以是可变 tag（同一 `image:1.0` 背后可能是新代码），"镜像引用未变"不足以判定两次执行等价；ARCHITECTURE 未要求记录实际 digest | 执行层把 K8s `imageID` 解析为 runner 执行记录的 `image_digest` 落库并写入报告；P1 跨 Task 续跑（仅外接模式，§7.7）复用以 **digest** 为准（缺失时退回引用并给出警告） | 已回写 §5.7/§7.7：可追溯性以"引用 + 实际 digest"为准 |
 
 ---
 
@@ -381,11 +396,11 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 
 | P1 能力 | 预留方式 | 状态 |
 |---|---|---|
-| MCP Server | 复用同一 OpenAPI 生成的客户端；MCP 只是另一层 adapter，无独有逻辑 | 🟢 进行中（本轮已交付最小可用）：`server/internal/mcp`，stdio + JSON-RPC 2.0，9 个工具 |
-| CLI `tpctl` | 同上；命令与 API 一一对应 | 🟢 进行中（本轮已交付最小可用）：`server/cmd/tpctl`，10 个子命令 |
-| 失败续跑（跨 Run） | `runs.retry_of` + `tasks.reused_from_task_id`；**retry = 新 Run**（`02 §2.6`），复用产物落 `tasks/<task>/reused/` | ✅ 已实现（`api/retry.go`、`store/retry.go`） |
-| Run 对比 | 读 `result.json` 的 UI 层能力（按指标名 + labels + workload 对齐）；P1 可依赖 MongoDB 指标集合 | ⬜ 之后 |
-| 指标索引（跨 Run 查询） | P0 只存 `result.json` 文件；P1 可写 **MongoDB**（`metrics` 集合：run/task/attempt/name/statistic/unit/value/labels），查询接口不变；也可先加 PostgreSQL `metrics_index` 表过渡 | ⬜ 之后 |
+| MCP Server | 复用同一 OpenAPI 生成的客户端；MCP 只是另一层 adapter，无独有逻辑 | 🟢 进行中（v1 已交付最小可用，v2 需同步工具名与 `/tasks` 端点）：`server/internal/mcp`，stdio + JSON-RPC 2.0，工具名 `argus_*`（见 agent-integration 分册） |
+| CLI `argus` | 同上；命令与 API 一一对应（submit / status / logs / clean / retry，子命令式） | 🟢 进行中（v1 已交付最小可用，v2 需同步为 `/tasks` 端点 + `clean`/`retry` 语义）：`server/cmd/argus` |
+| 跨 Task 续跑（P1，仅外接模式） | `tasks.retry_of` + 复用校验五元组（§7.7）；v1 的同 Run 追加 Attempt 与 `reused/` 目录机制随 v2 取消（重试 = 新 attempt 全量重跑） | 🔄 v1 实现需按 §7.8 重写（`api/retry.go`、`store/retry.go`） |
+| Task 对比 | 读 `result.json` 的 UI 层能力（按指标名 + labels + workload 对齐）；P1 可依赖 MongoDB 指标集合 | ⬜ 之后 |
+| 指标索引（跨 Task 查询） | P0 只存 `result.json` 文件；P1 可写 **MongoDB**（`metrics` 集合：task/attempt/runner_seq/name/statistic/unit/value/labels），查询接口不变；也可先加 PostgreSQL `metrics_index` 表过渡 | ⬜ 之后 |
 | Matrix 展开 | 提交前的纯函数变换（`args` 展开为多个 Task），不改变调度与契约 | ⬜ 之后 |
 | 看板 | `GET /queue-status` + Volcano 只读快照（E-11），前端独立路由 | ⬜ 之后 |
 
@@ -393,48 +408,51 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 
 ## 14. 文档维护
 
-- 本文与三份分册随实现更新；契约字段变化一律先改 ARCHITECTURE（§15）。
+- 本文与四份分册随实现更新；契约字段变化一律先改 ARCHITECTURE（§15）。
+- v2.0 落地期间（feat/argus-v2-runner-rename）：状态机、数据表、API 三处同步改造的要求同样适用（ARCHITECTURE §15 第 5 条）。
 - 每个实现 PR 在描述里写：对应 §14.1 的验收项、是否触及 §12 的缺口项、是否改 `api/openapi.yaml`。
 - `schemas/` 与 `api/openapi.yaml` 是机器可校验的真相；文档与它们不一致时，先修文档再修代码。
 
 ---
 
-## 15. MVP 实现状态与偏差（2026-11-05）
+## 15. MVP 实现状态与偏差（2026-11-05，v1 时期快照）
 
-本节记录"按本文实现出来的 P0 MVP 到底做到了哪一步"，是**实现回写**，不是新需求。逐项验收与证据见 `docs/runbook/acceptance.md`，运行步骤见 `docs/runbook/local-kind.md`。
+本节记录"按 v1 方案实现出来的 P0 MVP 到底做到了哪一步"，是**实现回写**，不是新需求。逐项验收与证据见 `docs/runbook/acceptance.md`，运行步骤见 `docs/runbook/local-kind.md`。
+
+> **v2.0 注：本节为 v1 架构（Run/Task 双层、Genet 直连适配、门控调度、`cleanup.policy`、argv 参数）下的实现快照，术语已按 v2 同步，但表中机制多以 v2 为准被取代（D-66～D-73）。v2 改造后需逐条对账：Genet 适配（#12）→ 内置 deploy/clean runner；门控调度（§15.1"调度"行）→ 串行管道；`POST /tasks`（#15.1 末行）→ 唯一提交端点；续跑（#21）→ 整 Task 新 attempt。**
 
 ### 15.1 状态总览
 
 | 能力 | MVP 状态 | 代码位置 |
 |---|---|---|
-| 三角色单二进制（`--role=api\|controller\|collector\|all`） | ✅ `api`/`controller`/`all` 可用；`collector` 未拆（日志由 executor 采、报告由终态 hook 写） | `server/cmd/testplaned` |
-| 状态机内核（Run/Task/Attempt/Tester + Deploy 子状态） | ✅ 转移表 R1–R10 / T1–T11，`Kernel.Apply` 8 步、CAS、事件 seq | `server/internal/domain`、`server/internal/store` |
+| 三角色单二进制（`--role=api\|controller\|collector\|all`） | ✅ `api`/`controller`/`all` 可用；`collector` 未拆（日志由 executor 采、报告由终态 hook 写） | `server/cmd/argusd` |
+| 状态机内核（Task / attempt / runner 执行记录 + Deploy 子状态） | ✅（v1 形态）转移表 R1–R10 / T1–T11，`Kernel.Apply` 8 步、CAS、事件 seq；v2 需合并 DEPLOYING/CLEANUP 进 RUNNING 并删除 runner 级重试回路 | `server/internal/domain`、`server/internal/store` |
 | 存储与迁移 | ✅ 11 张表 + 15 索引，启动自动迁移（`migrate up` 子命令亦可） | `server/migrations`、`server/internal/store` |
 | REST + SSE（**50 operations**） | ✅ `/api/v1` 全量；SSE 断点续传 + `events/history` | `server/internal/api`、`server/api/openapi.yaml` |
-| 调度（门控 / 独占 / 全局并发 / 公平性） | ✅ 门控与两类并发上限、`waiting_reason` 六值；公平性仅"按提交时间" | `server/internal/orchestrator` |
+| 调度（门控 / 独占 / 全局并发 / 公平性） | ✅（v1 形态）门控与两类并发上限、`waiting_reason` 六值；v2 收窄为"串行推进 + 外接模式端点槽位 + 全局并发"（D-69） | `server/internal/orchestrator` |
 | K8s Job 执行器 | ✅ 真集群跑通（渲染/提交/观测/取消/日志/digest） | `server/internal/executor` |
-| Deploy 阶段（Genet） | 🟡 **mock**；**适配设计已按 Genet 真实实现定稿**（Helm release 为部署单元、`noWait=true`、ready≠可用、位次不可得，见 D-44～D-48 与 `impl/execution.md §9`），实现待 P1 | `server/internal/genet/mocks` |
-| Tester 注册（自发现） | ✅ 启动扫描 + 周期重扫 + 15 条校验 + 版本钉死 + orphan | `server/internal/registry` |
+| Deploy（Genet 直连适配层） | 🟡 v1 为 mock；**v2 取消平台直连**：改为内置 service-deploy runner + deploy-state.json（`internal/genet` 瘦化为 deploy-state 解析，见 `impl/execution.md §9`） | `server/internal/genet/mocks`（待拆出 runner） |
+| Runner 注册（自发现） | ✅ 启动扫描 + 周期重扫 + 15 条校验 + 版本钉死 + orphan | `server/internal/registry` |
 | 报告与产物 | ✅ `report.json` / `report.md` / `events.jsonl` / 产物索引，终态后异步写 | `server/internal/report` |
-| Web UI | ✅ 6 路由（概览/列表/详情/提交/Tester/集群），SSE 实时 | `web/` |
+| Web UI | ✅ 6 路由（概览/列表/详情/提交/Runner/集群），SSE 实时 | `web/` |
 | 部署与镜像 | ✅ Kind + kustomize（Component + overlay）+ 两镜像 | `deploy/` |
 | Volcano / gang / 队列看板 | ✅ 已实现：直读 `scheduling.volcano.sh/v1beta1` 的 queues/podgroups（15s TTL + 单飞，失败退避 60s）；队列水位/原因原文，**无位次**（D-46）；降级 `crd_missing/rbac_forbidden/scheduler_unavailable/disabled` | `server/internal/k8s/volcano.go` |
-| OIDC / RBAC / CSRF | ✅ 已实现：OIDC（PKCE + `tp_session`/`tp_auth_tx` + CSRF 双提交）、三角色 RBAC（viewer/operator/admin）、假 IdP 集成测试 10 条；`dev` 模式仅限 `TESTPLANE_ENV ∈ {dev,local}` | `server/internal/auth` |
-| 独立 Task（`POST /tasks`） | ⬜ 未做 | — |
-| 失败续跑（`POST /runs/{id}/retry`）、`/report` 富指标 | ✅ 续跑 3 条已实现（`retry`/`retry-plan`/`tasks/{id}/retry`）；`/report` 仍是基础版（无富指标） | `02 §2.6`、`07 §8` |
+| OIDC / RBAC / CSRF | ✅ 已实现：OIDC（PKCE + `ag_session`/`ag_auth_tx` + CSRF 双提交）、三角色 RBAC（viewer/operator/admin）、假 IdP 集成测试 10 条；`dev` 模式仅限 `AG_ENV ∈ {dev,local}` | `server/internal/auth` |
+| `POST /tasks`（v2 唯一提交端点） | 🔄 v1 未做；v2 中 `/runs` 全部并入 `/tasks`（D-73） | — |
+| 整 Task 重试（`POST /tasks/{id}/retry`）、`/report` 富指标 | 🔄 v1 续跑 3 条已实现（`retry`/`retry-plan`/同 Run 追加 Attempt）；v2 语义改为新 attempt 全量重跑含 fresh deploy、上限 3、无复用（§7.8） | `07 §8`、C-5.6 |
 
 ### 15.2 P0 剩余端点收口（原「延后项」表，PR #18 后全部实现）
 
 | 端点 | 状态 | 实现要点 | 测试 |
 |---|---|---|---|
-| `GET /runs/{id}/artifacts` | **已实现** | 读 `artifacts` 表，`items` + `by_kind`（`result/raw/log/report/other`）+ `total_size_bytes`；`sha256` 惰性（未算即 `null`，不现算，C-7.5） | `TestRunArtifacts`（分组、总大小、未知 Run 404） |
-| `GET /runs/{id}/files?path=` | **已实现** | `http.ServeContent` 提供完整 Range 语义（200/206/416）；路径只由 `<storage-root>/<run_id>` + 校验后的相对路径拼出，绝对路径/盘符/`..`/空段一律 400 并二次校验前缀；>1 GiB 且无 `Range` → 413 提示分段 | `TestRunFile_Download`（200/206/416/5 类穿越/404）、`TestRunFile_TooLargeRequiresRange`（413） |
-| `GET /tasks/{id}/attempts/{idx}/artifacts` | **已实现** | 按 `idx` 定位 Attempt 后查 `artifacts`（`attempt_id` 过滤），形状同 Run 级；idx 非 ≥1 → 400 | `TestAttemptArtifacts`（清单、非法 idx 400） |
+| `GET /tasks/{id}/artifacts` | **已实现**（v1 为 `/runs/{id}/artifacts`） | 读 `artifacts` 表，`items` + `by_kind`（`result/raw/log/report/other`）+ `total_size_bytes`；`sha256` 惰性（未算即 `null`，不现算，C-7.5） | `TestTaskArtifacts`（分组、总大小、未知 Task 404） |
+| `GET /tasks/{id}/files?path=` | **已实现**（v1 为 `/runs/{id}/files`） | `http.ServeContent` 提供完整 Range 语义（200/206/416）；路径只由 `<storage-root>/<task_id>` + 校验后的相对路径拼出，绝对路径/盘符/`..`/空段一律 400 并二次校验前缀；>1 GiB 且无 `Range` → 413 提示分段 | `TestTaskFile_Download`（200/206/416/5 类穿越/404）、`TestTaskFile_TooLargeRequiresRange`（413） |
+| `GET /tasks/{id}/attempts/{idx}/artifacts` | **已实现**（v1 形态；v2 端点表见 C-8.2 的 `attempts/{n}/runners/{seq}/artifacts`） | 按 `idx` 定位 attempt 后查 `artifacts`（attempt 过滤），形状同 Task 级；idx 非 ≥1 → 400 | `TestAttemptArtifacts`（清单、非法 idx 400） |
 | `GET /profiles` | **已实现** | 读 `execution_profiles` + 挂载能力（`mounts[{name,pvc,sub_path,kind}]`）、`scheduler/queue/image_pull_secrets/resource_defaults/deploy_timeout_seconds`；**同时移除了「表为空就放行任意 profile」的引导期例外**，未登记一律 `EXECUTION_PROFILE_NOT_FOUND`（种子保证 `k8s-npu` 存在） | `TestListProfiles`（种子含 `k8s-npu`、含 `mounts`） |
-| `GET /testers/{name}/versions/{version}` | **已实现** | 精确 `name+version` 命中，返回含 `parameters`/`env` 声明与注册表元数据（`content_sha`/`source_file`/`orphaned`/`registered_at`）；未知版本 404 `TESTER_NOT_FOUND` | `TestGetTesterVersion`（含 `parameters`、未知版本 404） |
-| `GET /metrics` | **已实现** | 手写 Prometheus 文本 exposition（不引 client_golang）：`testplane_runs_total{status}`、`testplane_tasks_total{status}`、`testplane_attempts_active`、`testplane_queue_waiting{reason}`（六个 reason 全部预置 0）、`testplane_endpoint_leases`、`testplane_http_requests_total{method,code}`；**不带 `/api/v1` 前缀、不参与 SPA fallback**；DB 采样失败只跳过 DB 类指标，不 500 | `TestMetrics`（指标齐全、`/api/v1/metrics` 不误命中） |
+| `GET /runners/{name}/versions/{version}` | **已实现** | 精确 `name+version` 命中，返回含 `parameters`/`env` 声明与注册表元数据（`content_sha`/`source_file`/`orphaned`/`registered_at`）；未知版本 404 `RUNNER_NOT_FOUND` | `TestGetRunnerVersion`（含 `parameters`、未知版本 404） |
+| `GET /metrics` | **已实现** | 手写 Prometheus 文本 exposition（不引 client_golang）：`argus_tasks_total{status}`、`argus_task_runners_active`、`argus_queue_waiting{reason}`、`argus_endpoint_leases`、`argus_http_requests_total{method,code}`（v2 指标名以 ARCHITECTURE §12.6 为准：`runner_duration_seconds` / `runner_failures_total{code}` / `deploy_state_blocked_total` 等，v1 的 runs/tasks 双前缀合并）；**不带 `/api/v1` 前缀、不参与 SPA fallback**；DB 采样失败只跳过 DB 类指标，不 500 | `TestMetrics`（指标齐全、`/api/v1/metrics` 不误命中） |
 
-> 这张表是评审 [PR #13](https://github.com/ucm-system/testplane/pull/13)「API 面比设计少、且没有延后说明」的补记；PR #18 已把 6 项全部实现并补测试，`openapi.yaml` 同步这 6 个 operation（`make openapi-lint` 0 error）。
+> 这张表是评审 [PR #13](https://github.com/ucm-system/argus/pull/13)「API 面比设计少、且没有延后说明」的补记；PR #18 已把 6 项全部实现并补测试，`openapi.yaml` 同步这 6 个 operation（`make openapi-lint` 0 error）。
 >
 > **实现边界（票 #33 之后）**：`design/views/07-api.md §5` 里 50 个端点**全部实现**，`tools/contract/allow-missing.txt` 为 **0 条**。仍属"明确不做"的只有 `POST /tasks`（独立 Task 提交，`ARCHITECTURE §13` 当期不做）。
 >
@@ -447,29 +465,31 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 
 ### 15.3 与设计文档的偏差（已由 ARCHITECTURE v0.6 / D-38…D-43 裁决）
 
+> **v2.0 注：下表 #3（嵌套 `run:`）、#4（PVC 名）、#8、#10、#13、#19（`cleanup.policy`）、#21（跨 Run 续跑复用）所涉机制已被 D-66～D-73 取代或重构（提交体为嵌套 `task:`、`cleanup.policy` 取消、重试 = 新 attempt 全量重跑），v2 落地时按新裁决实现，保留本表作追溯。**
+
 | # | 偏差 | 处置 |
 |---|---|---|
-| 1 | 不提供 `POST /testers` 运行时注册 | 符合 K-3；自发现=启动/周期扫描（D-38），`07-api.md` 端点表本就无此端点 |
+| 1 | 不提供 `POST /runners` 运行时注册 | 符合 K-3；自发现=启动/周期扫描（D-38），`07-api.md` 端点表本就无此端点 |
 | 2 | 错误体为**扁平** `{code,message,detail,retryable,trace_id}` | 以 `07-api.md §3` 为准（D-39）；`api/openapi.yaml` 同步 |
-| 3 | 提交体以**嵌套** `run:` 为唯一形态 | 以 `07-api.md §4.1` 为准（D-40）；`03-data-view.md §4.1` 的平级示例是文档缺陷，待回写 |
-| 4 | 产物 PVC 名统一 `testplane-storage` | 06 §2（`-storage-root`）与 execution §2.2（`-artifacts`）待回写（D-41） |
+| 3 | 提交体以**嵌套** `run:` 为唯一形态（v2 已改为嵌套 `task:`，D-40/D-66） | v1 以 `07-api.md §4.1` 为准（D-40）；v2 提交体顶层为 `task:`（ARCHITECTURE §10.2） |
+| 4 | 产物 PVC 名统一 `argus-storage` | 06 §2（`-storage-root`）与 execution §2.2（`-artifacts`）待回写（D-41） |
 | 5 | 开发种子 `cluster-01` + `k8s-npu` 由进程启动时插入 | 03 §9 原为"Helm values 首次 seed"（D-42）；MVP 简化为进程内 seed |
 | 6 | 执行环境为宿主 Kind + `kind load docker-image`，无镜像仓库 | D-43 |
 | 7 | 未采用 `oapi-codegen` / `sqlc` 生成物，handler 与 DTO 手写 | 05 §5.2 的"重生成 diff 为空"门禁暂不适用；P1 再引入 |
 | 8 | `task_counts` 为 MVP 新增的 Run 投影字段 | 已写入 `server/api/openapi.yaml`；`03/07` 待回写 |
 | 9 | 架构表实为 **11 张**（文档曾按 12 表述） | 以 `03-data-view.md §3.2` 实际 DDL 为准 |
-| 10 | Pre-Check 判别曾有 4 处实现，其中门控（`orchestrator/controller.go`）、放行 SQL（`store/control.go`）、终态判定（`orchestrator/status.go`）误用 `TesterRole` / 单看 `seq=0` | 唯一判据 = `runs.resolved->'precheck'->>'injected' = true` **且** `tasks.seq = 0`（`03-data-view.md §4.2`）；`endpoint-probe` 本身 `role=pre_check`，用户可在 `precheck:"off"` 下把它当普通测试提交，故角色不可作判据。评审 #14 已修：`store.PrecheckTaskIDs`/`PrecheckFlags` + `orchestrator.TaskView.IsPrecheck` |
-| 11 | Job/Pod 正常结束后**没有回收路径**（只有取消才删 Job），也没有孤儿 GC goroutine；评审时集群已积压 53 个已终态 Job | 已按 `execution.md §6` 补齐（PR #14/#15）：`ports.Executor` 增 `Delete(ctx, h, DeletePolicy)`（`Background`/`Foreground`，404 幂等），Attempt 终态**落库之后**异步 `Delete(Background)`；新增 GC 循环（`Config.GCInterval` 默认 10min，`TESTPLANE_JOB_GC_ENABLED` 默认 true）回收"Job 已终态且 Attempt 已终态/无对应 Attempt"的 Job 与孤儿 Pod |
-| 12 | Deploy 阶段从 mock 切到**真实 Genet 客户端**（internal/genet，Helm release 语义：无部署单、无位次、oWait=true、404 宽限、取消先落意图后 DELETE） | 行为表见 impl/execution.md §9（观测 → Deploy 子状态九行映射）；kind E2E 默认仍 mock（TESTPLANE_DEPLOY_PROVIDER=mock），切真实 Genet 需 TESTPLANE_GENET_BASE_URL + TESTPLANE_GENET_API_KEY（+ 可选 _CA_FILE/_INSECURE） |
+| 10 | Pre-Check 判别曾有 4 处实现，其中门控（`orchestrator/controller.go`）、放行 SQL（`store/control.go`）、终态判定（`orchestrator/status.go`）误用 `RunnerRole` / 单看 `seq=0` | 唯一判据 = `runs.resolved->'precheck'->>'injected' = true` **且** `tasks.seq = 0`（`03-data-view.md §4.2`）；`endpoint-probe` 本身 `role=pre_check`，用户可在 `precheck:"off"` 下把它当普通测试提交，故角色不可作判据。评审 #14 已修：`store.PrecheckTaskIDs`/`PrecheckFlags` + `orchestrator.TaskView.IsPrecheck` |
+| 11 | Job/Pod 正常结束后**没有回收路径**（只有取消才删 Job），也没有孤儿 GC goroutine；评审时集群已积压 53 个已终态 Job | 已按 `execution.md §6` 补齐（PR #14/#15）：`ports.Executor` 增 `Delete(ctx, h, DeletePolicy)`（`Background`/`Foreground`，404 幂等），Attempt 终态**落库之后**异步 `Delete(Background)`；新增 GC 循环（`Config.GCInterval` 默认 10min，`AG_JOB_GC_ENABLED` 默认 true）回收"Job 已终态且 Attempt 已终态/无对应 Attempt"的 Job 与孤儿 Pod |
+| 12 | Deploy 阶段从 mock 切到**真实 Genet 客户端**（internal/genet，Helm release 语义：无部署单、无位次、noWait=true、404 宽限、取消先落意图后 DELETE） | **v2 取代（D-70）**：Genet 调用移入 service-deploy / service-clean runner；平台侧 `internal/genet` 瘦化为 deploy-state.json 解析。Genet 交互契约与上述语义保留在 E-9（runner 实现依据）；genet-local 为本地联调后端 |
 | 13 | 卸载失败/校验未过时写 `cleanup.failed` 事件（`state_events.type`）；`Repos` 为此加了一个**最小专用**方法 `AppendRunEvent(ctx, runID, type, payload)`，未开放通用事件 API | payload = `{release_name, cleanup_errors[], uninstall_state, verified_at}`（**不含 `attempt`**，实现见 `orchestrator/deploy.go`）；`uninstall.state` 的四个取值已收进 `domain` 常量。契约侧已回写：`03-data-view.md §4.6` 的 type 枚举与 `07-api.md §7` 的 SSE 事件类型表都补了 `cleanup.failed`；openapi 的 `EventType` 枚举同补，并新增 `DeployUninstall` schema（`state ∈ pending|running|verified|skipped|failed`） |
-| 14 | `testers/endpoint-probe/tester.yaml` 的 `placeholder` 是多行说明而非一行命令，`parameters.url.description` 里还写了"退出码 2"（`ARCHITECTURE §5.4` 要求一行示例、§5.8 只有 0/非 0） | **不改 Tester 内容**：内容一变就要升版本（K-3 版本钉死，注册表实测会拒绝启动——本轮试改后已回滚）。平台侧取 `placeholder` 首行作占位、退出码一律按 0 / 非 0 归类；待 `/testers/{name}/versions/{version}` 与版本升级流程就绪后，由 Tester 维护者在下一个版本里修（G-15） |
-| 19 | 卸载收口路径曾忽略 `cleanup_policy`（快路径不看策略，与对账不同口径）；`cleanup.failed` 载荷漂移（含 `attempt`、缺 `uninstall_state`） | 已按票 #28 修：`never` → `uninstall.state=skipped`、`on_failure` → 仅在"存在非 succeeded 的 Task"时卸载（新增 `domain.UninstallSkipped`）；载荷改为 `{release_name, cleanup_errors[], uninstall_state, verified_at}`；`ListDeployCleanupPending` 纳入 `canceled` 终态。**C-5.7 顺序**改为"先落终态 → 事务外卸载"，见 `impl/control-plane.md:722` |
+| 14 | `runners/endpoint-probe/runner.yaml` 的 `placeholder` 是多行说明而非一行命令，`parameters.url.description` 里还写了"退出码 2"（`ARCHITECTURE §5.4` 要求一行示例、§5.8 只有 0/非 0） | **不改 Runner 内容**：内容一变就要升版本（K-3 版本钉死，注册表实测会拒绝启动——本轮试改后已回滚）。平台侧取 `placeholder` 首行作占位、退出码一律按 0 / 非 0 归类；待 `/runners/{name}/versions/{version}` 与版本升级流程就绪后，由 Runner 维护者在下一个版本里修（G-15） |
+| 19 | 卸载收口路径曾忽略 `cleanup_policy`（v1 机制，v2 已取消 `cleanup.policy`，D-70）；`cleanup.failed` 载荷漂移 | v1 处置：`never` → `uninstall.state=skipped` 等。**v2：卸载动作移入 service-clean runner（finally 语义），平台只读其结果并记 `cleanup_failed`，不改 Task 终态**（C-5.7） |
 | 20 | `GET /runs/{id}/deploy/logs` 与设计不一致：设计要求 Deploy 日志落 `deploy/logs/<pod>.log` 且**不随 Pod 回收**（`ARCHITECTURE §8.1`、`execution.md §8`），实现是**实时读 K8s `pods/log`** | MVP 明确记为偏差：直读 `pods/log`，Pod 被 GC 回收后读不到。端点在"Pod 已回收"时返回 **200 + `message`**（写明"日志随 Pod 回收，MVP 未落盘"）**+ `gaps[].reason="pod recycled…"`**，不静默空数组；落盘由 collector 在 P1 补（届时端点实现不变、只换数据源）。游标为**单 Pod**（`?pod=` 必选），`tail_lines` 与 `offset` 互斥 |
-| 21 | 续跑复用产物：设计只要求"复用已成功 Task"，没规定产物怎么指向 | 实现选**硬链接到新 Run 自己的 `tasks/<task>/reused/`**（跨设备自动退化为复制），而不是引用旧目录：这样 `/runs/{id}/artifacts` 与 `/files?path=` 的路径前缀始终属于本 Run，不需要为复用开特例；复用 Task 不产生 Attempt（`attempt_no=0`） |
+| 21 | v1 续跑复用产物：硬链接到新 Run 的 `tasks/<task>/reused/`，复用 Task 不产生 Attempt（`attempt_no=0`） | **v2 取代（D-69）**：重试 = 新 attempt 全量重跑、不复用；跨 Task 部分续跑仅为 P1 且限外接模式（§7.7）。`reused/` 机制随 v2 移除 |
 | 15 | 业务时间曾直调 `time.Now()`（05 §6.5 禁止）：超窗判定、退避、`accepted_at/queued_at/ready_at/last_polled_at/finished_at/created_at` 等写库时间戳 | 引入 `domain.Clock`（`internal/domain/clock.go`，默认 `SystemClock`）；`store.Store.SetClock` 与 `orchestrator.Options.Clock` 注入，编排/存储两层的**业务时间**全部改走注入时钟；退避基准从 SQL `now()` 改为传入的事务时间 `at`（`effectScheduleRetry`），部署窗口判定从 `time.Since(...)` 改为 `now.Sub(...)`。回归：`TestDeployWindowUsesInjectedClock`、`TestWatchdogUsesInjectedClock`、`TestRetryBackoffUsesInjectedClock`。**保留 `time.Now()` 的位置与理由**见 15.3.1；执行层同步：`executor.Options.Clock` 注入 `domain.Clock`，`classifyOutcome` 的 `JobOutcome.FinishedAt` 不再直调 `time.Now()`（票 #31 executor 半边，`internal/executor/observe.go:218`） |
-| 16 | 请求链路曾用 `context.Background()`（丢掉 trace 与取消） | `cmd/testplaned/wire.go` 的 `taskView` 改为接收 `ctx`，`TesterRegistry.Resolve` 用请求上下文（`GetTask`/`ListTasks`/`ListActiveTasks` 一路透传 `r.Context()`）。**保留 Background 的位置**：进程信号（`main.go` 启动/关闭/migrate）、后台 goroutine（`store.fireRunFinished` 的 2 分钟超时、`notifier` 的 `notifyEmitDeadline`、`controller.cancelJobAsync` 用 `context.WithoutCancel`）——这些没有上游请求，必须显式给超时或 `WithoutCancel` |
+| 16 | 请求链路曾用 `context.Background()`（丢掉 trace 与取消） | `cmd/argusd/wire.go` 的 `taskView` 改为接收 `ctx`，`RunnerRegistry.Resolve` 用请求上下文（`GetTask`/`ListTasks`/`ListActiveTasks` 一路透传 `r.Context()`）。**保留 Background 的位置**：进程信号（`main.go` 启动/关闭/migrate）、后台 goroutine（`store.fireRunFinished` 的 2 分钟超时、`notifier` 的 `notifyEmitDeadline`、`controller.cancelJobAsync` 用 `context.WithoutCancel`）——这些没有上游请求，必须显式给超时或 `WithoutCancel` |
 | 17 | `orchestrator/memory.go`（894 行内存 Repos）混在产线代码里，`go build` 会把它编进二进制 | 改名为 `memory_test.go`（同包 `_test` 文件，`go build` 不再包含；单测仍可直接用 `NewMemoryRepos()`）。`go build ./internal/orchestrator/` 与 `go test ./internal/orchestrator/` 均通过 |
-| 18 | Job GC 与 `execution.md §6.3` 不一致：缺 `hold-until` 守卫与 1h 年龄窗（会和"先落日志再删 Job"抢）、运行中 Job 永不回收、`GCOnce` 内联主循环且无超时、`attemptStateByJobName` N+1、缺 `var _ JobGC` 断言 | 按 §6.3 补齐：`hold-until`（GC 与终态删 Job 两处都看）、`GCTerminalAge=1h`、孤儿（无 Attempt）立即删、运行中 >25h 先收口 `FAILED(TASK_TIMEOUT)` 再删、`gcInBackground` 独立 goroutine + 2min 超时、批量 `AttemptStatesByJobNames`（一次 SQL）、`var _ JobGC = (*executor.Executor)(nil)`（把签名改回匿名 func 会编译失败）。测试改造为"能失败"形态（真实 Executor + fake clientset、Delete 回调里断言库里已终态、开关关时断言 0 次 List） |
+| 18 | Job GC 与 `execution.md §6.3` 不一致：缺 `hold-until` 守卫与 1h 年龄窗（会和"先落日志再删 Job"抢）、运行中 Job 永不回收、`GCOnce` 内联主循环且无超时、`attemptStateByJobName` N+1、缺 `var _ JobGC` 断言 | 按 §6.3 补齐：`hold-until`（GC 与终态删 Job 两处都看）、`GCTerminalAge=1h`、孤儿（无 Attempt）立即删、运行中 >25h 先收口 `FAILED(RUNNER_TIMEOUT)` 再删、`gcInBackground` 独立 goroutine + 2min 超时、批量 `AttemptStatesByJobNames`（一次 SQL）、`var _ JobGC = (*executor.Executor)(nil)`（把签名改回匿名 func 会编译失败）。测试改造为"能失败"形态（真实 Executor + fake clientset、Delete 回调里断言库里已终态、开关关时断言 0 次 List） |
 
 #### 15.3.1 保留 `time.Now()` 的位置与理由（05 §6.5 的边界）
 
@@ -480,14 +500,14 @@ domain 不依赖任何包；api 不得直接调 executor；executor 不写 tasks
 | `internal/domain/clock.go` 的 `realClock.Now()` | 时钟实现本身 | 唯一允许直调 `time.Now()` 的地方（且返回 UTC） |
 | `internal/store/store.go` 的 ID 兜底（`crypto/rand` 失败时用纳秒） | 唯一 ID 生成 | 与业务时间无关；只是为了"绝不同 ID"，替换成可拨时钟会导致 ID 冲突 |
 | `time.NewTicker` / `time.AfterFunc` / `context.WithTimeout` / `time.Sleep` 的参数 | 运行时机制 | 它们是调度器/网络栈的等待语义点，可拨时钟无法真正快进 goroutine 的等待；用 `Clock` 替换只会制造"看起来可测、实际仍阻塞"的假象 |
-| `cmd/testplaned/main.go` 的 `signal.NotifyContext`、shutdown `WithTimeout`、`migrate` 超时 | 进程生命周期 | 启动/关闭路径没有业务事务，也没有请求上下文 |
+| `cmd/argusd/main.go` 的 `signal.NotifyContext`、shutdown `WithTimeout`、`migrate` 超时 | 进程生命周期 | 启动/关闭路径没有业务事务，也没有请求上下文 |
 
 判定口径：**会写进库或参与超窗/退避/有效期判定**的时间 → 必须走 `Clock`；**驱动 goroutine 的等待** → 保留 `time.Now()`。
 
 ### 15.4 P1 优先项（按投入产出排序）
 
-1. 真实 Genet 适配（替换 `internal/genet/mocks`，接口不变）。
-2. OIDC + 会话 + CSRF + RBAC（`TESTPLANE_AUTH_MODE=oidc`）。
-3. `POST /tasks` 独立 Task（`ARCHITECTURE §13` 明确当期不做）。
-4. 指标索引（MongoDB）与 Run 对比、看板。
+1. 内置 service-deploy / service-clean runner 落地（替换 v1 `internal/genet` 直连适配，接口收敛为 deploy-state.json）。
+2. OIDC + 会话 + CSRF + RBAC（`AG_AUTH_MODE=oidc`）。
+3. ~~`POST /tasks` 独立 Task~~（v2 已并入主路径：`POST /tasks` 即唯一提交端点，D-73）。
+4. 指标索引（MongoDB）与 Task 对比、看板。
 5. `oapi-codegen` / `sqlc` 与生成物 diff 门禁。
