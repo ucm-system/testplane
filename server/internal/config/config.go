@@ -2,9 +2,8 @@
 // （fail fast）。映射规则见 design/impl/control-plane.md C-11 与 AGENTS 约定：
 // 文档用 env 名，代码用内部字段名，二者指向同一个值。
 //
-// 环境变量统一 `TESTPLANE_` 前缀。主名取 task 口径（HTTP_ADDR / DATABASE_URL /
-// MAX_GLOBAL_CONCURRENCY / DEPLOY_TIMEOUT_SECONDS），同时兼容 C-11 的老名
-// （LISTEN / DB_DSN / CONCURRENCY_MAX / DEPLOY_TIMEOUT），两份都认、主名优先。
+// 环境变量统一 `AG_` 前缀（v2 更名，D-66；原 TESTPLANE_* 前缀废弃，一次切换不保留兼容）。
+// 主名取 C-11 口径（AG_LISTEN / AG_DB_DSN / AG_CONCURRENCY_MAX / AG_DEPLOY_TIMEOUT）。
 package config
 
 import (
@@ -46,102 +45,113 @@ func (r Role) RunsCollector() bool  { return r == RoleCollector || r == RoleAll 
 
 // Config 是全部运行期配置。字段名是内部名，注释给出对应 env。
 type Config struct {
-	// HTTPAddr 是 API 监听地址（TESTPLANE_HTTP_ADDR / TESTPLANE_LISTEN）。
+	// HTTPAddr 是 API 监听地址（AG_LISTEN）。
 	HTTPAddr string
-	// DatabaseURL 是 PostgreSQL DSN（TESTPLANE_DATABASE_URL / TESTPLANE_DB_DSN）。
+	// DatabaseURL 是 PostgreSQL DSN（AG_DB_DSN）。
 	DatabaseURL string
-	// StorageRoot 是产物根目录（TESTPLANE_STORAGE_ROOT），对应设计里的 <storage-root>。
+	// StorageRoot 是产物根目录（AG_STORAGE_ROOT），对应设计里的 <storage-root>。
 	StorageRoot string
-	// StoragePVC 是产物 RWX PVC 名（TESTPLANE_STORAGE_PVC，默认 testplane-storage），
-	// Job 渲染时挂到 /workspace/output（execution §3.1）。
+	// StoragePVC 是产物 RWX PVC 名（AG_STORAGE_PVC，默认 argus-storage，D-41），
+	// Job 渲染时挂到 /workspace/output。
 	StoragePVC string
-	// SharedMounts 是平台级统一共享挂载（D-63，TESTPLANE_SHARED_MOUNTS JSON 数组）。
-	// 默认空 = 不注入；Helm values 里给两条（/models、/mnt/model）。
+	// SharedMounts 是平台级统一共享挂载（D-63/D-65，AG_SHARED_MOUNTS JSON 数组）。
+	// 默认空 = 不注入；AG_SHARED_MOUNTS 只在 shared_mounts 表为空时作首次种子（D-65）。
 	SharedMounts []domain.SharedMountSpec
-	// ClusterName 是本实例对接的集群名（TESTPLANE_CLUSTER_NAME，默认 cluster-01），
-	// 写进 attempts.executor_ref.cluster，与 clusters 表的种子对齐。
+	// ClusterName 是本实例对接的默认集群名（AG_DEFAULT_CLUSTER，默认 cluster-01），
+	// 写进 task_runners.executor_ref.cluster，与 clusters 表的种子对齐。
 	ClusterName string
-	// Role 是进程角色（TESTPLANE_ROLE）。
+	// Role 是进程角色（AG_ROLE）。
 	Role Role
-	// LogLevel 是 slog 级别（TESTPLANE_LOG_LEVEL）：debug|info|warn|error。
+	// LogLevel 是 slog 级别（AG_LOG_LEVEL）：debug|info|warn|error。
 	LogLevel string
-	// TestersDir 是 Tester 注册表扫描来源（TESTPLANE_TESTERS_DIR）。
-	TestersDir string
-	// MaxGlobalConcurrency 是全局并发 Task 上限（TESTPLANE_MAX_GLOBAL_CONCURRENCY /
-	// TESTPLANE_CONCURRENCY_MAX）。
+	// RunnersDir 是 Runner 注册表扫描来源（AG_RUNNERS_DIR）。
+	//
+	// 注意：C-11 的部署默认值是 /app/runners；仓库内联调默认 `./runners`（目录已随
+	// Makefile/部署波次更名为 runners/）。
+	RunnersDir string
+	// Namespace 是 Job 与 PVC 所在 namespace（AG_EXECUTOR_NAMESPACE，默认 argus）。
+	Namespace string
+	// MaxGlobalConcurrency 是全局并发 runner 上限（AG_CONCURRENCY_MAX，默认 20，§12.7）。
 	MaxGlobalConcurrency int
-	// DeployTimeout 是 Deploy 排队 + 部署总窗口（TESTPLANE_DEPLOY_TIMEOUT_SECONDS /
-	// TESTPLANE_DEPLOY_TIMEOUT，默认 72h，见 K-6）。
+	// TaskMaxRunners 是单 Task runner 数上限（AG_TASK_MAX_RUNNERS，默认 200，
+	// 超出拒绝 TASK_TOO_LARGE，§12.7）。
+	TaskMaxRunners int
+	// AttemptMax 是单 Task attempt 上限（AG_ATTEMPT_MAX，默认 3；重试超限
+	// 返回 409 ATTEMPT_EXHAUSTED，§12.7）。
+	AttemptMax int
+	// RunnerTimeoutDefault 是默认 runner 超时（AG_RUNNER_TIMEOUT，默认 4h；
+	// Manifest runners[].timeout_seconds 可覆盖，§6.6）。
+	RunnerTimeoutDefault time.Duration
+	// RunnerTimeoutMax 是 runner 超时上限（AG_RUNNER_TIMEOUT_MAX，默认 24h）。
+	RunnerTimeoutMax time.Duration
+	// DeployTimeout 是部署总窗口（AG_DEPLOY_TIMEOUT，默认 72h；= service-deploy
+	// runner 的执行时限，排队计入，K-6）。
 	DeployTimeout time.Duration
-	// Kubeconfig 透传给 executor（TESTPLANE_KUBECONFIG），平台本身不读。
+	// RetentionDays 是产物保留期（AG_RETENTION_DAYS，默认 30；v2 cleanup.policy
+	// 取消，保留期只由本配置决定，D-70/D-33）。
+	RetentionDays int
+	// ResultMaxBytes 是 result.json 的技术上限（AG_RESULT_MAX_BYTES，默认 100MiB；
+	// 仅防 OOM，K-10；html/csv 不受此限）。
+	ResultMaxBytes int64
+	// ArtifactMaxBytes 是单 attempt 产物配额（AG_ARTIFACT_MAX_BYTES，默认 10GiB；
+	// 超出判失败 ARTIFACT_QUOTA_EXCEEDED，§12.7）。
+	ArtifactMaxBytes int64
+	// LogSegmentMaxBytes 是日志分段阈值（AG_LOG_SEGMENT_MAX_BYTES，默认 200MiB）。
+	LogSegmentMaxBytes int64
+	// LogTailLines 是默认日志尾部行数（AG_LOG_TAIL_LINES，默认 2000）。
+	LogTailLines int
+	// ReconcileInterval 是对账周期（AG_RECONCILE_INTERVAL，默认 30s，C-3.5）。
+	ReconcileInterval time.Duration
+	// Kubeconfig 透传给 executor（AG_KUBECONFIG），平台本身不读。
 	Kubeconfig string
-	// DeployProvider 是 Deploy 阶段实现（TESTPLANE_DEPLOY_PROVIDER）：mock（默认）| genet。
-	DeployProvider string
-	// GenetBaseURL 是 Genet OpenAPI 根地址（TESTPLANE_GENET_BASE_URL），形如 https://genet.dev.huawei.com。
-	GenetBaseURL string
-	// GenetAPIKey 是 Genet OpenAPI 的 Bearer Key（TESTPLANE_GENET_API_KEY）；
-	// 生产用 Secret 注入，本文件只读环境变量名，不落明文。
-	GenetAPIKey string
-	// GenetCAFile 是自签 CA 的 PEM 路径（TESTPLANE_GENET_CA_FILE），空则用系统根证书。
-	GenetCAFile string
-	// GenetInsecure 跳过 Genet 的 TLS 校验（TESTPLANE_GENET_INSECURE，默认 false，仅开发环境）。
-	GenetInsecure bool
-
-	// ---- Volcano 队列快照（E-11、design/impl/control-plane.md §C-4.8） ----
-
-	// VolcanoEnabled 是平台侧是否采样 Volcano 队列（TESTPLANE_VOLCANO_ENABLED，默认 true）。
-	// 关闭时 `/queue-status` 的 volcano 块降级为 detail=disabled（**不是** crd_missing，
-	// 也不是"0 排队"）。
+	// K8sInCluster 是集群内运行开关（AG_K8S_IN_CLUSTER，默认 true；false 时用 kubeconfig）。
+	K8sInCluster bool
+	// ClustersDir 是多集群 kubeconfig 目录（AG_CLUSTERS_DIR）。
+	ClustersDir string
+	// MetricsEnabled 是 /metrics 开关（AG_METRICS_ENABLED，默认 true）。
+	MetricsEnabled bool
+	// LogLevel 见上；Volcano 队列快照（C-4.8）：
+	// VolcanoEnabled（AG_VOLCANO_ENABLED，默认 true）；关闭时 `/queue-status` 的
+	// volcano 块降级为 detail=disabled。
 	VolcanoEnabled bool
-	// VolcanoNamespaces 是 List PodGroup 的 namespace 列表（TESTPLANE_VOLCANO_NAMESPACES，
-	// 逗号分隔）。空 / `*` = 全部 namespace（一次集群级 List）。
-	// 未配置时默认取 profile 的 namespace —— 即 seed 进 execution_profiles 的那个，
-	// 与控制面 namespace 同值（TESTPLANE_NAMESPACE）。
+	// VolcanoNamespaces 是 List PodGroup 的 namespace 列表（AG_VOLCANO_NAMESPACES，
+	// 逗号分隔）。空 / `*` = 全部 namespace。未配置时默认取 AG_EXECUTOR_NAMESPACE。
 	VolcanoNamespaces []string
-	// VolcanoTTL 是快照缓存 TTL（TESTPLANE_VOLCANO_TTL，默认 15s，06 §2.1（3））。
+	// VolcanoTTL 是快照缓存 TTL（AG_VOLCANO_TTL，默认 15s）。
 	VolcanoTTL time.Duration
 
 	// ---- 以下为实现细节配置，默认值即设计值 ----
 
-	// DBMaxConns 是连接池上限（TESTPLANE_DB_MAX_OPEN_CONNS，默认 20）。
+	// DBMaxConns 是连接池上限（AG_DB_MAX_OPEN_CONNS，默认 20）。
 	DBMaxConns int32
-	// RunMaxTasks 是单 Run Task 上限（TESTPLANE_RUN_MAX_TASKS，默认 200）。
-	RunMaxTasks int
-	// TaskTimeoutDefault 是默认 Task 超时（TESTPLANE_TASK_TIMEOUT，默认 4h）。
-	TaskTimeoutDefault time.Duration
-	// TaskTimeoutMax 是 Task 超时上限（TESTPLANE_TASK_TIMEOUT_MAX，默认 24h）。
-	TaskTimeoutMax time.Duration
-	// ResultMaxBytes 是 result.json 的技术上限（TESTPLANE_RESULT_MAX_BYTES，默认 100MiB）。
-	ResultMaxBytes int64
-	// SSEHeartbeat 是 SSE 心跳间隔（TESTPLANE_SSE_HEARTBEAT，默认 15s）。
+	// SSEHeartbeat 是 SSE 心跳间隔（AG_SSE_HEARTBEAT，默认 15s）。
 	SSEHeartbeat time.Duration
-	// SSEReplayWindow 是 SSE 回放窗口（TESTPLANE_SSE_REPLAY_HOURS，默认 24h）。
+	// SSEReplayWindow 是 SSE 回放窗口（AG_SSE_REPLAY_HOURS，默认 24h）。
 	SSEReplayWindow time.Duration
-	// AuthMode 是鉴权模式（TESTPLANE_AUTH_MODE）：dev | oidc（07 §2）。
+	// AuthMode 是鉴权模式（AG_AUTH_MODE）：dev | oidc（07 §2）。
 	AuthMode string
-	// Env 是部署环境（TESTPLANE_ENV，默认 dev）：用于"dev 鉴权用在非本地就打警告"。
+	// Env 是部署环境（AG_ENV，默认 dev）：用于"dev 鉴权用在非本地就打警告"。
 	Env string
 
 	// ---- OIDC（07 §2.1、D-51：独立 client，不把 Genet 当 IdP） ----
-	OIDCIssuer       string   // TESTPLANE_OIDC_ISSUER
-	OIDCClientID     string   // TESTPLANE_OIDC_CLIENT_ID
-	OIDCClientSecret string   // TESTPLANE_OIDC_CLIENT_SECRET
-	OIDCClientAuth   string   // TESTPLANE_OIDC_CLIENT_AUTH：basic | post（默认 basic）
-	OIDCRedirectURL  string   // TESTPLANE_OIDC_REDIRECT_URL，如 http://127.0.0.1:8080/auth/callback
-	OIDCScopes       []string // TESTPLANE_OIDC_SCOPES，默认 openid profile email groups
-	OIDCRoleClaim    string   // TESTPLANE_OIDC_ROLE_CLAIM，默认 groups
+	OIDCIssuer       string   // AG_OIDC_ISSUER
+	OIDCClientID     string   // AG_OIDC_CLIENT_ID
+	OIDCClientSecret string   // AG_OIDC_CLIENT_SECRET
+	OIDCClientAuth   string   // AG_OIDC_CLIENT_AUTH：basic | post（默认 basic）
+	OIDCRedirectURL  string   // AG_OIDC_REDIRECT_URL，如 http://127.0.0.1:8080/auth/callback
+	OIDCScopes       []string // AG_OIDC_SCOPES，默认 openid profile email groups
+	OIDCRoleClaim    string   // AG_OIDC_ROLE_CLAIM，默认 groups
 
 	// ---- 会话与 CSRF ----
-	SessionSecret []byte        // TESTPLANE_SESSION_SECRET（HMAC 密钥，≥32 字节）
-	SessionCookie string        // TESTPLANE_SESSION_COOKIE，默认 tp_session
-	SessionTTL    time.Duration // TESTPLANE_SESSION_TTL，默认 8h
-	SessionSecure bool          // TESTPLANE_SESSION_SECURE，默认 true（纯内网 http 部署可关）
+	SessionSecret []byte        // AG_SESSION_KEY（HMAC 密钥，≥32 字节）
+	SessionCookie string        // AG_SESSION_COOKIE，默认 ag_session
+	SessionTTL    time.Duration // AG_SESSION_TTL，默认 8h
+	SessionSecure bool          // AG_SESSION_SECURE，默认 true（纯内网 http 部署可关）
 
-	// RoleMap 是 groups → 角色 的映射（TESTPLANE_ROLE_MAP，形如 tp-admins=admin,tp-ops=operator）。
+	// RoleMap 是 groups → 角色 的映射（AG_ROLE_MAP，形如 ag-admins=admin,ag-ops=operator）。
 	RoleMap map[string]string
 
-	// JobGCEnabled 是 Job/裸 Pod 回收开关（TESTPLANE_JOB_GC_ENABLED，默认 true）。
-	// 由 config 统一读 env，编排层只读这个字段（不再自己 LookupEnv，票 #24-2）。
+	// JobGCEnabled 是 Job/裸 Pod 回收开关（AG_JOB_GC_ENABLED，默认 true）。
 	JobGCEnabled bool
 
 	// APIPrefix 是业务端点前缀，固定 /api/v1（07 §1）。
@@ -151,66 +161,80 @@ type Config struct {
 // Load 从环境变量装载配置并校验。任何非法值都返回错误（调用方直接退出）。
 func Load() (*Config, error) {
 	c := &Config{
-		HTTPAddr:           envFirst("TESTPLANE_HTTP_ADDR", "TESTPLANE_LISTEN", ":8080"),
-		DatabaseURL:        envFirst("TESTPLANE_DATABASE_URL", "TESTPLANE_DB_DSN", ""),
-		StorageRoot:        env("TESTPLANE_STORAGE_ROOT", "/storage-root"),
-		StoragePVC:         env("TESTPLANE_STORAGE_PVC", "testplane-storage"),
-		ClusterName:        env("TESTPLANE_CLUSTER_NAME", "cluster-01"),
-		Role:               Role(strings.ToLower(env("TESTPLANE_ROLE", string(RoleAll)))),
-		LogLevel:           strings.ToLower(env("TESTPLANE_LOG_LEVEL", "info")),
-		TestersDir:         env("TESTPLANE_TESTERS_DIR", "./testers"),
-		Kubeconfig:         env("TESTPLANE_KUBECONFIG", ""),
-		DeployProvider:     strings.ToLower(env("TESTPLANE_DEPLOY_PROVIDER", "mock")),
-		GenetBaseURL:       strings.TrimRight(env("TESTPLANE_GENET_BASE_URL", ""), "/"),
-		GenetAPIKey:        env("TESTPLANE_GENET_API_KEY", ""),
-		GenetCAFile:        env("TESTPLANE_GENET_CA_FILE", ""),
-		GenetInsecure:      envBool("TESTPLANE_GENET_INSECURE", false),
-		VolcanoEnabled:     envBool("TESTPLANE_VOLCANO_ENABLED", true),
-		VolcanoTTL:         15 * time.Second,
-		DBMaxConns:         20,
-		RunMaxTasks:        200,
-		TaskTimeoutDefault: 4 * time.Hour,
-		TaskTimeoutMax:     24 * time.Hour,
-		ResultMaxBytes:     100 << 20,
-		SSEHeartbeat:       15 * time.Second,
-		SSEReplayWindow:    24 * time.Hour,
-		AuthMode:           strings.ToLower(env("TESTPLANE_AUTH_MODE", "dev")),
-		Env:                strings.ToLower(env("TESTPLANE_ENV", "dev")),
-		OIDCIssuer:         strings.TrimRight(env("TESTPLANE_OIDC_ISSUER", ""), "/"),
-		OIDCClientID:       env("TESTPLANE_OIDC_CLIENT_ID", ""),
-		OIDCClientSecret:   env("TESTPLANE_OIDC_CLIENT_SECRET", ""),
-		OIDCClientAuth:     strings.ToLower(env("TESTPLANE_OIDC_CLIENT_AUTH", "basic")),
-		OIDCRedirectURL:    env("TESTPLANE_OIDC_REDIRECT_URL", ""),
-		OIDCScopes:         splitList(env("TESTPLANE_OIDC_SCOPES", "openid profile email groups")),
-		OIDCRoleClaim:      env("TESTPLANE_OIDC_ROLE_CLAIM", "groups"),
-		SessionSecret:      []byte(env("TESTPLANE_SESSION_SECRET", "")),
-		SessionCookie:      env("TESTPLANE_SESSION_COOKIE", "tp_session"),
-		SessionTTL:         8 * time.Hour, // 下面按 TESTPLANE_SESSION_TTL 覆盖
-		SessionSecure:      envBool("TESTPLANE_SESSION_SECURE", true),
-		RoleMap:            parseRoleMap(env("TESTPLANE_ROLE_MAP", "")),
-		JobGCEnabled:       envBool("TESTPLANE_JOB_GC_ENABLED", true),
-		APIPrefix:          "/api/v1",
+		HTTPAddr:             env("AG_LISTEN", ":8080"),
+		DatabaseURL:          env("AG_DB_DSN", ""),
+		StorageRoot:          env("AG_STORAGE_ROOT", "/storage-root"),
+		StoragePVC:           env("AG_STORAGE_PVC", "argus-storage"),
+		ClusterName:          env("AG_DEFAULT_CLUSTER", "cluster-01"),
+		Role:                 Role(strings.ToLower(env("AG_ROLE", string(RoleAll)))),
+		LogLevel:             strings.ToLower(env("AG_LOG_LEVEL", "info")),
+		RunnersDir:           env("AG_RUNNERS_DIR", "./runners"),
+		Namespace:            env("AG_EXECUTOR_NAMESPACE", "argus"),
+		MaxGlobalConcurrency: 20,
+		TaskMaxRunners:       200,
+		AttemptMax:           3,
+		RunnerTimeoutDefault: 4 * time.Hour,
+		RunnerTimeoutMax:     24 * time.Hour,
+		DeployTimeout:        72 * time.Hour,
+		RetentionDays:        30,
+		ResultMaxBytes:       100 << 20,
+		ArtifactMaxBytes:     10 << 30,
+		LogSegmentMaxBytes:   200 << 20,
+		LogTailLines:         2000,
+		ReconcileInterval:    30 * time.Second,
+		Kubeconfig:           env("AG_KUBECONFIG", ""),
+		K8sInCluster:         envBool("AG_K8S_IN_CLUSTER", true),
+		ClustersDir:          env("AG_CLUSTERS_DIR", "/etc/argus/clusters"),
+		MetricsEnabled:       envBool("AG_METRICS_ENABLED", true),
+		VolcanoEnabled:       envBool("AG_VOLCANO_ENABLED", true),
+		VolcanoTTL:           15 * time.Second,
+		DBMaxConns:           20,
+		SSEHeartbeat:         15 * time.Second,
+		SSEReplayWindow:      24 * time.Hour,
+		AuthMode:             strings.ToLower(env("AG_AUTH_MODE", "dev")),
+		Env:                  strings.ToLower(env("AG_ENV", "dev")),
+		OIDCIssuer:           strings.TrimRight(env("AG_OIDC_ISSUER", ""), "/"),
+		OIDCClientID:         env("AG_OIDC_CLIENT_ID", ""),
+		OIDCClientSecret:     env("AG_OIDC_CLIENT_SECRET", ""),
+		OIDCClientAuth:       strings.ToLower(env("AG_OIDC_CLIENT_AUTH", "basic")),
+		OIDCRedirectURL:      env("AG_OIDC_REDIRECT_URL", ""),
+		OIDCScopes:           splitList(env("AG_OIDC_SCOPES", "openid profile email groups")),
+		OIDCRoleClaim:        env("AG_OIDC_ROLE_CLAIM", "groups"),
+		SessionSecret:        []byte(env("AG_SESSION_KEY", "")),
+		SessionCookie:        env("AG_SESSION_COOKIE", "ag_session"),
+		SessionTTL:           8 * time.Hour, // 下面按 AG_SESSION_TTL 覆盖
+		SessionSecure:        envBool("AG_SESSION_SECURE", true),
+		RoleMap:              parseRoleMap(env("AG_ROLE_MAP", "")),
+		JobGCEnabled:         envBool("AG_JOB_GC_ENABLED", true),
+		APIPrefix:            "/api/v1",
 	}
-	shared, smErr := ParseSharedMounts(env("TESTPLANE_SHARED_MOUNTS", "[]"))
+	shared, smErr := ParseSharedMounts(env("AG_SHARED_MOUNTS", "[]"))
 	if smErr != nil {
 		return nil, smErr
 	}
 	c.SharedMounts = shared
 
-	if raw := env("TESTPLANE_SESSION_TTL", ""); raw != "" {
+	if raw := env("AG_SESSION_TTL", ""); raw != "" {
 		d, err := time.ParseDuration(strings.TrimSpace(raw))
 		if err != nil || d <= 0 {
-			return nil, fmt.Errorf("config: TESTPLANE_SESSION_TTL=%q 非法（如 8h）", raw)
+			return nil, fmt.Errorf("config: AG_SESSION_TTL=%q 非法（如 8h）", raw)
 		}
 		c.SessionTTL = d
 	}
 
-	if raw := env("TESTPLANE_VOLCANO_TTL", ""); raw != "" {
+	if raw := env("AG_VOLCANO_TTL", ""); raw != "" {
 		d, err := time.ParseDuration(strings.TrimSpace(raw))
 		if err != nil || d <= 0 {
-			return nil, fmt.Errorf("config: TESTPLANE_VOLCANO_TTL=%q 非法（如 15s）", raw)
+			return nil, fmt.Errorf("config: AG_VOLCANO_TTL=%q 非法（如 15s）", raw)
 		}
 		c.VolcanoTTL = d
+	}
+	if raw := env("AG_RECONCILE_INTERVAL", ""); raw != "" {
+		d, err := time.ParseDuration(strings.TrimSpace(raw))
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("config: AG_RECONCILE_INTERVAL=%q 非法（如 30s）", raw)
+		}
+		c.ReconcileInterval = d
 	}
 	c.VolcanoNamespaces = volcanoNamespacesFromEnv()
 
@@ -218,131 +242,135 @@ func Load() (*Config, error) {
 		c.Role = RoleAll
 	}
 	if !c.Role.Valid() {
-		return nil, fmt.Errorf("config: TESTPLANE_ROLE=%q 非法，允许 api|controller|collector|all", c.Role)
+		return nil, fmt.Errorf("config: AG_ROLE=%q 非法，允许 api|controller|collector|all", c.Role)
 	}
 	if c.DatabaseURL == "" {
-		return nil, errors.New("config: 缺少 TESTPLANE_DATABASE_URL")
+		return nil, errors.New("config: 缺少 AG_DB_DSN")
 	}
 	if _, err := url.Parse(c.DatabaseURL); err != nil {
-		return nil, fmt.Errorf("config: TESTPLANE_DATABASE_URL 非法: %w", err)
+		return nil, fmt.Errorf("config: AG_DB_DSN 非法: %w", err)
 	}
 	if c.StorageRoot == "" {
-		return nil, errors.New("config: TESTPLANE_STORAGE_ROOT 不能为空")
+		return nil, errors.New("config: AG_STORAGE_ROOT 不能为空")
 	}
 	if c.HTTPAddr == "" {
 		c.HTTPAddr = ":8080"
 	}
 
 	var err error
-	if c.DBMaxConns, err = envInt32("TESTPLANE_DB_MAX_OPEN_CONNS", c.DBMaxConns); err != nil {
+	if c.DBMaxConns, err = envInt32("AG_DB_MAX_OPEN_CONNS", c.DBMaxConns); err != nil {
 		return nil, err
 	}
-	if c.MaxGlobalConcurrency, err = envInt("TESTPLANE_MAX_GLOBAL_CONCURRENCY", "TESTPLANE_CONCURRENCY_MAX", 4); err != nil {
+	if c.MaxGlobalConcurrency, err = envInt("AG_CONCURRENCY_MAX", "", c.MaxGlobalConcurrency); err != nil {
 		return nil, err
 	}
-	if c.RunMaxTasks, err = envInt("TESTPLANE_RUN_MAX_TASKS", "", c.RunMaxTasks); err != nil {
+	if c.TaskMaxRunners, err = envInt("AG_TASK_MAX_RUNNERS", "", c.TaskMaxRunners); err != nil {
 		return nil, err
 	}
-	if c.DeployTimeout, err = envDuration("TESTPLANE_DEPLOY_TIMEOUT_SECONDS", "TESTPLANE_DEPLOY_TIMEOUT", 72*time.Hour); err != nil {
+	if c.AttemptMax, err = envInt("AG_ATTEMPT_MAX", "", c.AttemptMax); err != nil {
 		return nil, err
 	}
-	if c.TaskTimeoutDefault, err = envDuration("TESTPLANE_TASK_TIMEOUT", "", c.TaskTimeoutDefault); err != nil {
+	if c.RetentionDays, err = envInt("AG_RETENTION_DAYS", "", c.RetentionDays); err != nil {
 		return nil, err
 	}
-	if c.TaskTimeoutMax, err = envDuration("TESTPLANE_TASK_TIMEOUT_MAX", "", c.TaskTimeoutMax); err != nil {
+	if c.LogTailLines, err = envInt("AG_LOG_TAIL_LINES", "", c.LogTailLines); err != nil {
 		return nil, err
 	}
-	if c.ResultMaxBytes, err = envBytes("TESTPLANE_RESULT_MAX_BYTES", c.ResultMaxBytes); err != nil {
+	if c.DeployTimeout, err = envDuration("AG_DEPLOY_TIMEOUT", "", c.DeployTimeout); err != nil {
 		return nil, err
 	}
-	if c.SSEHeartbeat, err = envDuration("TESTPLANE_SSE_HEARTBEAT", "", c.SSEHeartbeat); err != nil {
+	if c.RunnerTimeoutDefault, err = envDuration("AG_RUNNER_TIMEOUT", "", c.RunnerTimeoutDefault); err != nil {
 		return nil, err
 	}
-	if c.SSEReplayWindow, err = envDurationHours("TESTPLANE_SSE_REPLAY_HOURS", 24*time.Hour); err != nil {
+	if c.RunnerTimeoutMax, err = envDuration("AG_RUNNER_TIMEOUT_MAX", "", c.RunnerTimeoutMax); err != nil {
+		return nil, err
+	}
+	if c.ResultMaxBytes, err = envBytes("AG_RESULT_MAX_BYTES", c.ResultMaxBytes); err != nil {
+		return nil, err
+	}
+	if c.ArtifactMaxBytes, err = envBytes("AG_ARTIFACT_MAX_BYTES", c.ArtifactMaxBytes); err != nil {
+		return nil, err
+	}
+	if c.LogSegmentMaxBytes, err = envBytes("AG_LOG_SEGMENT_MAX_BYTES", c.LogSegmentMaxBytes); err != nil {
+		return nil, err
+	}
+	if c.SSEHeartbeat, err = envDuration("AG_SSE_HEARTBEAT", "", c.SSEHeartbeat); err != nil {
+		return nil, err
+	}
+	if c.SSEReplayWindow, err = envDurationHours("AG_SSE_REPLAY_HOURS", 24*time.Hour); err != nil {
 		return nil, err
 	}
 
 	// 范围校验
 	if c.MaxGlobalConcurrency < 1 || c.MaxGlobalConcurrency > 10000 {
-		return nil, fmt.Errorf("config: TESTPLANE_MAX_GLOBAL_CONCURRENCY=%d 超出范围 [1,10000]", c.MaxGlobalConcurrency)
+		return nil, fmt.Errorf("config: AG_CONCURRENCY_MAX=%d 超出范围 [1,10000]", c.MaxGlobalConcurrency)
 	}
-	if c.RunMaxTasks < 1 || c.RunMaxTasks > 1000 {
-		return nil, fmt.Errorf("config: TESTPLANE_RUN_MAX_TASKS=%d 超出范围 [1,1000]", c.RunMaxTasks)
+	if c.TaskMaxRunners < 1 || c.TaskMaxRunners > 1000 {
+		return nil, fmt.Errorf("config: AG_TASK_MAX_RUNNERS=%d 超出范围 [1,1000]", c.TaskMaxRunners)
 	}
-	if c.TaskTimeoutDefault <= 0 || c.TaskTimeoutDefault > c.TaskTimeoutMax {
-		return nil, fmt.Errorf("config: 默认 Task 超时 %s 必须 >0 且 ≤ 上限 %s", c.TaskTimeoutDefault, c.TaskTimeoutMax)
+	if c.AttemptMax < 1 || c.AttemptMax > 100 {
+		return nil, fmt.Errorf("config: AG_ATTEMPT_MAX=%d 超出范围 [1,100]", c.AttemptMax)
+	}
+	if c.RunnerTimeoutDefault <= 0 || c.RunnerTimeoutDefault > c.RunnerTimeoutMax {
+		return nil, fmt.Errorf("config: 默认 runner 超时 %s 必须 >0 且 ≤ 上限 %s", c.RunnerTimeoutDefault, c.RunnerTimeoutMax)
 	}
 	// Profile CHECK 约束：deploy_timeout_seconds BETWEEN 3600 AND 604800。
 	if c.DeployTimeout < time.Hour || c.DeployTimeout > 7*24*time.Hour {
-		return nil, fmt.Errorf("config: Deploy 窗口 %s 超出范围 [1h,168h]（03 §3.2 的 CHECK 约束）", c.DeployTimeout)
+		return nil, fmt.Errorf("config: 部署窗口 %s 超出范围 [1h,168h]（03 §3.2 的 CHECK 约束）", c.DeployTimeout)
 	}
 	if c.DBMaxConns < 1 {
-		return nil, fmt.Errorf("config: TESTPLANE_DB_MAX_OPEN_CONNS=%d 必须 ≥1", c.DBMaxConns)
+		return nil, fmt.Errorf("config: AG_DB_MAX_OPEN_CONNS=%d 必须 ≥1", c.DBMaxConns)
 	}
 	if c.ResultMaxBytes < 1 {
-		return nil, errors.New("config: TESTPLANE_RESULT_MAX_BYTES 必须 >0")
+		return nil, errors.New("config: AG_RESULT_MAX_BYTES 必须 >0")
+	}
+	if c.ArtifactMaxBytes < 1 {
+		return nil, errors.New("config: AG_ARTIFACT_MAX_BYTES 必须 >0")
+	}
+	if c.RetentionDays < 1 {
+		return nil, errors.New("config: AG_RETENTION_DAYS 必须 >0")
 	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
-		return nil, fmt.Errorf("config: TESTPLANE_LOG_LEVEL=%q 非法，允许 debug|info|warn|error", c.LogLevel)
+		return nil, fmt.Errorf("config: AG_LOG_LEVEL=%q 非法，允许 debug|info|warn|error", c.LogLevel)
 	}
 	if c.OIDCClientAuth != "basic" && c.OIDCClientAuth != "post" {
-		return nil, fmt.Errorf("config: TESTPLANE_OIDC_CLIENT_AUTH=%q 非法，允许 basic|post", c.OIDCClientAuth)
+		return nil, fmt.Errorf("config: AG_OIDC_CLIENT_AUTH=%q 非法，允许 basic|post", c.OIDCClientAuth)
 	}
 	if c.AuthMode == "oidc" {
 		var missing []string
 		if c.OIDCIssuer == "" {
-			missing = append(missing, "TESTPLANE_OIDC_ISSUER")
+			missing = append(missing, "AG_OIDC_ISSUER")
 		}
 		if c.OIDCClientID == "" {
-			missing = append(missing, "TESTPLANE_OIDC_CLIENT_ID")
+			missing = append(missing, "AG_OIDC_CLIENT_ID")
 		}
 		if c.OIDCRedirectURL == "" {
-			missing = append(missing, "TESTPLANE_OIDC_REDIRECT_URL")
+			missing = append(missing, "AG_OIDC_REDIRECT_URL")
 		}
 		if len(c.SessionSecret) < 32 {
-			missing = append(missing, "TESTPLANE_SESSION_SECRET(≥32 字节)")
+			missing = append(missing, "AG_SESSION_KEY(≥32 字节)")
 		}
 		if len(missing) > 0 {
-			return nil, fmt.Errorf("config: TESTPLANE_AUTH_MODE=oidc 缺少必需配置: %s", strings.Join(missing, ", "))
+			return nil, fmt.Errorf("config: AG_AUTH_MODE=oidc 缺少必需配置: %s", strings.Join(missing, ", "))
 		}
 	}
 
 	switch c.AuthMode {
 	case "dev":
-		// 红线（06 §6.1、07 §2.1、票 #27-2 / #33 评审第 7 条）：dev 鉴权等于"任何人以任意身份操作"，
-		// 只允许在**显式声明的本地环境**下启用；其它任何取值（含未设置时的默认值以外的 staging/prod）都启动即失败。
+		// 红线（06 §6.1、07 §2.1）：dev 鉴权等于"任何人以任意身份操作"，
+		// 只允许在**显式声明的本地环境**下启用；其它任何取值都启动即失败。
 		switch c.Env {
 		case "dev", "local":
 		default:
 			return nil, fmt.Errorf(
-				"config: TESTPLANE_AUTH_MODE=dev 只能与 TESTPLANE_ENV=dev|local 一起用（当前 TESTPLANE_ENV=%q）；正式环境请设 TESTPLANE_AUTH_MODE=oidc",
+				"config: AG_AUTH_MODE=dev 只能与 AG_ENV=dev|local 一起用（当前 AG_ENV=%q）；正式环境请设 AG_AUTH_MODE=oidc",
 				c.Env)
 		}
 	case "oidc":
 	default:
-		return nil, fmt.Errorf("config: TESTPLANE_AUTH_MODE=%q 非法，允许 dev|oidc", c.AuthMode)
-	}
-	// Deploy 阶段：genet 需要完整接入配置；mock 不校验（kind E2E 用）。
-	switch c.DeployProvider {
-	case "mock":
-	case "genet":
-		if c.GenetBaseURL == "" {
-			return nil, errors.New("config: TESTPLANE_DEPLOY_PROVIDER=genet 需要 TESTPLANE_GENET_BASE_URL")
-		}
-		if _, err := url.Parse(c.GenetBaseURL); err != nil {
-			return nil, fmt.Errorf("config: TESTPLANE_GENET_BASE_URL=%q 非法: %w", c.GenetBaseURL, err)
-		}
-		if c.GenetAPIKey == "" {
-			return nil, errors.New("config: TESTPLANE_DEPLOY_PROVIDER=genet 需要 TESTPLANE_GENET_API_KEY（生产用 Secret 注入）")
-		}
-		if c.GenetInsecure {
-			// 不阻止启动（开发环境常见自签），但必须在日志里看得见。
-			fmt.Fprintln(os.Stderr, "warning: TESTPLANE_GENET_INSECURE=true —— Genet TLS 校验已关闭，仅限开发环境")
-		}
-	default:
-		return nil, fmt.Errorf("config: TESTPLANE_DEPLOY_PROVIDER=%q 非法，允许 mock|genet", c.DeployProvider)
+		return nil, fmt.Errorf("config: AG_AUTH_MODE=%q 非法，允许 dev|oidc", c.AuthMode)
 	}
 	return c, nil
 }
@@ -356,9 +384,10 @@ func (c *Config) RedactedDSN() string {
 	return u.Redacted()
 }
 
-// RunStorageDir 返回单个 Run 的产物目录（相对 StorageRoot 的相对路径 + 绝对路径两用）。
-func (c *Config) RunStorageDir(runID string) string {
-	return joinStorage(c.StorageRoot, "runs", runID)
+// TaskStorageDir 返回单个 Task 的产物目录（绝对路径）。
+// 产物布局：`<storage-root>/<task_id>/attempts/<n>/...`（§8.1）。
+func (c *Config) TaskStorageDir(taskID string) string {
+	return joinStorage(c.StorageRoot, taskID)
 }
 
 func joinStorage(root string, parts ...string) string {
@@ -369,15 +398,14 @@ func joinStorage(root string, parts ...string) string {
 	return out
 }
 
-// volcanoNamespacesFromEnv 解析 TESTPLANE_VOLCANO_NAMESPACES：
-//   - 未配置 → 默认 profile 的 namespace（与控制面 namespace 同值；这里不能调
-//     k8s.NamespaceFromEnv——config ← api ← k8s 会成导入环，所以按同一套 env 名重读一遍）；
+// volcanoNamespacesFromEnv 解析 AG_VOLCANO_NAMESPACES：
+//   - 未配置 → 默认 executor namespace（与 Job 所在 namespace 同值）；
 //   - `*` / `all` → nil（全部 namespace，一次集群级 List）；
 //   - 否则逗号/空白分隔的列表。
 func volcanoNamespacesFromEnv() []string {
-	raw := strings.TrimSpace(env("TESTPLANE_VOLCANO_NAMESPACES", ""))
+	raw := strings.TrimSpace(env("AG_VOLCANO_NAMESPACES", ""))
 	if raw == "" {
-		return []string{envFirst("TESTPLANE_NAMESPACE", "TESTPLANE_EXECUTOR_NAMESPACE", "testplane")}
+		return []string{env("AG_EXECUTOR_NAMESPACE", "argus")}
 	}
 	if raw == "*" || strings.EqualFold(raw, "all") {
 		return nil
@@ -402,7 +430,7 @@ func splitList(raw string) []string {
 	return out
 }
 
-// parseRoleMap 解析 TESTPLANE_ROLE_MAP（`tp-admins=admin,tp-ops=operator`）。
+// parseRoleMap 解析 AG_ROLE_MAP（`ag-admins=admin,ag-ops=operator`）。
 // 非法条目直接忽略（宁可少给权限，不给错权限）。
 func parseRoleMap(raw string) map[string]string {
 	out := map[string]string{}
@@ -427,7 +455,7 @@ func parseRoleMap(raw string) map[string]string {
 	return out
 }
 
-// ---- env 读取helper ------------------------------------------------------
+// ---- env 读取 helper ------------------------------------------------------
 
 func env(name, def string) string {
 	if v, ok := os.LookupEnv(name); ok && v != "" {
@@ -436,21 +464,8 @@ func env(name, def string) string {
 	return def
 }
 
-// envFirst 依次尝试多个变量名，返回第一个非空值。
-func envFirst(primary, alias, def string) string {
-	if v, ok := os.LookupEnv(primary); ok && v != "" {
-		return v
-	}
-	if alias != "" {
-		if v, ok := os.LookupEnv(alias); ok && v != "" {
-			return v
-		}
-	}
-	return def
-}
-
 func envInt(primary, alias string, def int) (int, error) {
-	raw := envFirst(primary, alias, "")
+	raw := env(primary, "")
 	if raw == "" {
 		return def, nil
 	}
@@ -475,7 +490,7 @@ func envInt32(primary string, def int32) (int32, error) {
 
 // envDuration 接受 Go duration 字符串（72h / 30s）或纯秒数。
 func envDuration(primary, alias string, def time.Duration) (time.Duration, error) {
-	raw := envFirst(primary, alias, "")
+	raw := env(primary, "")
 	if raw == "" {
 		return def, nil
 	}
@@ -552,12 +567,12 @@ func envBool(name string, def bool) bool {
 	}
 }
 
-// ParseSharedMounts 解析 TESTPLANE_SHARED_MOUNTS（JSON 数组，D-63）。
+// ParseSharedMounts 解析 AG_SHARED_MOUNTS（JSON 数组，D-63/D-65）。
 //
 // 形态：
 //
-//	[{"name":"models","mountPath":"/models","readOnly":true,"claimName":"testplane-models"},
-//	 {"name":"model-alt","mountPath":"/mnt/model","claimName":"testplane-models"}]
+//	[{"name":"models","mountPath":"/models","readOnly":true,"claimName":"argus-models"},
+//	 {"name":"model-alt","mountPath":"/mnt/model","claimName":"argus-models"}]
 //
 // 规则：claimName 必填；mountPath 绝对且不与平台保留路径冲突；name 唯一；readOnly **默认 true**
 // （只有显式写 false 才可写）。空/`[]` 表示不注入。
@@ -573,10 +588,10 @@ func ParseSharedMounts(raw string) ([]domain.SharedMountSpec, error) {
 		ClaimName string `json:"claimName"`
 	}
 	if err := json.Unmarshal([]byte(raw), &items); err != nil {
-		return nil, fmt.Errorf("config: TESTPLANE_SHARED_MOUNTS 不是合法 JSON 数组: %w", err)
+		return nil, fmt.Errorf("config: AG_SHARED_MOUNTS 不是合法 JSON 数组: %w", err)
 	}
 	out := make([]domain.SharedMountSpec, 0, len(items))
-	for i, it := range items {
+	for _, it := range items {
 		ro := true
 		if it.ReadOnly != nil {
 			ro = *it.ReadOnly
@@ -584,11 +599,10 @@ func ParseSharedMounts(raw string) ([]domain.SharedMountSpec, error) {
 		out = append(out, domain.SharedMountSpec{
 			Name: it.Name, MountPath: it.MountPath, ReadOnly: ro, ClaimName: it.ClaimName,
 		})
-		_ = i
 	}
 	normalized, err := domain.NormalizeSharedMounts(out)
 	if err != nil {
-		return nil, fmt.Errorf("config: TESTPLANE_SHARED_MOUNTS: %w", err)
+		return nil, fmt.Errorf("config: AG_SHARED_MOUNTS: %w", err)
 	}
 	return normalized, nil
 }

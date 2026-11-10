@@ -1,13 +1,5 @@
 package api
 
-// 审计查询（07 §5.4：GET /admin/audit）与人工清理产物
-// （07 §5.4：DELETE /admin/runs/{run_id}/artifacts）。
-//
-// 审计检索：按 actor / action / object_type / object_id / 时间范围过滤，
-// `ORDER BY at DESC, id DESC`，游标与其它 list 端点同构（07 §6）。
-// 清理产物：**Run 非终态一律 409**（不让人工清理正在写入的目录），
-// 终态则删 <storage-root>/<run_id> 与 artifacts 索引行，并记审计。
-
 import (
 	"encoding/json"
 	"errors"
@@ -23,6 +15,14 @@ import (
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
+
+// 审计查询（07 §5.4：GET /admin/audit）与人工清理产物
+// （07 §5.4：DELETE /admin/tasks/{task_id}/artifacts）。
+//
+// 审计检索：按 actor / action / object_type / object_id / 时间范围过滤，
+// `ORDER BY at DESC, id DESC`，游标与其它 list 端点同构（07 §6）。
+// 清理产物：**Task 非终态一律 409**（不让人工清理正在写入的目录），
+// 终态则删 <storage-root>/<task_id> 与 artifacts 索引行，并记审计。
 
 // auditDTO 是 GET /admin/audit 的列表项（openapi AuditLog）。
 type auditDTO struct {
@@ -104,48 +104,47 @@ func parseAuditTime(v string) (time.Time, error) {
 // 生产行为与 os.RemoveAll 完全一致。
 var removeAllForCleanup = os.RemoveAll
 
-// handleAdminCleanupArtifacts 是 DELETE /api/v1/admin/runs/{run_id}/artifacts（200）。
+// handleAdminCleanupArtifacts 是 DELETE /api/v1/admin/tasks/{task_id}/artifacts（200）。
 //
-// 这是保留期清理的例外通道（web-and-delivery §11）：只允许对**终态 Run** 执行，
-// 非终态 409 CONFLICT（避免删掉正在写入的目录）。
+// 这是保留期清理的例外通道（web-and-delivery §11）：只允许对**终态 Task** 执行，
+// 非终态 409 CONFLICT（避免删掉正在写入的目录）。Task 本身不删除。
 //
 // 顺序（issue #40-7）：先在同一个事务里删 artifacts 索引行 + 写 result=ok 审计，
-// 提交后再删磁盘目录；目录删除失败时**补写一条 result=rejected 审计**
-// （带 detail.directory 与 detail.error），再返回 5xx——不会再出现"目录没删掉、
-// 审计却只有成功"的情况。索引是可重建的派生数据（03 §3.2），先删它不会丢事实。
+// 提交后再删磁盘目录；目录删除失败时**补写一条 result=rejected 审计**，
+// 再返回 5xx——不会再出现"目录没删掉、审计却只有成功"的情况。
 func (s *Server) handleAdminCleanupArtifacts(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	const action, objectType = "cleanup_artifacts", "run"
+	const action, objectType = "cleanup_artifacts", "task"
 
-	runID := strings.TrimSpace(chi.URLParam(r, "run_id"))
-	if runID == "" {
+	taskID := strings.TrimSpace(chi.URLParam(r, "task_id"))
+	if taskID == "" {
 		s.rejectValidation(w, r, action, objectType, "",
-			"缺少 run_id", map[string]any{"param": "run_id"})
+			"缺少 task_id", map[string]any{"param": "task_id"})
 		return
 	}
-	run, err := s.st.Runs.Get(ctx, nil, runID)
+	task, err := s.st.Tasks.Get(ctx, nil, taskID)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
-			s.rejectWrite(w, r, action, objectType, runID,
+			s.rejectWrite(w, r, action, objectType, taskID,
 				http.StatusNotFound, domain.CodeNotFound,
-				"Run 不存在", map[string]any{"run_id": runID}, false)
+				"Task 不存在", map[string]any{"task_id": taskID}, false)
 			return
 		}
-		s.failWriteErr(w, r, action, objectType, runID, err)
+		s.failWriteErr(w, r, action, objectType, taskID, err)
 		return
 	}
-	status := domain.RunStatus(run.Status)
+	status := domain.TaskStatus(task.Status)
 	if !status.IsTerminal() {
-		s.rejectWrite(w, r, action, objectType, runID,
+		s.rejectWrite(w, r, action, objectType, taskID,
 			http.StatusConflict, domain.CodeConflict,
-			"Run 未到终态，不能人工清理产物",
-			map[string]any{"run_id": runID, "status": run.Status}, false)
+			"Task 未到终态，不能人工清理产物",
+			map[string]any{"task_id": taskID, "status": task.Status}, false)
 		return
 	}
 
-	// 目录名取自库里读出的 run.ID（不是 URL 原文），再做一次路径片段校验。
-	component, err := safePathComponent(run.ID)
-	if err != nil {
+	// 目录名取自库里读出的 task.ID（不是 URL 原文），再做一次路径片段校验。
+	component, ok := safePathComponent(task.ID)
+	if !ok {
 		s.failErr(w, r, err)
 		return
 	}
@@ -156,36 +155,30 @@ func (s *Server) handleAdminCleanupArtifacts(w http.ResponseWriter, r *http.Requ
 		dir = filepath.Join(root, component)
 	}
 
-	// 先做 DB 事务（删索引行 + result=ok 审计），提交后再删目录：
-	// 审计失败时索引行回滚、目录也还没动——不会出现"清了磁盘却查不到记录"；
-	// artifacts 索引是可重建的派生数据（03 §3.2），先删它不会丢事实。
-	// 目录删除失败时补一条 rejected 审计（issue #40-7），不让 ok 成为唯一记录。
 	var (
 		entries    int64
 		freedBytes int64
 	)
-	detail := map[string]any{
-		"deleted_entries": int64(0), "freed_bytes": int64(0), "directory": dir,
-	}
-	entry := s.auditEntry(r, action, objectType, runID, detail)
-	err = s.st.InAuditedTx(ctx, entry, func(tx pgx.Tx) error {
-		n, b, err := s.st.Artifacts.DeleteByRun(ctx, tx, runID)
-		if err != nil {
-			return err
+	// 行数与字节数在删除前统计（索引是派生数据，删后查不到）。
+	if rows, qerr := s.st.Artifacts.ListByTask(ctx, nil, taskID); qerr == nil {
+		for _, a := range rows {
+			entries++
+			freedBytes += a.SizeBytes
 		}
-		entries, freedBytes = n, b
-		detail["deleted_entries"] = n
-		detail["freed_bytes"] = b
-		entry.Detail["deleted_entries"] = n
-		entry.Detail["freed_bytes"] = b
-		return nil
+	}
+	detail := map[string]any{
+		"deleted_entries": entries, "freed_bytes": freedBytes, "directory": dir,
+	}
+	entry := s.auditEntry(r, action, objectType, taskID, detail)
+	err = s.st.InAuditedTx(ctx, entry, func(tx pgx.Tx) error {
+		return s.st.Artifacts.DeleteByTask(ctx, tx, taskID)
 	})
 	if err != nil {
 		if errors.Is(err, domain.ErrTx) {
-			s.failAuditTx(w, r, action, objectType, runID, err)
+			s.failAuditTx(w, r, action, objectType, taskID, err)
 			return
 		}
-		s.failWriteErr(w, r, action, objectType, runID, err)
+		s.failWriteErr(w, r, action, objectType, taskID, err)
 		return
 	}
 
@@ -195,9 +188,9 @@ func (s *Server) handleAdminCleanupArtifacts(w http.ResponseWriter, r *http.Requ
 			if err := removeAllForCleanup(dir); err != nil {
 				// 索引已删（可重建），目录没删掉：补一条 rejected 结果审计（#40-7），
 				// 再按 5xx 暴露，交给运维处理。
-				s.logger.Error("删除 Run 产物目录失败", "err", err, "run_id", run.ID,
+				s.logger.Error("删除 Task 产物目录失败", "err", err, "task_id", task.ID,
 					"request_id", RequestID(ctx))
-				s.auditRejected(ctx, Actor(ctx), Role(ctx), action, objectType, runID, map[string]any{
+				s.auditRejected(ctx, Actor(ctx), Role(ctx), action, objectType, taskID, map[string]any{
 					"result": "rejected", "reason": "directory_remove_failed",
 					"code": domain.CodeCleanupFailed, "directory": dir,
 					"error": err.Error(), "deleted_entries": entries, "freed_bytes": freedBytes,
@@ -205,7 +198,7 @@ func (s *Server) handleAdminCleanupArtifacts(w http.ResponseWriter, r *http.Requ
 
 				fail(w, r, http.StatusInternalServerError, domain.CodeCleanupFailed,
 					"产物索引已清理，但删除产物目录失败",
-					map[string]any{"run_id": runID, "deleted_entries": entries, "directory": dir}, true)
+					map[string]any{"task_id": taskID, "deleted_entries": entries, "directory": dir}, true)
 				return
 			}
 			directoryRemoved = true
@@ -213,7 +206,7 @@ func (s *Server) handleAdminCleanupArtifacts(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"run_id":            runID,
+		"task_id":           taskID,
 		"deleted_entries":   entries,
 		"freed_bytes":       freedBytes,
 		"directory_removed": directoryRemoved,

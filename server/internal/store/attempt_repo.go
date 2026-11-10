@@ -10,65 +10,68 @@ import (
 	"github.com/ucm-system/testplane/server/internal/domain"
 )
 
-// AttemptRepo 是 attempts 表的读写。Attempt 是物理执行事实，状态由执行层的
-// ResultSink 经 Kernel CAS 写；本 repo 只做读取与"物理字段回写"。
+// AttemptRepo 是 task_attempts 表（Task 级 attempt 计数与落档归组行，D-68）的读写。
+// attempt 行只做**归组与计数**：状态由 Task 推进派生落库；物理执行列在 task_runners。
 type AttemptRepo struct{ s *Store }
 
-const attemptCols = `id, task_id, idx, status, job_id, job_namespace, phase, image_digest,
-	exit_code, started_at, finished_at, log_ref, artifact_ref, result_ref, error, executor_ref`
+const attemptCols = `task_id, attempt_no, status, trigger, input_ref, exports_ref,
+	deploy_state_ref, error, started_at, finished_at`
 
 func scanAttempt(row pgx.Row) (*Attempt, error) {
 	var a Attempt
-	err := row.Scan(&a.ID, &a.TaskID, &a.Idx, &a.Status, &a.JobID, &a.JobNamespace,
-		&a.Phase, &a.ImageDigest, &a.ExitCode, &a.StartedAt, &a.FinishedAt,
-		&a.LogRef, &a.ArtifactRef, &a.ResultRef, &a.Error, &a.ExecutorRef)
+	err := row.Scan(&a.TaskID, &a.AttemptNo, &a.Status, &a.Trigger, &a.InputRef,
+		&a.ExportsRef, &a.DeployStateRef, &a.Error, &a.StartedAt, &a.FinishedAt)
 	if err != nil {
 		return nil, err
 	}
 	return &a, nil
 }
 
-// Get 按 id 取 Attempt。
-func (r *AttemptRepo) Get(ctx context.Context, tx pgx.Tx, id string) (*Attempt, error) {
-	a, err := scanAttempt(r.s.db(tx).QueryRow(ctx, `SELECT `+attemptCols+` FROM attempts WHERE id = $1`, id))
+// Get 取指定 attempt 行。
+func (r *AttemptRepo) Get(ctx context.Context, tx pgx.Tx, taskID string, attemptNo int) (*Attempt, error) {
+	a, err := scanAttempt(r.s.db(tx).QueryRow(ctx,
+		`SELECT `+attemptCols+` FROM task_attempts WHERE task_id = $1 AND attempt_no = $2`,
+		taskID, attemptNo))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("store: attempt %s: %w", id, domain.ErrNotFound)
+		return nil, fmt.Errorf("store: attempt %s#%d: %w", taskID, attemptNo, domain.ErrNotFound)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("store: get attempt %s: %w", id, err)
+		return nil, fmt.Errorf("store: get attempt %s#%d: %w", taskID, attemptNo, err)
 	}
 	return a, nil
 }
 
-// Owner 返回 Attempt 所属的 (task_id, run_id)，门面开事务后先锁 Run 用。
-func (r *AttemptRepo) Owner(ctx context.Context, tx pgx.Tx, attemptID string) (taskID, runID string, err error) {
-	e := r.s.db(tx).QueryRow(ctx, `
-		SELECT a.task_id, t.run_id FROM attempts a JOIN tasks t ON t.id = a.task_id WHERE a.id = $1`, attemptID)
-	if err = e.Scan(&taskID, &runID); errors.Is(err, pgx.ErrNoRows) {
-		return "", "", fmt.Errorf("store: attempt %s: %w", attemptID, domain.ErrNotFound)
-	}
-	if err != nil {
-		return "", "", fmt.Errorf("store: owner of attempt %s: %w", attemptID, err)
-	}
-	return taskID, runID, nil
-}
-
-// GetByJobID 按 job_id（内部幂等键）取 Attempt。
-func (r *AttemptRepo) GetByJobID(ctx context.Context, tx pgx.Tx, jobID string) (*Attempt, error) {
-	a, err := scanAttempt(r.s.db(tx).QueryRow(ctx, `SELECT `+attemptCols+` FROM attempts WHERE job_id = $1`, jobID))
+// GetLatest 取该 Task 的最新 attempt（不存在时返回 ErrNotFound）。
+func (r *AttemptRepo) GetLatest(ctx context.Context, tx pgx.Tx, taskID string) (*Attempt, error) {
+	a, err := scanAttempt(r.s.db(tx).QueryRow(ctx,
+		`SELECT `+attemptCols+` FROM task_attempts WHERE task_id = $1 ORDER BY attempt_no DESC LIMIT 1`,
+		taskID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("store: attempt by job %s: %w", jobID, domain.ErrNotFound)
+		return nil, fmt.Errorf("store: attempt latest %s: %w", taskID, domain.ErrNotFound)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("store: get attempt by job %s: %w", jobID, err)
+		return nil, fmt.Errorf("store: get latest attempt %s: %w", taskID, err)
 	}
 	return a, nil
 }
 
-// ListByTask 返回某 Task 的全部 Attempt（按 idx 升序，历史不被覆盖）。
+// GetActive 取该 Task 的活跃 attempt（至多一个；部分唯一索引保证）。
+func (r *AttemptRepo) GetActive(ctx context.Context, tx pgx.Tx, taskID string) (*Attempt, error) {
+	a, err := scanAttempt(r.s.db(tx).QueryRow(ctx,
+		`SELECT `+attemptCols+` FROM task_attempts WHERE task_id = $1 AND status = 'running'`, taskID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("store: attempt active %s: %w", taskID, domain.ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get active attempt %s: %w", taskID, err)
+	}
+	return a, nil
+}
+
+// ListByTask 返回该 Task 的全部 attempt（按 attempt_no 升序，历史不被覆盖）。
 func (r *AttemptRepo) ListByTask(ctx context.Context, tx pgx.Tx, taskID string) ([]Attempt, error) {
 	rows, err := r.s.db(tx).Query(ctx,
-		`SELECT `+attemptCols+` FROM attempts WHERE task_id = $1 ORDER BY idx`, taskID)
+		`SELECT `+attemptCols+` FROM task_attempts WHERE task_id = $1 ORDER BY attempt_no`, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list attempts %s: %w", taskID, err)
 	}
@@ -84,54 +87,21 @@ func (r *AttemptRepo) ListByTask(ctx context.Context, tx pgx.Tx, taskID string) 
 	return out, rows.Err()
 }
 
-// ListActive 返回全部进行中的 Attempt（对账用）。
-func (r *AttemptRepo) ListActive(ctx context.Context, tx pgx.Tx, limit int) ([]Attempt, error) {
-	limit = normalizeLimit(limit)
-	rows, err := r.s.db(tx).Query(ctx, `SELECT `+attemptCols+`
-		  FROM attempts WHERE status IN ('preparing','running') ORDER BY started_at NULLS FIRST LIMIT $1`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("store: list active attempts: %w", err)
-	}
-	defer rows.Close()
-	var out []Attempt
-	for rows.Next() {
-		a, err := scanAttempt(rows)
-		if err != nil {
-			return nil, fmt.Errorf("store: scan attempt: %w", err)
-		}
-		out = append(out, *a)
-	}
-	return out, rows.Err()
-}
-
-// CountActive 返回全局进行中的 Attempt 数（全局并发 permit 的判定输入，C-4.4）。
-func (r *AttemptRepo) CountActive(ctx context.Context, tx pgx.Tx) (int, error) {
-	var n int
-	err := r.s.db(tx).QueryRow(ctx,
-		`SELECT count(*) FROM attempts WHERE status IN ('preparing','running')`).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("store: count active attempts: %w", err)
-	}
-	return n, nil
-}
-
-// CreateAttemptParams 是启动一次 Attempt 的输入（T3 的副作用）。
+// CreateAttemptParams 是启动一次 attempt 的输入（提交 / POST /tasks/{id}/retry）。
 type CreateAttemptParams struct {
-	TaskID       string
-	JobID        string // 空则生成新 job_id
-	JobNamespace string
-	ExecutorRef  []byte
-	Idx          int // 0 表示用 current_attempt+1
+	TaskID    string
+	Trigger   string // initial | retry；空按 initial
+	AttemptNo int    // 0 表示用 tasks.current_attempt+1
 }
 
-// Create 插入一行 Attempt 并把 tasks.current_attempt 推进到同一 idx。
-// 调用方必须在事务里、且已持有该 Task 的 Run 锁。
+// Create 插入一行 attempt（status='running'）并把 tasks.current_attempt 推进到同一序号。
+// 调用方必须在事务里、且已持有该 Task 行锁。
 func (r *AttemptRepo) Create(ctx context.Context, tx pgx.Tx, p CreateAttemptParams) (*Attempt, error) {
-	idx := p.Idx
-	if idx <= 0 {
+	no := p.AttemptNo
+	if no <= 0 {
 		if err := r.s.db(tx).QueryRow(ctx,
-			`UPDATE tasks SET current_attempt = current_attempt + 1, updated_at = now()
-			  WHERE id = $1 RETURNING current_attempt`, p.TaskID).Scan(&idx); err != nil {
+			`UPDATE tasks SET current_attempt = current_attempt + 1 WHERE id = $1
+			  RETURNING current_attempt`, p.TaskID).Scan(&no); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, fmt.Errorf("store: create attempt: task %s: %w", p.TaskID, domain.ErrNotFound)
 			}
@@ -139,98 +109,78 @@ func (r *AttemptRepo) Create(ctx context.Context, tx pgx.Tx, p CreateAttemptPara
 		}
 	} else {
 		if _, err := r.s.db(tx).Exec(ctx,
-			`UPDATE tasks SET current_attempt = GREATEST(current_attempt, $2), updated_at = now()
-			  WHERE id = $1`, p.TaskID, idx); err != nil {
+			`UPDATE tasks SET current_attempt = GREATEST(current_attempt, $2) WHERE id = $1`,
+			p.TaskID, no); err != nil {
 			return nil, fmt.Errorf("store: create attempt: set current_attempt: %w", err)
 		}
 	}
-
-	jobID := p.JobID
-	if jobID == "" {
-		jobID = NewJobID()
-	}
+	trigger := defaultString(p.Trigger, "initial")
 	a := &Attempt{
-		ID:           AttemptID(p.TaskID, idx),
-		TaskID:       p.TaskID,
-		Idx:          idx,
-		Status:       string(domain.AttemptPreparing),
-		JobID:        jobID,
-		JobNamespace: nullableText(p.JobNamespace),
-		ExecutorRef:  p.ExecutorRef,
+		TaskID:    p.TaskID,
+		AttemptNo: no,
+		Status:    string(domain.AttemptRunning),
+		Trigger:   trigger,
 	}
 	_, err := r.s.db(tx).Exec(ctx, `
-		INSERT INTO attempts (id, task_id, idx, status, job_id, job_namespace, executor_ref)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		a.ID, a.TaskID, a.Idx, a.Status, a.JobID, a.JobNamespace, nullableBytes(a.ExecutorRef))
+		INSERT INTO task_attempts (task_id, attempt_no, status, trigger)
+		VALUES ($1,$2,$3,$4)`,
+		a.TaskID, a.AttemptNo, a.Status, trigger)
 	if err != nil {
-		return nil, fmt.Errorf("store: insert attempt %s: %w", a.ID, err)
+		return nil, fmt.Errorf("store: insert attempt %s#%d: %w", a.TaskID, a.AttemptNo, err)
 	}
 	return a, nil
 }
 
-// PhysicalFacts 是执行层回写的物理事实（不参与状态判定，03 §3.1）。
-type PhysicalFacts struct {
-	Phase        *string
-	ExitCode     *int32
-	ImageDigest  *string
-	JobNamespace *string
-	LogRef       *string
-	ArtifactRef  *string
-	ResultRef    *string
-	ExecutorRef  []byte
-}
-
-// SetPhysicalFacts 只补物理字段，不改 status（状态只能由 Kernel.Apply 改）。
-func (r *AttemptRepo) SetPhysicalFacts(ctx context.Context, tx pgx.Tx, id string, f PhysicalFacts) error {
+// SetRefs 回填 attempt 的落档引用（input_ref / exports_ref / deploy_state_ref）。
+// 空字符串表示"该落档不存在"，不覆盖已有值（不造死链）。
+func (r *AttemptRepo) SetRefs(ctx context.Context, tx pgx.Tx, taskID string, attemptNo int,
+	inputRef, exportsRef, deployStateRef string) error {
 	_, err := r.s.db(tx).Exec(ctx, `
-		UPDATE attempts
-		   SET phase         = COALESCE($2, phase),
-		       exit_code     = COALESCE($3, exit_code),
-		       image_digest  = COALESCE($4, image_digest),
-		       job_namespace = COALESCE($5, job_namespace),
-		       log_ref       = COALESCE($6, log_ref),
-		       artifact_ref  = COALESCE($7, artifact_ref),
-		       result_ref    = COALESCE($8, result_ref),
-		       executor_ref  = COALESCE($9, executor_ref)
-		 WHERE id = $1`,
-		id, f.Phase, f.ExitCode, f.ImageDigest, f.JobNamespace, f.LogRef, f.ArtifactRef, f.ResultRef,
-		nullableBytes(f.ExecutorRef))
+		UPDATE task_attempts
+		   SET input_ref        = COALESCE(NULLIF($3, ''), input_ref),
+		       exports_ref      = COALESCE(NULLIF($4, ''), exports_ref),
+		       deploy_state_ref = COALESCE(NULLIF($5, ''), deploy_state_ref)
+		 WHERE task_id = $1 AND attempt_no = $2`,
+		taskID, attemptNo, inputRef, exportsRef, deployStateRef)
 	if err != nil {
-		return fmt.Errorf("store: set physical facts %s: %w", id, err)
+		return fmt.Errorf("store: set attempt refs %s#%d: %w", taskID, attemptNo, err)
 	}
 	return nil
 }
 
-// AttemptJobState 是 GC 需要的"某个 Job 对应 Attempt 的库内状态"（一次批量查询）。
-type AttemptJobState struct {
-	Found    bool
-	Terminal bool
+// SetStatus 落 attempt 聚合状态（由 Task 推进派生；**终态不覆盖**，03 §3.1）。
+func (r *AttemptRepo) SetStatus(ctx context.Context, tx pgx.Tx, taskID string, attemptNo int,
+	status domain.AttemptStatus, errJSON []byte) error {
+	if !domain.ValidAttemptStatus(status.Status()) {
+		return fmt.Errorf("store: attempt status %q 非法: %w", status, domain.ErrPrecondition)
+	}
+	finished := status.IsTerminal()
+	tag, err := r.s.db(tx).Exec(ctx, `
+		UPDATE task_attempts
+		   SET status      = $3,
+		       error       = COALESCE($4, error),
+		       finished_at = CASE WHEN $5 THEN now() ELSE finished_at END
+		 WHERE task_id = $1 AND attempt_no = $2
+		   AND (status = 'running' OR ($3 = 'running' AND status <> 'running'))`,
+		taskID, attemptNo, string(status), nullableBytes(errJSON), finished)
+	if err != nil {
+		return fmt.Errorf("store: set attempt status %s#%d: %w", taskID, attemptNo, err)
+	}
+	if tag.RowsAffected() == 0 {
+		// 终态不覆盖；'running' 回写只在行不存在时未命中——按无操作处理。
+		return nil
+	}
+	return nil
 }
 
-// StatesByJobNames 批量把 Job 名映射成 Attempt 状态（票 #20-5：禁止 N+1）。
-// Job 名取自 attempts.executor_ref->>'job'；终态 = succeeded|failed|canceled。
-func (r *AttemptRepo) StatesByJobNames(ctx context.Context, tx pgx.Tx, jobNames []string) (map[string]AttemptJobState, error) {
-	out := make(map[string]AttemptJobState, len(jobNames))
-	if len(jobNames) == 0 {
-		return out, nil
-	}
-	rows, err := r.s.db(tx).Query(ctx, `
-		SELECT COALESCE(executor_ref->>'job', ''), status
-		  FROM attempts
-		 WHERE COALESCE(executor_ref->>'job', '') = ANY($1)`, jobNames)
+// CountActive 全局进行中的 attempt 数（全局并发 permit 的参考输入，C-4.4 用
+// task_runners 计数；本查询供指标与对账）。
+func (r *AttemptRepo) CountActive(ctx context.Context, tx pgx.Tx) (int, error) {
+	var n int
+	err := r.s.db(tx).QueryRow(ctx,
+		`SELECT count(*) FROM task_attempts WHERE status = 'running'`).Scan(&n)
 	if err != nil {
-		return nil, fmt.Errorf("store: attempt states by job names: %w", err)
+		return 0, fmt.Errorf("store: count active attempts: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var job, status string
-		if err := rows.Scan(&job, &status); err != nil {
-			return nil, fmt.Errorf("store: scan attempt job state: %w", err)
-		}
-		out[job] = AttemptJobState{
-			Found:    true,
-			Terminal: status == "succeeded" || status == "failed" || status == "canceled",
-		}
-	}
-	return out, rows.Err()
+	return n, nil
 }

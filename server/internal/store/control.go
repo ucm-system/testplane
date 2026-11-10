@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,283 +12,214 @@ import (
 	"github.com/ucm-system/testplane/server/internal/domain"
 )
 
-// 本文件是控制面内核给编排层（orchestrator.Repos）的"组合事务"出口。
+// 本文件是控制面内核给编排层（orchestrator）的"组合事务"出口（C-2.5）。
 //
-// 每个方法自己开事务并保证锁顺序 Run → Task → Attempt（02 §3.8），
-// 对外只暴露事实（Applied / 受影响 id / Attempt 句柄），不暴露 pgx 类型。
+// 每个方法自己开事务并保证锁顺序 Task → runner 执行记录（02 §3.8），
+// 对外只暴露事实（Applied / 受影响 key / Job 名），不暴露 pgx 类型。
 
-// ---- 读（不加行锁）-------------------------------------------------------
-
-// ListRunsByStatus 取指定状态的 Run（编排循环用）。
-func (s *Store) ListRunsByStatus(ctx context.Context, statuses []string, limit int) ([]Run, error) {
-	limit = normalizeLimit(limit)
-	rows, err := s.pool.Query(ctx, `SELECT `+runCols+`
-		  FROM runs WHERE status = ANY($1) ORDER BY submitted_at LIMIT $2`, statuses, limit)
-	if err != nil {
-		return nil, fmt.Errorf("store: list runs by status: %w", err)
-	}
-	defer rows.Close()
-	var out []Run
-	for rows.Next() {
-		r, err := scanRun(rows)
-		if err != nil {
-			return nil, fmt.Errorf("store: scan run: %w", err)
-		}
-		out = append(out, *r)
-	}
-	return out, rows.Err()
-}
-
-// CandidateRow 是调度候选 + 编排层需要的附加字段。
-type CandidateRow struct {
-	TaskID      string
-	RunID       string
-	Seq         int
-	EndpointKey string
-	Exclusive   bool
-	TesterRole  string
-	SubmittedAt time.Time
-}
-
-// CandidatesDetailed 取调度候选（不加行锁，C-4.2），附带 Tester 角色与提交时间。
-func (s *Store) CandidatesDetailed(ctx context.Context, limit int) ([]CandidateRow, error) {
-	limit = normalizeLimit(limit)
-	rows, err := s.pool.Query(ctx, `
-		SELECT t.id, t.run_id, t.seq, COALESCE(t.endpoint_key, ''), t.endpoint_exclusive,
-		       COALESCE(ts.role, 'test'), r.submitted_at
-		  FROM tasks t
-		  JOIN runs r ON r.id = t.run_id
-		  LEFT JOIN testers ts ON ts.name = t.tester_name AND ts.version = t.tester_version
-		 WHERE t.status = 'queued'
-		   AND r.status = 'testing'
-		   AND (t.available_at IS NULL OR t.available_at <= now())
-		 ORDER BY r.submitted_at, t.seq
-		 LIMIT $1`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("store: candidates detailed: %w", err)
-	}
-	defer rows.Close()
-	var out []CandidateRow
-	for rows.Next() {
-		var c CandidateRow
-		if err := rows.Scan(&c.TaskID, &c.RunID, &c.Seq, &c.EndpointKey, &c.Exclusive,
-			&c.TesterRole, &c.SubmittedAt); err != nil {
-			return nil, fmt.Errorf("store: scan candidate: %w", err)
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
-}
-
-// ExpiredAttempt 是超时 watchdog 的输入（C-6.3）。
-type ExpiredAttempt struct {
-	AttemptID string
-	TaskID    string
-	RunID     string
-	AttemptNo int
-	JobName   string
-}
-
-// ExpiredAttempts 返回 started_at + timeout_seconds 已到期的活跃 Attempt。
-func (s *Store) ExpiredAttempts(ctx context.Context, now time.Time) ([]ExpiredAttempt, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT a.id, a.task_id, t.run_id, a.idx, COALESCE(a.executor_ref->>'job', '')
-		  FROM attempts a
-		  JOIN tasks t ON t.id = a.task_id
-		 WHERE a.status IN ('preparing','running')
-		   AND a.started_at IS NOT NULL
-		   AND a.started_at + make_interval(secs => t.timeout_seconds) < $1
-		 LIMIT 100`, now)
-	if err != nil {
-		return nil, fmt.Errorf("store: expired attempts: %w", err)
-	}
-	defer rows.Close()
-	var out []ExpiredAttempt
-	for rows.Next() {
-		var e ExpiredAttempt
-		if err := rows.Scan(&e.AttemptID, &e.TaskID, &e.RunID, &e.AttemptNo, &e.JobName); err != nil {
-			return nil, fmt.Errorf("store: scan expired attempt: %w", err)
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
-// AttemptByJobName 用 K8s Job 名反查 Attempt（executor_ref->>'job'）。
-// attempts 表没有 created_at 列（03 §3.2），排序用 idx（同一 Job 名只会命中一行）。
-func (s *Store) AttemptByJobName(ctx context.Context, jobName string) (*Attempt, string, string, error) {
-	var a Attempt
-	var runID string
-	err := s.pool.QueryRow(ctx, `
-		SELECT a.id, a.task_id, t.run_id, a.idx, a.status
-		  FROM attempts a JOIN tasks t ON t.id = a.task_id
-		 WHERE a.executor_ref->>'job' = $1 OR a.job_id = $1
-		 ORDER BY a.idx DESC
-		 LIMIT 1`, jobName).
-		Scan(&a.ID, &a.TaskID, &runID, &a.Idx, &a.Status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, "", "", fmt.Errorf("store: attempt by job %s: %w", jobName, domain.ErrNotFound)
-	}
-	if err != nil {
-		return nil, "", "", fmt.Errorf("store: attempt by job %s: %w", jobName, err)
-	}
-	return &a, a.TaskID, runID, nil
-}
+// 全局并发 advisory 锁名（C-4.4：锁名常量只允许一处定义）。
+const globalConcurrencyLockName = "argus:global-concurrency"
 
 // ---- 调度 / 执行 ---------------------------------------------------------
 
-// MarkAttemptRunning 执行 T5：同事务里
-// 写 attempts 的 job_namespace/executor_ref + attempts preparing→running + tasks preparing→running。
-func (s *Store) MarkAttemptRunning(ctx context.Context, attemptID, jobNamespace, jobName string) error {
-	return s.InTx(ctx, func(tx pgx.Tx) error {
-		taskID, runID, err := s.Attempts.Owner(ctx, tx, attemptID)
-		if err != nil {
-			return err
-		}
-		if _, err := s.Runs.Lock(ctx, tx, runID); err != nil {
-			return err
-		}
-		ref, _ := json.Marshal(map[string]any{
-			"namespace": jobNamespace, "job": jobName,
-		})
-		if err := s.Attempts.SetPhysicalFacts(ctx, tx, attemptID, PhysicalFacts{
-			JobNamespace: nullableText(jobNamespace),
-			ExecutorRef:  ref,
-		}); err != nil {
-			return err
-		}
-		if _, err := s.Apply(ctx, tx, domain.Transition{
-			Entity: domain.EntityAttempt, ID: attemptID,
-			From:    []domain.Status{domain.AttemptPreparing.Status(), domain.AttemptRunning.Status()},
-			To:      domain.AttemptRunning.Status(),
-			Command: "start", Actor: "system:executor",
-		}); err != nil && !errors.Is(err, domain.ErrConflict) {
-			return err
-		}
-		_, err = s.Apply(ctx, tx, domain.Transition{
-			Entity: domain.EntityTask, ID: taskID,
-			From:    []domain.Status{domain.TaskPreparing.Status()},
-			To:      domain.TaskRunning.Status(),
-			Command: "start", Actor: "system:executor",
-		})
-		if err != nil && !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrNotFound) {
-			return err
-		}
-		return nil
-	})
+// ClaimRequest 是调度器"取活"的原子请求（C-4.1/C-4.2/C-4.3/C-4.4）。
+type ClaimRequest struct {
+	Key domain.RunnerKey
+	// EndpointKey 是该执行记录的 endpoint_key（仅外接模式非空；部署模式不建租约）。
+	EndpointKey string
+	// Exclusive 来自 Runner 声明的 concurrency.endpoint_exclusive（仅外接模式有效）。
+	Exclusive bool
+	// GlobalLimit 是 AG_CONCURRENCY_MAX；<=0 表示不限制。
+	GlobalLimit int
+	// JobID 可预分配；空则用 JobName 派生。
+	JobID        string
+	JobNamespace string
+	ExecutorRef  []byte
 }
 
-// QueueTasksTransition 把 Run 里的 pending Task 批量置 queued（走 Kernel，逐条写事件）。
-// onlySeqZero=true 时只放 Pre-Check（C-5.4）。
-func (s *Store) QueueTasksTransition(ctx context.Context, runID string, onlySeqZero bool) ([]string, error) {
-	var queued []string
-	err := s.InTx(ctx, func(tx pgx.Tx) error {
-		if _, err := s.Runs.Lock(ctx, tx, runID); err != nil {
-			return err
+// ClaimResult 是抢到之后的产物。
+type ClaimResult struct {
+	Key domain.RunnerKey
+	// JobName 是派生的 K8s Job 名（幂等键 = (task_id, attempt_no, seq) 的派生，附录 B）。
+	JobName string
+	// Seq 是本次 queued→preparing 转移的事件序号。
+	Seq int64
+}
+
+// ClaimForExecution 一个事务里按固定锁顺序完成（C-4.2）：
+//
+//	锁 Task → 端点 advisory 锁（仅外接模式有 key）→ 全局并发 advisory 锁 → 计数
+//	→ CAS task_runners queued→preparing → 插入 endpoint_leases → 回填 Job 句柄。
+//
+// 抢不到是**正常结果**，不是错误：返回 claimed=false + reason
+// （reason 取 domain.Wait* 之一，由调用方写回 waiting_reason）。
+func (s *Store) ClaimForExecution(ctx context.Context, req ClaimRequest) (ClaimResult, bool, string, error) {
+	if !req.Key.Valid() {
+		return ClaimResult{}, false, "", fmt.Errorf("store: claim: 非法 RunnerKey %+v", req.Key)
+	}
+
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return ClaimResult{}, false, "", err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(context.WithoutCancel(ctx))
 		}
-		// Pre-Check 放行判据（03-data-view.md §4.2）：
-		// runs.resolved.precheck.injected == true **且** tasks.seq = 0。
-		// 不能用 seq=0 单独判定 —— precheck:"off" 时测试 Task 也从 0 开始，
-		// 会把 seq>0 的 Task 永久卡在 precheck_gate（评审 #14）。
-		rows, err := tx.Query(ctx, `
-			SELECT id FROM tasks
-			 WHERE run_id = $1 AND status = 'pending' AND endpoint_key IS NOT NULL
-			   AND ($2 = false OR (seq = 0 AND EXISTS (
-			         SELECT 1 FROM runs r
-			          WHERE r.id = $1
-			            AND COALESCE((r.resolved -> 'precheck' ->> 'injected')::boolean, false))))
-			 ORDER BY seq`, runID, onlySeqZero)
+	}()
+
+	// 1. 统一锁顺序第一步：锁 Task（防与取消/abort 反向加锁死锁，C-4.2）。
+	if _, err := s.Tasks.Lock(ctx, tx, req.Key.TaskID); err != nil {
+		return ClaimResult{}, false, "", err
+	}
+
+	// 2. 端点槽位（仅外接模式：endpoint_key 非空才有租约，部署模式不建，C-4.3）。
+	if req.EndpointKey != "" {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, req.EndpointKey); err != nil {
+			return ClaimResult{}, false, "", fmt.Errorf("store: claim: 端点 advisory 锁: %w", err)
+		}
+		holders, err := s.Leases.Holders(ctx, tx, req.EndpointKey)
 		if err != nil {
-			return fmt.Errorf("store: queue tasks %s: %w", runID, err)
+			return ClaimResult{}, false, "", err
 		}
-		ids, err := collectIDs(rows)
-		if err != nil {
-			return err
-		}
-		for _, id := range ids {
-			if _, err := s.Apply(ctx, tx, domain.Transition{
-				Entity: domain.EntityTask, ID: id,
-				From:    []domain.Status{domain.TaskPending.Status()},
-				To:      domain.TaskQueued.Status(),
-				Command: "queue", Actor: "system:orchestrator",
-			}); err != nil {
-				if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrPrecondition) {
-					continue
-				}
-				return err
+		mine := false
+		exclusiveHeld := false
+		for _, l := range holders {
+			if l.TaskID == req.Key.TaskID && l.AttemptNo == req.Key.AttemptNo && l.RunnerSeq == req.Key.Seq {
+				mine = true
+				continue
 			}
-			queued = append(queued, id)
+			if l.Exclusive {
+				exclusiveHeld = true
+			}
 		}
-		return nil
+		if req.Exclusive && len(holders) > 0 && !mine {
+			return ClaimResult{}, false, domain.WaitSlotWaiting, nil
+		}
+		if !req.Exclusive && exclusiveHeld && !mine {
+			return ClaimResult{}, false, domain.WaitSlotWaiting, nil
+		}
+	}
+
+	// 3. 全局并发 permit（排在端点锁之后，C-4.4）。
+	if req.GlobalLimit > 0 {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, globalConcurrencyLockName); err != nil {
+			return ClaimResult{}, false, "", fmt.Errorf("store: claim: 全局 advisory 锁: %w", err)
+		}
+		active, err := s.RunnerRuns.CountActive(ctx, tx)
+		if err != nil {
+			return ClaimResult{}, false, "", err
+		}
+		if active >= req.GlobalLimit {
+			return ClaimResult{}, false, domain.WaitGlobalLimit, nil
+		}
+	}
+
+	// 4. CAS task_runners queued→preparing（同 Task 的下一 runner 由管道推进置 queued）。
+	applied, err := s.Apply(ctx, tx, domain.Transition{
+		Entity: domain.EntityRunnerRun, ID: req.Key.ID(),
+		From:    []domain.Status{domain.RunnerQueued.Status()},
+		To:      domain.RunnerPreparing.Status(),
+		Command: "prepare", Actor: "system:scheduler",
 	})
 	if err != nil {
-		return nil, err
+		switch {
+		case errors.Is(err, domain.ErrConflict):
+			return ClaimResult{}, false, domain.WaitSlotWaiting, nil
+		case errors.Is(err, domain.ErrPrecondition):
+			return ClaimResult{}, false, domain.WaitSlotWaiting, nil
+		}
+		return ClaimResult{}, false, "", err
 	}
-	return queued, nil
+
+	// 5. 端点租约（与状态推进同事务；执行记录终态时释放）。
+	if req.EndpointKey != "" {
+		if _, err := s.Leases.TryAcquire(ctx, tx, req.Key, req.EndpointKey, req.Exclusive); err != nil {
+			return ClaimResult{}, false, "", err
+		}
+	}
+
+	// 6. Job 句柄与状态推进同事务落库（C-2.5）。
+	jobID := req.JobID
+	if jobID == "" {
+		jobID = JobName(req.Key)
+	}
+	if err := s.RunnerRuns.SetPhysicalFacts(ctx, tx, req.Key, PhysicalFacts{
+		JobID:        jobID,
+		JobNamespace: nullableText(req.JobNamespace),
+		ExecutorRef:  req.ExecutorRef,
+	}); err != nil {
+		return ClaimResult{}, false, "", err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return ClaimResult{}, false, "", fmt.Errorf("store: claim: commit: %w", err)
+	}
+	committed = true
+
+	// 提交后通知（02 §3.7）。
+	if s.notifier != nil && applied.Seq > 0 {
+		s.notifier.Notify(req.Key.TaskID, applied.Seq)
+	}
+	return ClaimResult{Key: req.Key, JobName: jobID, Seq: applied.Seq}, true, "", nil
 }
 
-// ---- 终态推进 ------------------------------------------------------------
+// ---- runner 终态推进 -----------------------------------------------------
 
-// AttemptFinish 是 FinishAttempt 的组合输入。
-type AttemptFinish struct {
-	AttemptID   string
-	TaskID      string
-	RunID       string
-	Succeeded   bool
-	Phase       string
-	ExitCode    *int32
+// RunnerFinish 是 FinishRunnerRun 的组合输入。
+type RunnerFinish struct {
+	Key domain.RunnerKey
+	// Succeeded=false 时 Failure 必填（错误码用于终态判定与 abort 判定）。
+	Succeeded bool
+	Failure   *domain.Failure
+	Phase     string
+	ExitCode  *int
+	// ImageDigest 是 K8s imageID 解析出的实际 digest（可得时写入，D-36）。
 	ImageDigest string
-	Failure     *domain.Failure
 	FinishedAt  time.Time
 
-	// ---- 产物引用（03-data-view §3.1：attempts.log_ref/artifact_ref/result_ref，
-	// 相对 `<run>/tasks/<task>/attempts/<n>/`；tasks.result_ref 相对 Run 目录）----
-	//
+	// ---- 产物引用（03 §3.1；相对 Task 目录）----
 	// 只填**真实存在**的文件：空字符串表示"没有这个产物"，落库保持 NULL。
-	// 造一个指向不存在文件的引用会让报告变成死链（票 UX-2026-11）。
-	LogRef      string // logs/stdout.log
-	ArtifactRef string // artifacts
-	ResultRef   string // result.json
+	ExportsRef string
+	ResultRef  string
+	LogRef     string
 }
 
-// AttemptFinishResult 汇报推进结果。
-type AttemptFinishResult struct {
-	AttemptApplied domain.Applied
-	TaskStatus     domain.TaskStatus
-	TaskTerminal   bool
-	RunAllTerminal bool
-	RunStatus      domain.RunStatus
+// RunnerFinishResult 汇报推进结果。
+type RunnerFinishResult struct {
+	RunnerApplied domain.Applied
+	// NextQueued 是串行放行的下一条执行记录（成功或失败(continue) 时恰一条）。
+	NextQueued *domain.RunnerKey
+	// AbortTriggered 表示 on_failure=abort_task 生效：后续 runner 已批量 SKIPPED。
 	AbortTriggered bool
-	SkippedTasks   []string
-	CancelAttempts []string
-	PreCheckPassed bool
-	RetryScheduled bool
+	Skipped        []domain.RunnerKey
+	// TaskTerminal / TaskStatus：clean 之后（或无 clean 的管道收尾）Task 落终态。
+	TaskTerminal bool
+	TaskStatus   domain.TaskStatus
 }
 
-// FinishAttempt 落一次 Attempt 终态并推进 Task / Run（C-5.4、C-5.8）。
-func (s *Store) FinishAttempt(ctx context.Context, in AttemptFinish) (*AttemptFinishResult, error) {
-	out := &AttemptFinishResult{}
-	var finishedRunID string
+// FinishRunnerRun 落一次 runner 执行记录终态并推进 Task 管道（C-5.4/C-5.5/C-5.8）。
+//
+// 一个事务内：
+//  1. CAS 执行记录到终态（先落库者胜；冲突按幂等忽略）；
+//  2. 释放端点租约（effect）；
+//  3. 失败且 on_failure=abort_task → 其余未执行 runner 批量 skipped（传播到 clean 为止）；
+//  4. 失败且 continue（或成功）→ 下一条执行记录置 queued（严格串行推进）；
+//  5. 若本次终态的是 role=clean（或管道已无未执行 runner）→ 全部终态时按
+//     domain.DecideTaskOutcome 判 Task 终态（clean 失败不改终态）。
+func (s *Store) FinishRunnerRun(ctx context.Context, in RunnerFinish) (*RunnerFinishResult, error) {
+	out := &RunnerFinishResult{}
 	err := s.InTx(ctx, func(tx pgx.Tx) error {
-		taskID := in.TaskID
-		runID := in.RunID
-		if taskID == "" || runID == "" {
-			tid, rid, err := s.Attempts.Owner(ctx, tx, in.AttemptID)
-			if err != nil {
-				return err
-			}
-			taskID, runID = tid, rid
+		if _, err := s.Tasks.Lock(ctx, tx, in.Key.TaskID); err != nil {
+			return err
 		}
-		finishedRunID = runID
-		if _, err := s.Runs.Lock(ctx, tx, runID); err != nil {
+		rr, err := s.RunnerRuns.Get(ctx, tx, in.Key)
+		if err != nil {
 			return err
 		}
 
-		// 1. Attempt 终态（CAS）
-		attemptTo := domain.AttemptSucceeded
-		if !in.Succeeded {
-			attemptTo = domain.AttemptFailed
-		}
+		// 1. 执行记录终态（CAS；先落库者胜）。
 		payload := map[string]any{}
 		if in.Phase != "" {
 			payload["phase"] = in.Phase
@@ -298,193 +227,196 @@ func (s *Store) FinishAttempt(ctx context.Context, in AttemptFinish) (*AttemptFi
 		if in.ExitCode != nil {
 			payload["exit_code"] = *in.ExitCode
 		}
+		failure := domain.NewFailure(domain.CodeInternalError, "执行失败", nil)
 		if in.Failure != nil {
-			payload["error"] = *in.Failure
+			failure = *in.Failure
 		}
-		// 产物引用：kernel 会把它们写进 attempts.log_ref/artifact_ref/result_ref
-		// （COALESCE，不覆盖已有值）。同时这个 payload 会复用到 Task 终态转换，
-		// 所以 tasks.result_ref 也一并落库（03-data-view §3.1：Task 终态写）。
-		if in.LogRef != "" {
-			payload["log_ref"] = in.LogRef
+		payload["error_code"] = failure.Code
+		if !in.Succeeded || failure.Code != domain.CodeInternalError {
+			payload["error"] = failure
 		}
-		if in.ArtifactRef != "" {
-			payload["artifact_ref"] = in.ArtifactRef
+		if in.ExportsRef != "" {
+			payload["exports_ref"] = in.ExportsRef
 		}
 		if in.ResultRef != "" {
 			payload["result_ref"] = in.ResultRef
 		}
+		if in.LogRef != "" {
+			payload["log_ref"] = in.LogRef
+		}
+		to := domain.RunnerFailed
+		if in.Succeeded {
+			to = domain.RunnerSucceeded
+		}
 		applied, err := s.Apply(ctx, tx, domain.Transition{
-			Entity: domain.EntityAttempt, ID: in.AttemptID,
-			From:    []domain.Status{domain.AttemptPreparing.Status(), domain.AttemptRunning.Status()},
-			To:      attemptTo.Status(),
-			Command: "finish", Actor: "system:executor", Payload: payload,
-			At: in.FinishedAt,
+			Entity: domain.EntityRunnerRun, ID: in.Key.ID(),
+			From:    []domain.Status{domain.RunnerPreparing.Status(), domain.RunnerRunning.Status()},
+			To:      to.Status(),
+			Command: "finish", Reason: failure.Code, Actor: "system:executor",
+			Payload: payload, At: in.FinishedAt,
 		})
 		if err != nil {
 			if errors.Is(err, domain.ErrConflict) {
-				// 先落库者胜：不覆盖已有结论。
-				return nil
+				return nil // 先落库者胜：不覆盖已有结论
 			}
 			return err
 		}
-		out.AttemptApplied = applied
+		out.RunnerApplied = applied
 
+		// 物理事实：退出码 / digest（不参与状态判定）。
+		facts := PhysicalFacts{ExitCode: in.ExitCode, ErrorCode: &failure.Code}
 		if in.ImageDigest != "" {
-			digest := in.ImageDigest
-			_ = s.Attempts.SetPhysicalFacts(ctx, tx, in.AttemptID, PhysicalFacts{ImageDigest: &digest})
+			d := in.ImageDigest
+			facts.ImageDigest = &d
 		}
-
-		// 2. Task 终态
-		//
-		// tasks.result_ref 是**相对 Run 目录**的（03-data-view §3.1），而 attempts.result_ref
-		// 相对 Attempt 目录；所以这里把前缀补上再传给 Task 的转换 payload。
-		taskPayload := payload
+		if in.ExportsRef != "" {
+			facts.ExportsRef = &in.ExportsRef
+		}
 		if in.ResultRef != "" {
-			if n := attemptIdxFromID(in.AttemptID); n > 0 {
-				cp := make(map[string]any, len(payload)+1)
-				for k, v := range payload {
-					cp[k] = v
-				}
-				cp["result_ref"] = fmt.Sprintf("tasks/%s/attempts/%d/%s",
-					taskID, n, strings.TrimPrefix(in.ResultRef, "/"))
-				taskPayload = cp
-			}
+			facts.ResultRef = &in.ResultRef
 		}
-		t, err := s.Tasks.Get(ctx, tx, taskID)
-		if err != nil {
-			return err
+		if in.LogRef != "" {
+			facts.LogRef = &in.LogRef
 		}
-		if in.Succeeded {
-			if _, err := s.Apply(ctx, tx, domain.Transition{
-				Entity: domain.EntityTask, ID: taskID,
-				From:    []domain.Status{domain.TaskRunning.Status()},
-				To:      domain.TaskSucceeded.Status(),
-				Command: "succeed", Actor: "system:executor", Payload: taskPayload,
-				At: in.FinishedAt,
-			}); err != nil && !errors.Is(err, domain.ErrConflict) {
-				return err
-			}
-			out.TaskStatus = domain.TaskSucceeded
-			out.TaskTerminal = true
-			// Pre-Check 通过：其余 Task 由调用方放行（NeedsQueueUnblocked）。
-			// 判据与放行 SQL 同源（03-data-view §4.2）：resolved.precheck.injected=true **且** seq=0。
-			// 不看 testers.role：endpoint-probe 本身 role=pre_check，用户可在 precheck:"off" 下
-			// 把它当普通测试提交；也不能依赖注册表里"是否已有该 Tester 行"（未落库时门永远开不了）。
-			precheckIDs, err := s.PrecheckTaskIDs(ctx, tx, runID)
-			if err == nil && precheckIDs[t.ID] {
-				out.PreCheckPassed = true
-			}
-		} else {
-			failure := domain.NewFailure(domain.CodeInternalError, "执行失败", nil)
-			if in.Failure != nil {
-				failure = *in.Failure
-			}
-			if _, err := s.Apply(ctx, tx, domain.Transition{
-				Entity: domain.EntityTask, ID: taskID,
-				From:    []domain.Status{domain.TaskPreparing.Status(), domain.TaskRunning.Status()},
-				To:      domain.TaskFailed.Status(),
-				Command: "fail", Reason: failure.Code, Actor: "system:executor",
-				Payload: failPayload(taskPayload, failure), At: in.FinishedAt,
-			}); err != nil && !errors.Is(err, domain.ErrConflict) {
-				return err
-			}
-			out.TaskStatus = domain.TaskFailed
-			out.TaskTerminal = true
-			// 重试：错误码在 retry_on 且 idx < max_attempts → failed→queued（T11）。
-			if s.retryAllowed(t, failure.Code) {
-				applied, err := s.Apply(ctx, tx, domain.Transition{
-					Entity: domain.EntityTask, ID: taskID,
-					From:    []domain.Status{domain.TaskFailed.Status()},
-					To:      domain.TaskQueued.Status(),
-					Command: "retry", Actor: "system:orchestrator",
-					Payload: failPayload(taskPayload, failure), At: in.FinishedAt,
-				})
-				if err == nil {
-					out.RetryScheduled = true
-					out.TaskTerminal = false
-					_ = applied
-				}
-			}
-		}
+		_ = s.RunnerRuns.SetPhysicalFacts(ctx, tx, in.Key, facts)
 
-		// 3. abort_run：失败且 on_failure=abort_run → 终止其余未完成 Task（C-5.5）
-		if !in.Succeeded && t.OnFailure == domain.OnFailureAbortRun {
-			skipped, cancelAttempts, err := s.abortOthers(ctx, tx, runID, taskID, domain.SkipUpstreamAbort, in.FinishedAt)
+		// 2+3+4. 管道推进 / abort 传播。
+		if !in.Succeeded && rr.OnFailure == domain.OnFailureAbortTask {
+			skipped, err := s.skipUpstreamRunners(ctx, tx, in.Key, domain.SkipUpstreamAbort, in.FinishedAt)
 			if err != nil {
 				return err
 			}
 			out.AbortTriggered = true
-			out.SkippedTasks = skipped
-			out.CancelAttempts = cancelAttempts
+			out.Skipped = skipped
+		} else {
+			next, err := s.queueNextRunner(ctx, tx, in.Key, in.FinishedAt)
+			if err != nil {
+				return err
+			}
+			out.NextQueued = next
 		}
 
-		// 4. 全部 Task 终态 → Run 进 cleanup 并判终态（C-5.8）
-		nonTerminal, err := s.Tasks.CountNonTerminal(ctx, tx, runID)
+		// 5. 全部终态 → Task 终态判定（clean 失败只记 cleanup_failed，不改终态）。
+		nonTerminal, err := s.RunnerRuns.CountNonTerminal(ctx, tx, in.Key.TaskID, in.Key.AttemptNo)
 		if err != nil {
 			return err
 		}
-		run, err := s.Runs.Get(ctx, tx, runID)
-		if err != nil {
-			return err
-		}
-		out.RunStatus = domain.RunStatus(run.Status)
 		if nonTerminal == 0 {
-			out.RunAllTerminal = true
-			out.RunStatus = s.finishRunLocked(ctx, tx, run, in.FinishedAt)
+			status, err := s.finishTaskLocked(ctx, tx, in.Key.TaskID, in.Key.AttemptNo, in.FinishedAt)
+			if err != nil {
+				return err
+			}
+			out.TaskTerminal = true
+			out.TaskStatus = status
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	// Run 终态已提交：触发报告生成等外部动作（事务内禁止文件 IO）。
-	// 覆盖"最后一个 Attempt 结束 → Run 终态"这条最常见路径（不只 RunMachine.Finish）。
-	if out.RunStatus.IsTerminal() {
-		s.fireRunFinished(finishedRunID)
+	// Task 终态已提交：触发报告生成等外部动作（事务内禁止文件 IO）。
+	if out.TaskTerminal {
+		s.fireTaskFinished(in.Key.TaskID)
 	}
 	return out, nil
 }
 
-// finishRunLocked 在已持 Run 锁的事务里做 testing→cleanup→终态判定（C-5.8）。
-func (s *Store) finishRunLocked(ctx context.Context, tx pgx.Tx, run *Run, at time.Time) domain.RunStatus {
-	cur := domain.RunStatus(run.Status)
-	if cur == domain.RunTesting {
-		if _, err := s.Apply(ctx, tx, domain.Transition{
-			Entity: domain.EntityRun, ID: run.ID,
-			From:    []domain.Status{domain.RunTesting.Status()},
-			To:      domain.RunCleanup.Status(),
-			Command: "begin_cleanup", Actor: "system:orchestrator", At: at,
-		}); err != nil && !errors.Is(err, domain.ErrConflict) {
-			return cur
+// queueNextRunner 串行放行下一条执行记录：seq+1 存在且 pending → queued（C-5.4）。
+func (s *Store) queueNextRunner(ctx context.Context, tx pgx.Tx, cur domain.RunnerKey, at time.Time) (*domain.RunnerKey, error) {
+	var exists bool
+	next := domain.RunnerKey{TaskID: cur.TaskID, AttemptNo: cur.AttemptNo, Seq: cur.Seq + 1}
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM task_runners
+		 WHERE task_id = $1 AND attempt_no = $2 AND seq = $3 AND status = 'pending')`,
+		next.TaskID, next.AttemptNo, next.Seq).Scan(&exists)
+	if err != nil {
+		return nil, fmt.Errorf("store: queue next: %w", err)
+	}
+	if !exists {
+		return nil, nil
+	}
+	if _, err := s.Apply(ctx, tx, domain.Transition{
+		Entity: domain.EntityRunnerRun, ID: next.ID(),
+		From:    []domain.Status{domain.RunnerPending.Status()},
+		To:      domain.RunnerQueued.Status(),
+		Command: "queue", Actor: "system:orchestrator", At: at,
+	}); err != nil {
+		return nil, err
+	}
+	return &next, nil
+}
+
+// skipUpstreamRunners 把 abort_task 传播到其余未执行的 runner（传播到 clean 为止，
+// C-5.5）：pending/queued 且 role <> 'clean' 批量置 skipped(reason)。
+func (s *Store) skipUpstreamRunners(ctx context.Context, tx pgx.Tx, failed domain.RunnerKey,
+	reason string, at time.Time) ([]domain.RunnerKey, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT seq FROM task_runners
+		 WHERE task_id = $1 AND attempt_no = $2 AND seq <> $3
+		   AND status IN ('pending','queued') AND role <> 'clean'
+		 ORDER BY seq`, failed.TaskID, failed.AttemptNo, failed.Seq)
+	if err != nil {
+		return nil, fmt.Errorf("store: skip upstream: %w", err)
+	}
+	var seqs []int
+	for rows.Next() {
+		var sq int
+		if err := rows.Scan(&sq); err != nil {
+			rows.Close()
+			return nil, err
 		}
-		cur = domain.RunCleanup
+		seqs = append(seqs, sq)
 	}
-	if cur != domain.RunCleanup {
-		return cur
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
-	tasks, err := s.listTasks(ctx, tx, run.ID)
+	var skipped []domain.RunnerKey
+	for _, sq := range seqs {
+		k := domain.RunnerKey{TaskID: failed.TaskID, AttemptNo: failed.AttemptNo, Seq: sq}
+		if _, err := s.Apply(ctx, tx, domain.Transition{
+			Entity: domain.EntityRunnerRun, ID: k.ID(),
+			From:    []domain.Status{domain.RunnerPending.Status(), domain.RunnerQueued.Status()},
+			To:      domain.RunnerSkipped.Status(),
+			Command: "skip", Reason: reason, Actor: "system:orchestrator", At: at,
+		}); err != nil && !errors.Is(err, domain.ErrConflict) {
+			return nil, err
+		}
+		skipped = append(skipped, k)
+	}
+	return skipped, nil
+}
+
+// finishTaskLocked 在已持 Task 锁的事务里按 C-5.8 判 Task 终态，并落 attempt 聚合状态。
+func (s *Store) finishTaskLocked(ctx context.Context, tx pgx.Tx, taskID string, attemptNo int,
+	at time.Time) (domain.TaskStatus, error) {
+
+	t, err := s.Tasks.Get(ctx, tx, taskID)
 	if err != nil {
-		return cur
+		return "", err
 	}
-	// Pre-Check 的判别用 Tester 角色，**不能用 seq==0**：`precheck: "off"` 时唯一的
-	// 测试 Task 也从 seq=0 开始，误判会把它的 TASK_TIMEOUT 当成 Pre-Check 可重试失败，
-	// 把本该 failed 的 Run 判成 service_unavailable（QA 的 r-20261105-3J4R）。
-	precheckIDs, err := s.PrecheckTaskIDs(ctx, tx, run.ID)
+	cur := domain.TaskStatus(t.Status)
+	// attempt 触发的重试（terminal → queued）之后 Task 已回到 queued/running；
+	// 这里只在 running 态做终态判定。
+	if cur != domain.TaskRunning {
+		return cur, nil
+	}
+
+	runs, err := s.RunnerRuns.ListByAttempt(ctx, tx, taskID, attemptNo)
 	if err != nil {
-		return cur
+		return "", err
 	}
-	input := domain.RunOutcomeInput{}
+	input := domain.TaskOutcomeInput{}
 	var platformTimeout bool
-	for _, t := range tasks {
-		summary := domain.TaskSummary{Seq: t.Seq, Status: domain.TaskStatus(t.Status)}
-		if len(t.Error) > 0 {
-			// 用指针接 retryable：只有实例真的带了该字段才算"实例给了值"
-			// （07-api.md §3：终态判定以实例字段为准，码级默认只做兜底）。
+	for _, rr := range runs {
+		summary := domain.RunnerSummary{Seq: rr.Seq, Role: rr.Role, Status: domain.RunnerStatus(rr.Status)}
+		if len(rr.Error) > 0 {
+			// 用指针接 retryable：只有实例真的带了该字段才算"实例给了值"。
 			var f struct {
 				Code      string `json:"code"`
 				Retryable *bool  `json:"retryable"`
 			}
-			if err := json.Unmarshal(t.Error, &f); err == nil {
+			if err := json.Unmarshal(rr.Error, &f); err == nil {
 				summary.ErrorCode = f.Code
 				if f.Retryable != nil {
 					summary.Retryable = *f.Retryable
@@ -492,56 +424,67 @@ func (s *Store) finishRunLocked(ctx context.Context, tx pgx.Tx, run *Run, at tim
 				}
 			}
 		}
-		isPre := precheckIDs[t.ID]
-		if isPre {
-			pre := summary
-			input.Precheck = &pre
+		if summary.ErrorCode == "" && rr.ErrorCode != nil {
+			summary.ErrorCode = *rr.ErrorCode
 		}
-		// TASK_TIMEOUT 属 C-5.8 #3 的平台侧错误 → Run failed；但 Pre-Check 的超时
-		// 仍走 #4（可重试 → service_unavailable），不能被这里的平台错误抢走。
-		if !isPre && summary.Status == domain.TaskFailed && summary.ErrorCode == domain.CodeTaskTimeout {
+		// 超时（watchdog 判定）属平台侧事实：pre_check 之外的 RUNNER_TIMEOUT 走
+		// 平台错误（C-5.8 #2），Pre-Check 的超时仍走 #4（可重试 → service_unavailable）。
+		if rr.Role != domain.RolePreCheck && summary.Status == domain.RunnerFailed &&
+			summary.ErrorCode == domain.CodeRunnerTimeout {
 			platformTimeout = true
 		}
-		input.Tasks = append(input.Tasks, summary)
+		input.Runners = append(input.Runners, summary)
 	}
 	input.PlatformError = platformTimeout
-	status := domain.DecideRunOutcome(input)
+	status := domain.DecideTaskOutcome(input)
+
+	// Task 终态要带 error（03 §3.1）：取第一个失败 runner 的 Failure。
 	payload := map[string]any{}
-	if run.Endpoint != nil && len(run.Endpoint) > 0 {
-		payload["endpoint"] = json.RawMessage(run.Endpoint)
-	}
-	// Run 终态要带 error（03 §3.1「终态/失败」）：取第一个失败的 Task 的 Failure，
-	// Pre-Check 失败时优先用它（它决定 service_unavailable 的语义）。
-	if status != domain.RunSucceeded && status != domain.RunCanceled {
-		if f := firstTaskFailure(tasks, precheckIDs); f != nil {
+	if status != domain.TaskSucceeded && status != domain.TaskCanceled {
+		if f := firstRunnerFailure(runs); f != nil {
 			payload["error"] = *f
 		}
 	}
 	if _, err := s.Apply(ctx, tx, domain.Transition{
-		Entity: domain.EntityRun, ID: run.ID,
-		From:    []domain.Status{domain.RunCleanup.Status()},
+		Entity: domain.EntityTask, ID: taskID,
+		From:    []domain.Status{domain.TaskRunning.Status()},
 		To:      status.Status(),
 		Command: "finish", Actor: "system:orchestrator", Payload: payload, At: at,
-	}); err != nil && !errors.Is(err, domain.ErrConflict) {
-		return cur
+	}); err != nil {
+		return "", err
 	}
-	return status
+
+	// attempt 聚合状态落库（终态不覆盖）。
+	attStatus := domain.AttemptSucceeded
+	switch status {
+	case domain.TaskFailed, domain.TaskServiceUnavailable:
+		attStatus = domain.AttemptFailed
+	case domain.TaskCanceled:
+		attStatus = domain.AttemptCanceled
+	}
+	var attErr []byte
+	if f := firstRunnerFailure(runs); f != nil {
+		attErr, _ = json.Marshal(*f)
+	}
+	if err := s.Attempts.SetStatus(ctx, tx, taskID, attemptNo, attStatus, attErr); err != nil {
+		return "", err
+	}
+	return status, nil
 }
 
-// firstTaskFailure 取第一个可解释失败原因的 Task Failure（Pre-Check 优先，按角色判别）。
-func firstTaskFailure(tasks []Task, precheckIDs map[string]bool) *domain.Failure {
-	var precheck *domain.Failure
-	var any *domain.Failure
-	for i := range tasks {
-		t := &tasks[i]
-		if len(t.Error) == 0 {
+// firstRunnerFailure 取第一个可解释失败原因的 runner Failure（pre_check 优先）。
+func firstRunnerFailure(runs []RunnerRun) *domain.Failure {
+	var precheck, any *domain.Failure
+	for i := range runs {
+		rr := &runs[i]
+		if len(rr.Error) == 0 {
 			continue
 		}
 		var f domain.Failure
-		if err := json.Unmarshal(t.Error, &f); err != nil || f.Code == "" {
+		if err := json.Unmarshal(rr.Error, &f); err != nil || f.Code == "" {
 			continue
 		}
-		if precheckIDs[t.ID] && precheck == nil {
+		if rr.Role == domain.RolePreCheck && precheck == nil {
 			precheck = &f
 		}
 		if any == nil {
@@ -554,254 +497,185 @@ func firstTaskFailure(tasks []Task, precheckIDs map[string]bool) *domain.Failure
 	return any
 }
 
-// abortOthers 把同 Run 其余未完成的 Task 收口（C-5.5）。
-func (s *Store) abortOthers(ctx context.Context, tx pgx.Tx, runID, failedTaskID, reason string,
-	at time.Time) (skipped []string, activeAttempts []string, err error) {
-	rows, err := tx.Query(ctx, `
-		SELECT id, status FROM tasks
-		 WHERE run_id = $1 AND id <> $2 AND status IN ('pending','queued') ORDER BY seq`,
-		runID, failedTaskID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("store: abort others: %w", err)
-	}
-	type item struct{ id, status string }
-	var items []item
-	for rows.Next() {
-		var it item
-		if err := rows.Scan(&it.id, &it.status); err != nil {
-			rows.Close()
-			return nil, nil, err
-		}
-		items = append(items, it)
-	}
-	rows.Close()
-	for _, it := range items {
-		if _, err := s.Apply(ctx, tx, domain.Transition{
-			Entity: domain.EntityTask, ID: it.id,
-			From:    []domain.Status{domain.TaskPending.Status(), domain.TaskQueued.Status()},
-			To:      domain.TaskSkipped.Status(),
-			Command: "skip", Reason: reason, Actor: "system:orchestrator", At: at,
-		}); err != nil && !errors.Is(err, domain.ErrConflict) {
-			return nil, nil, err
-		}
-		skipped = append(skipped, it.id)
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE tasks SET cancel_requested = true, updated_at = $2
-		 WHERE run_id = $1 AND id <> $3 AND status IN ('preparing','running')`,
-		runID, at, failedTaskID); err != nil {
-		return nil, nil, fmt.Errorf("store: abort others: mark cancel: %w", err)
-	}
-	arows, err := tx.Query(ctx, `
-		SELECT a.id FROM attempts a JOIN tasks t ON t.id = a.task_id
-		 WHERE t.run_id = $1 AND t.id <> $2 AND a.status IN ('preparing','running')`,
-		runID, failedTaskID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("store: abort others: attempts: %w", err)
-	}
-	activeAttempts, err = collectIDs(arows)
-	return skipped, activeAttempts, err
-}
+// ---- 取消 / abort / 重试 -------------------------------------------------
 
-// retryAllowed 判断 T11 是否成立：错误码在 retry_on 且 idx < max_attempts（03 §4.5）。
-func (s *Store) retryAllowed(t *Task, code string) bool {
-	if code == "" || len(t.RetryPolicy) == 0 {
-		return false
-	}
-	var policy struct {
-		MaxAttempts int      `json:"max_attempts"`
-		RetryOn     []string `json:"retry_on"`
-	}
-	if err := json.Unmarshal(t.RetryPolicy, &policy); err != nil {
-		return false
-	}
-	if policy.MaxAttempts <= 0 || t.CurrentAttempt >= policy.MaxAttempts {
-		return false
-	}
-	for _, c := range policy.RetryOn {
-		if c == code {
-			return true
-		}
-	}
-	return false
-}
-
-// ---- Run 阶段 ------------------------------------------------------------
-
-// BeginTestingService 处理无 deploy 的 Run：queued → testing（endpoint 来自提交时的 service）。
-// 返回该 Run 的 Task 总数。回填 endpoint_key/injected_argv 由 Kernel effect 完成。
-func (s *Store) BeginTestingService(ctx context.Context, runID string) (int, error) {
-	var count int
+// CancelTask 取消 Task（C-6.1）：Task→cancelling（effects 批量 skip 未执行 runner +
+// 置 cancel_requested），返回仍需异步删 Job 的执行记录。clean 执行完由调用方落 canceled。
+func (s *Store) CancelTask(ctx context.Context, taskID, actor string) ([]domain.RunnerKey, error) {
+	var active []domain.RunnerKey
 	err := s.InTx(ctx, func(tx pgx.Tx) error {
-		run, err := s.Runs.Get(ctx, tx, runID)
-		if err != nil {
+		if _, err := s.Tasks.Lock(ctx, tx, taskID); err != nil {
 			return err
 		}
-		if _, err := s.Runs.Lock(ctx, tx, runID); err != nil {
-			return err
-		}
-		if _, err := s.Apply(ctx, tx, domain.Transition{
-			Entity: domain.EntityRun, ID: runID,
-			From:    []domain.Status{domain.RunQueued.Status()},
-			To:      domain.RunTesting.Status(),
-			Command: "begin_testing", Actor: "system:orchestrator",
-			Payload: map[string]any{"endpoint": json.RawMessage(run.Endpoint),
-				"endpoint_key": endpointKeyOf(run.Endpoint)},
-			At: s.now(),
-		}); err != nil && !errors.Is(err, domain.ErrConflict) {
-			return err
-		}
-		return tx.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE run_id = $1`, runID).Scan(&count)
-	})
-	return count, err
-}
-
-func endpointKeyOf(endpointJSON []byte) string {
-	if len(endpointJSON) == 0 {
-		return ""
-	}
-	var ep struct {
-		Key string `json:"key"`
-	}
-	if err := json.Unmarshal(endpointJSON, &ep); err != nil {
-		return ""
-	}
-	return ep.Key
-}
-
-// RequestCancelTaskTx 取消单个 Task（C-6.2）：未开始 → skipped(canceled)，进行中 → canceled。
-func (s *Store) RequestCancelTaskTx(ctx context.Context, taskID, actor string) ([]string, []string, error) {
-	var skipped, activeAttempts []string
-	err := s.InTx(ctx, func(tx pgx.Tx) error {
 		t, err := s.Tasks.Get(ctx, tx, taskID)
 		if err != nil {
 			return err
 		}
-		if _, err := s.Runs.Lock(ctx, tx, t.RunID); err != nil {
-			return err
-		}
-		switch domain.TaskStatus(t.Status) {
-		case domain.TaskPending, domain.TaskQueued:
-			if _, err := s.Apply(ctx, tx, domain.Transition{
-				Entity: domain.EntityTask, ID: taskID,
-				From:    []domain.Status{domain.TaskPending.Status(), domain.TaskQueued.Status()},
-				To:      domain.TaskSkipped.Status(),
-				Command: "skip", Reason: domain.SkipCanceled, Actor: actor,
-			}); err != nil && !errors.Is(err, domain.ErrConflict) {
-				return err
-			}
-			skipped = append(skipped, taskID)
-		case domain.TaskPreparing, domain.TaskRunning:
-			if _, err := s.Apply(ctx, tx, domain.Transition{
-				Entity: domain.EntityTask, ID: taskID,
-				From:    []domain.Status{domain.TaskPreparing.Status(), domain.TaskRunning.Status()},
-				To:      domain.TaskCanceled.Status(),
-				Command: "cancel", Reason: domain.SkipCanceled, Actor: actor,
-			}); err != nil && !errors.Is(err, domain.ErrConflict) {
-				return err
-			}
-			rows, err := tx.Query(ctx, `
-				SELECT id FROM attempts WHERE task_id = $1 AND status IN ('preparing','running')`, taskID)
-			if err != nil {
-				return fmt.Errorf("store: cancel task attempts: %w", err)
-			}
-			activeAttempts, err = collectIDs(rows)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	return skipped, activeAttempts, err
-}
-
-// RequestCancelRunTx 取消 Run（C-6.1）：Run→cancelling，pending/queued 收口为 skipped，
-// 进行中的 Task 置 cancel_requested 并返回其 Attempt（由调用方异步删 Job）。
-func (s *Store) RequestCancelRunTx(ctx context.Context, runID, actor string) ([]string, []string, error) {
-	var skipped, activeAttempts []string
-	err := s.InTx(ctx, func(tx pgx.Tx) error {
-		if _, err := s.Runs.Lock(ctx, tx, runID); err != nil {
-			return err
+		if domain.TaskStatus(t.Status).IsTerminal() {
+			return fmt.Errorf("store: cancel task %s: 已终态: %w", taskID, domain.ErrConflict)
 		}
 		if _, err := s.Apply(ctx, tx, domain.Transition{
-			Entity: domain.EntityRun, ID: runID,
-			From:    domain.RunStatuses(domain.RunNonTerminal()...),
-			To:      domain.RunCancelling.Status(),
+			Entity: domain.EntityTask, ID: taskID,
+			From:    domain.TaskStatuses(domain.TaskNonTerminal()...),
+			To:      domain.TaskCancelling.Status(),
 			Command: "cancel", Actor: actor, At: s.now(),
 		}); err != nil && !errors.Is(err, domain.ErrConflict) {
 			return err
 		}
 		rows, err := tx.Query(ctx, `
-			SELECT id FROM tasks WHERE run_id = $1 AND status = 'skipped'
-			   AND status_reason = $2`, runID, domain.SkipCanceled)
+			SELECT attempt_no, seq FROM task_runners
+			 WHERE task_id = $1 AND attempt_no = (SELECT current_attempt FROM tasks WHERE id = $1)
+			   AND status IN ('preparing','running')`, taskID)
 		if err != nil {
-			return fmt.Errorf("store: cancel run skipped: %w", err)
+			return fmt.Errorf("store: cancel task %s: active runners: %w", taskID, err)
 		}
-		skipped, err = collectIDs(rows)
+		defer rows.Close()
+		for rows.Next() {
+			var k domain.RunnerKey
+			k.TaskID = taskID
+			if err := rows.Scan(&k.AttemptNo, &k.Seq); err != nil {
+				return err
+			}
+			active = append(active, k)
+		}
+		return rows.Err()
+	})
+	return active, err
+}
+
+// AbortTaskOthers 是 abort_task 的编排出口（C-5.5）：同事务锁 Task，收口其余未执行的
+// runner（传播到 clean 为止），并置 cancel_requested。返回仍需异步删 Job 的执行记录。
+func (s *Store) AbortTaskOthers(ctx context.Context, taskID string, failedKey domain.RunnerKey, reason string) ([]domain.RunnerKey, error) {
+	var active []domain.RunnerKey
+	err := s.InTx(ctx, func(tx pgx.Tx) error {
+		if _, err := s.Tasks.Lock(ctx, tx, taskID); err != nil {
+			return err
+		}
+		at := s.now()
+		if _, err := s.skipUpstreamRunners(ctx, tx, failedKey, reason, at); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `
+			SELECT attempt_no, seq FROM task_runners
+			 WHERE task_id = $1 AND attempt_no = $2 AND seq <> $3
+			   AND status IN ('preparing','running')`,
+			taskID, failedKey.AttemptNo, failedKey.Seq)
+		if err != nil {
+			return fmt.Errorf("store: abort others: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var k domain.RunnerKey
+			k.TaskID = taskID
+			if err := rows.Scan(&k.AttemptNo, &k.Seq); err != nil {
+				return err
+			}
+			active = append(active, k)
+		}
+		return rows.Err()
+	})
+	return active, err
+}
+
+// ErrRetryConflict 表示重试前置条件不满足（Task 非终态 / attempt 达上限）。
+// API 层统一映射成 409，detail.reason 说明具体原因。
+var ErrRetryConflict = errors.New("store: retry conflict")
+
+// RetryTask 执行整 Task 重试（§7.8 / 03 §4.5）：新 attempt 全量重跑，含 fresh deploy。
+//
+// 前置：Task 已终态（succeeded/failed/service_unavailable；canceled 不可重试）、
+// attempt_no 未达上限（超限返回 ATTEMPT_EXHAUSTED）。新 attempt 的 task_runners
+// 按**最后一个 attempt 的冻结快照**全量重建（seq/runner 定义/timeout 不变，
+// fresh 快照：status 重置 pending、input_ref 重落档、job_id 重新派生）。
+func (s *Store) RetryTask(ctx context.Context, taskID, actor, role string, attemptMax int) (int, error) {
+	at := s.now()
+	attemptNo := 0
+	err := s.InTx(ctx, func(tx pgx.Tx) error {
+		if _, err := s.Tasks.Lock(ctx, tx, taskID); err != nil {
+			return err
+		}
+		t, err := s.Tasks.Get(ctx, tx, taskID)
 		if err != nil {
 			return err
 		}
-		arows, err := tx.Query(ctx, `
-			SELECT a.id FROM attempts a JOIN tasks t ON t.id = a.task_id
-			 WHERE t.run_id = $1 AND a.status IN ('preparing','running')`, runID)
+		status := domain.TaskStatus(t.Status)
+		switch status {
+		case domain.TaskSucceeded, domain.TaskFailed, domain.TaskServiceUnavailable:
+			// 可重试。
+		case domain.TaskCanceled:
+			return fmt.Errorf("store: retry task %s: %w: canceled", taskID, ErrRetryConflict)
+		default:
+			return fmt.Errorf("store: retry task %s: 尚未结束（%s），不能重试: %w", taskID, status, ErrRetryConflict)
+		}
+		next := t.CurrentAttempt + 1
+		if attemptMax > 0 && next > attemptMax {
+			return domain.NewFailureError(domain.CodeAttemptExhausted,
+				fmt.Sprintf("Task %s 的 attempt 数已达上限 %d", taskID, attemptMax),
+				map[string]any{"task_id": taskID, "attempt_no": t.CurrentAttempt, "attempt_max": attemptMax})
+		}
+
+		// 冻结快照：取最后一个 attempt 的执行记录全量重建（fresh，D-69）。
+		prev, err := s.RunnerRuns.ListByAttempt(ctx, tx, taskID, t.CurrentAttempt)
 		if err != nil {
-			return fmt.Errorf("store: cancel run attempts: %w", err)
+			return err
 		}
-		activeAttempts, err = collectIDs(arows)
-		return err
-	})
-	return skipped, activeAttempts, err
-}
+		if len(prev) == 0 {
+			return fmt.Errorf("store: retry task %s: 无历史 attempt 快照: %w", taskID, domain.ErrPrecondition)
+		}
 
-// listTasks 读 Run 的全部 Task（事务内）。
-func (s *Store) listTasks(ctx context.Context, tx pgx.Tx, runID string) ([]Task, error) {
-	rows, err := s.db(tx).Query(ctx, `SELECT `+taskCols+`
-		  FROM tasks WHERE run_id = $1 ORDER BY seq`, runID)
+		// Task 回到 queued（终态 → queued 重试边；02 §2"重试做了什么"）。
+		if _, err := s.Apply(ctx, tx, domain.Transition{
+			Entity: domain.EntityTask, ID: taskID,
+			From:    []domain.Status{domain.TaskSucceeded.Status(), domain.TaskFailed.Status(), domain.TaskServiceUnavailable.Status()},
+			To:      domain.TaskQueued.Status(),
+			Command: "retry", Actor: actorOf(actor), At: at,
+		}); err != nil {
+			return err
+		}
+
+		a, err := s.Attempts.Create(ctx, tx, CreateAttemptParams{TaskID: taskID, Trigger: "retry", AttemptNo: next})
+		if err != nil {
+			return err
+		}
+		attemptNo = a.AttemptNo
+		for _, rr := range prev {
+			fresh := rr // 复制定义快照
+			fresh.AttemptNo = next
+			fresh.Status = string(domain.RunnerPending)
+			fresh.StatusReason = nil
+			fresh.WaitingReason = nil
+			fresh.ExitCode = nil
+			fresh.ErrorCode = nil
+			fresh.Error = nil
+			fresh.ExportsRef = nil
+			fresh.ResultRef = nil
+			fresh.LogRef = nil
+			fresh.Phase = nil
+			fresh.ImageDigest = nil
+			fresh.ExecutorRef = nil
+			fresh.CancelRequested = false
+			fresh.StartedAt = nil
+			fresh.FinishedAt = nil
+			fresh.CreatedAt = at
+			fresh.UpdatedAt = at
+			fresh.JobID = JobName(domain.RunnerKey{TaskID: taskID, AttemptNo: next, Seq: rr.Seq})
+			fresh.JobNamespace = nil
+			fresh.InputRef = fmt.Sprintf("attempts/%d/input/", next)
+			if err := s.RunnerRuns.Insert(ctx, tx, &fresh); err != nil {
+				return err
+			}
+		}
+		return s.Audits.Insert(ctx, tx, AuditEntry{
+			Actor: actorOf(actor), Role: defaultString(role, "operator"),
+			Action: "retry", ObjectType: "task", ObjectID: taskID,
+			Detail: map[string]any{"result": "ok", "attempt_no": attemptNo, "trigger": "retry"},
+		})
+	})
 	if err != nil {
-		return nil, fmt.Errorf("store: list tasks %s: %w", runID, err)
+		return 0, err
 	}
-	return collectTasks(rows)
-}
-
-// SetAttemptRefs 回填 Attempt 的产物引用（相对 `<run>/tasks/<task>/attempts/<n>/`）。
-//
-// 典型调用时机：Attempt 终态落库 → 日志异步落盘完成 → 用它补 `log_ref`。
-// 空字符串表示"该产物不存在"，COALESCE 语义下不会覆盖已有引用（不造死链）。
-func (s *Store) SetAttemptRefs(ctx context.Context, attemptID, logRef, artifactRef, resultRef string) error {
-	return s.InTx(ctx, func(tx pgx.Tx) error {
-		f := PhysicalFacts{}
-		if logRef != "" {
-			f.LogRef = &logRef
-		}
-		if artifactRef != "" {
-			f.ArtifactRef = &artifactRef
-		}
-		if resultRef != "" {
-			f.ResultRef = &resultRef
-		}
-		return s.Attempts.SetPhysicalFacts(ctx, tx, attemptID, f)
-	})
-}
-
-// attemptIdxFromID 从 `<task>-a<n>` 里取 idx（1-based）；解析不出返回 0。
-func attemptIdxFromID(attemptID string) int {
-	i := strings.LastIndex(attemptID, "-a")
-	if i < 0 || i+2 >= len(attemptID) {
-		return 0
+	if s.notifier != nil {
+		s.notifier.Notify(taskID, 0)
 	}
-	n, err := strconv.Atoi(attemptID[i+2:])
-	if err != nil || n <= 0 {
-		return 0
-	}
-	return n
-}
-
-// failPayload 是 Task 失败转换的 payload：错误 + （有就带上）run 相对路径的 result_ref。
-// Task 无论成功失败都要能指出自己的产物（03-data-view §3.1），否则报告页失败任务没有指标表。
-func failPayload(base map[string]any, failure domain.Failure) map[string]any {
-	p := map[string]any{"error": failure}
-	if ref, ok := base["result_ref"].(string); ok && ref != "" {
-		p["result_ref"] = ref
-	}
-	return p
+	return attemptNo, nil
 }

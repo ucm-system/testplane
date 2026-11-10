@@ -1,5 +1,15 @@
 package api
 
+// OIDC 鉴权集成测试（真 PG + 假 IdP；没设 AG_TEST_DATABASE_URL 就 skip）。
+//
+// 从 v1 harness 的 oidc_it_test.go 平移（控制面波次删除），断言改到 v2 路径/表名：
+//   - 登录流（PKCE + state + nonce + 会话 Cookie + /me 下发 CSRF）；
+//   - state/nonce 不匹配、过期 token、错误 aud → 401 UNAUTHENTICATED；
+//   - CSRF 双提交（Cookie 写操作必须带 X-CSRF-Token）；RBAC 角色映射；
+//   - /metrics 匿名可读；logout 清会话。
+// v2 差异：提交端点是 POST /api/v1/tasks（JSON manifest，v1 是 /runs + YAML）；
+// 会话 Cookie 默认名 ag_session（v1 tp_session）；/auth/logout 在根路由、无需 CSRF。
+
 import (
 	"context"
 	"crypto"
@@ -19,7 +29,6 @@ import (
 
 	"github.com/ucm-system/testplane/server/internal/config"
 	"github.com/ucm-system/testplane/server/internal/dbtest"
-	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
 
@@ -138,15 +147,15 @@ func writeJSONRaw(w http.ResponseWriter, v any) {
 	_, _ = w.Write(b)
 }
 
-// oidcTestServer 起一个 oidc 模式的 api.Server（假 IdP + 真 PG）。
+// oidcTestServer 起一个 oidc 模式的 api.Server（假 IdP + 真 PG；v2 形状）。
 func oidcTestServer(t *testing.T, idp *fakeIdP) (*Server, *store.Store, func()) {
 	t.Helper()
 	dsn, err := dbtest.URL("api")
-	if err != nil || dsn == "" {
-		if err != nil {
-			t.Fatalf("准备测试库: %v", err)
-		}
-		t.Skip("未设置 TESTPLANE_TEST_DATABASE_URL")
+	if err != nil {
+		t.Fatalf("准备测试库: %v", err)
+	}
+	if dsn == "" {
+		t.Skip("未设置 AG_TEST_DATABASE_URL")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -155,56 +164,45 @@ func oidcTestServer(t *testing.T, idp *fakeIdP) (*Server, *store.Store, func()) 
 		t.Fatalf("连接测试库: %v", err)
 	}
 	if err := st.SeedDefaults(ctx); err != nil {
+		st.Close()
 		t.Fatalf("seed: %v", err)
 	}
 	cfg := &config.Config{
-		APIPrefix: "/api/v1", StorageRoot: t.TempDir(),
-		RunMaxTasks: 200, TaskTimeoutDefault: time.Hour, TaskTimeoutMax: 24 * time.Hour,
-		MaxGlobalConcurrency: 4, DeployTimeout: 72 * time.Hour,
-		AuthMode:         "oidc",
-		Env:              "dev",
-		OIDCIssuer:       idp.base(),
-		OIDCClientID:     idp.client,
-		OIDCClientSecret: "secret",
-		OIDCClientAuth:   "basic",
-		OIDCRedirectURL:  "http://testplane.local/auth/callback",
-		OIDCScopes:       []string{"openid", "email", "groups"},
-		OIDCRoleClaim:    "groups",
-		RoleMap:          map[string]string{"tp-admins": "admin", "tp-ops": "operator"},
-		SessionSecret:    []byte("0123456789abcdef0123456789abcdef"),
-		SessionCookie:    "tp_session",
-		SessionTTL:       time.Hour,
-		SessionSecure:    false, // httptest 用 http
+		APIPrefix:            "/api/v1",
+		AuthMode:             "oidc",
+		Env:                  "dev",
+		StorageRoot:          t.TempDir(),
+		RunnerTimeoutDefault: time.Hour,
+		RunnerTimeoutMax:     24 * time.Hour,
+		TaskMaxRunners:       200,
+		AttemptMax:           3,
+		MaxGlobalConcurrency: 4,
+		DeployTimeout:        72 * time.Hour,
+		SSEReplayWindow:      24 * time.Hour,
+		OIDCIssuer:           idp.base(),
+		OIDCClientID:         idp.client,
+		OIDCClientSecret:     "secret",
+		OIDCClientAuth:       "basic",
+		OIDCRedirectURL:      "http://testplane.local/auth/callback",
+		OIDCScopes:           []string{"openid", "email", "groups"},
+		OIDCRoleClaim:        "groups",
+		RoleMap:              map[string]string{"tp-admins": "admin", "tp-ops": "operator"},
+		SessionSecret:        []byte("0123456789abcdef0123456789abcdef"),
+		SessionCookie:        "ag_session",
+		SessionTTL:           time.Hour,
+		SessionSecure:        false, // httptest 用 http
 	}
-	resolver := &fakeResolver{specs: map[string]domain.TesterSpec{
-		"probe-again@1.0.0": {
-			Name: "probe-again", Version: "1.0.0", Role: domain.RoleTest,
-			OnFailure: domain.OnFailureContinue, Entry: "/tester/run.sh", Image: "probe:1",
-		},
-	}}
-	srv := New(Deps{Config: cfg, Store: st, Machines: store.NewMachines(st, nil), Resolver: resolver})
+	srv := New(Deps{Config: cfg, Store: st, Machines: store.NewMachines(st, nil),
+		Catalog: itTestCatalog()})
+	t.Cleanup(func() { st.Close() })
 	return srv, st, func() { st.Close() }
 }
-
-const validSubmitYAML = `
-run:
-  name: oidc-demo
-  precheck: "off"
-  service:
-    url: http://127.0.0.1:8000/v1
-  tests:
-    - name: t1
-      tester: probe-again
-      version: "1.0.0"
-      execution:
-        profile: k8s-npu
-`
 
 // browserLogin 走完"授权码 → 回调 → 会话 Cookie"，返回会话 Cookie 与 /me 的 csrf_token。
 func browserLogin(t *testing.T, srv *Server, idp *fakeIdP) (*http.Cookie, string) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/auth/login?return=/runs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/auth/login?return=/tasks", nil)
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusFound {
 		t.Fatalf("login status = %d, body=%s", rec.Code, rec.Body.String())
@@ -248,12 +246,12 @@ func browserLogin(t *testing.T, srv *Server, idp *fakeIdP) (*http.Cookie, string
 	if rec.Code != http.StatusFound {
 		t.Fatalf("callback status = %d, body=%s", rec.Code, rec.Body.String())
 	}
-	if got := rec.Header().Get("Location"); got != "/runs" {
-		t.Fatalf("callback 应回跳 /runs，得到 %q", got)
+	if got := rec.Header().Get("Location"); got != "/tasks" {
+		t.Fatalf("callback 应回跳 /tasks，得到 %q", got)
 	}
 	var session *http.Cookie
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == "tp_session" {
+		if c.Name == "ag_session" {
 			session = c
 		}
 	}
@@ -386,7 +384,7 @@ func TestOIDC_BearerExpired(t *testing.T) {
 		"iat":    time.Now().Add(-20 * time.Minute).Unix(),
 	})
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -406,7 +404,7 @@ func TestOIDC_BearerWrongAudience(t *testing.T) {
 		"exp":    time.Now().Add(5 * time.Minute).Unix(),
 	})
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tasks", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -424,8 +422,8 @@ func TestOIDC_CSRFRequired(t *testing.T) {
 
 	// 缺 CSRF → 403
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs", strings.NewReader(validSubmitYAML))
-	req.Header.Set("Content-Type", "application/yaml")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks", strings.NewReader(manifestJSON))
+	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(session)
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
@@ -437,8 +435,8 @@ func TestOIDC_CSRFRequired(t *testing.T) {
 
 	// 带正确 CSRF → 202
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/v1/runs", strings.NewReader(validSubmitYAML))
-	req.Header.Set("Content-Type", "application/yaml")
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/tasks", strings.NewReader(manifestJSON))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-CSRF-Token", csrf)
 	req.AddCookie(session)
 	srv.Handler().ServeHTTP(rec, req)
@@ -459,17 +457,17 @@ func TestOIDC_RBACViewerDenied(t *testing.T) {
 		"exp":    time.Now().Add(5 * time.Minute).Unix(),
 	})
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs", strings.NewReader(validSubmitYAML))
-	req.Header.Set("Content-Type", "application/yaml")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks", strings.NewReader(manifestJSON))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("viewer 写 status = %d, 期望 403, body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("viewer 写 status = %d, 期望 403", rec.Code)
 	}
 
 	// 读接口允许
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/v1/runs", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/tasks", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -489,8 +487,8 @@ func TestOIDC_RBACAdminAllowed(t *testing.T) {
 		"exp":    time.Now().Add(5 * time.Minute).Unix(),
 	})
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/runs", strings.NewReader(validSubmitYAML))
-	req.Header.Set("Content-Type", "application/yaml")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks", strings.NewReader(manifestJSON))
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
@@ -528,9 +526,9 @@ func TestOIDC_MetricsStillAnonymous(t *testing.T) {
 
 	// 业务端点无凭据 → 401（证明鉴权确实生效，不是全放行）。
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/runs", nil))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/tasks", nil))
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("无凭据访问 /api/v1/runs status = %d, 期望 401", rec.Code)
+		t.Fatalf("无凭据访问 /api/v1/tasks status = %d, 期望 401", rec.Code)
 	}
 }
 
@@ -541,17 +539,19 @@ func TestOIDC_LogoutClearsSession(t *testing.T) {
 	defer cleanup()
 	session, csrf := browserLogin(t, srv, idp)
 
+	// v2：/auth/logout 注册在根路由（匿名组），不经过 API 鉴权/CSRF 中间件；
+	// CSRF 头保留发送（习惯一致性），但断言不依赖它。
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	req.AddCookie(session)
-	req.Header.Set("X-CSRF-Token", csrf) // 写操作需要 CSRF（logout 也在鉴权组内）
+	req.Header.Set("X-CSRF-Token", csrf)
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("logout status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	var cleared *http.Cookie
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == "tp_session" {
+		if c.Name == "ag_session" {
 			cleared = c
 		}
 	}

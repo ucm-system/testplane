@@ -30,11 +30,12 @@ func newMetricsRegistry() *metricsRegistry {
 
 // 拒绝审计管道的指标名（issue #40-6）。名字只在这里定义一次：
 // exposition 与测试都引用同一组常量，改名后测试会跟着变（不会"改了名测试还绿"）。
+// v2 品牌更名：testplane_* → argus_*（openapi /metrics 描述）。
 const (
-	metricAuditRejectedWritten    = "testplane_audit_rejected_written_total"
-	metricAuditRejectedDropped    = "testplane_audit_rejected_dropped_total"
-	metricAuditRejectedFailed     = "testplane_audit_rejected_failed_total"
-	metricAuditRejectedSuppressed = "testplane_audit_rejected_suppressed_total"
+	metricAuditRejectedWritten    = "argus_audit_rejected_written_total"
+	metricAuditRejectedDropped    = "argus_audit_rejected_dropped_total"
+	metricAuditRejectedFailed     = "argus_audit_rejected_failed_total"
+	metricAuditRejectedSuppressed = "argus_audit_rejected_suppressed_total"
 )
 
 func (m *metricsRegistry) observeHTTP(method string, code int) {
@@ -109,8 +110,6 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	// ---- DB 计数（采样失败只跳过这一组） ----
 	if stats, err := s.st.MetricsSnapshot(r.Context()); err == nil {
-		writeSeriesMetric(&b, "testplane_runs_total", "Run 数量（按状态）。", "status",
-			stats.RunsByStatus, runStatusSeries)
 		writeSeriesMetric(&b, "testplane_tasks_total", "Task 数量（按状态）。", "status",
 			stats.TasksByStatus, taskStatusSeries)
 		b.WriteString("# HELP testplane_attempts_active 进行中的 Attempt 数（preparing/running）。\n")
@@ -155,17 +154,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // 指标里的状态维度**全量预置**（即使计数为 0 也输出），让看板不必处理"序列时有时无"。
 // 终态部分必须走 domain 的单一真源：手抄一份会在新增状态时静默漏掉（issue #45-5）。
 var (
-	runStatusSeries = append(
-		[]string{"submitted", "queued", "deploying", "testing", "cleanup", "cancelling"},
-		sortedCopy(domain.TerminalRunStatusStrings())...,
-	)
+	// taskStatusSeries 是 tasks.status 的 8 值全量（v2：无 deploying/testing/cleanup，D-70）。
 	taskStatusSeries = append(
-		[]string{"pending", "queued", "preparing", "running"},
+		[]string{"submitted", "queued", "running", "cancelling"},
 		sortedCopy(domain.TerminalTaskStatusStrings())...,
 	)
 	waitingReasonSeries = []string{
-		"precheck_gate", "slot_waiting", "global_limit",
-		"queue_full", "insufficient_resources", "gang_pending",
+		"slot_waiting", "global_limit", "queue_full", "insufficient_resources", "gang_pending",
 	}
 )
 

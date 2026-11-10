@@ -269,7 +269,11 @@ func buildScheduler(ctx context.Context, cfg *config.Config, st *store.Store,
 	// 执行层装配（S2 已落地：*executor.Executor 满足 ports.Executor）。
 	exec := executor.NewWithNamespace(client, namespace, executor.Options{})
 
-	sched, err := orchestrator.New(orchestrator.Options{
+	// GC 接回（execution §6.3）：维护 tick 周期调 executor.CollectGarbage。
+	// stale 回调引用 sched 变量（New 之后赋值；GC tick 首轮在 GCInterval 之后，
+	// 届时 sched 已非 nil）。间隔用编排层默认（DefaultGCInterval = 5m）。
+	var sched *orchestrator.Scheduler
+	sched, err = orchestrator.New(orchestrator.Options{
 		Store:     st,
 		Machines:  machines,
 		Executor:  exec,
@@ -285,6 +289,11 @@ func buildScheduler(ctx context.Context, cfg *config.Config, st *store.Store,
 			MaxGlobalConcurrency:         cfg.MaxGlobalConcurrency,
 			AttemptMax:                   cfg.AttemptMax,
 			ReconcileInterval:            cfg.ReconcileInterval,
+			GCEnabled:                    cfg.JobGCEnabled,
+			GCTick: (&gcTicker{st: st, exec: exec,
+				stale: func(ctx context.Context, taskID string, attemptNo, seq int) error {
+					return sched.MarkStaleRunnerTimeout(ctx, taskID, attemptNo, seq)
+				}}).Tick,
 		},
 		Logf: func(format string, args ...any) {
 			logger.Info(fmt.Sprintf(format, args...), "component", "orchestrator")

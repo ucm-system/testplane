@@ -2000,7 +2000,7 @@ paths:
 
         1. `slots`：平台自身的槽位——全局并发 permit（`AG_CONCURRENCY_MAX`，默认 20，C-4.4）
            与端点互斥租约（`endpoint_leases`，C-4.3；**仅外接模式**，§6.7）。
-        2. `waiting`：排队 runner 的计数（`by_reason`，键与 `WaitingReason` 的 4 个取值逐字一致）与明细。
+        2. `waiting`：排队 runner 的计数（`by_reason`，键与 `WaitingReason` 的 5 个取值逐字一致）与明细。
            四值全是 K8s/Volcano 侧或槽位等待（§6.9：`QUEUED` 必须带原因）。
         3. `volcano`：D-49 的 Volcano 只读快照（capability / allocated / Pending Job / 最长等待）。
            不可达时 `available: false` 且原因落 `detail`，**不新增枚举值**（C-4.7）。
@@ -3087,9 +3087,11 @@ components:
       type: string
       description: |
         `task_runners.waiting_reason`（03 §3.2，仅展示）：`queued` 必带原因（§6.9，D-28）。
-        v2 为 4 值枚举：v1 的 `precheck_gate` / `global_limit` 随门控+并发模型取消（D-32/D-69）。
+        v2 为 5 值枚举：`precheck_gate` 随门控模型取消（D-32/D-69）；`global_limit` 保留——
+        全局并发上限（§12.7，AG_CONCURRENCY_MAX）造成的平台自身等待仍需可见（C-4.7）。
       enum:
         - slot_waiting
+        - global_limit
         - queue_full
         - insufficient_resources
         - gang_pending
@@ -5135,7 +5137,7 @@ components:
       type: object
       description: |
         排队 runner 的计数与明细。C-4.7 要求把"平台自身的等待"与"K8s/Volcano 的等待"分开呈现，
-        用户才知道该找谁；本结构按 `waiting_reason` 分桶，语义归属见 `WaitingReason`（v2 为 4 值）。
+        用户才知道该找谁；本结构按 `waiting_reason` 分桶，语义归属见 `WaitingReason`（v2 为 5 值，含平台自身等待 `global_limit`）。
       required: [total, by_reason]
       additionalProperties: true
       properties:

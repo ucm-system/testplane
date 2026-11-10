@@ -2,7 +2,9 @@
 //
 //   - registryStorage：registry.Store（接口）↔ store.RunnerRegistry（实现）的适配；
 //   - newExecutor：ports.Executor 的装配点——*executor.Executor 已对齐 ports.JobSpec /
-//     ports.JobHandle 冻结接口（S2 波次落地后接线）。
+//     ports.JobHandle 冻结接口（S2 波次落地后接线）；
+//   - gcTicker：executor.CollectGarbage ↔ orchestrator 维护 tick 的适配（GC 接回），
+//     RunnerRunStates 批量查 store、OnStaleRunning 回编排层的超时修复。
 //
 // 本文件不做任何业务决策：只搬运类型。
 package main
@@ -11,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/ucm-system/testplane/server/internal/executor"
 	"github.com/ucm-system/testplane/server/internal/registry"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
@@ -110,6 +113,40 @@ func (s *registryStorage) MarkRunnerOrphaned(ctx context.Context, name, version 
 }
 
 // ---- 小工具 ----------------------------------------------------------------
+
+// gcTicker 把 executor.CollectGarbage 适配成编排层维护 tick（GC 接回点）：
+// 编排层只认 GCTick 函数（不 import executor），本类型负责构造 GCOptions——
+// RunnerRunStates 批量查 store（禁止 N+1，票 #20-5），OnStaleRunning 回编排层的
+// MarkStaleRunnerTimeout（stale 由调用方闭包注入，规避 Scheduler 构造先后依赖）。
+type gcTicker struct {
+	st    *store.Store
+	exec  *executor.Executor
+	stale func(ctx context.Context, taskID string, attemptNo, seq int) error
+}
+
+// Tick 跑一轮 GC（execution §6.3）。返回错误只表示本轮 List/查库失败，调用方记日志。
+func (g *gcTicker) Tick(ctx context.Context) error {
+	_, err := g.exec.CollectGarbage(ctx, executor.GCOptions{
+		RunnerRunStates: func(ctx context.Context, jobNames []string) (map[string]executor.RunnerRunState, error) {
+			states, err := g.st.RunnerRuns.StatesByJobNames(ctx, nil, jobNames)
+			if err != nil {
+				return nil, err
+			}
+			out := make(map[string]executor.RunnerRunState, len(states))
+			for job, s := range states {
+				out[job] = executor.RunnerRunState{Found: s.Found, Terminal: s.Terminal}
+			}
+			return out, nil
+		},
+		OnStaleRunning: func(ctx context.Context, job executor.ManagedJob) error {
+			if g.stale == nil || job.TaskID == "" {
+				return nil
+			}
+			return g.stale(ctx, job.TaskID, job.AttemptNo, job.Seq)
+		},
+	})
+	return err
+}
 
 func unmarshalInto(raw []byte, v any) error {
 	if len(raw) == 0 {

@@ -26,6 +26,9 @@ type Tool struct {
 	InputSchema map[string]any `json:"inputSchema"`
 }
 
+// ToolCount 是 tools/list 的工具数（由静态清单推导，不双写；/meta 的 agent_caps 引用）。
+func ToolCount() int { return len(toolList()) }
+
 // toolList 返回 13 个工具的静态清单（agent-integration.md §5.3/§5.4，全部 task_id 化）。
 // inputSchema 是 JSON Schema 2020-12 的子集，additionalProperties=false：
 // 拼错的参数会被 -32602 拒绝，而不是被静默忽略。

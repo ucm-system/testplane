@@ -13,18 +13,42 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
+	"github.com/ucm-system/testplane/server/internal/store"
 )
 
-// handleAttemptLogs 是 GET /api/v1/tasks/{id}/attempts/{idx}/logs。
+// runner 日志端点（07 §5.2、C-7.5）：日志明文（不做脱敏，K-5），单次 ≤64 KiB；
+// 翻页用 offset + limit，同一坐标系由 X-Log-Offset / X-Log-Coverage 交代。
+// 日志不走 SSE（C-9.2）。
 //
-// MVP 没有 collector 角色，日志直接读 PVC 上的文件（C-7.5 的"不整文件入内存"约束照旧）：
-//   - 目录：<storage-root>/<run_id>/tasks/<task_id>/attempts/<idx>/logs/
-//   - 优先级：stdout.log（collector 落盘）→ 否则按文件名排序拼接 *.log（Tester 自写，如 probe.log）；
-//   - 参数：offset（字节）、limit（默认/上限 64KiB）、tail=N（从尾部取最后 N 行）；
-//   - 响应：text/plain；头 X-Log-Offset = 本次返回的结束处字节偏移（客户端据此续读）、`n//     X-Log-Coverage（拿不到采集时间区间就留空）；
-//   - 文件不存在：404 NOT_FOUND + detail.reason="log_not_ready"（不用 202/500）；
-//   - 路径只由 DB 里的 run_id/task_id + 整数 idx 拼出，不接受用户传路径（防穿越）。
-func (s *Server) handleAttemptLogs(w http.ResponseWriter, r *http.Request) {
+// 两条路由共用同一实现：
+//   - GET /tasks/{task_id}/runners/{seq}/logs           （缺省最新 attempt，?attempt=）
+//   - GET /tasks/{task_id}/attempts/{attempt_no}/runners/{seq}/logs
+
+// maxLogChunk 是单次日志返回上限（07 §5.2：≤64 KiB）。
+const maxLogChunk = 64 << 10
+
+// handleTaskRunnerLogs 是 Task 级快捷定位（?attempt= 缺省最新）。
+func (s *Server) handleTaskRunnerLogs(w http.ResponseWriter, r *http.Request) {
+	_, rr, err := s.runnerKeyFromURL(r)
+	if err != nil {
+		s.failErr(w, r, err)
+		return
+	}
+	s.serveRunnerLogs(w, r, rr)
+}
+
+// handleAttemptRunnerLogs 是 attempt 级权威定位。
+func (s *Server) handleAttemptRunnerLogs(w http.ResponseWriter, r *http.Request) {
+	_, rr, err := s.runnerKeyFromURL(r)
+	if err != nil {
+		s.failErr(w, r, err)
+		return
+	}
+	s.serveRunnerLogs(w, r, rr)
+}
+
+// serveRunnerLogs 读 <storage-root>/<task_id>/attempts/<n>/runners/<seq>/logs/ 下的日志。
+func (s *Server) serveRunnerLogs(w http.ResponseWriter, r *http.Request, rr *store.RunnerRun) {
 	q := r.URL.Query()
 
 	stream := q.Get("stream")
@@ -45,38 +69,21 @@ func (s *Server) handleAttemptLogs(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > maxLogChunk {
 		limit = maxLogChunk
 	}
-	tail := atoiDefault(q.Get("tail"), 0)
-	if tail < 0 {
-		tail = 0
-	}
 
-	taskID := chi.URLParam(r, "id")
-	idx, convErr := strconv.Atoi(chi.URLParam(r, "idx"))
-	if convErr != nil || idx < 1 {
-		fail(w, r, http.StatusBadRequest, domain.CodeValidationError,
-			"attempt idx 必须是 ≥1 的整数", nil, false)
-		return
-	}
-	task, err := s.st.Tasks.Get(r.Context(), nil, taskID)
-	if err != nil {
-		s.failErr(w, r, err)
-		return
-	}
-
-	dir := filepath.Join(s.cfg.StorageRoot, task.RunID, "tasks", task.ID,
-		"attempts", strconv.Itoa(idx), "logs")
+	dir := filepath.Join(s.runnerDirFor(rr.TaskID, rr.AttemptNo, rr.Seq), "logs")
 	files := pickLogFiles(dir, stream)
 	if len(files) == 0 {
 		fail(w, r, http.StatusNotFound, domain.CodeNotFound, "日志尚未产出", map[string]any{
-			"reason":      "log_not_ready",
-			"task_id":     task.ID,
-			"attempt_idx": idx,
-			"stream":      stream,
+			"reason":     "log_not_ready",
+			"task_id":    rr.TaskID,
+			"attempt_no": rr.AttemptNo,
+			"runner_seq": rr.Seq,
+			"stream":     stream,
 		}, true)
 		return
 	}
 
-	data, start, err := readLogFiles(files, offset, limit, tail)
+	data, start, err := readLogFiles(files, offset, limit, 0)
 	if err != nil {
 		s.failErr(w, r, err)
 		return
@@ -86,7 +93,7 @@ func (s *Server) handleAttemptLogs(w http.ResponseWriter, r *http.Request) {
 	// X-Log-Offset = 本次返回的**结束处**字节偏移（openapi headers 定义）：
 	// 客户端下次直接用 offset= 这个值续读，不重读也不跳过。
 	w.Header().Set("X-Log-Offset", strconv.FormatInt(start+int64(len(data)), 10))
-	// 日志区间需要 collector 的采集时间；MVP 拿不到就不编，留空。
+	// 日志区间需要采集时间；拿不到就不编，留空。
 	w.Header().Set("X-Log-Coverage", "")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(http.StatusOK)
@@ -285,3 +292,5 @@ func readAtVirtual(files []string, sizes []int64, offset int64, buf []byte) (int
 	}
 	return read, nil
 }
+
+var _ = chi.URLParam

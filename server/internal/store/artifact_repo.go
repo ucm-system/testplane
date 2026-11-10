@@ -7,42 +7,42 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/ucm-system/testplane/server/internal/domain"
 )
 
 // ArtifactRepo 是 artifacts 表（派生索引，可重建；03 §3.2、C-7.5）。
+// 产物路径相对 <storage-root>/<task_id>/（如 attempts/1/runners/3/result.json）。
 type ArtifactRepo struct{ s *Store }
 
-// Artifact 是 artifacts 表的一行；path 相对 <storage-root>。
+// Artifact 是 artifacts 表的一行；path 相对 <storage-root>/<task_id>/。
 type Artifact struct {
-	RunID     string     `json:"run_id"`
-	TaskID    *string    `json:"task_id,omitempty"`
-	AttemptID *string    `json:"attempt_id,omitempty"`
+	TaskID    string     `json:"task_id"`
+	AttemptNo *int       `json:"attempt_no,omitempty"`
+	RunnerSeq *int       `json:"runner_seq,omitempty"`
 	Path      string     `json:"path"`
 	SizeBytes int64      `json:"size_bytes"`
 	SHA256    *string    `json:"sha256,omitempty"`
-	Kind      string     `json:"kind"`
+	Kind      string     `json:"kind"` // result|raw|log|report|export|other
 	MTime     *time.Time `json:"mtime,omitempty"`
 	IndexedAt time.Time  `json:"indexed_at"`
 }
 
-// UpsertBatch 在一个事务里替换某 Run 的产物索引（幂等重建）。
-func (r *ArtifactRepo) UpsertBatch(ctx context.Context, tx pgx.Tx, runID string, items []Artifact) error {
-	if _, err := r.s.db(tx).Exec(ctx, `DELETE FROM artifacts WHERE run_id = $1`, runID); err != nil {
-		return fmt.Errorf("store: artifacts: clear %s: %w", runID, err)
+// UpsertBatch 在一个事务里替换某 Task 的产物索引（幂等重建）。
+func (r *ArtifactRepo) UpsertBatch(ctx context.Context, tx pgx.Tx, taskID string, items []Artifact) error {
+	if _, err := r.s.db(tx).Exec(ctx, `DELETE FROM artifacts WHERE task_id = $1`, taskID); err != nil {
+		return fmt.Errorf("store: artifacts: clear %s: %w", taskID, err)
 	}
 	for _, a := range items {
 		_, err := r.s.db(tx).Exec(ctx, `
-			INSERT INTO artifacts (run_id, task_id, attempt_id, path, size_bytes, sha256, kind, mtime, indexed_at)
+			INSERT INTO artifacts (task_id, attempt_no, runner_seq, path, size_bytes, sha256, kind, mtime, indexed_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
-			ON CONFLICT (run_id, path) DO UPDATE
+			ON CONFLICT (task_id, path) DO UPDATE
 			   SET size_bytes = EXCLUDED.size_bytes,
 			       sha256 = EXCLUDED.sha256,
 			       kind = EXCLUDED.kind,
 			       mtime = EXCLUDED.mtime,
 			       indexed_at = now()`,
-			runID, a.TaskID, a.AttemptID, a.Path, a.SizeBytes, a.SHA256, a.Kind, a.MTime)
+			a.TaskID, intPtrToAny(a.AttemptNo), intPtrToAny(a.RunnerSeq),
+			a.Path, a.SizeBytes, a.SHA256, a.Kind, a.MTime)
 		if err != nil {
 			return fmt.Errorf("store: artifacts: upsert %s: %w", a.Path, err)
 		}
@@ -50,19 +50,19 @@ func (r *ArtifactRepo) UpsertBatch(ctx context.Context, tx pgx.Tx, runID string,
 	return nil
 }
 
-// ListByRun 返回某 Run 的产物索引。
-func (r *ArtifactRepo) ListByRun(ctx context.Context, tx pgx.Tx, runID string) ([]Artifact, error) {
+// ListByTask 返回某 Task 的产物索引。
+func (r *ArtifactRepo) ListByTask(ctx context.Context, tx pgx.Tx, taskID string) ([]Artifact, error) {
 	rows, err := r.s.db(tx).Query(ctx, `
-		SELECT run_id, task_id, attempt_id, path, size_bytes, sha256, kind, mtime, indexed_at
-		  FROM artifacts WHERE run_id = $1 ORDER BY path`, runID)
+		SELECT task_id, attempt_no, runner_seq, path, size_bytes, sha256, kind, mtime, indexed_at
+		  FROM artifacts WHERE task_id = $1 ORDER BY path`, taskID)
 	if err != nil {
-		return nil, fmt.Errorf("store: list artifacts %s: %w", runID, err)
+		return nil, fmt.Errorf("store: list artifacts %s: %w", taskID, err)
 	}
 	defer rows.Close()
 	var out []Artifact
 	for rows.Next() {
 		var a Artifact
-		if err := rows.Scan(&a.RunID, &a.TaskID, &a.AttemptID, &a.Path, &a.SizeBytes,
+		if err := rows.Scan(&a.TaskID, &a.AttemptNo, &a.RunnerSeq, &a.Path, &a.SizeBytes,
 			&a.SHA256, &a.Kind, &a.MTime, &a.IndexedAt); err != nil {
 			return nil, fmt.Errorf("store: scan artifact: %w", err)
 		}
@@ -71,23 +71,29 @@ func (r *ArtifactRepo) ListByRun(ctx context.Context, tx pgx.Tx, runID string) (
 	return out, rows.Err()
 }
 
-// ListByAttempt 返回某个 Attempt 的产物（07 §5.2）。attemptID 为空时只按 task 过滤。
-// 用一次索引查询，避免在 API 层把整 Run 的产物拉回来再过滤。
-func (r *ArtifactRepo) ListByAttempt(ctx context.Context, tx pgx.Tx, runID, taskID, attemptID string) ([]Artifact, error) {
+// ListByRunner 返回某个执行记录的产物（07 §5.2）。attemptNo/seq 为 0 时只按 task 过滤。
+func (r *ArtifactRepo) ListByRunner(ctx context.Context, tx pgx.Tx, taskID string, attemptNo, seq int) ([]Artifact, error) {
+	args := []any{taskID}
+	where := "task_id = $1"
+	if attemptNo > 0 {
+		args = append(args, attemptNo)
+		where += fmt.Sprintf(" AND attempt_no = $%d", len(args))
+	}
+	if seq > 0 {
+		args = append(args, seq)
+		where += fmt.Sprintf(" AND runner_seq = $%d", len(args))
+	}
 	rows, err := r.s.db(tx).Query(ctx, `
-		SELECT run_id, task_id, attempt_id, path, size_bytes, sha256, kind, mtime, indexed_at
-		  FROM artifacts
-		 WHERE run_id = $1 AND task_id = $2
-		   AND ($3 = '' OR attempt_id = $3)
-		 ORDER BY path`, runID, taskID, attemptID)
+		SELECT task_id, attempt_no, runner_seq, path, size_bytes, sha256, kind, mtime, indexed_at
+		  FROM artifacts WHERE `+where+` ORDER BY path`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("store: list attempt artifacts %s/%s: %w", taskID, attemptID, err)
+		return nil, fmt.Errorf("store: list artifacts %s#%d/%d: %w", taskID, attemptNo, seq, err)
 	}
 	defer rows.Close()
-	out := make([]Artifact, 0, 8)
+	var out []Artifact
 	for rows.Next() {
 		var a Artifact
-		if err := rows.Scan(&a.RunID, &a.TaskID, &a.AttemptID, &a.Path, &a.SizeBytes,
+		if err := rows.Scan(&a.TaskID, &a.AttemptNo, &a.RunnerSeq, &a.Path, &a.SizeBytes,
 			&a.SHA256, &a.Kind, &a.MTime, &a.IndexedAt); err != nil {
 			return nil, fmt.Errorf("store: scan artifact: %w", err)
 		}
@@ -96,47 +102,25 @@ func (r *ArtifactRepo) ListByAttempt(ctx context.Context, tx pgx.Tx, runID, task
 	return out, rows.Err()
 }
 
-// RunBundle 是一次报告生成需要的全部库内事实。
-type RunBundle struct {
-	Run      *Run
-	Tasks    []Task
-	Attempts map[string][]Attempt // task_id -> attempts（按 idx 升序）
-	Events   []Event
+// DeleteByTask 清掉某 Task 的产物索引（人工清理 / 保留期清理；磁盘删除在事务外）。
+func (r *ArtifactRepo) DeleteByTask(ctx context.Context, tx pgx.Tx, taskID string) error {
+	if _, err := r.s.db(tx).Exec(ctx, `DELETE FROM artifacts WHERE task_id = $1`, taskID); err != nil {
+		return fmt.Errorf("store: artifacts: delete by task %s: %w", taskID, err)
+	}
+	return nil
 }
 
-// ReportBundle 读一个 Run 的报告数据（报告模块的唯一数据来源；库是权威）。
-func (s *Store) ReportBundle(ctx context.Context, runID string) (*RunBundle, error) {
-	run, err := s.Runs.Get(ctx, nil, runID)
+// TaskQuotaBytes 返回该 Task 当前 attempt 已索引产物的总字节数
+// （ARTIFACT_QUOTA_EXCEEDED 判定的输入，§12.7）。
+func (r *ArtifactRepo) TaskQuotaBytes(ctx context.Context, tx pgx.Tx, taskID string) (int64, error) {
+	var total int64
+	err := r.s.db(tx).QueryRow(ctx, `
+		SELECT COALESCE(sum(size_bytes), 0) FROM artifacts WHERE task_id = $1`, taskID).Scan(&total)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
 	if err != nil {
-		return nil, err
+		return 0, fmt.Errorf("store: artifact quota %s: %w", taskID, err)
 	}
-	tasks := make([]Task, 0, 16)
-	cursor := ""
-	for {
-		batch, next, err := s.Tasks.ListByRun(ctx, nil, runID, cursor, 200)
-		if err != nil {
-			return nil, err
-		}
-		tasks = append(tasks, batch...)
-		if next == "" {
-			break
-		}
-		cursor = next
-	}
-	attempts := make(map[string][]Attempt, len(tasks))
-	for i := range tasks {
-		list, err := s.Attempts.ListByTask(ctx, nil, tasks[i].ID)
-		if err != nil {
-			return nil, err
-		}
-		attempts[tasks[i].ID] = list
-	}
-	events, err := s.Events.AllByRun(ctx, nil, runID)
-	if err != nil {
-		return nil, err
-	}
-	return &RunBundle{Run: run, Tasks: tasks, Attempts: attempts, Events: events}, nil
+	return total, nil
 }
-
-// IsNotFound 报告错误是否是"对象不存在"。
-func IsNotFound(err error) bool { return errors.Is(err, domain.ErrNotFound) }

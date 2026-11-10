@@ -2,75 +2,82 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
 )
 
-// PrecheckTaskIDs 返回该 Run **真的注入了平台 Pre-Check** 时对应的那个 Task id 集合。
+// precheck 判据（03 §4.2）：`tasks.resolved.precheck.injected` 是"这个 Task 到底有没有
+// 平台注入的 pre_check runner"的**唯一判据**（`precheck: "off"` 时为 {"injected": false}，
+// 只有这一个键）。判定某个 runner 是不是注入的 pre_check 必须用它，**不能**用
+// `role='pre_check'`：用户可以显式提交 pre_check 角色 runner（§10.1）。
 //
-// 判别依据是提交时冻结的解析快照，不是"测试用了哪个 Tester"：`endpoint-probe` 本身是
-// `role=pre_check`，但用户可以把它当普通测试用（`precheck: "off"`）。只有
-//
-//	runs.resolved -> 'precheck' ->> 'injected'  == true   且   tasks.seq = 0
-//
-// 才是平台注入的 Pre-Check（注入时固定 seq=0；见 api/submit_prepare.go 的 resolved 快照）。
-// 叠加 `testers.role='pre_check'` 做双保险：注入路径在提交校验里已强制该角色；
-// 注册表行缺失（历史数据）时按"可能是"放行，不影响主判据。
-//
-// 反例（QA r-20261105-TA6M）：`precheck:"off"` + 唯一测试 Task 用了 endpoint-probe，
-// 此时 injected=false → 返回空集 → 全部 Task 走"测试"语义，TASK_TIMEOUT 按平台侧错误处理。
-func (s *Store) PrecheckTaskIDs(ctx context.Context, tx pgx.Tx, runID string) (map[string]bool, error) {
-	rows, err := s.db(tx).Query(ctx, `
-		SELECT t.id
-		  FROM tasks t
-		  JOIN runs r ON r.id = t.run_id
-		  LEFT JOIN testers ts
-		         ON ts.name = t.tester_name AND ts.version = t.tester_version
-		 WHERE t.run_id = $1
-		   AND t.seq = 0
-		   AND COALESCE((r.resolved -> 'precheck' ->> 'injected')::boolean, false)
-		   AND COALESCE(ts.role, 'pre_check') = 'pre_check'`, runID)
+// 注入的行在 resolved.runners[] 里带 `injected: true`（含 service-deploy / service-clean）。
+
+// InjectedPrecheckSeq 返回平台注入的 pre_check runner 的 seq（未注入时返回 0）。
+// 判据：resolved.precheck.injected == true 且 resolved.runners[] 中 injected=true 且
+// role=pre_check 的那一行（`precheck: auto` 注入时固定为测试类 runner 最前面的 seq）。
+func (s *Store) InjectedPrecheckSeq(ctx context.Context, tx pgx.Tx, taskID string) (int, error) {
+	t, err := s.Tasks.Get(ctx, tx, taskID)
 	if err != nil {
-		return nil, fmt.Errorf("store: precheck task ids %s: %w", runID, err)
+		return 0, err
 	}
-	defer rows.Close()
-	out := map[string]bool{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("store: scan precheck task ids: %w", err)
-		}
-		out[id] = true
+	injected, _, _, err := ResolvedPrecheck(t.Resolved)
+	if err != nil || !injected {
+		return 0, err
 	}
-	return out, rows.Err()
+	seq, err := injectedRunnerSeq(t.Resolved, "pre_check")
+	if err != nil {
+		return 0, err
+	}
+	return seq, nil
 }
 
-// PrecheckFlags 批量判定"哪些 Task 是平台注入的 Pre-Check"（一次查询，禁止 N+1）。
-// 判据同 PrecheckTaskIDs：runs.resolved.precheck.injected == true 且 tasks.seq = 0。
-// 供 adapter 填 orchestrator.TaskView.IsPrecheck（门控与终态都不再用 Tester 角色）。
-func (s *Store) PrecheckFlags(ctx context.Context, taskIDs []string) (map[string]bool, error) {
-	out := map[string]bool{}
-	if len(taskIDs) == 0 {
-		return out, nil
-	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT t.id
-		  FROM tasks t
-		  JOIN runs r ON r.id = t.run_id
-		 WHERE t.id = ANY($1)
-		   AND t.seq = 0
-		   AND COALESCE((r.resolved -> 'precheck' ->> 'injected')::boolean, false)`, taskIDs)
+// InjectedRunnerSeqs 返回 resolved 快照里全部注入行（injected=true）的 seq → role。
+// 供编排层识别注入的 service-deploy / precheck / service-clean。
+func (s *Store) InjectedRunnerSeqs(ctx context.Context, tx pgx.Tx, taskID string) (map[int]string, error) {
+	t, err := s.Tasks.Get(ctx, tx, taskID)
 	if err != nil {
-		return nil, fmt.Errorf("store: precheck flags: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("store: scan precheck flags: %w", err)
+	return resolvedInjectedRunnerSeqs(t.Resolved)
+}
+
+// injectedRunnerSeq 从 resolved 里取指定角色的注入行 seq。
+func injectedRunnerSeq(resolved []byte, role string) (int, error) {
+	m, err := resolvedInjectedRunnerSeqs(resolved)
+	if err != nil {
+		return 0, err
+	}
+	for seq, r := range m {
+		if r == role {
+			return seq, nil
 		}
-		out[id] = true
 	}
-	return out, rows.Err()
+	return 0, nil
+}
+
+// jsonUnmarshalStrict 是 json.Unmarshal 的薄包装（容错未知字段）。
+func jsonUnmarshalStrict(b []byte, v any) error { return json.Unmarshal(b, v) }
+
+// resolvedInjectedRunnerSeqs 解析 resolved.runners[] 的注入行（03 §4.2 的快照形状）。
+func resolvedInjectedRunnerSeqs(resolved []byte) (map[int]string, error) {
+	var snap struct {
+		Runners []struct {
+			Seq      int    `json:"seq"`
+			Role     string `json:"role"`
+			Injected bool   `json:"injected"`
+		} `json:"runners"`
+	}
+	if err := jsonUnmarshalStrict(resolved, &snap); err != nil {
+		return nil, fmt.Errorf("store: parse resolved.runners: %w", err)
+	}
+	out := map[int]string{}
+	for _, r := range snap.Runners {
+		if r.Injected {
+			out[r.Seq] = r.Role
+		}
+	}
+	return out, nil
 }

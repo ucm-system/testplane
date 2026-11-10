@@ -13,16 +13,16 @@ import (
 )
 
 // 事件发布（C-9.2、§3.7）：
-//   - state_events 是唯一事件源；提交后调用 Notify(run_id, seq)；
+//   - state_events 是唯一事件源；提交后调用 Notify(task_id, seq)；
 //   - 本进程内先 fan-out 给 SSE 订阅者（低延迟）；
 //   - 同时 `pg_notify` 到统一频道，多副本各自 LISTEN 后按需查库；
-//   - NOTIFY 载荷只有 run_id 与 seq（避免 PG 8KB 载荷限制）。
+//   - NOTIFY 载荷只有 task_id 与 seq（避免 PG 8KB 载荷限制）。
 //
 // 只做"提示"，不保证不丢：SSE 侧另有 500ms 轮询兜底，丢失只影响延迟。
 
 // 频道名常量只允许在这里定义（C-4.4 同类约束：锁名/频道名一处定义）。
 const (
-	notifyChannel      = "testplane_run_events"
+	notifyChannel      = "argus_task_events"
 	notifyPayloadSep   = "|"
 	hubQueuePerSub     = 64
 	notifyQueueDepth   = 256
@@ -31,8 +31,8 @@ const (
 
 // Notification 是一次状态变化提示。
 type Notification struct {
-	RunID string
-	Seq   int64
+	TaskID string
+	Seq    int64
 }
 
 // Hub 是本进程内的事件广播（每个 Run 一组订阅者）。
@@ -43,21 +43,21 @@ type Hub struct {
 }
 
 type hubSub struct {
-	runID string
-	ch    chan Notification
+	taskID string
+	ch     chan Notification
 }
 
 // NewHub 构造广播中心。
 func NewHub() *Hub { return &Hub{subs: make(map[uint64]*hubSub)} }
 
-// Subscribe 订阅某个 Run 的通知；返回取消函数（必须调用，避免泄漏）。
-func (h *Hub) Subscribe(runID string) (<-chan Notification, func()) {
+// Subscribe 订阅某个 Task 的通知；返回取消函数（必须调用，避免泄漏）。
+func (h *Hub) Subscribe(taskID string) (<-chan Notification, func()) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.nextID++
 	id := h.nextID
 	ch := make(chan Notification, hubQueuePerSub)
-	h.subs[id] = &hubSub{runID: runID, ch: ch}
+	h.subs[id] = &hubSub{taskID: taskID, ch: ch}
 	var once sync.Once
 	return ch, func() {
 		once.Do(func() {
@@ -69,12 +69,12 @@ func (h *Hub) Subscribe(runID string) (<-chan Notification, func()) {
 	}
 }
 
-// Publish 把通知投递给该 Run 的订阅者；队列满时丢弃（由轮询兜底补上）。
+// Publish 把通知投递给该 Task 的订阅者；队列满时丢弃（由轮询兜底补上）。
 func (h *Hub) Publish(n Notification) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, s := range h.subs {
-		if s.runID != n.RunID {
+		if s.taskID != n.TaskID {
 			continue
 		}
 		select {
@@ -109,11 +109,11 @@ func NewNotifier(pool *pgxpool.Pool) *Notifier {
 func (n *Notifier) Hub() *Hub { return n.hub }
 
 // Notify 在事务提交后调用（存活期内不阻塞调用方）。
-func (n *Notifier) Notify(runID string, seq int64) {
-	if runID == "" {
+func (n *Notifier) Notify(taskID string, seq int64) {
+	if taskID == "" {
 		return
 	}
-	note := Notification{RunID: runID, Seq: seq}
+	note := Notification{TaskID: taskID, Seq: seq}
 	n.hub.Publish(note)
 	select {
 	case n.out <- note:
@@ -128,11 +128,11 @@ func (n *Notifier) emitLoop() {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), notifyEmitDeadline)
-		payload := note.RunID + notifyPayloadSep + strconv.FormatInt(note.Seq, 10)
+		payload := note.TaskID + notifyPayloadSep + strconv.FormatInt(note.Seq, 10)
 		_, err := n.pool.Exec(ctx, `SELECT pg_notify($1, $2)`, notifyChannel, payload)
 		cancel()
 		if err != nil {
-			n.log.Debug("pg_notify 失败（SSE 轮询兜底）", "err", err, "run_id", note.RunID, "seq", note.Seq)
+			n.log.Debug("pg_notify 失败（SSE 轮询兜底）", "err", err, "task_id", note.TaskID, "seq", note.Seq)
 		}
 	}
 }
@@ -181,23 +181,23 @@ func (n *Notifier) listenOnce(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("store: wait notification: %w", err)
 		}
-		runID, seq, ok := parseNotifyPayload(raw.Payload)
+		taskID, seq, ok := parseNotifyPayload(raw.Payload)
 		if !ok {
 			continue
 		}
-		n.hub.Publish(Notification{RunID: runID, Seq: seq})
+		n.hub.Publish(Notification{TaskID: taskID, Seq: seq})
 	}
 }
 
-func parseNotifyPayload(p string) (runID string, seq int64, ok bool) {
+func parseNotifyPayload(p string) (taskID string, seq int64, ok bool) {
 	idx := strings.Index(p, notifyPayloadSep)
 	if idx <= 0 {
 		return "", 0, false
 	}
-	runID = p[:idx]
+	taskID = p[:idx]
 	seq, err := strconv.ParseInt(p[idx+1:], 10, 64)
 	if err != nil {
 		return "", 0, false
 	}
-	return runID, seq, true
+	return taskID, seq, true
 }

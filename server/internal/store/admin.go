@@ -142,11 +142,12 @@ func (r *ProfileRepo) Delete(ctx context.Context, tx pgx.Tx, name string) error 
 }
 
 // CountTaskRefs 数有多少 Task 引用了该 Profile（删除时作为 detail 回报）。
-// 只查 tasks（03 §3.1：tasks.profile 是引用列；manifest 里的历史配置不参与计数）。
+// v2（D-68）引用列在 task_runners.profile（tasks 表没有 profile 列——v1 遗留口径，
+// 直查会 SQL 报错），按 Task 去重计数；manifest 里的历史配置不参与计数。
 func (r *ProfileRepo) CountTaskRefs(ctx context.Context, tx pgx.Tx, name string) (int, error) {
 	var n int
 	if err := r.s.db(tx).QueryRow(ctx,
-		`SELECT count(*) FROM tasks WHERE profile = $1`, name).Scan(&n); err != nil {
+		`SELECT count(DISTINCT task_id) FROM task_runners WHERE profile = $1`, name).Scan(&n); err != nil {
 		return 0, fmt.Errorf("store: count task refs of profile %s: %w", name, err)
 	}
 	return n, nil
