@@ -1,17 +1,17 @@
-# TestPlane · 前端独立镜像（testplane-web）
+# Argus · 前端独立镜像（argus-web）
 #
 # 用途：**只给"前端单独发版 / 单独托管"的场景**。默认部署仍用 server 内嵌前端
 # （server.Dockerfile 的 web 阶段 → go:embed → 单端口同时服务静态资源与 /api/v1），
 # 不要因为有了本文件就把默认部署改成双镜像。
 #
 # 构建上下文 = **仓库根**（要 web/ 整个目录）：
-#   docker build -f deploy/docker/web.Dockerfile -t testplane-web:dev .
+#   docker build -f deploy/docker/web.Dockerfile -t argus-web:dev .
 #   或：pwsh deploy/docker/build-push.ps1 -Component web
 #
 # 运行时约定：
 #   - 只读根可跑：nginx 的临时目录/缓存/pid 全部落在可写的空挂点上；
 #   - 非 root（10001:10001）；
-#   - `/api/` **可选**反代：设了 `TESTPLANE_API_UPSTREAM` 才启用（envsubst 渲染模板）；
+#   - `/api/` **可选**反代：设了 `AG_API_UPSTREAM` 才启用（envsubst 渲染模板）；
 #     没设就纯静态（只服务 SPA，API 由别处托管）；
 #   - SSE 友好：`proxy_buffering off`、长连接超时放宽；
 #   - `/healthz` 固定 200，供 k8s 探针。
@@ -53,8 +53,8 @@ FROM nginx:1.27-alpine
 # 这里不用 nginx 官方的 101 用户，而是固定 10001（与本平台其他镜像一致，
 # 便于 fsGroup 与 PVC 属主统一）。
 RUN set -eux; \
-    addgroup -g 10001 testplane; \
-    adduser -D -u 10001 -G testplane -H -s /sbin/nologin testplane; \
+    addgroup -g 10001 argus; \
+    adduser -D -u 10001 -G argus -H -s /sbin/nologin argus; \
     mkdir -p /etc/nginx/templates /var/cache/nginx /var/run /tmp; \
     chown -R 10001:10001 /var/cache/nginx /var/run /tmp /etc/nginx; \
     # 官方镜像默认监听 80 并在 /etc/nginx/conf.d/default.conf；我们用自己的模板，
@@ -109,7 +109,7 @@ COPY --from=web /src/web/dist /usr/share/nginx/html
 USER 10001:10001
 
 ENV TZ=Asia/Shanghai \
-    TESTPLANE_API_UPSTREAM=""
+    AG_API_UPSTREAM=""
 
 EXPOSE 8080
 

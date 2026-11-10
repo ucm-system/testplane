@@ -1,7 +1,7 @@
-# TestPlane · 数据库迁移 Job（**默认不启用，opt-in**）
+# Argus · 数据库迁移 Job（**默认不启用，opt-in**）
 #
 # ⚠️ 本文件**没有**列在 deploy/k8s/kustomization.yaml 里：
-#    镜像 testplane-server:dev 要有 server/cmd/testplaned 才能构建；
+#    镜像 argus-server:dev 要有 server/cmd/argusd 才能构建；
 #    迁移 Job 用了同一镜像，所以它的启用条件与 deployment.yaml 相同。
 #
 # 依据 design/impl/web-and-delivery.md §11、design/views/06-physical-view.md §6.2：
@@ -10,21 +10,21 @@
 #   现在是原生清单，所以由人显式跑，**不要**把它挂进 Deployment 的 initContainers。
 #
 # 用法：
-#   kubectl --context kind-testplane apply -f deploy/k8s/migrate-job.yaml
-#   kubectl --context kind-testplane -n testplane wait --for=condition=complete job/testplaned-migrate --timeout=300s
-#   kubectl --context kind-testplane -n testplane logs job/testplaned-migrate
-#   kubectl --context kind-testplane -n testplane delete job testplaned-migrate
+#   kubectl --context kind-argus apply -f deploy/k8s/migrate-job.yaml
+#   kubectl --context kind-argus -n argus wait --for=condition=complete job/argusd-migrate --timeout=300s
+#   kubectl --context kind-argus -n argus logs job/argusd-migrate
+#   kubectl --context kind-argus -n argus delete job argusd-migrate
 #
 # 规范（03 §7）：只前进；down 仅供本地。expand 与 contract 分两个发布，
 # 保证"回滚镜像不需要回滚库"。启动时控制面比对 schema_migrations 版本，不匹配拒绝启动。
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: testplaned-migrate
-  namespace: testplane
+  name: argusd-migrate
+  namespace: argus
   labels:
-    app.kubernetes.io/name: testplaned-migrate
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argusd-migrate
+    app.kubernetes.io/part-of: argus
     app.kubernetes.io/component: migration
 spec:
   # 迁移失败就该停下来看日志，不重试（重试会掩盖并发/半途状态）
@@ -34,8 +34,8 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: testplaned-migrate
-        app.kubernetes.io/part-of: testplane
+        app.kubernetes.io/name: argusd-migrate
+        app.kubernetes.io/part-of: argus
         app.kubernetes.io/component: migration
     spec:
       restartPolicy: Never
@@ -51,20 +51,20 @@ spec:
           type: RuntimeDefault
       containers:
         - name: migrate
-          image: testplane-server:dev
+          image: argus-server:dev
           imagePullPolicy: IfNotPresent
-          # 与 06 §6.2 / 03 §7 一致：`testplaned migrate up`
-          command: ["/testplaned"]
+          # 与 06 §6.2 / 03 §7 一致：`argusd migrate up`
+          command: ["/argusd"]
           args: ["migrate", "up"]
           env:
-            - name: TESTPLANE_DATABASE_URL
+            - name: AG_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: testplane-db
+                  name: argus-db
                   key: dsn
           envFrom:
             - configMapRef:
-                name: testplane-config
+                name: argus-config
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

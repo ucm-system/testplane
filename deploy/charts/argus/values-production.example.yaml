@@ -1,0 +1,133 @@
+# 生产模板 —— 复制成 `values-<env>.yaml` 再改，**不要**直接 -f 这个文件。
+#
+# 环境里需要先准备好这 4 个 Secret（都不含明文进 values）：
+#   kubectl -n argus create secret generic argus-db      --from-literal=dsn='postgres://...'
+#   kubectl -n argus create secret generic argus-oidc    --from-literal=client-secret='...'
+#   kubectl -n argus create secret generic argus-genet   --from-literal=api-key='...'
+#   kubectl -n argus create secret generic argus-clusters   # 可选：多集群 kubeconfig
+#
+# 以及一个支持 RWX 的 StorageClass（NFS CSI / CephFS 等），或预先建好的 PVC。
+
+image:
+  repository: ghcr.io/ucm-system/argus-server
+  # ← 由 `deploy/docker/build-push.ps1 -Push` 打印的 digest（钉死，不用可变 tag）
+  digest: "sha256:f91cef0daaa7d0d60d2b26a3da6546dd824e3a7261b34ac001d2a815c9165dee"
+  pullPolicy: IfNotPresent
+  # 公开仓库的 GHCR 镜像匿名可拉；私有包才需要 pull secret
+  # pullSecrets:
+  #   - name: ghcr-pull
+
+# controller 必须单活（没有 leader election）：要水平扩就拆 role=api（多副本）+ 独立 controller（1 副本）
+replicaCount: 1
+role: all
+
+config:
+  env: prod
+  authMode: oidc
+  logLevel: info
+  clusterName: cluster-01
+  maxGlobalConcurrency: 20   # 按 06 §5.4 的容量公式定
+  runMaxTasks: 200
+  deployProvider: genet
+
+oidc:
+  issuer: "https://sso.example.internal/realms/ucm"
+  clientID: "argus"
+  redirectURL: "https://argus.example.internal/api/v1/auth/callback"
+  clientAuth: client_secret_basic
+  roleClaim: groups
+  roleMap: "tp-admins=admin,tp-ops=operator"
+  clientSecretRef:
+    name: argus-oidc
+    key: client-secret
+
+session:
+  secretRef:
+    name: argus-oidc
+    key: session-secret
+  cookie: tp_session
+  ttl: 8h
+  secure: true
+
+genet:
+  baseURL: "https://genet.example.internal"
+  apiKeySecretRef:
+    name: argus-genet
+    key: api-key
+  # 自签 CA（可选）
+  # caConfigMap: genet-ca
+  # caFile: /etc/argus/genet-ca/ca.pem
+
+database:
+  existingSecret: argus-db
+  key: dsn
+
+persistence:
+  enabled: true
+  # 生产推荐：复用运维建好的 RWX claim
+  existingClaim: argus-storage-prod
+  # 或者交给动态供给：
+  # storageClass: nfs-client
+  size: 2Ti
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"   # 请求体上限 1 MiB（07 §9）
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"  # SSE 长连接
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"      # SSE 不能被缓冲
+  hosts:
+    - host: argus.example.internal
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: argus-tls
+      hosts:
+        - argus.example.internal
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  # 自管 Calico 时填节点网段，否则 kubelet 探针会被拦（readiness 永远失败）
+  # probeSources:
+  #   - ipBlock: { cidr: 10.0.0.0/8 }
+  databasePort: 5432
+  databaseCIDR: "10.0.0.0/8"     # PG 在集群网段内；公网 RDS 就写那个 CIDR
+  storagePort: 2049
+  storageCIDR: "10.0.0.0/8"      # NFS
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 1Gi
+  limits:
+    cpu: "4"
+    memory: 4Gi
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: argus
+# ---- 统一共享挂载（D-63）----
+# 生产用集群提供的 NFS/RWX PVC（平台只认 claimName）。权限：目录 0755 / 文件 0644
+# （uid 10001 原样透传；root_squash 不压 10001；fsGroup 对 NFS 无效）。
+sharedMounts:
+  - name: models
+    mountPath: /models
+    readOnly: true
+    claimName: models-nfs
+  - name: model-alt
+    mountPath: /mnt/model
+    readOnly: true
+    claimName: models-nfs
+sharedMountsDisabledProfiles: []
+
+extraObjects: []

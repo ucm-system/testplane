@@ -1,12 +1,12 @@
-# TestPlane · RBAC（最小集）
+# Argus · RBAC（最小集）
 #
 # 设计依据
 #   design/views/06-physical-view.md §2（对象清单）、§4.4（平台不授予的权限）
 #   design/impl/web-and-delivery.md §9「RBAC（最小集）」表
 #
 # 两层结构（W-9）：
-#   1) Role testplane          —— namespace 级，执行层要写的东西（Job/Pod/Lease…）
-#   2) ClusterRole testplane-view —— 集群级只读，看板与 waiting_reason 的数据源
+#   1) Role argus          —— namespace 级，执行层要写的东西（Job/Pod/Lease…）
+#   2) ClusterRole argus-view —— 集群级只读，看板与 waiting_reason 的数据源
 #
 # 刻意**不授予**（06 §4.4，任何一条都不要"顺手补上"）：
 #   secrets get/list/watch     日志明文不脱敏（K-5），凭据只由 kubelet 注入
@@ -16,25 +16,25 @@
 #                              ⚠️ **这是 apply 完本文件之后的硬步骤**：漏了它，
 #                              `POST /admin/secrets/{name}/rotate` 会一直 503（缺 secrets get）。
 #                              生成脚本的 -ServiceAccount 必填，两种安装方式名字不同
-#                              （kustomize=testplane，Helm=<release>-testplane）。
+#                              （kustomize=argus，Helm=<release>-argus）。
 #                              步骤见 deploy/README.md §6.1 与 kustomization.yaml 顶部注释。
 #   pods/exec、attach、portforward  平台不代执行命令
 #   deployments/services/ingresses  部署归 Genet，平台只建 Job
 #   nodes 写 / drain / evict    只读可见性，不替运维做节点决策
 #   volcano 写（权重、抢占、删 PodGroup）  平台没有调度决策权
 #
-# 作用域说明：控制面与 Tester Job 同处 namespace `testplane`
-# （TESTPLANE_EXECUTOR_NAMESPACE），所以 namespace 级 Role 足够。
+# 作用域说明：控制面与 Runner Job 同处 namespace `argus`
+# （AG_EXECUTOR_NAMESPACE），所以 namespace 级 Role 足够。
 # 若将来 Job 要落到**其它** namespace，用 deploy/k8s/rbac-cluster-executor.yaml
 # 里的 ClusterRole 变体替换本文件的 Role/RoleBinding——那是更大的权限面，需评审。
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: testplane
-  namespace: testplane
+  name: argus
+  namespace: argus
   labels:
-    app.kubernetes.io/name: testplane
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argus
+    app.kubernetes.io/part-of: argus
 rules:
   # 创建 / 跟踪 / 取消 Task Job（E-2、E-5.2）
   - apiGroups: ["batch"]
@@ -64,29 +64,29 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: testplane
-  namespace: testplane
+  name: argus
+  namespace: argus
   labels:
-    app.kubernetes.io/name: testplane
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argus
+    app.kubernetes.io/part-of: argus
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: testplane
+  name: argus
 subjects:
   - kind: ServiceAccount
-    name: testplane
-    namespace: testplane
+    name: argus
+    namespace: argus
 ---
 # 集群级**只读**：看板节点状态（`insufficient_resources` 判定的数据源）。
-# Volcano 相关权限单独拆到下面的 testplane-volcano-view —— 见 design/views/06 §2.1。
+# Volcano 相关权限单独拆到下面的 argus-volcano-view —— 见 design/views/06 §2.1。
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: testplane-view
+  name: argus-view
   labels:
-    app.kubernetes.io/name: testplane
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argus
+    app.kubernetes.io/part-of: argus
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
@@ -95,18 +95,18 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: testplane-view
+  name: argus-view
   labels:
-    app.kubernetes.io/name: testplane
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argus
+    app.kubernetes.io/part-of: argus
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: testplane-view
+  name: argus-view
 subjects:
   - kind: ServiceAccount
-    name: testplane
-    namespace: testplane
+    name: argus
+    namespace: argus
 ---
 # Volcano 队列快照（E-11、design/views/06 §2.1）：`queues` 与 `podgroups` 都是
 # **cluster-scoped**，上面的 namespace 级 Role 绑不到，所以必须 ClusterRole。
@@ -121,10 +121,10 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: testplane-volcano-view
+  name: argus-volcano-view
   labels:
-    app.kubernetes.io/name: testplane
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argus
+    app.kubernetes.io/part-of: argus
 rules:
   - apiGroups: ["scheduling.volcano.sh"]
     resources: ["queues", "podgroups"]
@@ -133,15 +133,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: testplane-volcano-view
+  name: argus-volcano-view
   labels:
-    app.kubernetes.io/name: testplane
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argus
+    app.kubernetes.io/part-of: argus
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: testplane-volcano-view
+  name: argus-volcano-view
 subjects:
   - kind: ServiceAccount
-    name: testplane
-    namespace: testplane
+    name: argus
+    namespace: argus

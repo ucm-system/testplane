@@ -1,16 +1,16 @@
-# TestPlane · 控制面镜像（testplane-server）
+# Argus · 控制面镜像（argus-server）
 #
 # 构建上下文 = **仓库根**（要用 server/ 与 testers/ 两个目录，W-8）：
-#   docker build -f deploy/docker/server.Dockerfile -t testplane-server:dev .
-#   & .\.tools\kind.exe load docker-image testplane-server:dev --name testplane
+#   docker build -f deploy/docker/server.Dockerfile -t argus-server:dev .
+#   & .\.tools\kind.exe load docker-image argus-server:dev --name argus
 #
 # 依据
 #   design/impl/web-and-delivery.md §7（构建与集成）、§8（镜像与 CI）
-#   design/impl/execution.md §10（Tester Registry：镜像内 /app/testers）
+#   design/impl/execution.md §10（Runner Registry：镜像内 /app/testers）
 #
 # 与 W-8 的差异（有意的，写在这里免得被当成漏项）
 #   1) W-8 的镜像还有 node:22-alpine 前端阶段 + distroless 运行阶段；
-#      当前仓库还没有 web/ 产物，也没有 server/cmd/testplaned，所以这里先给
+#      当前仓库还没有 web/ 产物，也没有 server/cmd/argusd，所以这里先给
 #      「Go 后端 + alpine 运行阶段」的可跑版本。web 阶段见文件末尾注释，
 #      等 web/ 有产物、server/internal/webui/dist 就位后启用。
 #   2) 运行阶段用 alpine 而不是 distroless：需要 ca-certificates、tzdata
@@ -25,7 +25,7 @@
 # 不变量
 #   - CGO_ENABLED=0：静态二进制，alpine 上不装 libc 兼容层也能跑。
 #   - 迁移**不进 ENTRYPOINT**（多副本会并发迁移，W-11）：
-#     由 `testplaned migrate up` 单独执行（Helm pre-upgrade hook）。
+#     由 `argusd migrate up` 单独执行（Helm pre-upgrade hook）。
 #   - testers/ 逐个 COPY 到 /app/testers，注册表启动时扫描一次（K-3、E-10）。
 
 # syntax=docker/dockerfile:1.7
@@ -105,12 +105,12 @@ ENV CGO_ENABLED=0
 
 # -trimpath：去掉本机路径，镜像可复现
 # -s -w：去符号表，二进制小一半
-# 产物名固定 testplaned（与 06 §2 的 Deployment 名、`/testplaned migrate up` 一致）
+# 产物名固定 argusd（与 06 §2 的 Deployment 名、`/argusd migrate up` 一致）
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -trimpath \
       -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
-      -o /out/testplaned ./cmd/testplaned
+      -o /out/argusd ./cmd/argusd
 
 # 构建期自检：
 #   1) 二进制存在，且**不是**动态链接（CGO_ENABLED=0 的实证，不是"应该"）；
@@ -119,11 +119,11 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 #   2) **架构 == TARGETARCH**：读 ELF 头 e_machine（偏移 18-19，0x3e=x86-64，0xb7=AArch64）。
 #      交叉编译最大的坑就是"忘了传 GOARCH"，结果 arm64 镜像里塞了 amd64 二进制；
 #      这一步把那种错误变成**构建失败**，而不是等运行期 exec format error。
-RUN test -x /out/testplaned && \
-    ls -lh /out/testplaned && \
-    ! ldd /out/testplaned 2>/dev/null && \
+RUN test -x /out/argusd && \
+    ls -lh /out/argusd && \
+    ! ldd /out/argusd 2>/dev/null && \
     echo "BUILD_CHECK_OK: static binary" && \
-    elf_machine=$(od -An -tx1 -j18 -N2 /out/testplaned | tr -d ' \n') && \
+    elf_machine=$(od -An -tx1 -j18 -N2 /out/argusd | tr -d ' \n') && \
     case "${TARGETARCH:-amd64}:${elf_machine}" in \
       amd64:3e00) echo "BUILD_CHECK_OK: elf x86-64 (amd64)" ;; \
       arm64:b700) echo "BUILD_CHECK_OK: elf aarch64 (arm64)" ;; \
@@ -139,30 +139,30 @@ FROM ${RUNTIME_BASE}
 # ca-certificates：出站 HTTPS（OIDC / Genet / K8s API）
 # tzdata：TZ=Asia/Shanghai 要真实时区数据；日志时间戳仍以 apiserver/DB 为准（06 §7.1）
 RUN apk add --no-cache ca-certificates tzdata \
- && addgroup -g 10001 testplane \
- && adduser  -D -u 10001 -G testplane -s /sbin/nologin testplane \
+ && addgroup -g 10001 argus \
+ && adduser  -D -u 10001 -G argus -s /sbin/nologin argus \
  && mkdir -p /app/testers \
  && chown -R 10001:10001 /app
 
-COPY --from=build /out/testplaned /testplaned
+COPY --from=build /out/argusd /argusd
 
-# Tester Registry 的扫描源（E-10、K-3）。只用 COPY，不做运行时同步。
+# Runner Registry 的扫描源（E-10、K-3）。只用 COPY，不做运行时同步。
 COPY testers/ /app/testers/
 # chown 必须放在 COPY 之后：COPY 以 root 落盘，前面那次 chown 覆盖不到它。
 # 注册表只读这些文件，但属主统一到 10001，避免以后有人加写操作踩权限。
 RUN chown -R 10001:10001 /app/testers
 
 ENV TZ=Asia/Shanghai \
-    TESTPLANE_LISTEN=:8080 \
-    TESTPLANE_STORAGE_ROOT=/storage-root \
-    TESTPLANE_TESTERS_DIR=/app/testers
+    AG_LISTEN=:8080 \
+    AG_STORAGE_ROOT=/storage-root \
+    AG_TESTERS_DIR=/app/testers
 
 USER 10001:10001
 
 EXPOSE 8080
 
 # 不用 shell 形式：ENTRYPOINT/CMD 分离，`docker run <img> migrate up` 能追加子命令
-ENTRYPOINT ["/testplaned"]
+ENTRYPOINT ["/argusd"]
 CMD ["--role=all"]
 
 # ---------------------------------------------------------------------------

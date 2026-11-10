@@ -1,0 +1,38 @@
+Argus 已部署。
+
+  命名空间 : {{ .Release.Namespace }}
+  Release  : {{ .Release.Name }}
+  镜像     : {{ include "argus.image" . }}
+  角色     : {{ .Values.role }}（副本 {{ .Values.replicaCount }}）
+  认证     : {{ .Values.config.authMode }}
+  部署提供方: {{ .Values.config.deployProvider }}
+  产物存储 : {{ include "argus.storageClaim" . }}
+
+{{- if eq .Values.config.authMode "dev" }}
+
+⚠️  当前是 dev 鉴权：**任何能连上服务的人都是 admin**。只允许本地/临时环境。
+{{- end }}
+
+下一步：
+
+  1) 看迁移是否成功（pre-install hook）：
+     kubectl -n {{ .Release.Namespace }} get job -l app.kubernetes.io/component=migration
+     kubectl -n {{ .Release.Namespace }} logs job/{{ include "argus.fullname" . }}-migrate
+
+  2) 探活：
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "argus.fullname" . }} 8080:{{ .Values.service.port }}
+     curl -sS localhost:8080/healthz && curl -sS localhost:8080/readyz
+
+  3) 首次登录（authMode=oidc）：浏览器打开 {{ if .Values.oidc.redirectURL }}{{ .Values.oidc.redirectURL }}{{ else }}/api/v1/auth/login{{ end }}
+
+{{- if .Values.ingress.enabled }}
+
+  对外入口：
+  {{- range .Values.ingress.hosts }}
+     http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+  {{- end }}
+{{- end }}
+
+  4) 排障：
+     kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "argus.fullname" . }} -f
+     kubectl -n {{ .Release.Namespace }} get events --sort-by=.lastTimestamp | tail -20

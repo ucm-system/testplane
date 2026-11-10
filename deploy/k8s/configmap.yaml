@@ -1,6 +1,6 @@
-# TestPlane · 非敏感配置（ConfigMap）
+# Argus · 非敏感配置（ConfigMap）
 #
-# 依据 design/views/06-physical-view.md §2（ConfigMap testplane-config）与
+# 依据 design/views/06-physical-view.md §2（ConfigMap argus-config）与
 # design/impl/web-and-delivery.md §10（配置项表）。
 #
 # ⚠️ 键名以**代码实际读取**的为准，不照抄设计表：
@@ -9,85 +9,85 @@
 #   已核对：2026-11-05，server/internal/config/config.go 的 envFirst/env 调用。
 #
 # 边界：**敏感项一律不进这里**。DB DSN / OIDC client secret / Genet token /
-# session key / kubeconfig 全部走 Secret（deployment.yaml 引 testplane-db），
+# session key / kubeconfig 全部走 Secret（deployment.yaml 引 argus-db），
 # chart 不生成明文（W-9）。
 #
 # 变更触发滚动：原生清单没有 Helm 的 checksum/config 注解，改完自己重启：
-#   kubectl -n testplane rollout restart deploy/testplaned
+#   kubectl -n argus rollout restart deploy/argusd
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: testplane-config
-  namespace: testplane
+  name: argus-config
+  namespace: argus
   labels:
-    app.kubernetes.io/name: testplane
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argus
+    app.kubernetes.io/part-of: argus
 data:
   # ---- 监听与角色（config.go: HTTP_ADDR 优先，LISTEN 是别名）----
-  TESTPLANE_HTTP_ADDR: ":8080"
-  TESTPLANE_LOG_LEVEL: "info"
+  AG_HTTP_ADDR: ":8080"
+  AG_LOG_LEVEL: "info"
 
-  # ---- 存储与 Tester 注册表 ----
-  # 三个一起看：Root 是控制面自己的挂载点；PVC 是 Tester Job 挂 /workspace/output 用的名字
+  # ---- 存储与 Runner 注册表 ----
+  # 三个一起看：Root 是控制面自己的挂载点；PVC 是 Runner Job 挂 /workspace/output 用的名字
   # （executor 渲染 Job 必须有它，否则 invalid job spec: storage PVC is required），
   # ClusterName 是集群注册名。代码侧有默认值（config.go），这里显式写出来让部署值可见可改。
-  TESTPLANE_STORAGE_ROOT: "/storage-root"
-  TESTPLANE_STORAGE_PVC: "testplane-storage"
-  TESTPLANE_TESTERS_DIR: "/app/testers"
+  AG_STORAGE_ROOT: "/storage-root"
+  AG_STORAGE_PVC: "argus-storage"
+  AG_TESTERS_DIR: "/app/testers"
 
   # ---- 执行层 ----
   # Job/裸 Pod 回收开关（默认 true）；config.go 统一读，编排层只读配置。
-  TESTPLANE_JOB_GC_ENABLED: "true"
+  AG_JOB_GC_ENABLED: "true"
 
 
-  # ---- 执行层（k8s/client.go: TESTPLANE_NAMESPACE 优先，EXECUTOR_NAMESPACE 是旧名）----
-  TESTPLANE_NAMESPACE: "testplane"
+  # ---- 执行层（k8s/client.go: AG_NAMESPACE 优先，EXECUTOR_NAMESPACE 是旧名）----
+  AG_NAMESPACE: "argus"
   # 本实例对接的集群名，对应启动时 seed 的 clusters 行（默认 cluster-01）
-  TESTPLANE_CLUSTER_NAME: "cluster-01"
+  AG_CLUSTER_NAME: "cluster-01"
   # Pod 内跑：走 ServiceAccount 而不是 kubeconfig（client-go in-cluster）
-  TESTPLANE_K8S_IN_CLUSTER: "true"
+  AG_K8S_IN_CLUSTER: "true"
 
   # ---- 认证（06 §6.1 红线 / 07 §2.1 / D-51）----
   # 这份是**仓库默认清单**：默认 oidc + prod，缺 OIDC 必填项就启动失败（安全默认）。
   # dev 鉴权（任何人=admin）只允许在本地：用 overlay `deploy/overlays/local-dev` 或
-  #   .env 里显式 TESTPLANE_ENV=dev + TESTPLANE_AUTH_MODE=dev（见 deploy/.env.example）。
-  TESTPLANE_ENV: "prod"
-  TESTPLANE_AUTH_MODE: "oidc"
+  #   .env 里显式 AG_ENV=dev + AG_AUTH_MODE=dev（见 deploy/.env.example）。
+  AG_ENV: "prod"
+  AG_AUTH_MODE: "oidc"
   # 统一认证（与 Genet 同一个企业 IdP，但**独立 client**，D-51）；按环境填：
-  # TESTPLANE_OIDC_ISSUER: "https://sso.example.internal/realms/ucm"
-  # TESTPLANE_OIDC_CLIENT_ID: "testplane"
-  # TESTPLANE_OIDC_REDIRECT_URL: "https://testplane.example.internal/api/v1/auth/callback"
+  # AG_OIDC_ISSUER: "https://sso.example.internal/realms/ucm"
+  # AG_OIDC_CLIENT_ID: "argus"
+  # AG_OIDC_REDIRECT_URL: "https://argus.example.internal/api/v1/auth/callback"
 
   # ---- 并发与连接池 ----
-  TESTPLANE_DB_MAX_OPEN_CONNS: "20"
-  TESTPLANE_MAX_GLOBAL_CONCURRENCY: "20"
-  TESTPLANE_RUN_MAX_TASKS: "200"
+  AG_DB_MAX_OPEN_CONNS: "20"
+  AG_MAX_GLOBAL_CONCURRENCY: "20"
+  AG_RUN_MAX_TASKS: "200"
 
   # ---- 超时 ----
-  TESTPLANE_TASK_TIMEOUT: "4h"
-  TESTPLANE_TASK_TIMEOUT_MAX: "24h"
-  TESTPLANE_DEPLOY_TIMEOUT: "72h"
-  TESTPLANE_RESULT_MAX_BYTES: "100MiB"
+  AG_TASK_TIMEOUT: "4h"
+  AG_TASK_TIMEOUT_MAX: "24h"
+  AG_DEPLOY_TIMEOUT: "72h"
+  AG_RESULT_MAX_BYTES: "100MiB"
 
   # ---- SSE ----
-  TESTPLANE_SSE_HEARTBEAT: "15s"
-  TESTPLANE_SSE_REPLAY_HOURS: "24"
+  AG_SSE_HEARTBEAT: "15s"
+  AG_SSE_REPLAY_HOURS: "24"
 
   # ---- Deploy provider ----
   # mock：进程内假 Genet（默认，不联网）；genet：调 Genet 的 Open API（真 Genet 或 tools/fake-genet）
-  TESTPLANE_DEPLOY_PROVIDER: "genet"
+  AG_DEPLOY_PROVIDER: "genet"
   # 本地联调：集群里的 Genet backend（namespace genet）+ ChartMuseum 兼容仓库 genet-chartrepo
   # （见 deploy/genet-local/）；换成 fake-genet 时改成 http://host.docker.internal:<port>
-  TESTPLANE_GENET_BASE_URL: "http://host.docker.internal:18091"
+  AG_GENET_BASE_URL: "http://host.docker.internal:18091"
   # API Key 不放 ConfigMap，走 Secret（见 components/control-plane/deployment.yaml 的 secretKeyRef）：
-  #   kubectl -n testplane create secret generic testplane-genet --from-literal=api-key=<key>
+  #   kubectl -n argus create secret generic argus-genet --from-literal=api-key=<key>
 
   # ---- Deploy mock（MVP 用 internal/genet/mocks，不联网；D-14）----
   # 没有这三行，deploy 形态的 Run 走完 DeployReady 后注入的 Endpoint 会指向
-  # 一个不存在的地址（默认是 http://mock-llm.testplane.svc:8080/v1），
+  # 一个不存在的地址（默认是 http://mock-llm.argus.svc:8080/v1），
   # 于是 pre-check 直接 ENDPOINT_UNREACHABLE——集群内测 deploy 形态必须设。
-  # 键名以 internal/genet/mocks/genet.go 的 Env* 常量为准（不是 TESTPLANE_ 前缀的都认）。
-  TESTPLANE_MOCK_ENDPOINT_URL: "http://mock-llm.default.svc:18080/v1"
+  # 键名以 internal/genet/mocks/genet.go 的 Env* 常量为准（不是 AG_ 前缀的都认）。
+  AG_MOCK_ENDPOINT_URL: "http://mock-llm.default.svc:18080/v1"
   # mocks 读 DEPLOY_MOCK_MODEL_NAME 优先，其次 MODEL_NAME；两个都写，免得换实现时漏
   MODEL_NAME: "mock-llm"
   DEPLOY_MOCK_MODEL_NAME: "mock-llm"
@@ -102,11 +102,11 @@ data:
   # 设计里有、**当前代码还不读**的键（写在这里只作登记，加了等于没加，
   # 别指望它生效；等 config.go 补上再启用）：
   #
-  #   TESTPLANE_RETENTION_DAYS: "30"           # 保留期 sweep（06 §3.4）
-  #   TESTPLANE_ARTIFACT_MAX_BYTES: "10GiB"    # 单 Attempt 产物上限（E-8.3）
-  #   TESTPLANE_LOG_SEGMENT_MAX_BYTES: "200MiB"# Deploy 日志分段（E-7.2）
-  #   TESTPLANE_CLUSTERS_DIR: "/etc/testplane/clusters"  # 多集群 kubeconfig 目录（P1，W-10）
-  #   TESTPLANE_GENET_CA_FILE / TESTPLANE_GENET_INSECURE  # 自签 CA（见下方 Genet 段，已实现）
+  #   AG_RETENTION_DAYS: "30"           # 保留期 sweep（06 §3.4）
+  #   AG_ARTIFACT_MAX_BYTES: "10GiB"    # 单 Attempt 产物上限（E-8.3）
+  #   AG_LOG_SEGMENT_MAX_BYTES: "200MiB"# Deploy 日志分段（E-7.2）
+  #   AG_CLUSTERS_DIR: "/etc/argus/clusters"  # 多集群 kubeconfig 目录（P1，W-10）
+  #   AG_GENET_CA_FILE / AG_GENET_INSECURE  # 自签 CA（见下方 Genet 段，已实现）
   # ------------------------------------------------------------------------
 
   # ------------------------------------------------------------------------
@@ -115,11 +115,11 @@ data:
   # 默认 mock（kind E2E 用，不联网）。**切真实 Genet 时**取消下面注释并配好
   # base_url / key；key 建议从 Secret 注入（envFrom/secretKeyRef），不要写进本文件。
   #
-  #   TESTPLANE_DEPLOY_PROVIDER: "genet"        # mock（默认）| genet
-  #   TESTPLANE_GENET_BASE_URL: "https://genet.dev.huawei.com"
-  #   TESTPLANE_GENET_API_KEY:  "<从 Secret 注入，勿提交>"   # 若改走 Secret，用 secretKeyRef 覆盖
-  #   TESTPLANE_GENET_CA_FILE:  "/etc/testplane/genet-ca/ca.pem"  # 自签 CA（可选，空则用系统根证书）
-  #   TESTPLANE_GENET_INSECURE: "false"         # true = 跳过 TLS 校验，仅开发环境
+  #   AG_DEPLOY_PROVIDER: "genet"        # mock（默认）| genet
+  #   AG_GENET_BASE_URL: "https://genet.dev.huawei.com"
+  #   AG_GENET_API_KEY:  "<从 Secret 注入，勿提交>"   # 若改走 Secret，用 secretKeyRef 覆盖
+  #   AG_GENET_CA_FILE:  "/etc/argus/genet-ca/ca.pem"  # 自签 CA（可选，空则用系统根证书）
+  #   AG_GENET_INSECURE: "false"         # true = 跳过 TLS 校验，仅开发环境
   #
   # 行为表（观测 → Deploy 子状态）见 design/impl/execution.md §9.3；
   # 注意：Genet 的 endpoint.ready 只代表"地址解析完成"，可用性仍由 Pre-Check 判定。

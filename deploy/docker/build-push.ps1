@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    构建 + 打标 + 推送 TestPlane 控制面镜像（运维与 CI 共用一条命令）。
+    构建 + 打标 + 推送 Argus 控制面镜像（运维与 CI 共用一条命令）。
 
 .DESCRIPTION
     只走 deploy/docker/server.Dockerfile 这一个构建入口（W-8 / web-and-delivery §7、§8）。
@@ -31,7 +31,7 @@
       CCR（可选）：docker login ccr.ccs.tencentyun.com
 
 .PARAMETER Image
-    镜像名。默认按 -Component 推导：testplane-server / testplane-web / testplane-tester-<name>。
+    镜像名。默认按 -Component 推导：argus-server / argus-web / argus-<runner-name>。
 
 .PARAMETER Tag
     主 tag；默认 `git describe --tags --always --dirty`，取不到时 `dev-<yyyymmdd>`。
@@ -55,14 +55,14 @@
     pwsh deploy/docker/build-push.ps1 -Component web -Tag v0.2.0 -Push
 
 .EXAMPLE
-    pwsh deploy/docker/build-push.ps1 -Component tester:endpoint-probe
+    pwsh deploy/docker/build-push.ps1 -Component runner:endpoint-probe
 
 .EXAMPLE
     pwsh deploy/docker/build-push.ps1 -Platforms linux/amd64,linux/arm64 -Push -Tag v0.2.0
 
 .EXAMPLE
     # 本地 kind 验证：构建 amd64 后导入集群
-    pwsh deploy/docker/build-push.ps1 -KindCluster testplane
+    pwsh deploy/docker/build-push.ps1 -KindCluster argus
 #>
 [CmdletBinding()]
 param(
@@ -82,32 +82,32 @@ $ErrorActionPreference = 'Stop'
 # 仓库根 = 本脚本往上两级（deploy/docker/build-push.ps1）
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
-# ---- 组件解析：server / web / tester:<name> -------------------------------
-# 三者的 Dockerfile 与**构建上下文**不同，这里集中决定（tester 的上下文是 Tester 目录，
+# ---- 组件解析：server / web / runner:<name> -------------------------------
+# 三者的 Dockerfile 与**构建上下文**不同，这里集中决定（runner 的上下文是 Runner 目录，
 # 不是仓库根——搞错会把整个仓库塞进镜像上下文）。
 $ComponentSpec = $Component.Trim()
 $BuildContext = $RepoRoot
 switch -Regex ($ComponentSpec) {
     '^server$' {
         $Dockerfile = Join-Path $RepoRoot 'deploy/docker/server.Dockerfile'
-        $DefaultImage = 'testplane-server'
+        $DefaultImage = 'argus-server'
     }
     '^web$' {
         $Dockerfile = Join-Path $RepoRoot 'deploy/docker/web.Dockerfile'
-        $DefaultImage = 'testplane-web'
+        $DefaultImage = 'argus-web'
     }
-    '^tester:(?<name>[\w.-]+)$' {
-        $testerName = $Matches['name']
-        $testerDir = Join-Path $RepoRoot "testers/$testerName"
-        if (-not (Test-Path $testerDir)) {
-            throw "找不到 Tester 目录：$testerDir"
+    '^runner:(?<name>[\w.-]+)$' {
+        $runnerName = $Matches['name']
+        $runnerDir = Join-Path $RepoRoot "testers/$runnerName"
+        if (-not (Test-Path $runnerDir)) {
+            throw "找不到 Runner 目录：$runnerDir"
         }
-        $Dockerfile = Join-Path $testerDir 'build/Dockerfile'
-        $BuildContext = $testerDir          # <-- 与 server/web 不同：上下文 = Tester 根目录
-        $DefaultImage = "testplane-tester-$testerName"
+        $Dockerfile = Join-Path $runnerDir 'build/Dockerfile'
+        $BuildContext = $runnerDir          # <-- 与 server/web 不同：上下文 = Runner 根目录
+        $DefaultImage = "argus-$runnerName"
     }
     default {
-        throw "-Component 只能是 server | web | tester:<name>（收到 '$Component'）"
+        throw "-Component 只能是 server | web | runner:<name>（收到 '$Component'）"
     }
 }
 if (-not $Image) { $Image = $DefaultImage }

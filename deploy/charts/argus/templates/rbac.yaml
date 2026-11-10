@@ -1,0 +1,128 @@
+{{- if .Values.rbac.create }}
+{{- /*
+命名空间级最小权限（06 §4.4）。刻意**不授予**（任何一条都不要"顺手补上"）：
+  secrets get/list/watch  —— 唯一例外是 D-55 的 rotate 窄授权，由
+      deploy/k8s/gen-secret-rotate-role.ps1 按登记项生成（resourceNames 限定），
+      **不要**并进本文件。
+  pods/exec|attach|portforward —— 平台不代执行命令。
+  deployments/services/ingresses —— 部署归 Genet，平台只建 Job。
+  nodes 写 / drain / evict、volcano 写 —— 平台没有调度决策权。
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "argus.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "argus.labels" . | nindent 4 }}
+rules:
+  # 执行层：Job / Pod / 日志 / Lease（控制面选主）/ Event
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["{{ include "argus.fullname" . }}-config"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # 产物存储：只读 PVC 信息（不改 PVC）
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "argus.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "argus.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "argus.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "argus.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+
+{{- if .Values.rbac.clusterRead }}
+---
+{{- /* 集群级**只读**：队列看板与 waiting_reason 的数据源（Volcano Queue / PodGroup） */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "argus.fullname" . }}-view
+  labels:
+    {{- include "argus.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["queues", "podgroups"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "argus.fullname" . }}-view
+  labels:
+    {{- include "argus.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "argus.fullname" . }}-view
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "argus.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+
+{{- if .Values.rbac.executorClusterRole }}
+---
+{{- /* 仅当 Runner Job 要落到**别的**命名空间时需要——权限面更大，需评审。 */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "argus.fullname" . }}-executor
+  labels:
+    {{- include "argus.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "argus.fullname" . }}-executor
+  labels:
+    {{- include "argus.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "argus.fullname" . }}-executor
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "argus.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -1,7 +1,7 @@
-# TestPlane · namespace
+# Argus · namespace
 #
-# 一个 namespace 装控制面 + Tester Job + PVC + Lease（design/views/06-physical-view.md §2）。
-# PSA 打 restricted：控制面与 Tester Pod 都必须在 restricted 档下可跑
+# 一个 namespace 装控制面 + Runner Job + PVC + Lease（design/views/06-physical-view.md §2）。
+# PSA 打 restricted：控制面与 Runner Pod 都必须在 restricted 档下可跑
 # （runAsNonRoot / drop ALL / seccomp RuntimeDefault / 无 hostPath 的 Pod 级挂载）。
 #
 # 注意：PSA 只管 **Pod**。deploy/k8s/storage.yaml 里的 hostPath PV 是集群级对象，
@@ -9,10 +9,10 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: testplane
+  name: argus
   labels:
-    app.kubernetes.io/name: testplane
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argus
+    app.kubernetes.io/part-of: argus
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted

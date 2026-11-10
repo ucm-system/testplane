@@ -1,4 +1,4 @@
-# TestPlane · 控制面组件（kustomize Component，**默认不启用**）
+# Argus · 控制面组件（kustomize Component，**默认不启用**）
 #
 # 这是「按需叠加」的载体：被 deploy/overlays/with-control-plane 引用时才生效。
 # 单独 apply 它没意义（Component 不是完整清单，不能直接 `kubectl apply -k` 它）。
@@ -12,7 +12,7 @@
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 resources:
-  # 控制面 Deployment + Service（testplaned，--role=all）
+  # 控制面 Deployment + Service（argusd，--role=all）
   - deployment.yaml
-  # 迁移 Job（testplaned migrate up，必须先于控制面跑完；W-11）
+  # 迁移 Job（argusd migrate up，必须先于控制面跑完；W-11）
   - migrate-job.yaml

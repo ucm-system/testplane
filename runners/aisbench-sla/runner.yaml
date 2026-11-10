@@ -1,0 +1,244 @@
+name: aisbench-sla
+version: 0.5.0
+display_name: AISBench 前缀缓存 SLA 搜索
+description: |
+  用前缀缓存 SLA 搜索找出「满足延迟约束的最大并发」与「最高输出吞吐」。
+  预检（并发=1）→ 指数阶梯（×2）→ 二分收敛，每条 SLA 约束是「指标.统计量:阈值」，多条 AND 生效；
+  逐点写 ais_bench 配置并调用 ais_bench 压测，命中率按目标服务 /metrics 快照差分给出（只作证据，不参与判定）。
+  只回答「这套服务在给定负载形态下能扛到几并发、吞吐多少」；是否达标由下游消费指标判断。
+
+  0.2.0 起镜像基于官方 AISBench benchmark 镜像（ghcr.io/aisbench/aisbench_benchmark，
+  3.1.20260330 / py310），`ais_bench` 是真命令；stub 仍留在镜像里仅供离线回归
+  （`aisbench_cmd=/runner/tool/tests/stub_aisbench.py`）。
+  0.4.0 起 `sla_max_concurrency` 只取**实测并发达到目标 80%** 的 PASS 点：压不满的点标
+  degraded、不参与取值；`ENDPOINT_API_KEY` 只走环境变量（不进 argv、不落日志、不留临时配置）。
+
+role: test
+
+# 单个并发点失败（服务抖动、单点超时）不应终止整个 Task：SLA 搜索本身会把该点记为 FAIL 并继续收敛。
+# 只有 Pre-Check（endpoint-probe）才 abort_task（§7.3）。
+on_failure: continue
+
+entry: ["/runner/run.sh"]
+input_format: jsonl
+
+# 镜像由 CI 构建产出（见 build/Dockerfile 与 README 的构建节）。平台与任何运行环境都不 build（§6.2）。
+# 只有一种发布镜像：build/Dockerfile（FROM 官方 ais_bench 基础镜像，自带 ais_bench 3.1.20260330）。
+# stub 只用于离线冒烟（tests/Dockerfile.stub，不进发布矩阵），构建上下文都是 **Runner 目录**。
+# 0.4.0：密钥只走 env、sla_max_concurrency 需实测并发达标、指标名不再编码统计量/单位。
+image: registry.dev.huawei.com/argus/aisbench-sla:0.5.0
+
+resources:
+  cpu: "2"
+  memory: "2Gi"
+  gpu: { resource: nvidia.com/gpu, count: 0 }
+
+# 必须独占该服务（§6.7）：本工具会按并发阶梯持续打满目标服务，
+# 与任何其他测量并行都会互相污染（吞吐被摊薄、延迟被抬高，结论不可用）。
+# （v2：Task 内 runner 严格串行；本字段在外接模式下仍约束与该服务相关的并行测量。）
+concurrency:
+  endpoint_exclusive: true
+
+# 数据集与权重都不由平台托管（§10.4）：路径是不透明字符串。
+# 本 Runner 不向平台声明挂载点，是因为需要哪个共享存储、挂到容器内什么路径，取决于
+# Execution Profile 提供的挂载能力与调用方约定的容器内路径；声明成固定 mount_path 反而会
+# 把某个 Profile 的目录布局写死。需要时请由 Profile 挂载，并在输入文件里给出容器内绝对路径：
+#   model_path：公共参数，走 AG_MODEL_PATH 环境变量（如 /models/Qwen3-32B，由统一共享挂载提供，D-63）
+#   dataset_path=/data/sla_datasets     （生成的前缀数据集落盘目录，可写）
+#   dataset=/data/gsm8k/test.jsonl      （现成数据集，跳过生成、跳过 tokenizer）
+# 离线冒烟（stub 镜像）用 dataset=/runner/fixtures/smoke_dataset.jsonl + work_path=/tmp/aisbench-ws。
+mounts: []
+
+# 本 Runner 不产出下游 key（测试类 Runner 通常为空，§5.12）。
+exports: []
+# 被测服务地址与模型名由平台以公共参数环境变量注入（§5.4.1）：
+#   AG_SERVED_URL / AG_SERVED_MODEL_NAME（外接模式来自 Manifest service 块，部署模式来自 deploy 导出）。
+consumes: [AG_SERVED_URL, AG_SERVED_MODEL_NAME]
+
+# 业务参数 schema（jsonl，§5.4）：平台校验类型与 required 存在性；
+# 范围/枚举/跨字段语义仍归本 Runner。url / model_name / model_path 是公共参数（§5.4.1），
+# 走 AG_SERVED_URL / AG_SERVED_MODEL_NAME / AG_MODEL_PATH 环境变量，**不进参数文件**。
+# 本 Runner 不声明超时与产物：超时由平台/调用方决定；产物契约三选一（D-74：result.json/html/csv 至少其一，本 Runner 产出 result.json），全局统一见 §5.3、§6.6。
+
+placeholder: |
+  {"sla":["ttft.avg:1200","tpot.avg:30"],"input_len":2048,"output_len":32,"data_num":160,
+   "start":8,"max":256,"max_probes":12,"request_rate":0,"dataset_type":"prefix_cache",
+   "prefix_num":1,"repeat_rate":"90%","work_path":"/tmp/aisbench-ws",
+   "dataset_path":"/workspace/output/sla_out/datasets"}
+  url / model_name / model_path 不在输入文件里：由平台以 AG_SERVED_URL / AG_SERVED_MODEL_NAME /
+  AG_MODEL_PATH 注入。服务根地址由 Runner 自行处理（去掉末尾 /v1 再交给工具）。
+  work_path **不要**写 /benchmark：平台 Job 的根文件系统只读，/benchmark 属 root 不可写；
+  run.sh 会用 AIS_BENCH_DATASETS_CACHE + --config-dir 把 /tmp 下的影子源码根接给 ais_bench。
+
+parameters:
+  - name: sla
+    type: array
+    required: true
+    description: |
+      SLA 约束，多条 AND 生效；JSONL 里可给字符串数组（推荐）或单个字符串（Runner 兼容）。
+      语法 `<指标>.<统计量>:<阈值>`，分隔符 . _ - 均可，阈值可用 : 或 =。
+      指标：ttft / tpot / e2e / output_throughput；统计量：avg/min/max/median/p50/p75/p90/p99（吞吐为下限语义）。
+      延迟单位 ms，吞吐单位 tok/s。至少一条：没有约束时工具会以参数错误退出。
+    example: ["ttft.avg:1200"]
+
+  - name: work_path
+    type: string
+    required: true
+    description: |
+      ais_bench 的「工作根」（run.sh 会往它下面写
+      ais_bench/benchmark/configs/models/vllm_api/vllm_api_chat_temp.py 与数据集目录），必须可写。
+      平台上它**必填、且没有可用的默认值**：平台不会注入它，镜像里也没有可写的固定目录
+      （根文件系统只读，只有 /workspace/output 与 /tmp 可写），所以别指望省略它。
+      推荐值 `/tmp/aisbench-ws`（目录不存在时 run.sh 会 mkdir -p）。
+      目录不可创建/不可写时本 Runner 直接 `failed` + `error.code=RUNNER_NONZERO_EXIT`，
+      message 里写明「容器内请用 /tmp 下的路径」——不会再打一行 log 硬着头皮跑。
+      **不要写 /benchmark**：官方镜像里它是 ais_bench 源码根、属 root 0755，平台 Job 又是
+      ReadOnlyRootFilesystem，写不进去。
+      run.sh 会自动做两处接线，让 /tmp 下的影子源码根被 ais_bench 认到：
+      `AIS_BENCH_DATASETS_CACHE=<work_path>`（数据集相对路径锚点）与
+      `--config-dir <work_path>/ais_bench/benchmark/configs`（模型配置搜索路径）。
+    example: "/tmp/aisbench-ws"
+
+  - name: input_len
+    type: integer
+    required: false
+    default: 2048
+    description: "输入 token 长度（生成前缀数据集的目标长度）。默认 2048；长上下文很贵，可用 length_* 变长。"
+
+  - name: output_len
+    type: integer
+    required: false
+    default: 32
+    description: "输出 token 长度（ais_bench max_out_len）。默认 32；压吞吐时通常取 128~1024。"
+
+  - name: data_num
+    type: integer
+    required: false
+    default: 64
+    description: "数据集条数（每点压测的请求数）。默认 64；要测并发上限时建议 `>= 4 × max`（至少不低于 max），否则最高并发点压不满、实测并发低于目标并发，该点会被判 degraded、不计入 sla_max_concurrency。注意：显式给 `dataset` 时本参数不生效（截断只发生在生成数据集的路径里，已有数据集原样使用）。"
+
+  - name: start
+    type: integer
+    required: false
+    default: 1
+    description: "起始并发。默认 1；> 1 时先在并发=1 做预检，预检不达标直接判「阈值与能力矛盾」（退出码 2）。"
+
+  - name: max
+    type: integer
+    required: false
+    default: 256
+    description: "并发上限。默认 256；阶梯从 start 起每次 ×2，到上限仍达标则状态 max_unbounded（仍算成功）。"
+
+  - name: max_probes
+    type: integer
+    required: false
+    default: 20
+    description: "探测点数预算。默认 20；预算用尽即停止搜索（结论取已跑点里的最大可行并发）。"
+
+  - name: tolerance
+    type: integer
+    required: false
+    default: 1
+    description: "二分收敛容差（并发数）。默认 1；区间宽度 <= max(tolerance, lo//8) 时停止二分。"
+
+  - name: max_bisect
+    type: integer
+    required: false
+    default: 5
+    description: "二分最大迭代次数。默认 5；0 表示只做阶梯不二分。"
+
+  - name: request_rate
+    type: number
+    required: false
+    default: 3
+    description: |
+      请求频率（RPS，写进 ais_bench 模型配置的 request_rate）。默认 3；0 = 不限速。
+      **要测「最大并发」就必须设 0**：请求频率 × 时延 < 目标并发时，在飞请求数被频率卡住，
+      实测并发（measured_concurrency）明显低于目标并发 —— 此时该点会被标 degraded、不计入
+      sla_max_concurrency，整轮可能直接没有可用结论。推荐 `request_rate: 0` 且
+      `data_num >= 4 × max`。详见 README「硬警告」。
+
+  - name: dataset_type
+    type: string
+    required: false
+    default: prefix_cache
+    description: "数据集形态。prefix_cache（默认）= 公共前缀 + 3 个随机 token + 后缀，用于前缀缓存命中场景；normal = 普通数据集（不带公共前缀）。"
+
+  - name: prefix_num
+    type: integer
+    required: false
+    default: 1
+    description: "前缀种类数（dp 域数量 > 1 时每域一份）。默认 1。"
+
+  - name: repeat_rate
+    type: string
+    required: false
+    default: "90%"
+    description: "前缀重复率，支持 90% 或 0.9。默认 90%；决定每条请求有多少比例的 token 可以命中 KV cache。"
+
+  - name: seed
+    type: integer
+    required: false
+    default: 1
+    description: "随机种子。默认 1；每个探测点实际用 seed+i（seed_per_point 默认开），各点前缀互不相同、命中率可比。"
+
+  - name: dp
+    type: integer
+    required: false
+    default: 1
+    description: "dp 域数量（预热阶段并发取它）。默认 1；PD 分离或数据并行服务按实际 P 节点数填。"
+
+  - name: dataset
+    type: string
+    required: false
+    description: |
+      现成数据集 jsonl（gsm8k 格式，每行 {"question":...}）的容器内绝对路径。给了就跳过生成，也不再需要
+      tokenizer。注意：工具在「每点换 seed」默认模式下会**忽略** dataset 去重新生成，所以本 Runner 在
+      给了 dataset 时自动关闭每点换 seed（各点复用同一份数据集，命中率会逐点饱和）。
+      离线冒烟用 /runner/fixtures/smoke_dataset.jsonl。
+    example: "/runner/fixtures/smoke_dataset.jsonl"
+
+  - name: dataset_path
+    type: string
+    required: false
+    description: "生成的数据集落盘目录（容器内绝对路径，需可写）。默认 <output>/sla_out/datasets；长上下文场景建议指到挂载的共享存储，便于跨 attempt 复用。"
+    example: "/data/sla_datasets"
+
+  - name: aisbench_cmd
+    type: string
+    required: false
+    default: ais_bench
+    description: "替换 ais_bench 命令（可带参数，按 shell 解析）。默认 ais_bench（0.2.0 起是真命令）；离线回归填 /runner/tool/tests/stub_aisbench.py 或 'python3 /runner/tool/tests/stub_aisbench.py'（前者要求可执行位，镜像已给）。"
+    example: "/runner/tool/tests/stub_aisbench.py"
+
+  - name: aisbench_extra_args
+    type: string
+    required: false
+    default: ""
+    description: "追加到 ais_bench 命令末尾的原始参数串（按 shell 解析）。默认空；用于透传本 Runner 未建模的 ais_bench 开关。"
+
+  - name: point_timeout
+    type: number
+    required: false
+    default: 0
+    description: "单个探测点（含预热阶段）的超时秒数，超时终止进程树并把该点判 FAIL。默认 0 = 不限；长上下文建议 1800。"
+
+  - name: prefix_warmup
+    type: string
+    required: false
+    default: per-point
+    description: "前缀预热时机。per-point（默认）每点预热；once 只首点预热；none 不预热（此时命中率偏低，结论只反映冷缓存）。"
+
+  - name: no_stream
+    type: boolean
+    required: false
+    default: false
+    description: "true 时不在 stdout 实时打印 ais_bench 输出（仍逐点落盘到 sla_out/points/**）。默认 false；日志量大时建议 true。"
+
+# 运行期读取的环境变量（§12.4）：只声明，不绑定；平台上由 Task 级 secrets 注入。
+# 凭据只走环境变量，不进参数文件（§12.4）。
+env:
+  ENDPOINT_API_KEY:
+    required: false
+    secret: true
+    description: "Bearer token，用于目标服务鉴权（/v1/models、/metrics、ais_bench 模型配置的 api_key）；不提供时按无鉴权压测"

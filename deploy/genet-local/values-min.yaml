@@ -1,14 +1,14 @@
-# TestPlane infra · Genet 本地联调 values（临时，不入库；.data/ 已 gitignore）
+# Argus infra · Genet 本地联调 values（临时，不入库；.data/ 已 gitignore）
 #
 # 目标：在 kind 单节点里把 Genet backend 跑起来，只保留"Open API + Helm 管理"两条能力，
 # 其余生产特性（OAuth / 用户 RBAC / Volcano / 前端 / webshell / 清理 CronJob / Ingress）全关。
 #
 # 安装：
-#   & .\.tools\helm.exe install genet .data\genet\helm\genet -n testplane-mock `
+#   & .\.tools\helm.exe install genet .data\genet\helm\genet -n argus-mock `
 #       -f .data\genet-values.local.yaml
 #
 # 说明：
-# - chart 在 Genet 仓（.data/genet），**不提交进 TestPlane 仓库**；本文件是我们的临时 overlay。
+# - chart 在 Genet 仓（.data/genet），**不提交进 Argus 仓库**；本文件是我们的临时 overlay。
 # - 镜像 genet-backend:dev 由 .data/genet/backend/Dockerfile 本地构建（已 patch 掉内网 base/apk/GOPROXY）。
 
 backend:
@@ -53,7 +53,7 @@ backend:
       # ⚠️ 这是 **控制面 namespace**（存 genet-openapi-keys 这个 Secret），
       # 不是被测服务落地的 namespace，也不能和 Helm release secret 混在一起
       # （上游会 FATAL: control namespace still contains legacy user resources）。
-      # 被测服务落地的 namespace 由「创建 API Key 时传的 namespace」决定 → 我们用 testplane-mock。
+      # 被测服务落地的 namespace 由「创建 API Key 时传的 namespace」决定 → 我们用 argus-mock。
       namespace: "genet-open-api"
       # ⚠️ 本地**不**用静态 apiKeys：上游有个迁移 bug（legacy 静态 key 迁移时
       # "resource name may not be empty"，见 README 的已知问题），会把进程 FATAL 掉。
@@ -79,7 +79,7 @@ backend:
 
     # 集群信息：本地 kind（in-cluster 直连，不需要写死外部 API server 与 CA）
     cluster:
-      name: "testplane"
+      name: "argus"
       server: "https://kubernetes.default.svc:443"
       caData: ""
 
