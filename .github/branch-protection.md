@@ -61,9 +61,9 @@ git push origin v0.1.0          # → 触发 .github/workflows/release.yml
 
 | 镜像 | 源 |
 |---|---|
-| `testplane-server` | `deploy/docker/server.Dockerfile`（前端已内嵌进二进制） |
-| `testplane-web` | `deploy/docker/web.Dockerfile`（纯静态 + 可选 `/api` 反代） |
-| `testplane-tester-<name>` | `testers/<name>/build/Dockerfile`（矩阵自动发现，加 Tester 不用改 workflow） |
+| `argus-server` | `deploy/docker/server.Dockerfile`（前端已内嵌进二进制） |
+| `argus-web` | `deploy/docker/web.Dockerfile`（纯静态 + 可选 `/api` 反代） |
+| `argus-runner-<name>` | `runners/<name>/build/Dockerfile`（矩阵自动发现，加 Runner 不用改 workflow） |
 
 每个镜像三个 tag：`:<version>`（`v0.1.0` → `0.1.0`）、`:sha-<12>`、`:latest`；digest 写进 job summary，直接填进 Helm：
 

@@ -13,16 +13,16 @@ import { expect, test } from '@playwright/test'
 test.describe.configure({ mode: 'serial' })
 
 test('④ 弹窗焦点陷阱：Tab 不进背景，Esc 关闭后焦点回到触发按钮', async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
-  await page.goto('/runs/r-20261105-0005')
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
+  await page.goto('/tasks/t-20261105-0005')
 
-  const trigger = page.getByTestId('cancel-run')
+  const trigger = page.getByTestId('cancel-task')
   await expect(trigger).toBeVisible({ timeout: 20_000 })
   await trigger.click()
 
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
-  await expect(dialog).toContainText('取消这个 Run？')
+  await expect(dialog).toContainText('取消这个 Task？')
   // P2：模态语义必须出现在 DOM 上（不能被透传属性盖掉）
   await expect(dialog).toHaveAttribute('aria-modal', 'true')
 
@@ -46,8 +46,8 @@ test('④ 弹窗焦点陷阱：Tab 不进背景，Esc 关闭后焦点回到触�
 })
 
 test('⑤ 结果 / 执行细节：role=tabpanel 且 id 与页签互相指向', async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
-  await page.goto('/runs/r-20261105-0003')
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
+  await page.goto('/tasks/t-20261105-0003')
 
   const resultTab = page.getByRole('tab', { name: '结果' })
   await expect(resultTab).toBeVisible({ timeout: 20_000 })
@@ -68,7 +68,7 @@ test('⑤ 结果 / 执行细节：role=tabpanel 且 id 与页签互相指向', a
   // 切到「执行细节」后仍是配对的一组面板
   await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByRole('tabpanel')).toHaveCount(1)
-  await expect(page.getByRole('tabpanel')).toContainText('Task 列表')
+  await expect(page.getByRole('tabpanel')).toContainText('runner 管道时间线')
   await expect(detailTab).toHaveAttribute(
     'aria-controls',
     (await page.getByRole('tabpanel').getAttribute('id'))!,
@@ -79,7 +79,7 @@ test('⑤ 结果 / 执行细节：role=tabpanel 且 id 与页签互相指向', a
 test('⑥ /runs?q= 只在本页内查找，改关键字会写回 URL', async ({ page }) => {
   // 列表已经是真分页（D-61）：q 不跨页、不改 total，只在当前页的条目里找
   await page.goto('/?page_size=50&q=qwen3-8b-nightly')
-  await expect(page.getByText('全部 Run')).toBeVisible()
+  await expect(page.getByText('全部 Task')).toBeVisible()
 
   const search = page.getByLabel('在当前页内查找（名称 / ID）')
   await expect(search).toHaveValue('qwen3-8b-nightly')
@@ -111,29 +111,30 @@ test('⑦ /testers?open= 直接打开抽屉，关闭后 URL 去掉该参数', as
 
 test('⑧ 900px 宽：没有右栏了，事件流在「事件」页签里照样可达', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 900 })
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
-  await page.goto('/runs/r-20261105-0003')
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
+  await page.goto('/tasks/t-20261105-0003')
 
   // 右栏只在概览页存在：Run 详情页压根没有 aside[aria-label="辅助信息"]
   await expect(page.locator('aside[aria-label="辅助信息"]')).toHaveCount(0)
 
   // 事件流搬进主内容的第三个页签（折叠 ≠ 隐藏）
   await page.getByRole('tab', { name: '事件' }).click()
-  const panel = page.getByTestId('run-events-panel')
+  const panel = page.getByTestId('task-events-panel')
   await expect(panel).toBeVisible({ timeout: 20_000 })
   await expect(panel).toContainText(/共 \d+ 条/)
   await expect(panel).toContainText('日志不在事件流里')
 })
 
-test('C3 Task 行内「查看」按钮可聚焦并用键盘打开 Attempt 面板', async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
-  await page.goto('/runs/r-20261105-0003')
+test('C3 runner 时间线节点可聚焦并用键盘打开 runner 日志面板', async ({ page }) => {
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
+  await page.goto('/tasks/t-20261105-0003')
   await page.getByRole('tab', { name: '执行细节' }).click()
 
-  const view = page.getByTestId('view-task').first()
-  await expect(view).toBeVisible({ timeout: 20_000 })
-  await view.focus()
-  expect(await view.evaluate((el) => el === document.activeElement)).toBe(true)
+  // v2：runner 管道时间线的节点就是键盘入口（button，aria-label=名称（状态））
+  const node = page.locator('[data-chain-node] button').first()
+  await expect(node).toBeVisible({ timeout: 20_000 })
+  await node.focus()
+  expect(await node.evaluate((el) => el === document.activeElement)).toBe(true)
   await page.keyboard.press('Enter')
-  await expect(page.getByText(/Task #\d+/).first()).toBeVisible()
+  await expect(page.getByRole('log').first()).toBeVisible()
 })

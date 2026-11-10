@@ -7,7 +7,7 @@ import { join } from 'node:path'
  *
  * | 导航项 | viewer | operator | admin |
  * |---|---|---|---|
- * | 概览（含全量 Run 表）/ 提交运行（按钮置灰） | ✅ | ✅ | ✅ |
+ * | 概览（含全量 Task 表）/ 提交运行（按钮置灰） | ✅ | ✅ | ✅ |
  * | Tester 目录 | ✅ | ✅ | ✅ |
  * | 集群与队列（只读水位与原因） | ✅（设计：viewer 可读） | ✅ | ✅ |
  * | 管理台（Profile/Cluster/Secret/审计） | — | — | ✅ |
@@ -23,10 +23,10 @@ async function navLabels(page: import('@playwright/test').Page): Promise<string[
   return nav.locator('a').allInnerTexts()
 }
 
-test('viewer：能在概览看到全部 Run 与集群队列，看不到管理台', async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'viewer'))
+test('viewer：能在概览看到全部 Task 与集群队列，看不到管理台', async ({ page }) => {
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'viewer'))
   await page.goto('/')
-  await expect(page.getByText('全部 Run')).toBeVisible()
+  await expect(page.getByText('全部 Task')).toBeVisible()
 
   const labels = (await navLabels(page)).map((text) => text.trim())
   // D-62：运行列表并入概览，导航里不再有独立入口
@@ -47,9 +47,9 @@ test('viewer：能在概览看到全部 Run 与集群队列，看不到管理台
 })
 
 test('operator：能看集群队列，仍看不到管理台', async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/')
-  await expect(page.getByText('全部 Run')).toBeVisible()
+  await expect(page.getByText('全部 Task')).toBeVisible()
 
   const labels = (await navLabels(page)).map((text) => text.trim())
   expect(labels).toContain('集群与队列')
@@ -62,10 +62,10 @@ test('operator：能看集群队列，仍看不到管理台', async ({ page }) =
 })
 
 test('admin：能看到管理台', async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
   mkdirSync(OUT_DIR, { recursive: true })
   await page.goto('/')
-  await expect(page.getByText('全部 Run')).toBeVisible()
+  await expect(page.getByText('全部 Task')).toBeVisible()
 
   const labels = (await navLabels(page)).map((text) => text.trim())
   expect(labels).toContain('集群与队列')

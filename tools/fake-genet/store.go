@@ -288,7 +288,7 @@ func (s *SimStore) Status(ctx context.Context, release string) (ReleaseInfo, err
 	}
 	info := ReleaseInfo{Name: r.name, Status: status, Description: r.desc, Chart: r.chart, ChartVersion: r.version, Revision: r.revision}
 	if status == "deployed" {
-		info.Pods = []Pod{{Name: r.name + "-mock-llm-0", Phase: "Running", NodeName: "testplane-control-plane", Ready: true}}
+		info.Pods = []Pod{{Name: r.name + "-mock-llm-0", Phase: "Running", NodeName: "argus-control-plane", Ready: true}}
 	} else {
 		info.Pods = []Pod{{Name: r.name + "-mock-llm-0", Phase: "Pending"}}
 	}

@@ -30,7 +30,7 @@ type eventsSummary struct {
 type resultJSON struct {
 	OK          bool           `json:"ok"`
 	Command     string         `json:"command"`
-	RunID       string         `json:"run_id,omitempty"`
+	TaskID      string         `json:"task_id,omitempty"`
 	Expected    []string       `json:"expected,omitempty"`
 	Actual      string         `json:"actual,omitempty"`
 	StatusTrace []string       `json:"status_trace,omitempty"`
@@ -49,17 +49,20 @@ type Options struct {
 	Token     string
 	NoAuth    bool
 
-	ManifestFile   string
-	Mode           string
-	MockURL        string
-	Model          string
-	Profile        string
-	RunName        string
-	DeployProvider string
+	ManifestFile    string
+	Mode            string
+	MockURL         string
+	Model           string
+	Profile         string
+	TaskName        string
+	DeployProvider  string
+	RunnerName      string
+	RunnerVersion   string
+	PrecheckVersion string
 
 	Expect              []string
 	ExpectErrorCode     string
-	ExpectTaskErrorCode string
+	ExpectRunnerErrCode string
 	ExpectRetryable     *bool
 
 	Timeout    time.Duration
@@ -67,7 +70,7 @@ type Options struct {
 	SSETimeout time.Duration
 	ReportWait time.Duration
 
-	RunID          string
+	TaskID         string
 	DryRunFirst    bool
 	Strict         bool
 	AllowEmptyLogs bool
@@ -86,7 +89,7 @@ type App struct {
 	checks   []check
 	warnings []string
 
-	run          *Run
+	task         *Task
 	statusTrace  []string
 	events       []Event
 	eventsSource string
@@ -149,16 +152,16 @@ func (a *App) finish(command string, start time.Time, runErr error) int {
 	}
 	res := resultJSON{
 		Command:     command,
-		RunID:       a.opts.RunID,
+		TaskID:      a.opts.TaskID,
 		Expected:    a.opts.Expect,
 		StatusTrace: a.statusTrace,
 		DurationMS:  time.Since(start).Milliseconds(),
 		Checks:      checks,
 		Warnings:    a.warnings,
 	}
-	if a.run != nil {
-		res.RunID = a.run.ID
-		res.Actual = a.run.Status
+	if a.task != nil {
+		res.TaskID = a.task.ID
+		res.Actual = a.task.Status
 	}
 	if len(a.events) > 0 {
 		res.Events = summarizeEvents(a.events, a.eventsSource)
@@ -196,8 +199,8 @@ func (a *App) printSummary(res *resultJSON) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n==== e2e %s ====\n", res.Command)
-	if res.RunID != "" {
-		fmt.Fprintf(&b, "run_id : %s\n", res.RunID)
+	if res.TaskID != "" {
+		fmt.Fprintf(&b, "task_id: %s\n", res.TaskID)
 	}
 	if len(res.Expected) > 0 {
 		fmt.Fprintf(&b, "期望   : %s\n", strings.Join(res.Expected, ", "))

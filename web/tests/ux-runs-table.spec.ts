@@ -13,22 +13,22 @@ import { expect, test } from '@playwright/test'
 
 test.describe.configure({ mode: 'serial' })
 
-/** 记录 listRuns / listRunFacets 的真实入参（mock 模式下网络面板看不到，这里包一层） */
+/** 记录 listTasks / listTaskFacets 的真实入参（mock 模式下网络面板看不到，这里包一层） */
 async function spyApi(page: import('@playwright/test').Page) {
   await page.evaluate(async () => {
     const mod = (await import('/src/api/mock.ts')) as {
-      mockApi: { listRuns: unknown; listRunFacets: unknown }
+      mockApi: { listTasks: unknown; listTaskFacets: unknown }
     }
     const w = window as unknown as { __runs: unknown[]; __facets: unknown[] }
     w.__runs = []
     w.__facets = []
-    const originalRuns = mod.mockApi.listRuns as (q?: unknown) => Promise<unknown>
-    const originalFacets = mod.mockApi.listRunFacets as (q?: unknown) => Promise<unknown>
-    mod.mockApi.listRuns = (query?: unknown) => {
+    const originalRuns = mod.mockApi.listTasks as (q?: unknown) => Promise<unknown>
+    const originalFacets = mod.mockApi.listTaskFacets as (q?: unknown) => Promise<unknown>
+    mod.mockApi.listTasks = (query?: unknown) => {
       w.__runs.push(query ?? {})
       return originalRuns.call(mod.mockApi, query)
     }
-    mod.mockApi.listRunFacets = (query?: unknown) => {
+    mod.mockApi.listTaskFacets = (query?: unknown) => {
       w.__facets.push(query ?? {})
       return originalFacets.call(mod.mockApi, query)
     }
@@ -40,13 +40,13 @@ function runsCalls(page: import('@playwright/test').Page) {
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
 })
 
 test('① 分页栏：共 N 条 / 每页条数 / 页码 / 下一页都进 URL', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.goto('/')
-  await expect(page.getByText('全部 Run')).toBeVisible()
+  await expect(page.getByText('全部 Task')).toBeVisible()
   await spyApi(page)
 
   // 总数来自服务端 total，不是"已加载多少"
@@ -160,8 +160,8 @@ test('③ 改筛选回到第 1 页；page 超界显示空态并可回第 1 页',
 test('④ 空结果态：筛选到没有数据时给出空态与「清除过滤」', async ({ page }) => {
   // 提交人里没有的谁，直接给 URL
   await page.goto('/?submitter=不存在的提交人')
-  await expect(page.getByTestId('runs-empty')).toBeVisible({ timeout: 15_000 })
-  await expect(page.getByTestId('runs-empty')).toContainText('没有 Run')
+  await expect(page.getByTestId('tasks-empty')).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByTestId('tasks-empty')).toContainText('当前筛选条件下没有 Task')
   await expect(page.getByTestId('pagination-total')).toHaveText('共 0 条')
 
   await page.getByTestId('empty-clear-filters').click()
@@ -211,13 +211,13 @@ test('⑥ 列筛选候选值随其它列变化（facets 每次筛选都重拉）
 })
 
 test('⑦ D-62：/runs 兼容重定向到概览，query 原样保留且筛选生效', async ({ page }) => {
-  await page.goto('/runs?status=completed_with_errors&page=1&page_size=10&submitter=陈一鸣')
+  await page.goto('/?status=completed_with_errors&page=1&page_size=10&submitter=陈一鸣')
   // URL 落到概览，参数一个不少
   await expect(page).toHaveURL(/\/\?.*status=completed_with_errors/)
   await expect(page).toHaveURL(/page_size=10/)
   await expect(page).toHaveURL(/submitter=/)
   // 列表页已经不存在：表格长在概览上，筛选确实生效
-  await expect(page.getByText('全部 Run')).toBeVisible()
+  await expect(page.getByText('全部 Task')).toBeVisible()
   await expect(page.getByTestId('pagination-total')).toBeVisible({ timeout: 15_000 })
   const total = await page.getByTestId('pagination-total').innerText()
   expect(total).toMatch(/^共 \d+ 条$/)
@@ -225,9 +225,9 @@ test('⑦ D-62：/runs 兼容重定向到概览，query 原样保留且筛选生
   await expect(page.getByText('状态：completed_with_errors')).toBeVisible()
 })
 
-test('⑦ D-62：导航里没有「运行列表」，概览页同时有 KPI 与全量 Run 表', async ({ page }) => {
+test('⑦ D-62：导航里没有「运行列表」，概览页同时有 KPI 与全量 Task 表', async ({ page }) => {
   await page.goto('/')
-  await expect(page.getByText('进行中 Run')).toBeVisible({ timeout: 15_000 })
+  await expect(page.getByText('进行中 Task')).toBeVisible({ timeout: 15_000 })
 
   const labels = (await page.locator('nav[aria-label="主导航"] a').allInnerTexts()).map((text) => text.trim())
   expect(labels).toContain('概览')

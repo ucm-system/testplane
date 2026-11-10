@@ -93,10 +93,10 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: tester-allow-egress
+  name: runner-allow-egress
   namespace: argus
   labels:
-    app.kubernetes.io/name: tester
+    app.kubernetes.io/name: runner
     app.kubernetes.io/part-of: argus
 spec:
   podSelector:

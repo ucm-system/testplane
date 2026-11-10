@@ -41,7 +41,7 @@ func TestLoadRealDesign(t *testing.T) {
 		"GET /metrics",
 		"GET /api/v1/auth/login",
 		"GET /api/v1/me",
-		"POST /api/v1/runs",
+		"POST /api/v1/tasks",
 	} {
 		if !design.Set[want] {
 			t.Errorf("设计端点解析缺 %s；现有 %d 个", want, len(design.Endpoints))
@@ -233,7 +233,7 @@ func TestDesignChecksCatchOpenapiOnly(t *testing.T) {
 	}
 }
 
-// /report、/report.md 的 404 只允许在非终态 Run 上；终态必须 200。
+// /report、/report.md 的 404 只允许在非终态 Task 上；终态必须 200。
 func TestArtifactResponseTerminalSemantics(t *testing.T) {
 	spec := loadRealSpec(t)
 	live := NewLive(spec, Options{BaseURL: "http://127.0.0.1:1"})
@@ -241,34 +241,34 @@ func TestArtifactResponseTerminalSemantics(t *testing.T) {
 	errHeader.Set("Content-Type", "application/json; charset=utf-8")
 	errBody := []byte(`{"code":"NOT_FOUND","message":"报告尚未生成","retryable":false,"trace_id":"t-1"}`)
 
-	if ok, detail := live.artifactResponseCheck("getRunReport", false, 404, errHeader, errBody, "Report", ""); !ok {
-		t.Fatalf("非终态 Run 的 404 应允许：%s", detail)
+	if ok, detail := live.artifactResponseCheck("getTaskReport", false, 404, errHeader, errBody, "Report", ""); !ok {
+		t.Fatalf("非终态 Task 的 404 应允许：%s", detail)
 	}
-	if ok, detail := live.artifactResponseCheck("getRunReport", true, 404, errHeader, errBody, "Report", ""); ok {
-		t.Fatal("终态 Run 的 /report 404 必须判红（这正是评审指出的“接受 404 一刀切”）")
+	if ok, detail := live.artifactResponseCheck("getTaskReport", true, 404, errHeader, errBody, "Report", ""); ok {
+		t.Fatal("终态 Task 的 /report 404 必须判红（这正是评审指出的“接受 404 一刀切”）")
 	} else if !strings.Contains(detail, "必须返回 200") {
 		t.Fatalf("终态 404 的失败原因不明确：%s", detail)
 	}
 	mdHeader := http.Header{}
 	mdHeader.Set("Content-Type", "text/markdown; charset=utf-8")
-	if ok, detail := live.artifactResponseCheck("getRunReportMarkdown", true, 200, mdHeader, []byte("# report\n"), "", "text/markdown"); !ok {
-		t.Fatalf("终态 Run 的 report.md 200 应通过：%s", detail)
+	if ok, detail := live.artifactResponseCheck("getTaskReportMarkdown", true, 200, mdHeader, []byte("# report\n"), "", "text/markdown"); !ok {
+		t.Fatalf("终态 Task 的 report.md 200 应通过：%s", detail)
 	}
-	if ok, _ := live.artifactResponseCheck("getRunReport", true, 500, errHeader, errBody, "Report", ""); ok {
+	if ok, _ := live.artifactResponseCheck("getTaskReport", true, 500, errHeader, errBody, "Report", ""); ok {
 		t.Fatal("500 必须判红")
 	}
 }
 
-// 终态 Run 的 /report 404 必须判红（模拟“注释掉 /report 路由”）。
-func TestProbeRunReportTerminal404Fails(t *testing.T) {
+// 终态 Task 的 /report 404 必须判红（模拟“注释掉 /report 路由”）。
+func TestProbeTaskReportTerminal404Fails(t *testing.T) {
 	spec := loadRealSpec(t)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		switch r.URL.Path {
-		case "/api/v1/runs/r-test":
+		case "/api/v1/tasks/t-test":
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"status":"succeeded"}`))
-		case "/api/v1/runs/r-test/report":
+		case "/api/v1/tasks/t-test/report":
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"code":"NOT_FOUND","message":"报告未生成","retryable":false,"trace_id":"t"}`))
 		default:
@@ -278,11 +278,11 @@ func TestProbeRunReportTerminal404Fails(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 	live := NewLive(spec, Options{BaseURL: ts.URL, User: "dev"})
-	live.probeRunReport(context.Background(), "r-test", "/report", "Report", "getRunReport")
+	live.probeTaskReport(context.Background(), "t-test", "/report", "Report", "getTaskReport")
 	for _, c := range live.checks {
-		if c.Name == "live.getRunReport" {
+		if c.Name == "live.getTaskReport" {
 			if c.OK {
-				t.Fatal("终态 Run 的 /report 404 必须判红")
+				t.Fatal("终态 Task 的 /report 404 必须判红")
 			}
 			if !strings.Contains(c.Detail, "必须返回 200") {
 				t.Fatalf("失败原因不明确：%s", c.Detail)
@@ -290,17 +290,18 @@ func TestProbeRunReportTerminal404Fails(t *testing.T) {
 			return
 		}
 	}
-	t.Fatal("没有产生 live.getRunReport 检查")
+	t.Fatal("没有产生 live.getTaskReport 检查")
 }
 
-func TestIsTerminalRunStatus(t *testing.T) {
-	for _, s := range []string{"succeeded", "completed_with_errors", "service_unavailable", "failed", "canceled"} {
-		if !isTerminalRunStatus(s) {
+func TestIsTerminalTaskStatus(t *testing.T) {
+	for _, s := range []string{"succeeded", "failed", "service_unavailable", "canceled"} {
+		if !isTerminalTaskStatus(s) {
 			t.Errorf("%s 应是终态", s)
 		}
 	}
-	for _, s := range []string{"submitted", "queued", "deploying", "testing", "cleanup", "cancelling"} {
-		if isTerminalRunStatus(s) {
+	// v2 没有 completed_with_errors（并入 failed，D-73），也没有平台阶段 deploying/testing/cleanup
+	for _, s := range []string{"submitted", "queued", "running", "cancelling", "completed_with_errors", "deploying", "testing", "cleanup"} {
+		if isTerminalTaskStatus(s) {
 			t.Errorf("%s 不应是终态", s)
 		}
 	}

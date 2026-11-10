@@ -33,7 +33,7 @@ data:
   # ClusterName 是集群注册名。代码侧有默认值（config.go），这里显式写出来让部署值可见可改。
   AG_STORAGE_ROOT: "/storage-root"
   AG_STORAGE_PVC: "argus-storage"
-  AG_TESTERS_DIR: "/app/testers"
+  AG_RUNNERS_DIR: "/app/runners"
 
   # ---- 执行层 ----
   # Job/裸 Pod 回收开关（默认 true）；config.go 统一读，编排层只读配置。

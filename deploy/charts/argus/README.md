@@ -162,7 +162,7 @@ git tag -a v0.1.0 -m "Argus v0.1.0" && git push origin v0.1.0
 |---|---|
 | `ghcr.io/ucm-system/argus-server` | 控制面（前端已内嵌，单端口） |
 | `ghcr.io/ucm-system/argus-web` | 可选：纯静态前端镜像（需要单独托管前端时用） |
-| `ghcr.io/ucm-system/argus-tester-<name>` | 各 Runner（`testers/<name>/build/Dockerfile` 自动发现） |
+| `ghcr.io/ucm-system/argus-runner-<name>` | 各 Runner（`runners/<name>/build/Dockerfile` 自动发现） |
 
 每个镜像都有 `:<version>` / `:sha-<12>` / `:latest` 三个 tag，**双架构** `linux/amd64` + `linux/arm64`；
 digest 在 Actions 的 job summary 里，直接填 `image.digest`。

@@ -1,12 +1,12 @@
 # Argus · 控制面镜像（argus-server）
 #
-# 构建上下文 = **仓库根**（要用 server/ 与 testers/ 两个目录，W-8）：
+# 构建上下文 = **仓库根**（要用 server/ 与 runners/ 两个目录，W-8）：
 #   docker build -f deploy/docker/server.Dockerfile -t argus-server:dev .
 #   & .\.tools\kind.exe load docker-image argus-server:dev --name argus
 #
 # 依据
 #   design/impl/web-and-delivery.md §7（构建与集成）、§8（镜像与 CI）
-#   design/impl/execution.md §10（Runner Registry：镜像内 /app/testers）
+#   design/impl/execution.md §10（Runner Registry：镜像内 /app/runners）
 #
 # 与 W-8 的差异（有意的，写在这里免得被当成漏项）
 #   1) W-8 的镜像还有 node:22-alpine 前端阶段 + distroless 运行阶段；
@@ -26,7 +26,7 @@
 #   - CGO_ENABLED=0：静态二进制，alpine 上不装 libc 兼容层也能跑。
 #   - 迁移**不进 ENTRYPOINT**（多副本会并发迁移，W-11）：
 #     由 `argusd migrate up` 单独执行（Helm pre-upgrade hook）。
-#   - testers/ 逐个 COPY 到 /app/testers，注册表启动时扫描一次（K-3、E-10）。
+#   - runners/ 逐个 COPY 到 /app/runners，注册表启动时扫描一次（K-3、E-10）。
 
 # syntax=docker/dockerfile:1.7
 
@@ -141,21 +141,21 @@ FROM ${RUNTIME_BASE}
 RUN apk add --no-cache ca-certificates tzdata \
  && addgroup -g 10001 argus \
  && adduser  -D -u 10001 -G argus -s /sbin/nologin argus \
- && mkdir -p /app/testers \
+ && mkdir -p /app/runners \
  && chown -R 10001:10001 /app
 
 COPY --from=build /out/argusd /argusd
 
 # Runner Registry 的扫描源（E-10、K-3）。只用 COPY，不做运行时同步。
-COPY testers/ /app/testers/
+COPY runners/ /app/runners/
 # chown 必须放在 COPY 之后：COPY 以 root 落盘，前面那次 chown 覆盖不到它。
 # 注册表只读这些文件，但属主统一到 10001，避免以后有人加写操作踩权限。
-RUN chown -R 10001:10001 /app/testers
+RUN chown -R 10001:10001 /app/runners
 
 ENV TZ=Asia/Shanghai \
     AG_LISTEN=:8080 \
     AG_STORAGE_ROOT=/storage-root \
-    AG_TESTERS_DIR=/app/testers
+    AG_TESTERS_DIR=/app/runners
 
 USER 10001:10001
 

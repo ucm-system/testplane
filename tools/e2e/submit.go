@@ -7,16 +7,15 @@ import (
 	"strings"
 )
 
-// submitOutcome 是 POST /runs 的结果。
+// submitOutcome 是 POST /tasks 的结果。
 type submitOutcome struct {
-	RunID  string
+	TaskID string
 	Status int
 	Body   []byte
 }
 
-// submit 提交 Run：POST /runs，断言 202 + run_id（07 §4.2）。
-// 可选先 dry-run（--dry-run-first，默认关）：设计上 dry_run 只校验不落库，
-// 但 MVP 是否实现该查询参数尚未确认，默认关掉避免"多建一个 Run"。
+// submit 提交 Task：POST /tasks，断言 202 + task.id（07 §4.2）。
+// 可选先 dry-run（--dry-run-first，默认关）：?dry_run=true 只校验不落库，返回 200 DryRunResult。
 func (a *App) submit(ctx context.Context) (*submitOutcome, error) {
 	raw, contentType, err := a.loadManifest()
 	if err != nil {
@@ -32,35 +31,35 @@ func (a *App) submit(ctx context.Context) (*submitOutcome, error) {
 		}
 	}
 
-	status, header, body, err := a.client.Post(ctx, "/runs", raw, contentType)
+	status, header, body, err := a.client.Post(ctx, "/tasks", raw, contentType)
 	if err != nil {
 		return nil, err
 	}
 	_ = header
 	if err := expectStatus(status, 202, body); err != nil {
-		return nil, fmt.Errorf("提交 Run 失败：%w", err)
+		return nil, fmt.Errorf("提交 Task 失败：%w", err)
 	}
 
-	runID := extractRunID(body)
-	if runID == "" {
-		return nil, fmt.Errorf("202 响应里没有 run id（期望 {\"run\":{\"id\":\"r-...\"}}）：%s", truncate(string(body), 800))
+	taskID := extractTaskID(body)
+	if taskID == "" {
+		return nil, fmt.Errorf("202 响应里没有 task id（期望 {\"task\":{\"id\":\"t-...\"}}）：%s", truncate(string(body), 800))
 	}
 	a.addCheck("submit.http_status", true, "HTTP 202 Accepted")
-	a.addCheck("submit.run_id", true, runID)
-	if !responseHasTasks(body) {
-		a.warn("202 响应里没有 tasks[]（07 §4.2 期望同时返回 Task 摘要）")
+	a.addCheck("submit.task_id", true, taskID)
+	if !responseHasRunners(body) {
+		a.warn("202 响应里没有 runners[]（07 §4.2 期望返回含注入行的最终执行序）")
 	}
-	return &submitOutcome{RunID: runID, Status: status, Body: body}, nil
+	return &submitOutcome{TaskID: taskID, Status: status, Body: body}, nil
 }
 
 func (a *App) dryRun(ctx context.Context, raw []byte, contentType string) error {
-	status, header, body, err := a.client.Post(ctx, "/runs?dry_run=true", raw, contentType)
+	status, header, body, err := a.client.Post(ctx, "/tasks?dry_run=true", raw, contentType)
 	if err != nil {
 		return err
 	}
 	_ = header
 	if status == 404 {
-		return &UsageError{Msg: "开启了 --dry-run-first，但控制面没有 POST /runs?dry_run（404）；去掉该参数后重试"}
+		return &UsageError{Msg: "开启了 --dry-run-first，但控制面没有 POST /tasks?dry_run（404）；去掉该参数后重试"}
 	}
 	if err := expectStatus(status, 200, body); err != nil {
 		return fmt.Errorf("dry-run 失败：%w", err)
@@ -72,6 +71,7 @@ func (a *App) dryRun(ctx context.Context, raw []byte, contentType string) error 
 			Path    string `json:"path"`
 			Code    string `json:"code"`
 			Message string `json:"message"`
+			Line    int    `json:"line"`
 		} `json:"issues"`
 	}
 	if err := json.Unmarshal(body, &res); err != nil {
@@ -83,7 +83,11 @@ func (a *App) dryRun(ctx context.Context, raw []byte, contentType string) error 
 	if !*res.Valid {
 		lines := make([]string, 0, len(res.Issues))
 		for _, issue := range res.Issues {
-			lines = append(lines, fmt.Sprintf("%s: %s（%s）", issue.Path, issue.Message, issue.Code))
+			if issue.Line > 0 {
+				lines = append(lines, fmt.Sprintf("%s:%d %s（%s）", issue.Path, issue.Line, issue.Message, issue.Code))
+			} else {
+				lines = append(lines, fmt.Sprintf("%s: %s（%s）", issue.Path, issue.Message, issue.Code))
+			}
 		}
 		return fmt.Errorf("Manifest 校验未通过（dry-run valid=false）：\n  %s", strings.Join(lines, "\n  "))
 	}
@@ -91,34 +95,34 @@ func (a *App) dryRun(ctx context.Context, raw []byte, contentType string) error 
 	return nil
 }
 
-// extractRunID 兼容 07 §4.2 的 {run:{id}}，以及常见的扁平形态。
-func extractRunID(raw []byte) string {
+// extractTaskID 兼容 07 §4.2 的 {task:{id}}，以及常见的扁平形态。
+func extractTaskID(raw []byte) string {
 	var resp struct {
-		Run struct {
+		Task struct {
 			ID string `json:"id"`
-		} `json:"run"`
-		RunID string `json:"run_id"`
-		ID    string `json:"id"`
+		} `json:"task"`
+		TaskID string `json:"task_id"`
+		ID     string `json:"id"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return ""
 	}
 	switch {
-	case resp.Run.ID != "":
-		return resp.Run.ID
-	case resp.RunID != "":
-		return resp.RunID
+	case resp.Task.ID != "":
+		return resp.Task.ID
+	case resp.TaskID != "":
+		return resp.TaskID
 	default:
 		return resp.ID
 	}
 }
 
-func responseHasTasks(raw []byte) bool {
+func responseHasRunners(raw []byte) bool {
 	var resp struct {
-		Tasks []json.RawMessage `json:"tasks"`
+		Runners []json.RawMessage `json:"runners"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return false
 	}
-	return len(resp.Tasks) > 0
+	return len(resp.Runners) > 0
 }

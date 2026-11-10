@@ -35,7 +35,7 @@ func newTestServer(t *testing.T, readyAfter time.Duration) (*httptest.Server, *t
 	t.Helper()
 	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
 	store := NewSimStore(clock.Now, readyAfter)
-	srv := NewServer(store, "testplane-mock", "tp-local-2026", "mock-llm", clock.Now)
+	srv := NewServer(store, "argus-mock", "tp-local-2026", "mock-llm", clock.Now)
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	return hs, clock
@@ -112,7 +112,7 @@ func TestInstallReadyUninstall(t *testing.T) {
 	if ep["status"] != EndpointReady {
 		t.Fatalf("endpoint = %+v, want ready", ep)
 	}
-	wantURL := "http://" + name + "-mock-llm.testplane-mock.svc:18080/v1"
+	wantURL := "http://" + name + "-mock-llm.argus-mock.svc:18080/v1"
 	if ep["url"] != wantURL {
 		t.Errorf("url = %v, want %s", ep["url"], wantURL)
 	}
@@ -224,9 +224,9 @@ func TestLiveWithHelm(t *testing.T) {
 	}
 	store := &HelmStore{
 		Helm: helmBin, Kubectl: "kubectl", Kubeconfig: os.Getenv("KUBECONFIG"),
-		Namespace: "testplane-mock", ChartDir: chartDir,
+		Namespace: "argus-mock", ChartDir: chartDir,
 	}
-	srv := NewServer(store, "testplane-mock", "tp-local-2026", "mock-llm", time.Now)
+	srv := NewServer(store, "argus-mock", "tp-local-2026", "mock-llm", time.Now)
 	hs := httptest.NewServer(srv.Handler())
 	defer hs.Close()
 
@@ -265,7 +265,7 @@ func TestLiveWithHelm(t *testing.T) {
 func TestSimBlockedEndpoint(t *testing.T) {
 	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
 	store := NewSimStore(clock.Now, time.Millisecond)
-	srv := NewServer(store, "testplane-mock", "k", "mock-llm", clock.Now)
+	srv := NewServer(store, "argus-mock", "k", "mock-llm", clock.Now)
 	srv.SimBlocked = true
 	hs := httptest.NewServer(srv.Handler())
 	defer hs.Close()
@@ -315,7 +315,7 @@ func TestSimBlockedEndpoint(t *testing.T) {
 func TestSimError500(t *testing.T) {
 	clock := &testClock{now: time.Unix(1_700_000_000, 0)}
 	store := NewSimStore(clock.Now, time.Millisecond)
-	srv := NewServer(store, "testplane-mock", "k", "mock-llm", clock.Now)
+	srv := NewServer(store, "argus-mock", "k", "mock-llm", clock.Now)
 	srv.SimError = http.StatusInternalServerError
 	hs := httptest.NewServer(srv.Handler())
 	defer hs.Close()

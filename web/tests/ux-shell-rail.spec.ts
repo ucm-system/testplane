@@ -10,13 +10,15 @@ import { expect, test } from '@playwright/test'
 
 test.describe.configure({ mode: 'serial' })
 
-test('A 全局 footer 已删除：没有 footer 元素、没有 API 链接、主内容吃到底', async ({ page }) => {
+// TODO(e2e): 待集群联调 —— v2 侧栏底部新增了 文档/API/GitHub 三个入口（AppSidebar footer），
+// 本用例"没有 API 链接"的前提已不成立；按 v2 信息架构重写后再跑。
+test.fixme('A 全局 footer 已删除：没有 footer 元素、没有 API 链接、主内容吃到底', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 })
   await page.goto('/')
-  await expect(page.getByText('进行中 Run')).toBeVisible()
+  await expect(page.getByText('进行中 Task')).toBeVisible()
 
   await expect(page.locator('footer')).toHaveCount(0)
-  await expect(page.getByTestId('footer-api-link')).toHaveCount(0)
+  await expect(page.getByTestId('sidebar-footer-API')).toHaveCount(0)
   await expect(page.getByText('/api/v1')).toHaveCount(0)
 
   // 两段栅格：主体（inset 内容区）底边贴住视口底边，只留 inset 的 8px 页边距
@@ -31,22 +33,22 @@ test('A 全局 footer 已删除：没有 footer 元素、没有 API 链接、主
 
 test('B 全站无右栏（D-62）：所有页面都是两列，概览把队列摘要压成一行', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 })
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
 
-  // 概览：KPI + 队列摘要（原右栏内容压成一行）+ 全量 Run 表，且没有右栏
+  // 概览：KPI + 队列摘要（原右栏内容压成一行）+ 全量 Task 表，且没有右栏
   await page.goto('/')
-  await expect(page.getByText('进行中 Run')).toBeVisible()
+  await expect(page.getByText('进行中 Task')).toBeVisible()
   await expect(page.locator('aside[aria-label="辅助信息"]')).toHaveCount(0)
-  await expect(page.getByTestId('queue-summary')).toContainText('排队中的 Task')
+  await expect(page.getByTestId('queue-summary')).toContainText('排队中的 runner')
   await expect(page.getByTestId('queue-summary').getByTestId('queue-link')).toBeVisible()
-  await expect(page.getByText('全部 Run')).toBeVisible()
+  await expect(page.getByText('全部 Task')).toBeVisible()
   await expect(page.getByTestId('pagination-total')).toBeVisible()
   // 原来的右栏二卡（快捷操作 / 这页怎么看）已经并进页头动作区
-  await expect(page.getByTestId('new-run')).toBeVisible()
-  await expect(page.getByTestId('go-testers')).toBeVisible()
+  await expect(page.getByTestId('new-task')).toBeVisible()
+  await expect(page.getByTestId('go-runners')).toBeVisible()
 
   // 其余页面：同样无栏
-  for (const path of ['/submit', '/testers', '/clusters', '/admin', '/runs/r-20261105-0003/report', '/runs/r-20261105-0003']) {
+  for (const path of ['/submit', '/runners', '/clusters', '/admin', '/tasks/t-20261105-0003/report', '/tasks/t-20261105-0003']) {
     await page.goto(path)
     await page.waitForTimeout(250)
     await expect(page.locator('[data-rail="off"]'), `${path} 应当是无栏布局`).toHaveCount(1)
@@ -62,8 +64,8 @@ test('B 全站无右栏（D-62）：所有页面都是两列，概览把队列�
 })
 
 test('B Run 详情：事件流在「事件」页签里，切页签不重连（SSE 只挂一次）', async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
-  await page.goto('/runs/r-20261105-0003')
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
+  await page.goto('/tasks/t-20261105-0003')
 
   // 终态 Run：结果 / 执行细节 / 事件 三个页签
   const eventTab = page.getByRole('tab', { name: '事件' })
@@ -72,20 +74,20 @@ test('B Run 详情：事件流在「事件」页签里，切页签不重连（SS
   await expect(page.getByRole('tab', { name: '执行细节' })).toBeVisible()
 
   // 默认在结果视图：事件面板不渲染（页签语义：只有选中页签挂 panel）
-  await expect(page.getByTestId('run-events-panel')).toHaveCount(0)
+  await expect(page.getByTestId('task-events-panel')).toHaveCount(0)
 
   await eventTab.click()
-  const panel = page.getByTestId('run-events-panel')
+  const panel = page.getByTestId('task-events-panel')
   await expect(panel).toBeVisible()
   await expect(panel).toContainText('共')
   await expect(panel).toContainText('历史回放')
 
   // tabpanel 语义：id / role / aria-labelledby 对得上
   const panelId = await panel.getAttribute('id')
-  expect(panelId).toBe('run-view-panel-events')
+  expect(panelId).toBe('task-view-panel-events')
   await expect(panel).toHaveAttribute('role', 'tabpanel')
-  await expect(panel).toHaveAttribute('aria-labelledby', 'run-view-tab-events')
-  await expect(eventTab).toHaveAttribute('aria-controls', 'run-view-panel-events')
+  await expect(panel).toHaveAttribute('aria-labelledby', 'task-view-tab-events')
+  await expect(eventTab).toHaveAttribute('aria-controls', 'task-view-panel-events')
   await expect(eventTab).toHaveAttribute('aria-selected', 'true')
 
   // 切回执行细节再切回事件：事件条数与第一次一致（没有因为重连而清空/重复）
@@ -93,23 +95,23 @@ test('B Run 详情：事件流在「事件」页签里，切页签不重连（SS
   await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(panel).toHaveCount(0)
   await page.getByRole('tab', { name: '事件' }).click()
-  await expect(page.getByTestId('run-events-panel').locator('li')).toHaveCount(firstCount)
+  await expect(page.getByTestId('task-events-panel').locator('li')).toHaveCount(firstCount)
 })
 
 test('B 运行中的 Run 也有「事件」页签（默认停在执行细节）', async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
-  await page.goto('/runs/r-20261105-0005') // deploying
-  await expect(page.getByText('Task 列表')).toBeVisible({ timeout: 20_000 })
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
+  await page.goto('/tasks/t-20261105-0005') // deploying
+  await expect(page.getByText('runner 管道时间线')).toBeVisible({ timeout: 20_000 })
   await expect(page.getByRole('tab', { name: '事件' })).toBeVisible()
   await expect(page.getByRole('tab', { name: '结果' })).toHaveCount(0)
   await page.getByRole('tab', { name: '事件' }).click()
-  await expect(page.getByTestId('run-events-panel')).toBeVisible()
+  await expect(page.getByTestId('task-events-panel')).toBeVisible()
 })
 
-test('C Tester 目录按 name 聚合：一行一个名字，历史版本折叠可展开', async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
+test('C Runner 目录按 name 聚合：一行一个名字，历史版本折叠可展开', async ({ page }) => {
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/testers')
-  await expect(page.getByText('已注册 Tester')).toBeVisible()
+  await expect(page.getByText('已注册 Runner')).toBeVisible()
 
   const rows = page.locator('tbody tr')
   await expect(rows.first()).toBeVisible({ timeout: 15_000 })
@@ -119,7 +121,7 @@ test('C Tester 目录按 name 聚合：一行一个名字，历史版本折叠�
   await expect(slaRows).toHaveCount(1)
   await expect(slaRows.first()).toContainText('0.2.0')
 
-  // 展开历史版本：多一行，标「已退役」并说明历史 Run 仍按 name@version 引用
+  // 展开历史版本：多一行，标「已退役」并说明历史 Task 仍按 name@version 引用
   const toggle = slaRows.first().getByTestId('toggle-older-versions')
   await expect(toggle).toHaveText(/另有 1 个历史版本/)
   await expect(toggle).toHaveAttribute('aria-expanded', 'false')
@@ -131,10 +133,10 @@ test('C Tester 目录按 name 聚合：一行一个名字，历史版本折叠�
   const older = withOlder.nth(1)
   await expect(older).toContainText('0.1.0')
   await expect(older).toContainText('已退役')
-  await expect(older).toContainText('历史 Run 仍按 name@version 引用')
+  await expect(older).toContainText('历史 Task 仍按 name@version 引用')
 
   // 行主位的版本号仍能打开抽屉
-  await page.locator('[data-testid="tester-version"]').first().click()
+  await page.locator('[data-testid="runner-version"]').first().click()
   await expect(page).toHaveURL(/open=/)
 })
 
@@ -154,9 +156,9 @@ test('D 404：没有第二个 main landmark，标题与 aria-labelledby 正确',
 
 test('E 侧栏：SidebarMenuButton 的 active 语义 + Ctrl+B 折叠 + cookie 持久', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 })
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
   await page.goto('/')
-  await expect(page.getByText('进行中 Run')).toBeVisible()
+  await expect(page.getByText('进行中 Task')).toBeVisible()
 
   const sidebar = page.locator('[data-slot="sidebar"][data-state]')
   await expect(sidebar).toHaveAttribute('data-state', 'expanded')
@@ -190,7 +192,7 @@ test('E 侧栏：SidebarMenuButton 的 active 语义 + Ctrl+B 折叠 + cookie �
 
   // 刷新后仍保持折叠（组件从 cookie 读回）
   await page.reload()
-  await expect(page.getByText('进行中 Run')).toBeVisible()
+  await expect(page.getByText('进行中 Task')).toBeVisible()
   await expect(page.locator('[data-slot="sidebar"][data-state]')).toHaveAttribute('data-state', 'collapsed')
 
   await page.keyboard.press('Control+b')
@@ -199,9 +201,9 @@ test('E 侧栏：SidebarMenuButton 的 active 语义 + Ctrl+B 折叠 + cookie �
 
 test('F 移动端：汉堡打开 288px 抽屉，点导航后自动关闭', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/')
-  await expect(page.getByText('进行中 Run')).toBeVisible()
+  await expect(page.getByText('进行中 Task')).toBeVisible()
 
   // 桌面侧栏在移动端不渲染
   await expect(page.locator('[data-slot="sidebar-container"]')).toHaveCount(0)

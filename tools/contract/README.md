@@ -1,4 +1,4 @@
-# contract：TestPlane 契约校验器
+# contract：Argus 契约校验器
 
 以 [`server/api/openapi.yaml`](../../server/api/openapi.yaml) 为唯一机器契约（07 §10），
 分两层校验：
@@ -61,7 +61,7 @@ go build -o ../../bin/contract .
 不是 `{error:{...}}`。工具每次都会打一条 warning 提醒；实现若返回嵌套形态，
 `live.error_envelope_*` 会判红。
 
-## 实现侧检查（34 个 operation）
+## 实现侧检查（v2 全部 59 个 operation）
 
 实现侧从 spec 取"成功状态码 + 响应 schema + Content-Type"，不在代码里硬编码。
 期望行为：
@@ -70,19 +70,19 @@ go build -o ../../bin/contract .
 |---|---|---|
 | 运维 | `/healthz`、`/readyz` | 200 + `text/plain` |
 | 身份/元信息 | `/meta`、`/me` | 200 + schema required |
-| 列表 | `/runs`、`/tasks`、`/testers`、`/clusters`、`/queue-status`、`/profiles` | 200 + schema required；`/queue-status` 额外断言 `volcano` 块的 `available`/`queues` 形态 |
-| 产物 | `/runs/{id}/artifacts`、`/tasks/{id}/attempts/{idx}/artifacts`、`/runs/{id}/files?path=` | 200 `ArtifactList`；files 允许未生成 404（Error 形状） |
+| 列表 | `/tasks`、`/tasks/facets`、`/runners`、`/clusters`、`/queue-status`、`/profiles`、`/secrets`、`/shared-mounts` | 200 + schema required；`/queue-status` 额外断言 `volcano` 块的 `available`/`queues` 形态 |
+| 产物 | `/tasks/{id}/artifacts`、`/tasks/{id}/attempts/{n}/runners/{seq}/artifacts`、`/tasks/{id}/files?path=`、`/tasks/{id}/bundle` | 200 `ArtifactList`；files 允许未生成 404（Error 形状）；bundle 校验 zip + MANIFEST.counts 与 /artifacts 同源 |
 | 运维/认证 | `/metrics`、`/auth/login`、`/auth/callback`、`/auth/logout` | metrics 200 `text/plain`；login/callback 302 或 dev 404；logout 200 `{ok}` |
-| Registry | `/testers`、`/testers/endpoint-probe` | `endpoint-probe` 必须在目录里（K-3：无运行时注册） |
-| 提交 | `POST /runs`、`?dry_run=true` | 202 `RunAccepted`（`run.id`/`tasks[]` 非空）；dry-run 200 `DryRunResult` |
-| Run 读 | `/runs/{id}`、`/tasks`、`/events/history`、`/manifest` | 200 + schema required |
-| 状态相关读 | `/report`、`/report.md`、`/deploy`、attempt `result`/`logs` | `/report`、`/report.md`：非终态 Run 允许 404，**终态 Run 必须 200**；`/deploy`：Run 无 deploy 时允许 404；attempt result/logs 允许尚未产出的 404；404 仍须是 Error |
-| SSE | `/runs/{id}/events` | 200 + `text/event-stream`，5s 内至少一行 |
-| 取消 | `POST /runs/{id}/cancel`、`POST /tasks/{id}/cancel` | 202（幂等时 200）+ `CancelAccepted`/`TaskCancelAccepted` |
-| 错误体 | 不存在的 Run（404）、deploy+service 同时出现（400） | 扁平 Error 的 required 齐全、`code` 非空、Content-Type JSON |
+| Registry | `/runners`、`/runners/endpoint-probe`（+ `/versions/1.0.0`） | `endpoint-probe` 必须在目录里（K-3：无运行时注册） |
+| 提交 | `POST /tasks`、`?dry_run=true` | 202 `TaskAccepted`（`task.id`/`runners[]` 非空）；dry-run 200 `DryRunResult` |
+| Task 读 | `/tasks/{id}`、`/tasks/{id}/attempts`、`/tasks/{id}/runners`、`/events/history`、`/manifest` | 200 + schema required |
+| 状态相关读 | `/tasks/{id}/report(.md)`、`/deploy`、runner `result`/`logs`（最新 attempt 与 `attempts/{n}/runners/{seq}` 两形态） | report：非终态 Task 允许 404，**终态 Task 必须 200**；`/deploy`：Task 无部署（外接模式）时允许 404；runner result/logs 允许尚未产出的 404（产物三选一 D-74）；404 仍须是 Error |
+| SSE | `/tasks/{id}/events` | 200 + `text/event-stream`，5s 内至少一行 |
+| 取消/重试/clean | `POST /tasks/{id}/cancel`、`/retry`、`/clean` | cancel 202（幂等 200）+ `CancelAccepted`（已终态 409 也合格）；retry 202 `TaskRetryAccepted`（非终态 409）；clean 202 或 409 `detail.reason` |
+| 错误体 | 不存在的 Task（404）、deploy+service 同时出现（400） | 扁平 Error 的 required 齐全、`code` 非空、Content-Type JSON |
 
-实现侧会创建 **2 个 fixture Run**（A 用于读、B 用于取消），结束时尽力取消 A。
-fixture Manifest 默认是 `service` 模式 + `endpoint-probe` + `profile: k8s-npu`，
+实现侧会创建 **4 个 fixture Task**（A 读 / B 取消 / deploy 形态 / F 失败后 retry+clean），结束时尽力取消 A。
+fixture Manifest 默认是 `service` 模式 + `endpoint-probe`（显式 precheck）+ `aisbench-sla`（stub）+ `profile: k8s-npu`，
 指向 `--mock-url`（默认 `http://127.0.0.1:18080/v1`；Kind 用
 `http://mock-llm.<ns>.svc.cluster.local:18080/v1`）。
 

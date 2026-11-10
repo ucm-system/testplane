@@ -6,7 +6,7 @@
 |---|---|---|---|---|
 | 控制面（**内嵌前端**） | `server`（默认） | `deploy/docker/server.Dockerfile` | 仓库根 | `argus-server` |
 | 前端（独立托管时用） | `web` | `deploy/docker/web.Dockerfile` | 仓库根 | `argus-web` |
-| Runner | `tester:<name>` | `testers/<name>/build/Dockerfile` | **`testers/<name>/`**（不是仓库根） | `argus-tester-<name>` |
+| Runner | `runner:<name>` | `runners/<name>/build/Dockerfile` | **`runners/<name>/`**（不是仓库根） | `argus-runner-<name>` |
 
 > 默认部署用 **server 内嵌前端**（`go:embed`，单端口同时服务静态资源与 `/api/v1`）；
 > `web` 镜像只给"前端单独发版 / 单独托管"的场景，两者互不影响。
@@ -37,7 +37,7 @@ pwsh deploy/docker/build-push.ps1 -Push
 pwsh deploy/docker/build-push.ps1 -Component web -Push
 
 # Runner（endpoint-probe）
-pwsh deploy/docker/build-push.ps1 -Component tester:endpoint-probe -Push
+pwsh deploy/docker/build-push.ps1 -Component runner:endpoint-probe -Push
 
 # 多架构（两个平台都真的构建；arm64 走 qemu，较慢）
 pwsh deploy/docker/build-push.ps1 -Platforms linux/amd64,linux/arm64 -Push
@@ -77,7 +77,7 @@ PLATFORMS=linux/amd64,linux/arm64  PUSHED=True
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `-Component` | `server` | `server` \| `web` \| `tester:<name>` |
+| `-Component` | `server` | `server` \| `web` \| `runner:<name>` |
 | `-Registry` | `ghcr.io/ucm-system` | 仓库前缀（CCR 等其它仓库见"其它 registry"） |
 | `-Image` | 按 Component 推导 | 覆盖默认镜像名 |
 | `-Tag` | `git describe --tags --always --dirty`，取不到 `dev-<yyyymmdd>` | 主 tag |
@@ -118,15 +118,15 @@ docker run --rm --read-only --tmpfs /tmp -p 18097:8080 ghcr.io/ucm-system/argus-
 
 ## Runner 镜像
 
-构建上下文是 **`testers/<name>/`**（不是仓库根），脚本已处理；入口固定 `/tester/run.sh`
+构建上下文是 **`runners/<name>/`**（不是仓库根），脚本已处理；入口固定 `/runner/run.sh`
 （ARCHITECTURE §5.2），非 root `10001`，参数只接受 `--key=value`。
 
 ```powershell
-pwsh deploy/docker/build-push.ps1 -Component tester:endpoint-probe -Push
-docker run --rm ghcr.io/ucm-system/argus-tester-endpoint-probe:<tag>   # 无参 → status=failed 缺少 --url
+pwsh deploy/docker/build-push.ps1 -Component runner:endpoint-probe -Push
+docker run --rm ghcr.io/ucm-system/argus-runner-endpoint-probe:<tag>   # 无参 → status=failed 缺少 --url
 ```
 
-发布后把 `testers/<name>/runner.yaml` 的 `image:` 换成新产物（tag 或 digest 都行，§5.6）。
+发布后把 `runners/<name>/runner.yaml` 的 `image:` 换成新产物（tag 或 digest 都行，§5.6）。
 
 ## 其它 registry
 
@@ -161,7 +161,7 @@ CI（`.github/workflows/**`，仓库维护者负责）与本脚本用**同一套
 |---|---|---|---|---|
 | `server` | `-Component server` | `ghcr.io/ucm-system/argus-server` | `deploy/docker/server.Dockerfile` | 仓库根 |
 | `web` | `-Component web` | `ghcr.io/ucm-system/argus-web` | `deploy/docker/web.Dockerfile` | 仓库根 |
-| `tester:endpoint-probe` | `-Component tester:endpoint-probe` | `ghcr.io/ucm-system/argus-tester-endpoint-probe` | `testers/endpoint-probe/build/Dockerfile` | `testers/endpoint-probe/` |
+| `runner:endpoint-probe` | `-Component runner:endpoint-probe` | `ghcr.io/ucm-system/argus-runner-endpoint-probe` | `runners/endpoint-probe/build/Dockerfile` | `runners/endpoint-probe/` |
 
 每个镜像都打两个 tag（`:<tag>`、`:sha-<12>`）；CI 解析脚本输出的 `DIGEST=` 写 job summary，
 Helm chart 的 `image.digest`、Runner 的 `runner.yaml` 都用它。
@@ -179,21 +179,21 @@ Helm chart 的 `image.digest`、Runner 的 `runner.yaml` 都用它。
 
 ## Runner 发版流程约束（重要）
 
-`testers/<name>/runner.yaml` 是 **Runner 契约**，`image:` 是契约内容的一部分（K-3：版本钉死、注册表会校验）。
+`runners/<name>/runner.yaml` 是 **Runner 契约**，`image:` 是契约内容的一部分（K-3：版本钉死、注册表会校验）。
 镜像换了但 `version` 没换 = 同一版本号指向不同内容，注册表校验/复现都会出问题。
 
 正确流程（对应设计里的 G-15「版本升级流程」）：
 
 ```text
-1. CI 产出新镜像：ghcr.io/ucm-system/argus-tester-<name>@sha256:<digest>（+ :sha-<12> tag）
+1. CI 产出新镜像：ghcr.io/ucm-system/argus-runner-<name>@sha256:<digest>（+ :sha-<12> tag）
 2. Runner 维护者改 runner.yaml：
-     image:   ghcr.io/ucm-system/argus-tester-<name>@sha256:<digest>   # 建议用 digest 而不是 tag
+     image:   ghcr.io/ucm-system/argus-runner-<name>@sha256:<digest>   # 建议用 digest 而不是 tag
      version: <新版本号>                                                    # 必须一起改
 3. 走新版本发布（版本号 → 注册表重新入库 → 平台按新版本调度）
 ```
 
 **严禁**只改 `image:` 不改 `version:`——那会让"同一个版本号"对应两份不同内容，历史 Run 无法复现。
-（本仓库当前的 `testers/endpoint-probe/runner.yaml` 仍指向旧的 `registry.dev.huawei.com/...:1.0.0`，
+（本仓库当前的 `runners/endpoint-probe/runner.yaml` 仍指向旧的 `registry.dev.huawei.com/...:1.0.0`，
 等 G-15 落地后由 Runner 维护者按上面流程一次性升级。）
 
 ## kind 的坑（本机实测）
@@ -209,4 +209,4 @@ docker save → docker cp → docker exec <node> ctr -n k8s.io images import
 
 ## CI
 
-`.github/workflows/**` 由仓库维护者负责（GHCR、多架构 matrix 覆盖 server / web / tester）。
+`.github/workflows/**` 由仓库维护者负责（GHCR、多架构 matrix 覆盖 server / web / runner）。

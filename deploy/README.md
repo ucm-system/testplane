@@ -227,7 +227,7 @@ kubectl --context kind-argus -n argus delete job argus-storage-smoke
 构建上下文 = **Runner 目录**（不是 `build/`），用现成的 `build/Dockerfile`：
 
 ```powershell
-Push-Location testers\endpoint-probe
+Push-Location runners\endpoint-probe
 docker build -f build/Dockerfile `
   -t argus/endpoint-probe:1.0.0 `
   -t registry.dev.huawei.com/argus/endpoint-probe:1.0.0 .
@@ -245,7 +245,7 @@ docker exec argus-control-plane crictl images | Select-String endpoint-probe
 
 > **为什么打两个 tag —— 这是 `runner.yaml` 的 image 引用问题，别再想别的招**
 >
-> [`testers/endpoint-probe/runner.yaml`](../testers/endpoint-probe/runner.yaml) 里写的是
+> [`runners/endpoint-probe/runner.yaml`](../runners/endpoint-probe/runner.yaml) 里写的是
 > `image: registry.dev.huawei.com/argus/endpoint-probe:1.0.0`（CI 推内部仓库的形态）。
 > 平台把 `image` **原样透传**给 K8s（E-2.1、§5.6 不解析 tag/digest），所以本地要么能推到那个
 > 仓库，要么让节点上"已经有这个引用"。
@@ -254,18 +254,18 @@ docker exec argus-control-plane crictl images | Select-String endpoint-probe
 > 因为 tag 不是 `:latest`，`imagePullPolicy` 是 `IfNotPresent`（E-2.4），kubelet 发现本地已有
 > 该引用就直接用，不会去 `registry.dev.huawei.com` 拉。
 >
-> **收益：`testers/` 里的文件一个字都不用改**（改了就是动契约 + 可能被注册表校验拦住）。
+> **收益：`runners/` 里的文件一个字都不用改**（改了就是动契约 + 可能被注册表校验拦住）。
 > 代价：这个 tag 是本地约定，换个 registry 域名要重打——写在本文第 5 步，别散落在聊天里。
 >
-> 备选（不推荐）：把 `testers/` 换成别的镜像名 → 属于改契约，需 Lead 裁决；
-> 或者用 `AG_TESTERS_DIR` 挂一个改过的 `runner.yaml` → 多一份漂移源，dev 不值得。
+> 备选（不推荐）：把 `runners/endpoint-probe` 换成别的镜像名 → 属于改契约，需 Lead 裁决；
+> 或者用 `AG_RUNNERS_DIR` 挂一个改过的 `runner.yaml` → 多一份漂移源，dev 不值得。
 
 已核验：用 `registry.dev.huawei.com/argus/endpoint-probe:1.0.0` 起一个
 `restricted` 的 Job，运行用户 `uid=10001`、`/runner/run.sh` 可执行、无外网拉取。
 
 ### 5.2 控制面镜像 `argus-server:dev`
 
-构建上下文 = **仓库根**（要 `server/` 与 `testers/`，W-8）：
+构建上下文 = **仓库根**（要 `server/` 与 `runners/`，W-8）：
 
 ```powershell
 docker build -f deploy/docker/server.Dockerfile -t argus-server:dev .

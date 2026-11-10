@@ -24,8 +24,8 @@ concurrency:
 env:
   GO_VERSION: '1.25'
   NODE_VERSION: '22'
-  # Go 集成测试用：service container 的名字就是主机名
-  TESTPLANE_TEST_DATABASE_URL: postgres://testplane:testplane@localhost:5432/testplane_test?sslmode=disable
+  # Go 集成测试用（server/internal/dbtest 读 AG_TEST_DATABASE_URL）：service container 的名字就是主机名
+  AG_TEST_DATABASE_URL: postgres://argus:argus@localhost:5432/argus_test?sslmode=disable
 
 jobs:
   go:
@@ -35,12 +35,12 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: testplane
-          POSTGRES_PASSWORD: testplane
-          POSTGRES_DB: testplane
+          POSTGRES_USER: argus
+          POSTGRES_PASSWORD: argus
+          POSTGRES_DB: argus
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U testplane"
+          --health-cmd "pg_isready -U argus"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
@@ -55,7 +55,7 @@ jobs:
             tools/fake-genet/go.sum
       - name: 准备测试库
         run: |
-          PGPASSWORD=testplane psql -h localhost -U testplane -d postgres -c 'CREATE DATABASE testplane_test;' || true
+          PGPASSWORD=argus psql -h localhost -U argus -d postgres -c 'CREATE DATABASE argus_test;' || true
       # 先建库再跑；重跑时库已存在，`|| true` 不是掩饰错误，是幂等
       - name: build
         working-directory: server
@@ -95,7 +95,7 @@ jobs:
           go test ./...
 
   contract:
-    name: 契约（spec 侧：openapi ↔ design 50 端点）
+    name: 契约（spec 侧：openapi ↔ design 端点基线）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -148,24 +148,24 @@ jobs:
         with:
           version: v3.16.4
       - name: lint（生产模板）
-        run: helm lint deploy/charts/testplane -f deploy/charts/testplane/values-production.example.yaml
+        run: helm lint deploy/charts/argus -f deploy/charts/argus/values-production.example.yaml
       - name: 渲染生产 values（必须能出 Deployment/Job/PVC 等）
         run: |
-          helm template testplane deploy/charts/testplane -n testplane \
-            -f deploy/charts/testplane/values-production.example.yaml > /tmp/prod.yaml
+          helm template argus deploy/charts/argus -n argus \
+            -f deploy/charts/argus/values-production.example.yaml > /tmp/prod.yaml
           grep -q 'kind: Deployment' /tmp/prod.yaml
           grep -q 'kind: Job' /tmp/prod.yaml            # 迁移 hook
           grep -q 'kind: Ingress' /tmp/prod.yaml        # 生产模板带 Ingress
           # 生产模板用 existingClaim 复用 RWX，所以**不**创建 PVC；PVC 由 kind 模板验证
       - name: 渲染本地 values（并验证 PVC 会被创建）
         run: |
-          helm template tp deploy/charts/testplane -n testplane-helm \
-            -f deploy/charts/testplane/values-kind.yaml > /tmp/kind.yaml
+          helm template argus deploy/charts/argus -n argus-helm \
+            -f deploy/charts/argus/values-kind.yaml > /tmp/kind.yaml
           grep -q 'kind: PersistentVolumeClaim' /tmp/kind.yaml
       - name: 必填项校验必须能红（删掉 OIDC issuer 应失败）
         run: |
-          if helm template tp deploy/charts/testplane -n t \
-               -f deploy/charts/testplane/values-production.example.yaml \
+          if helm template argus deploy/charts/argus -n t \
+               -f deploy/charts/argus/values-production.example.yaml \
                --set oidc.issuer= > /dev/null 2>&1; then
             echo "❌ 缺 OIDC issuer 居然渲染成功——渲染期校验失效了"; exit 1
           fi
@@ -181,4 +181,4 @@ jobs:
       - run: kubectl kustomize deploy/overlays/local-dev > /tmp/dev.yaml
       - name: 本地 overlay 必须是 dev 鉴权（防误配）
         run: |
-          grep -q 'TESTPLANE_AUTH_MODE: dev' /tmp/dev.yaml
+          grep -q 'AG_AUTH_MODE: dev' /tmp/dev.yaml

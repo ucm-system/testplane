@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const usageText = `contract 是 TestPlane 的契约校验器：以 server/api/openapi.yaml 为唯一契约，
+const usageText = `contract 是 Argus 的契约校验器：以 server/api/openapi.yaml 为唯一契约，
 做"规格侧"与"实现侧"两层校验。
 
 用法：
@@ -25,15 +25,16 @@ const usageText = `contract 是 TestPlane 的契约校验器：以 server/api/op
   另校验 operationId 唯一、成功响应已定义、Error 引用、鉴权、path 参数、$ref、ErrorCode 枚举。
 
 实现侧（mode=live）：
-  对运行中的控制面逐个打 MVP 的 operation：
+  对运行中的控制面逐个打 v2 的 59 个 operation：
     - 核心只读端点要求精确 2xx，并校验 spec 中响应 schema 的 required 字段；
-    - 状态相关端点（report/report.md/deploy/attempt result/logs）的 404 按语义区分：
-      /report、/report.md 未就绪只允许出现在非终态 Run 上，终态 Run 必须 200；
-      /deploy 仅在 Run 无 deploy 时允许 404；404 的响应体仍必须是 Error；
+    - 状态相关端点（report/report.md/deploy/runner result/logs）的 404 按语义区分：
+      /report、/report.md 未就绪只允许出现在非终态 Task 上，终态 Task 必须 200；
+      /deploy 仅在 Task 无部署（外接模式）时允许 404；404 的响应体仍必须是 Error；
     - 单独验证 404 与 400 的错误体形状；
     - 校验 SSE 的 Content-Type 与首行；
-    - 用 GET /testers 证明 endpoint-probe 已被扫描入库（K-3，无运行时注册）；
-    - 会创建 2 个 fixture Run（A 用于读、B 用于取消），结束时尽力取消 A。
+    - 用 GET /runners 证明 endpoint-probe 已被扫描入库（K-3，无运行时注册）；
+    - 会创建 4 个 fixture Task（A 读 / B 取消 / deploy 形态 / F 失败后 retry+clean），
+      结束时尽力取消 A。
 
 参数：
   --spec          openapi.yaml 路径（默认从 cwd 向上找 server/api/openapi.yaml）
@@ -45,10 +46,10 @@ const usageText = `contract 是 TestPlane 的契约校验器：以 server/api/op
   --user          dev 模式身份（默认 dev；Bearer <subject>）
   --token         显式 Bearer（优先于 --user）
   --no-auth       不发 Authorization
-  --manifest      实现侧 fixture Run 的 Manifest（默认内置 service 模板）
+  --manifest      实现侧 fixture Task 的 Manifest（默认内置 service 模板）
   --mock-url      内置 Manifest 指向的 mock-llm（默认 http://127.0.0.1:18080/v1）
   --profile       内置 Manifest 的 execution.profile（默认 k8s-npu）
-  --name          内置 Manifest 的 Run 名（默认 contract-<时间戳>）
+  --name          内置 Manifest 的 Task 名（默认 contract-<时间戳>）
   --timeout       实现侧总超时（默认 2m）
   --json-out      机器可读结果另存文件
   --verbose       打印每个 HTTP 请求
@@ -67,7 +68,7 @@ const usageText = `contract 是 TestPlane 的契约校验器：以 server/api/op
   contract --mode spec
   contract --mode live
   contract --mode all --json-out .data/contract.json
-  contract --mode live --manifest run.yaml --mock-url http://mock-llm.testplane.svc.cluster.local:18080/v1
+  contract --mode live --manifest task.yaml --mock-url http://mock-llm.argus.svc.cluster.local:18080/v1
 `
 
 func parseArgs(argv []string) (Options, error) {

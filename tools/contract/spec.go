@@ -262,10 +262,10 @@ func (s *Spec) requireFields(schemaName string, raw []byte) []string {
 // 端点集合的期望来自 design/views/07-api.md §5（外加 §2.4 的认证端点），
 // 见 design.go 的 DesignChecks；这里不再维护硬编码的 MVP 端点表（票 #16）。
 
-// excludedPrefixes/paths 是明确不在 MVP 的端点（票 #3 裁决 + openapi 自述）。
-var excludedOperations = []string{
-	"POST /api/v1/tasks",
-}
+// excludedOperations 是明确不在契约里的端点。v2 里 Task 即提交单元（POST /api/v1/tasks
+// 就是提交端点，D-73），v1 时代的"排除 POST /api/v1/tasks"随 /runs 一起消失；
+// 机制保留，供将来登记反向排除项。
+var excludedOperations []string
 
 // isPublicEndpoint 是不要求 bearerAuth 的端点：运维探针、Prometheus 指标、OIDC 登录/回调。
 func isPublicEndpoint(path string) bool {
@@ -438,8 +438,9 @@ func (s *Spec) StaticChecks() (checks []check, warnings []string) {
 	walk(s.Raw, "#")
 	add("spec.refs_resolvable", len(refIssues) == 0, firstN(refIssues, 5, "所有 $ref 都能解析"))
 
-	// 11) 错误码枚举
-	critical := []string{"VALIDATION_ERROR", "UNAUTHENTICATED", "FORBIDDEN", "NOT_FOUND", "CONFLICT", "INTERNAL_ERROR", "PRECHECK_FAILED", "ENDPOINT_UNREACHABLE", "EXECUTOR_UNAVAILABLE", "TASK_TIMEOUT"}
+	// 11) 错误码枚举（附录 D v2：TESTER_*→RUNNER_*、TASK_TIMEOUT→RUNNER_TIMEOUT，
+	//     新增 EXPORT_INVALID / ATTEMPT_EXHAUSTED）
+	critical := []string{"VALIDATION_ERROR", "UNAUTHENTICATED", "FORBIDDEN", "NOT_FOUND", "CONFLICT", "INTERNAL_ERROR", "PRECHECK_FAILED", "ENDPOINT_UNREACHABLE", "EXECUTOR_UNAVAILABLE", "RUNNER_TIMEOUT", "ATTEMPT_EXHAUSTED", "EXPORT_INVALID"}
 	var missingCodes []string
 	for _, code := range critical {
 		if !containsString(s.ErrorCodes, code) {

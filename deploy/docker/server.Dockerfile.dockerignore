@@ -4,7 +4,7 @@
 # 且用 BuildKit 构建（Docker 23+ 默认）。构建命令必须显式 -f：
 #   docker build -f deploy/docker/server.Dockerfile -t argus-server:dev .
 #
-# 上下文是**仓库根**（W-8 要求：要用 server/、web/、testers/），所以这里的目的
+# 上下文是**仓库根**（W-8 要求：要用 server/、web/、runners/），所以这里的目的
 # 是把设计文档、原型截图、依赖目录、本地数据全部挡在上下文之外——
 # 否则 design/prototype 的几 MB 截图会进构建层缓存，每次都变。
 
@@ -41,4 +41,4 @@ bin/
 **/.env.*
 !**/.env.example
 
-# 说明：testers/ **不能**排除——镜像要把它们 COPY 到 /app/testers（E-10）。
+# 说明：runners/ **不能**排除——镜像要把它们 COPY 到 /app/runners（E-10）。

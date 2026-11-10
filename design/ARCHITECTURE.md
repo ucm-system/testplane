@@ -976,6 +976,7 @@ Genet 是服务部署与拆除的唯一职责方，其部署单元是 **Helm rel
 - exports 与 `deploy-state.json` 按 attempt 落库落盘，信息不丢；
 - 提供 `argus clean --task <id> [--attempt <n>]`：用落档的导出**重新拉起一次内置 service-clean Job**。平台仍是哑平台，只是重放一个 Job。REST 形态：`POST /api/v1/tasks/{id}/clean`（body 可选 `attempt`/`force`，缺省最后一个 attempt；重放执行记录名 `service-clean-replay` 追加在该 attempt 尾部；失败不改 Task 终态，只发 `cleanup_failed` 事件）；
 - v1.5：周期扫描"已终态、含部署、无 clean 成功记录"的 attempt，自动重放并告警；
+- **对账扫描的边界（消歧）**：扫描只负责**发现与记录**泄漏（事件 + 日志 + 重放清单），**不执行任何删除**；被测服务资源的删除动作唯一入口是 service-clean（直接执行或经重放拉起）。平台周期回收的只有**自身的 runner Job 对象**（§6.3，按 `argus.io/*` 标签识别，绝不触碰 Genet 管理的服务资源）——两类"清理"语义不同，后者不是 GC 部署资源；
 - **硬规则**：任何组件不得对 Genet 管理的资源设置指向 runner Job 的 K8s ownerReferences——Job 回收的级联删除会杀掉活着的被测服务。**runner 进程生命周期 ≠ 资源使用生命周期**（§8.1 原则）：deploy runner 在服务 ready 时退出，服务必须存活到 clean 完成或重放完成。
 
 ### 9.4 Jenkins 与下游
@@ -1136,6 +1137,22 @@ task:
 - 新 Runner 上线无需改前端：提交框是文本输入框，参数说明由 `runner.yaml` 只读展示，指标展示由 `result.json` 结构驱动。
 - 鉴权与 API 完全一致；Web 用户走团队统一身份源 + Argus 自建 OIDC client（D-48/D-51 沿用）。
 
+### 11.5 Agent 亲和性清单（v2）
+
+Agent（LLM 或自动化脚本）集成 Argus 不需要任何私有接口，全部能力都是上述公开契约的组合：
+
+- **MCP（13 工具，stdio JSON-RPC 2.0，`argus mcp` 或独立二进制均可）**：`argus_submit_task`、`argus_get_task`、`argus_wait_task`（SSE 订阅 + Last-Event-ID 续传，不可用自动降级轮询）、`argus_cancel_task`、`argus_retry_task`、`argus_clean_task`（泄漏重放）、`argus_list_runners`、`argus_get_report`（json/markdown）、`argus_get_logs`、`argus_list_artifacts`、`argus_get_file`（摘要读取）、`argus_queue_status`、`argus_list_profiles`。
+- **CLI `argus`（REST 薄 adapter，子命令与 openapi 端点一一对应）**：`submit` / `status` / `wait` / `report` / `logs` / `artifacts` / `files` / `cancel` / `retry` / `clean` / `runners` / `queue` / `profiles`，全部支持 `--json` 机器可读输出与稳定退出码（见 `server/cmd/argus`）。
+- **Runner 自发现（§5.3 / 附录 C）**：`GET /api/v1/runners` 返回每个 Runner 的 `entry`、`input_format`（jsonl/yaml/text）、`parameters`（jsonl 输入的类型 + required 结构 schema）、`exports` / `consumes`（组合期校验依据）——Agent 组合 Task 提交体前可全量自查，无需读仓库。
+- **行号级校验错误（D-67）**：提交失败的 `400 VALIDATION_ERROR` 带 `detail.issues[].path/line/code/message`（如 `runners[2].input` 第 3 行类型不符），Agent 可直接定位并修复重试；提交前可用 `POST /api/v1/tasks?dry_run=true` 预检（不落库）。
+- **错误体契约（07 §3）**：扁平 `{code, message, detail, retryable, trace_id}`；附录 D v2 错误码每个都带 `next_action` 语义（§15），`retryable` 显式区分可重试与终局失败，便于 Agent 自动分诊。
+- **SSE**：`GET /api/v1/tasks/{id}/events`，`seq` 每 Task 单调、`Last-Event-ID` 从中断处回放、窗口越界发 `resync_required`（客户端整页重建）；JSON 形态 `GET /tasks/{id}/events/history` 供断线补齐。
+- **facets**：`GET /api/v1/tasks/facets` 返回 `status` / `submitter` / `runner` 三维候选值与计数（D-61），Agent 汇报"还有多少在跑"不必遍历列表。
+- **bundle**：`GET /api/v1/tasks/{id}/bundle` 打包全部产物为 zip（带 `MANIFEST.json`），Agent 一次性取走结果集。
+- **自举入口**：站点静态提供 `/llms.txt`（Agent 说明书索引）与 `/openapi.yaml`（机器契约，与 `server/api/openapi.yaml` 同源，`make sync-spec` 保证不漂移）；术语与 v1→v2 映射见 `GLOSSARY.md`，Agent 全闭环操作手册见 [`docs/agents/argus-playbook.md`](../docs/agents/argus-playbook.md)。
+
+**裁决：Agent 集成能力以上述公开契约为准，不设特权路径**——Agent 与 Web UI / CLI 走同一套 REST + 鉴权（07 §2），不存在仅 Agent 可用的端点或免鉴权通道。
+
 ---
 
 ## 12. 安全、可靠性与运维
@@ -1250,7 +1267,7 @@ Argus 是对内工具，但**对内部网络与生产主机拥有执行能力**�
 | 不允许用户上传任意 Runner | 保证执行能力可控；`deploy` / `clean` 角色仅内置 |
 | 不托管数据集与模型 | 沿用现有资源管理方式，平台只透传路径 |
 | 不承诺结果可复现 | 平台保证执行逻辑可追溯（§5.7） |
-| 不做平台侧 GC 机制 | 部署拆除由 clean runner（finally + 重放）承载（§9.3） |
+| 不做**部署资源**的平台侧 GC | 被测服务的拆除由 clean runner（finally + 重放）承载（§9.3）；平台周期回收仅限**自身执行资源**（已结束的 runner Job 对象，§6.3） |
 
 ### 13.2 当期不做（可重新评估）
 

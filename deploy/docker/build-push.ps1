@@ -98,7 +98,7 @@ switch -Regex ($ComponentSpec) {
     }
     '^runner:(?<name>[\w.-]+)$' {
         $runnerName = $Matches['name']
-        $runnerDir = Join-Path $RepoRoot "testers/$runnerName"
+        $runnerDir = Join-Path $RepoRoot "runners/$runnerName"
         if (-not (Test-Path $runnerDir)) {
             throw "找不到 Runner 目录：$runnerDir"
         }
