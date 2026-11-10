@@ -11,7 +11,7 @@ import (
 )
 
 // MemoryStore 是 Store 的内存实现：单测与本地联调用，也可在 PG 不可用时兜底。
-// 生产路径由 backend-core 的 store 适配（同签名）。
+// 生产路径由 store.RunnerRegistry 适配（同签名）。
 type MemoryStore struct {
 	mu      sync.RWMutex
 	records map[string]Record
@@ -24,8 +24,8 @@ func NewMemoryStore() *MemoryStore {
 
 var _ Store = (*MemoryStore)(nil)
 
-// UpsertTester 写入或覆盖一行；content_sha 不同不在这里拦（由 Registry 判定）。
-func (m *MemoryStore) UpsertTester(ctx context.Context, rec Record) (bool, error) {
+// UpsertRunner 写入或覆盖一行；content_sha 不同不在这里拦（由 Registry 判定）。
+func (m *MemoryStore) UpsertRunner(ctx context.Context, rec Record) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := Key(rec.Spec.Name, rec.Spec.Version)
@@ -34,8 +34,8 @@ func (m *MemoryStore) UpsertTester(ctx context.Context, rec Record) (bool, error
 	return !existed, nil
 }
 
-// GetTester 按 name+version 读一行；version 为空取最新。
-func (m *MemoryStore) GetTester(ctx context.Context, name, version string) (Record, error) {
+// GetRunner 按 name+version 读一行；version 为空取最高版本。
+func (m *MemoryStore) GetRunner(ctx context.Context, name, version string) (Record, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if version == "" {
@@ -50,13 +50,13 @@ func (m *MemoryStore) GetTester(ctx context.Context, name, version string) (Reco
 	}
 	rec, ok := m.records[Key(name, version)]
 	if !ok {
-		return Record{}, fmt.Errorf("registry: tester %s@%s: %w", name, version, domain.ErrNotFound)
+		return Record{}, fmt.Errorf("registry: runner %s@%s: %w", name, version, domain.ErrNotFound)
 	}
 	return rec, nil
 }
 
-// ListTesters 列出全部记录，按 name/version 排序。
-func (m *MemoryStore) ListTesters(ctx context.Context) ([]Record, error) {
+// ListRunners 列出全部记录，按 name/version 排序。
+func (m *MemoryStore) ListRunners(ctx context.Context) ([]Record, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]Record, 0, len(m.records))
@@ -72,8 +72,8 @@ func (m *MemoryStore) ListTesters(ctx context.Context) ([]Record, error) {
 	return out, nil
 }
 
-// MarkTesterOrphaned 把一行标记为 orphaned（只标记，不删）。
-func (m *MemoryStore) MarkTesterOrphaned(ctx context.Context, name, version string) error {
+// MarkRunnerOrphaned 把一行标记为 orphaned（只标记，不删）。
+func (m *MemoryStore) MarkRunnerOrphaned(ctx context.Context, name, version string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := Key(name, version)

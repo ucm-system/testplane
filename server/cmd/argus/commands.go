@@ -27,16 +27,17 @@ import (
 // ---- submit ---------------------------------------------------------------
 
 type submitOutput struct {
-	RunID       string       `json:"run_id"`
-	Status      string       `json:"status"`
-	Kind        string       `json:"kind"`
-	SubmittedAt *string      `json:"submitted_at,omitempty"`
-	Tasks       []submitTask `json:"tasks"`
+	TaskID      string         `json:"task_id"`
+	Status      string         `json:"status"`
+	SubmittedAt *string        `json:"submitted_at,omitempty"`
+	Runners     []submitRunner `json:"runners"`
 }
 
-type submitTask struct {
-	ID     string `json:"id"`
+type submitRunner struct {
+	Seq    int    `json:"seq"`
 	Name   string `json:"name"`
+	Runner string `json:"runner"`
+	Role   string `json:"role,omitempty"`
 	Status string `json:"status"`
 }
 
@@ -47,7 +48,7 @@ func (a *app) cmdSubmit(args []string) int {
 	jsonOut := &a.jsonOut
 	fs.StringVar(&file, "f", "", "Manifest 文件路径（- 表示 stdin）")
 	fs.StringVar(&fileAlias, "file", "", "同 -f")
-	fs.BoolVar(&dryRun, "dry-run", false, "只校验、不落库（POST /runs?dry_run=true）")
+	fs.BoolVar(&dryRun, "dry-run", false, "只校验、不落库（POST /tasks?dry_run=true）")
 	fs.BoolVar(jsonOut, "json", a.jsonOut, "机器可读输出")
 
 	pos, err := parseArgs(fs, args)
@@ -77,7 +78,7 @@ func (a *app) cmdSubmit(args []string) int {
 		contentType = "application/json"
 	}
 
-	res, err := a.api.post(context.Background(), "/api/v1/runs", q, manifest, contentType)
+	res, err := a.api.post(context.Background(), "/api/v1/tasks", q, manifest, contentType)
 	if err != nil {
 		return a.fail(err)
 	}
@@ -87,39 +88,40 @@ func (a *app) cmdSubmit(args []string) int {
 	}
 
 	var body struct {
-		Run struct {
-			ID          string  `json:"id"`
-			Status      string  `json:"status"`
-			Kind        string  `json:"kind"`
-			SubmittedAt *string `json:"submitted_at"`
-		} `json:"run"`
-		Tasks []struct {
-			ID     string `json:"id"`
+		Task struct {
+			ID             string  `json:"id"`
+			Status         string  `json:"status"`
+			SubmittedAt    *string `json:"submitted_at"`
+			CurrentAttempt int     `json:"current_attempt"`
+		} `json:"task"`
+		Runners []struct {
+			Seq    int    `json:"seq"`
 			Name   string `json:"name"`
+			Runner string `json:"runner"`
+			Role   string `json:"role"`
 			Status string `json:"status"`
-		} `json:"tasks"`
+		} `json:"runners"`
 	}
 	if err := json.Unmarshal(res.Body, &body); err != nil {
 		return a.fail(fmt.Errorf("控制面返回了无法解析的提交应答: %w", err))
 	}
 	out := submitOutput{
-		RunID:       body.Run.ID,
-		Status:      body.Run.Status,
-		Kind:        body.Run.Kind,
-		SubmittedAt: body.Run.SubmittedAt,
-		Tasks:       make([]submitTask, 0, len(body.Tasks)),
+		TaskID:      body.Task.ID,
+		Status:      body.Task.Status,
+		SubmittedAt: body.Task.SubmittedAt,
+		Runners:     make([]submitRunner, 0, len(body.Runners)),
 	}
-	for _, t := range body.Tasks {
-		out.Tasks = append(out.Tasks, submitTask{ID: t.ID, Name: t.Name, Status: t.Status})
+	for _, r := range body.Runners {
+		out.Runners = append(out.Runners, submitRunner{Seq: r.Seq, Name: r.Name, Runner: r.Runner, Role: r.Role, Status: r.Status})
 	}
 
 	if *jsonOut {
 		a.printJSON(out)
 		return exitOK
 	}
-	fmt.Fprintf(a.stdout, "已提交 %s（status=%s, kind=%s）\n", out.RunID, out.Status, out.Kind)
-	for _, t := range out.Tasks {
-		fmt.Fprintf(a.stdout, "  %s  %-24s %s\n", t.ID, t.Name, t.Status)
+	fmt.Fprintf(a.stdout, "已提交 %s（status=%s）\n", out.TaskID, out.Status)
+	for _, r := range out.Runners {
+		fmt.Fprintf(a.stdout, "  seq=%d %-24s %-24s role=%s %s\n", r.Seq, r.Name, r.Runner, r.Role, r.Status)
 	}
 	return exitOK
 }
@@ -176,60 +178,61 @@ func (a *app) printDryRun(body []byte, jsonOut bool) int {
 
 // ---- status / wait --------------------------------------------------------
 
-type runSummary struct {
-	ID          string          `json:"id"`
-	Name        string          `json:"name"`
-	Kind        string          `json:"kind"`
-	Status      string          `json:"status"`
-	SubmittedAt *string         `json:"submitted_at"`
-	StartedAt   *string         `json:"started_at"`
-	FinishedAt  *string         `json:"finished_at"`
-	TaskCounts  json.RawMessage `json:"task_counts"`
-	Error       json.RawMessage `json:"error"`
-	Tasks       []taskSummary   `json:"tasks"`
+type taskDetailShape struct {
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Status         string          `json:"status"`
+	SubmittedAt    *string         `json:"submitted_at"`
+	StartedAt      *string         `json:"started_at"`
+	FinishedAt     *string         `json:"finished_at"`
+	RunnerCounts   json.RawMessage `json:"runner_counts"`
+	Error          json.RawMessage `json:"error"`
+	CurrentAttempt int             `json:"current_attempt"`
+	Runners        []runnerSummary `json:"runners"`
 }
 
-type taskSummary struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	Status        string          `json:"status"`
-	Attempts      int             `json:"attempts"`
-	WaitingReason *string         `json:"waiting_reason"`
-	Error         json.RawMessage `json:"error"`
+type runnerSummary struct {
+	Seq           int     `json:"seq"`
+	Name          string  `json:"name"`
+	RunnerName    string  `json:"runner_name"`
+	Role          string  `json:"role"`
+	Status        string  `json:"status"`
+	WaitingReason *string `json:"waiting_reason"`
+	ErrorCode     *string `json:"error_code"`
 }
 
-func parseRun(body []byte) (runSummary, error) {
-	var run runSummary
-	if err := json.Unmarshal(body, &run); err != nil {
-		return runSummary{}, err
+func parseTaskDetail(body []byte) (taskDetailShape, error) {
+	var t taskDetailShape
+	if err := json.Unmarshal(body, &t); err != nil {
+		return taskDetailShape{}, err
 	}
-	return run, nil
+	return t, nil
 }
 
 // statusOutput 是 status / wait 的 --json 输出。字段取自 Run 投影，不新增语义；
 // terminal / outcome 是由 status 派生的便利字段（映射规则见 agent-integration.md §4.3）。
 // next_action / hint 来自共享的码级提示表（internal/mcp/hints.go），只对已知错误码出现。
 type statusOutput struct {
-	RunID       string          `json:"run_id"`
-	Name        string          `json:"name,omitempty"`
-	Kind        string          `json:"kind,omitempty"`
-	Status      string          `json:"status"`
-	Terminal    bool            `json:"terminal"`
-	SubmittedAt *string         `json:"submitted_at,omitempty"`
-	StartedAt   *string         `json:"started_at,omitempty"`
-	FinishedAt  *string         `json:"finished_at,omitempty"`
-	TaskCounts  json.RawMessage `json:"task_counts,omitempty"`
-	Error       json.RawMessage `json:"error"`
-	Tasks       []statusTask    `json:"tasks,omitempty"`
-	NextAction  string          `json:"next_action,omitempty"`
-	Hint        string          `json:"hint,omitempty"`
+	TaskID       string          `json:"task_id"`
+	Name         string          `json:"name,omitempty"`
+	Status       string          `json:"status"`
+	Terminal     bool            `json:"terminal"`
+	SubmittedAt  *string         `json:"submitted_at,omitempty"`
+	StartedAt    *string         `json:"started_at,omitempty"`
+	FinishedAt   *string         `json:"finished_at,omitempty"`
+	RunnerCounts json.RawMessage `json:"runner_counts,omitempty"`
+	Error        json.RawMessage `json:"error"`
+	Runners      []statusRunner  `json:"runners,omitempty"`
+	NextAction   string          `json:"next_action,omitempty"`
+	Hint         string          `json:"hint,omitempty"`
 }
 
-type statusTask struct {
-	ID            string  `json:"id"`
+type statusRunner struct {
+	Seq           int     `json:"seq"`
 	Name          string  `json:"name"`
+	RunnerName    string  `json:"runner_name,omitempty"`
+	Role          string  `json:"role,omitempty"`
 	Status        string  `json:"status"`
-	Attempts      int     `json:"attempts"`
 	WaitingReason *string `json:"waiting_reason,omitempty"`
 }
 
@@ -242,45 +245,43 @@ type waitOutput struct {
 	TimedOut       bool    `json:"timed_out,omitempty"`
 }
 
-func buildStatusOutput(run runSummary) statusOutput {
+func buildStatusOutput(t taskDetailShape) statusOutput {
 	out := statusOutput{
-		RunID:       run.ID,
-		Name:        run.Name,
-		Kind:        run.Kind,
-		Status:      run.Status,
-		Terminal:    isTerminalRunStatus(run.Status),
-		SubmittedAt: run.SubmittedAt,
-		StartedAt:   run.StartedAt,
-		FinishedAt:  run.FinishedAt,
-		TaskCounts:  run.TaskCounts,
-		Error:       rawOrNil(run.Error),
+		TaskID:       t.ID,
+		Name:         t.Name,
+		Status:       t.Status,
+		Terminal:     isTerminalTaskStatus(t.Status),
+		SubmittedAt:  t.SubmittedAt,
+		StartedAt:    t.StartedAt,
+		FinishedAt:   t.FinishedAt,
+		RunnerCounts: t.RunnerCounts,
+		Error:        rawOrNil(t.Error),
 	}
-	for _, t := range run.Tasks {
-		out.Tasks = append(out.Tasks, statusTask{
-			ID: t.ID, Name: t.Name, Status: t.Status,
-			Attempts: t.Attempts, WaitingReason: t.WaitingReason,
+	for _, rr := range t.Runners {
+		out.Runners = append(out.Runners, statusRunner{
+			Seq: rr.Seq, Name: rr.Name, RunnerName: rr.RunnerName, Role: rr.Role,
+			Status: rr.Status, WaitingReason: rr.WaitingReason,
 		})
 	}
-	if h, ok := hintForRun(run); ok {
+	if h, ok := hintForTask(t); ok {
 		out.NextAction = h.NextAction
 		out.Hint = h.Hint
 	}
 	return out
 }
 
-// hintForRun 给终态 Run 找下一步提示：优先 Run.error.code，其次终态本身。
-func hintForRun(run runSummary) (mcp.Hint, bool) {
+// hintForTask 给终态 Task 找下一步提示：优先 Task.error.code，其次终态本身。
+func hintForTask(t taskDetailShape) (mcp.Hint, bool) {
 	var failure struct {
 		Code string `json:"code"`
 	}
-	if len(run.Error) > 0 && json.Unmarshal(run.Error, &failure) == nil && failure.Code != "" {
+	if len(t.Error) > 0 && json.Unmarshal(t.Error, &failure) == nil && failure.Code != "" {
 		if h, ok := mcp.HintForError(failure.Code); ok {
 			return h, true
 		}
 	}
-	return mcp.HintForRunStatus(run.Status)
+	return mcp.HintForTaskStatus(t.Status)
 }
-
 func (a *app) cmdStatus(args []string) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	jsonOut := &a.jsonOut
@@ -290,18 +291,18 @@ func (a *app) cmdStatus(args []string) int {
 		return a.flagError(err)
 	}
 	if len(pos) != 1 {
-		return a.usageError("用法: tpctl status <run_id>")
+		return a.usageError("用法: argus status <task_id>")
 	}
 
-	res, err := a.api.get(context.Background(), "/api/v1/runs/"+pathEscape(pos[0]), nil)
+	res, err := a.api.get(context.Background(), "/api/v1/tasks/"+pathEscape(pos[0]), nil)
 	if err != nil {
 		return a.fail(err)
 	}
-	run, err := parseRun(res.Body)
+	task, err := parseTaskDetail(res.Body)
 	if err != nil {
-		return a.fail(fmt.Errorf("控制面返回了无法解析的 Run: %w", err))
+		return a.fail(fmt.Errorf("控制面返回了无法解析的 Task: %w", err))
 	}
-	out := buildStatusOutput(run)
+	out := buildStatusOutput(task)
 	if *jsonOut {
 		a.printJSON(out)
 	} else {
@@ -322,7 +323,7 @@ func (a *app) cmdWait(args []string) int {
 		return a.flagError(err)
 	}
 	if len(pos) != 1 {
-		return a.usageError("用法: tpctl wait <run_id> [--follow] [--timeout 3600] [--interval 3]")
+		return a.usageError("用法: argus wait <task_id> [--follow] [--timeout 3600] [--interval 3]")
 	}
 	timeout, err := parseDurationLoose(*timeoutStr)
 	if err != nil || timeout <= 0 {
@@ -333,16 +334,16 @@ func (a *app) cmdWait(args []string) int {
 		return a.usageError("--interval 必须是正数（秒或 duration）")
 	}
 
-	runID := pos[0]
-	res, err := mcp.Wait(context.Background(), a.api, runID, mcp.WaitOptions{
+	taskID := pos[0]
+	res, err := mcp.Wait(context.Background(), a.api, taskID, mcp.WaitOptions{
 		Timeout:  timeout,
 		Interval: interval,
 		Follow:   *follow,
 		OnStatus: func(status string) {
-			fmt.Fprintf(a.stderr, "tpctl: %s status=%s\n", runID, status)
+			fmt.Fprintf(a.stderr, "argus: %s status=%s\n", taskID, status)
 		},
 		OnFallback: func(reason string) {
-			fmt.Fprintf(a.stderr, "tpctl: SSE 不可用（%s），已降级为轮询\n", reason)
+			fmt.Fprintf(a.stderr, "argus: SSE 不可用（%s），已降级为轮询\n", reason)
 		},
 	})
 	if err != nil {
@@ -356,23 +357,23 @@ func (a *app) cmdWait(args []string) int {
 		FallbackReason: res.FallbackReason,
 		TimedOut:       res.TimedOut,
 	}
-	if len(res.RunJSON) > 0 {
-		if run, perr := parseRun(res.RunJSON); perr == nil {
-			wo.statusOutput = buildStatusOutput(run)
+	if len(res.TaskJSON) > 0 {
+		if t, perr := parseTaskDetail(res.TaskJSON); perr == nil {
+			wo.statusOutput = buildStatusOutput(t)
 		}
 	}
-	if wo.RunID == "" {
-		wo.RunID = runID
+	if wo.TaskID == "" {
+		wo.TaskID = taskID
 	}
 	wo.Status = res.Status
-	wo.Terminal = isTerminalRunStatus(res.Status)
+	wo.Terminal = isTerminalTaskStatus(res.Status)
 
 	a.printWaitResult(wo, *jsonOut)
 	if wo.NextAction != "" {
-		fmt.Fprintf(a.stderr, "tpctl: next_action: %s\n", wo.NextAction)
+		fmt.Fprintf(a.stderr, "argus: next_action: %s\n", wo.NextAction)
 	}
 	if res.TimedOut {
-		fmt.Fprintf(a.stderr, "tpctl: 等待超时（%s），最后状态: %s\n", timeout, statusOrUnknown(wo.Status))
+		fmt.Fprintf(a.stderr, "argus: 等待超时（%s），最后状态: %s\n", timeout, statusOrUnknown(wo.Status))
 	}
 	return waitExitCode(wo.Outcome)
 }
@@ -391,10 +392,10 @@ func (a *app) printWaitResult(wo waitOutput, jsonOut bool) {
 }
 
 func (a *app) printRunSummary(out statusOutput) {
-	fmt.Fprintf(a.stdout, "%s  %s\n", out.RunID, out.Name)
+	fmt.Fprintf(a.stdout, "%s  %s\n", out.TaskID, out.Name)
 	fmt.Fprintf(a.stdout, "  status: %s（terminal=%t）\n", out.Status, out.Terminal)
-	if counts := parseTaskCounts(out.TaskCounts); counts != nil {
-		fmt.Fprintf(a.stdout, "  tasks: %d total, %d succeeded, %d failed, %d skipped, %d running, %d pending\n",
+	if counts := parseRunnerCounts(out.RunnerCounts); counts != nil {
+		fmt.Fprintf(a.stdout, "  runners: %d total, %d succeeded, %d failed, %d skipped, %d running, %d pending\n",
 			counts.Total, counts.Succeeded, counts.Failed, counts.Skipped, counts.Running, counts.Pending)
 	}
 	if out.SubmittedAt != nil {
@@ -412,16 +413,16 @@ func (a *app) printRunSummary(out statusOutput) {
 	if out.Hint != "" {
 		fmt.Fprintf(a.stdout, "  hint: %s\n", out.Hint)
 	}
-	for _, t := range out.Tasks {
-		line := fmt.Sprintf("    %s %-24s %s", t.ID, t.Name, t.Status)
-		if t.WaitingReason != nil && *t.WaitingReason != "" {
-			line += "（waiting_reason=" + *t.WaitingReason + "）"
+	for _, rr := range out.Runners {
+		line := fmt.Sprintf("    seq=%d %-24s %-24s %s", rr.Seq, rr.Name, rr.RunnerName, rr.Status)
+		if rr.WaitingReason != nil && *rr.WaitingReason != "" {
+			line += "（waiting_reason=" + *rr.WaitingReason + "）"
 		}
 		fmt.Fprintln(a.stdout, line)
 	}
 }
 
-type taskCounts struct {
+type runnerCountsShape struct {
 	Total     int `json:"total"`
 	Pending   int `json:"pending"`
 	Running   int `json:"running"`
@@ -430,22 +431,25 @@ type taskCounts struct {
 	Skipped   int `json:"skipped"`
 }
 
-func parseTaskCounts(raw json.RawMessage) *taskCounts {
+func parseRunnerCounts(raw json.RawMessage) *runnerCountsShape {
 	if len(raw) == 0 {
 		return nil
 	}
-	var c taskCounts
+	var c runnerCountsShape
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil
 	}
 	return &c
 }
 
+// parseTaskCounts 是 v1 遗留名（保留编译兼容）。
+func parseTaskCounts(raw json.RawMessage) *runnerCountsShape { return parseRunnerCounts(raw) }
+
 // ---- report / logs --------------------------------------------------------
 
 func (a *app) cmdReport(args []string) int {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
-	md := fs.Bool("md", false, "打印 report.md 原文（GET /runs/{id}/report.md）")
+	md := fs.Bool("md", false, "打印 report.md 原文（GET /tasks/{id}/report.md）")
 	jsonOut := &a.jsonOut
 	fs.BoolVar(jsonOut, "json", a.jsonOut, "机器可读输出（单行 JSON）")
 	pos, err := parseArgs(fs, args)
@@ -453,10 +457,10 @@ func (a *app) cmdReport(args []string) int {
 		return a.flagError(err)
 	}
 	if len(pos) != 1 {
-		return a.usageError("用法: tpctl report <run_id> [--md]")
+		return a.usageError("用法: argus report <task_id> [--md]")
 	}
 
-	path := "/api/v1/runs/" + pathEscape(pos[0]) + "/report"
+	path := "/api/v1/tasks/" + pathEscape(pos[0]) + "/report"
 	if *md {
 		path += ".md"
 	}
@@ -464,11 +468,11 @@ func (a *app) cmdReport(args []string) int {
 	if err != nil {
 		var apiErr *apiError
 		if errors.As(err, &apiErr) && apiErr.Status == 404 {
-			hint := "报告尚未生成（run.finished 后异步生成）"
+			hint := "报告尚未生成（task.finished 后异步生成）"
 			if apiErr.RetryAfter != "" {
 				hint += "，建议 " + apiErr.RetryAfter + " 秒后重试"
 			}
-			fmt.Fprintf(a.stderr, "tpctl: %s\n", hint)
+			fmt.Fprintf(a.stderr, "argus: %s\n", hint)
 			return a.fail(err)
 		}
 		return a.fail(err)
@@ -491,7 +495,8 @@ func (a *app) cmdReport(args []string) int {
 
 func (a *app) cmdLogs(args []string) int {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
-	attempt := fs.Int("attempt", 1, "Attempt 序号（从 1 开始）")
+	attempt := fs.Int("attempt", 1, "attempt 序号（从 1 开始）")
+	runnerSeq := fs.Int("runner-seq", 0, "runner 执行序（从 1 开始；缺省取管道第一个失败 runner）")
 	offset := fs.Int64("offset", 0, "起始字节偏移")
 	tail := fs.Int("tail", 0, "只取最后 N 行")
 	limit := fs.Int64("limit", 0, "本次返回的字节上限（服务端收敛到 ≤64 KiB）")
@@ -503,7 +508,7 @@ func (a *app) cmdLogs(args []string) int {
 		return a.flagError(err)
 	}
 	if len(pos) != 1 {
-		return a.usageError("用法: tpctl logs <task_id> [--attempt 1] [--offset N] [--tail N]")
+		return a.usageError("用法: argus logs <task_id> [--attempt 1] [--runner-seq N] [--offset N] [--tail N]")
 	}
 	if *attempt < 1 {
 		return a.usageError("--attempt 必须 ≥1")
@@ -521,6 +526,42 @@ func (a *app) cmdLogs(args []string) int {
 		return a.usageError("--tail 必须 ≥0")
 	}
 
+	// --runner-seq 缺省：从详情里取管道第一个失败（或已结束）的 runner。
+	seq := *runnerSeq
+	if seq == 0 {
+		detail, derr := a.api.get(context.Background(), "/api/v1/tasks/"+pathEscape(pos[0]), nil)
+		if derr != nil {
+			return a.fail(derr)
+		}
+		var v struct {
+			Runners []struct {
+				Seq    int    `json:"seq"`
+				Status string `json:"status"`
+			} `json:"runners"`
+		}
+		_ = json.Unmarshal(detail.Body, &v)
+		fallback := 0
+		for _, rr := range v.Runners {
+			switch rr.Status {
+			case "failed", "canceled":
+				seq = rr.Seq
+			case "succeeded", "skipped":
+				if fallback == 0 {
+					fallback = rr.Seq
+				}
+			}
+			if seq != 0 {
+				break
+			}
+		}
+		if seq == 0 {
+			seq = fallback
+		}
+		if seq == 0 {
+			return a.usageError("该 attempt 没有已结束的 runner，请显式给 --runner-seq")
+		}
+	}
+
 	q := url.Values{}
 	if *stream != "" {
 		q.Set("stream", *stream)
@@ -534,7 +575,7 @@ func (a *app) cmdLogs(args []string) int {
 	if *tail > 0 {
 		q.Set("tail", strconv.Itoa(*tail))
 	}
-	path := fmt.Sprintf("/api/v1/tasks/%s/attempts/%d/logs", pathEscape(pos[0]), *attempt)
+	path := fmt.Sprintf("/api/v1/tasks/%s/attempts/%d/runners/%d/logs", pathEscape(pos[0]), *attempt, seq)
 	res, err := a.api.get(context.Background(), path, q)
 	if err != nil {
 		return a.fail(err)
@@ -550,12 +591,13 @@ func (a *app) cmdLogs(args []string) int {
 
 	if *jsonOut {
 		out := map[string]any{
-			"task_id":  pos[0],
-			"attempt":  *attempt,
-			"stream":   streamOrDefault(*stream),
-			"offset":   *offset,
-			"coverage": res.Header.Get("X-Log-Coverage"),
-			"text":     string(res.Body),
+			"task_id":    pos[0],
+			"attempt":    *attempt,
+			"runner_seq": seq,
+			"stream":     streamOrDefault(*stream),
+			"offset":     *offset,
+			"coverage":   res.Header.Get("X-Log-Coverage"),
+			"text":       string(res.Body),
 		}
 		if *tail > 0 {
 			out["tail"] = *tail
@@ -578,6 +620,76 @@ func (a *app) cmdLogs(args []string) int {
 	return exitOK
 }
 
+// cmdRetry 是整 Task 重试（POST /tasks/{id}/retry；超限 409 ATTEMPT_EXHAUSTED）。
+func (a *app) cmdRetry(args []string) int {
+	fs := flag.NewFlagSet("retry", flag.ContinueOnError)
+	taskID := fs.String("task-id", "", "Task ID（--task-id 取代 v1 的 --run-id）")
+	jsonOut := &a.jsonOut
+	fs.BoolVar(jsonOut, "json", a.jsonOut, "机器可读输出")
+	if _, err := parseArgs(fs, args); err != nil {
+		return a.flagError(err)
+	}
+	if *taskID == "" {
+		return a.usageError("用法: argus retry --task-id <task_id>（整 Task 新 attempt 全量重跑，含 fresh deploy）")
+	}
+	res, err := a.api.post(context.Background(), "/api/v1/tasks/"+pathEscape(*taskID)+"/retry", nil, nil, "")
+	if err != nil {
+		return a.fail(err)
+	}
+	if *jsonOut {
+		writeCompactJSON(a.stdout, res.Body)
+		return exitOK
+	}
+	var v struct {
+		TaskID    string `json:"task_id"`
+		AttemptNo int    `json:"attempt_no"`
+		Status    string `json:"status"`
+	}
+	_ = json.Unmarshal(res.Body, &v)
+	fmt.Fprintf(a.stdout, "重试已受理：attempt_no=%d status=%s\n", v.AttemptNo, v.Status)
+	return exitOK
+}
+
+// cmdClean 是泄漏重放（POST /tasks/{id}/clean，§9.3；幂等）。
+func (a *app) cmdClean(args []string) int {
+	fs := flag.NewFlagSet("clean", flag.ContinueOnError)
+	taskID := fs.String("task-id", "", "Task ID（--task-id 取代 v1 的 --run-id）")
+	attempt := fs.Int("attempt", 0, "要重放的 attempt 序号；0 = 最后一个 attempt")
+	force := fs.Bool("force", false, "该 attempt 已有成功 clean 记录时显式放行")
+	jsonOut := &a.jsonOut
+	fs.BoolVar(jsonOut, "json", a.jsonOut, "机器可读输出")
+	if _, err := parseArgs(fs, args); err != nil {
+		return a.flagError(err)
+	}
+	if *taskID == "" {
+		return a.usageError("用法: argus clean --task-id <task_id> [--attempt N] [--force]（泄漏重放，§9.3）")
+	}
+	body := map[string]any{"force": *force}
+	if *attempt > 0 {
+		body["attempt"] = *attempt
+	}
+	raw, _ := json.Marshal(body)
+	res, err := a.api.post(context.Background(), "/api/v1/tasks/"+pathEscape(*taskID)+"/clean", nil, raw, "application/json")
+	if err != nil {
+		return a.fail(err)
+	}
+	if *jsonOut {
+		writeCompactJSON(a.stdout, res.Body)
+		return exitOK
+	}
+	var v struct {
+		TaskID    string `json:"task_id"`
+		AttemptNo int    `json:"attempt_no"`
+		Runner    struct {
+			Seq  int    `json:"seq"`
+			Name string `json:"name"`
+		} `json:"runner"`
+	}
+	_ = json.Unmarshal(res.Body, &v)
+	fmt.Fprintf(a.stdout, "clean 重放已受理：attempt_no=%d seq=%d name=%s\n", v.AttemptNo, v.Runner.Seq, v.Runner.Name)
+	return exitOK
+}
+
 // ---- cancel ---------------------------------------------------------------
 
 type cancelOutput struct {
@@ -591,35 +703,25 @@ type cancelOutput struct {
 
 func (a *app) cmdCancel(args []string) int {
 	fs := flag.NewFlagSet("cancel", flag.ContinueOnError)
-	taskID := fs.String("task", "", "取消单个 Task（与 run_id 二选一）")
+	taskID := fs.String("task-id", "", "Task ID（--task-id 取代 v1 的 --run-id）")
 	jsonOut := &a.jsonOut
 	fs.BoolVar(jsonOut, "json", a.jsonOut, "机器可读输出")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return a.flagError(err)
 	}
-
-	if *taskID != "" {
-		if len(pos) > 0 {
-			return a.usageError("cancel --task <task_id> 不接受位置参数")
-		}
-		return a.cancelTarget("task", *taskID, *jsonOut)
+	if *taskID == "" && len(pos) == 1 {
+		*taskID = pos[0]
 	}
-	if len(pos) != 1 {
-		return a.usageError("用法: tpctl cancel <run_id> | --task <task_id>")
+	if *taskID == "" {
+		return a.usageError("用法: argus cancel <task_id>（v2 只有 Task 级取消；取消先执行 service-clean 再落 canceled）")
 	}
-	return a.cancelTarget("run", pos[0], *jsonOut)
+	return a.cancelTarget("task", *taskID, *jsonOut)
 }
 
 func (a *app) cancelTarget(target, id string, jsonOut bool) int {
-	var cancelPath, getPath string
-	if target == "task" {
-		cancelPath = "/api/v1/tasks/" + pathEscape(id) + "/cancel"
-		getPath = "/api/v1/tasks/" + pathEscape(id)
-	} else {
-		cancelPath = "/api/v1/runs/" + pathEscape(id) + "/cancel"
-		getPath = "/api/v1/runs/" + pathEscape(id)
-	}
+	cancelPath := "/api/v1/tasks/" + pathEscape(id) + "/cancel"
+	getPath := "/api/v1/tasks/" + pathEscape(id)
 
 	res, err := a.api.post(context.Background(), cancelPath, nil, nil, "")
 	if err != nil {
@@ -654,10 +756,10 @@ func statusFromBody(body []byte) string {
 	return v.Status
 }
 
-// ---- testers / queue / profiles -------------------------------------------
+// ---- runners / queue / profiles -------------------------------------------
 
-func (a *app) cmdTesters(args []string) int {
-	fs := flag.NewFlagSet("testers", flag.ContinueOnError)
+func (a *app) cmdRunners(args []string) int {
+	fs := flag.NewFlagSet("runners", flag.ContinueOnError)
 	role := fs.String("role", "", "按角色过滤：test|pre_check")
 	retired := fs.Bool("include-retired", false, "包含已退役的历史版本（器 #60）")
 	orphaned := fs.Bool("orphaned", false, "等价于 --include-retired（旧名，保留兼容）")
@@ -668,7 +770,7 @@ func (a *app) cmdTesters(args []string) int {
 		return a.flagError(err)
 	}
 	if len(pos) > 0 {
-		return a.usageError("testers 不接受位置参数")
+		return a.usageError("runners 不接受位置参数")
 	}
 	if *role != "" && *role != "test" && *role != "pre_check" {
 		return a.usageError("--role 只能是 test|pre_check")
@@ -681,7 +783,7 @@ func (a *app) cmdTesters(args []string) int {
 		q.Set("include_retired", "true")
 	}
 
-	res, err := a.api.get(context.Background(), "/api/v1/testers", q)
+	res, err := a.api.get(context.Background(), "/api/v1/runners", q)
 	if err != nil {
 		return a.fail(err)
 	}
@@ -702,10 +804,10 @@ func (a *app) cmdTesters(args []string) int {
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(res.Body, &list); err != nil {
-		return a.fail(fmt.Errorf("控制面返回了无法解析的 Tester 列表: %w", err))
+		return a.fail(fmt.Errorf("控制面返回了无法解析的 Runner 列表: %w", err))
 	}
 	if len(list.Items) == 0 {
-		fmt.Fprintln(a.stdout, "（没有 Tester）")
+		fmt.Fprintln(a.stdout, "（没有 Runner）")
 		return exitOK
 	}
 	for _, t := range list.Items {
@@ -866,29 +968,26 @@ type artifactList struct {
 
 func (a *app) cmdArtifacts(args []string) int {
 	fs := flag.NewFlagSet("artifacts", flag.ContinueOnError)
-	taskID := fs.String("task", "", "Task ID（与 run_id 二选一）")
-	attempt := fs.Int("attempt", 1, "Attempt 序号（给 --task 时使用）")
+	attempt := fs.Int("attempt", 1, "attempt 序号（runner 级时使用）")
+	runnerSeq := fs.Int("runner-seq", 0, "runner 执行序（给定时返回 runner 级清单）")
 	jsonOut := &a.jsonOut
 	fs.BoolVar(jsonOut, "json", a.jsonOut, "机器可读输出")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return a.flagError(err)
 	}
+	if len(pos) != 1 {
+		return a.usageError("用法: argus artifacts <task_id> [--attempt 1 --runner-seq N]")
+	}
+	if *runnerSeq > 0 && *attempt < 1 {
+		return a.usageError("--attempt 必须 ≥1")
+	}
 
 	var path string
-	if *taskID != "" {
-		if len(pos) > 0 {
-			return a.usageError("artifacts --task <task_id> 不接受位置参数")
-		}
-		if *attempt < 1 {
-			return a.usageError("--attempt 必须 ≥1")
-		}
-		path = fmt.Sprintf("/api/v1/tasks/%s/attempts/%d/artifacts", pathEscape(*taskID), *attempt)
+	if *runnerSeq > 0 {
+		path = fmt.Sprintf("/api/v1/tasks/%s/attempts/%d/runners/%d/artifacts", pathEscape(pos[0]), *attempt, *runnerSeq)
 	} else {
-		if len(pos) != 1 {
-			return a.usageError("用法: tpctl artifacts <run_id> | --task <task_id> [--attempt 1]")
-		}
-		path = "/api/v1/runs/" + pathEscape(pos[0]) + "/artifacts"
+		path = "/api/v1/tasks/" + pathEscape(pos[0]) + "/artifacts"
 	}
 
 	res, err := a.api.get(context.Background(), path, nil)
@@ -905,7 +1004,7 @@ func (a *app) cmdArtifacts(args []string) int {
 		return a.fail(fmt.Errorf("控制面返回了无法解析的产物清单: %w", err))
 	}
 	fmt.Fprintf(a.stdout, "产物 %d 个，共 %s\n", len(list.Items), humanBytes(list.TotalSizeBytes))
-	order := []string{"result", "raw", "log", "report", "other"}
+	order := []string{"result", "raw", "log", "report", "export", "other"}
 	seen := map[string]bool{}
 	groups := list.ByKind
 	if len(groups) == 0 && len(list.Items) > 0 {
@@ -967,9 +1066,9 @@ func (a *app) cmdFiles(args []string) int {
 		return a.flagError(err)
 	}
 	if len(pos) != 2 {
-		return a.usageError("用法: tpctl files <run_id> <path> [--out <file>] [--range 0-1023]")
+		return a.usageError("用法: argus files <task_id> <path> [--out <file>] [--range 0-1023]")
 	}
-	runID, relPath := pos[0], pos[1]
+	taskID, relPath := pos[0], pos[1]
 	if relPath == "" {
 		return a.usageError("path 不能为空")
 	}
@@ -979,7 +1078,7 @@ func (a *app) cmdFiles(args []string) int {
 	}
 	// artifacts 返回的是 storage-root 相对路径（含 <run_id>/ 前缀），/files 要 run 内相对路径；
 	// 两种写法都接受，统一剥离前缀。
-	apiPath := normalizeRunFilePath(runID, relPath)
+	apiPath := normalizeTaskFilePath(taskID, relPath)
 	if apiPath == "" {
 		return a.usageError("path 不能为空")
 	}
@@ -995,7 +1094,7 @@ func (a *app) cmdFiles(args []string) int {
 		headers["Range"] = rangeValue
 	}
 	// 流式下载：单文件契约上限 1 GiB，不能整段读进内存。
-	resp, err := a.api.getStream(context.Background(), "/api/v1/runs/"+pathEscape(runID)+"/files", q, headers)
+	resp, err := a.api.getStream(context.Background(), "/api/v1/tasks/"+pathEscape(taskID)+"/files", q, headers)
 	if err != nil {
 		return a.fail(err)
 	}
@@ -1051,7 +1150,7 @@ func (a *app) cmdFiles(args []string) int {
 	}
 
 	info := map[string]any{
-		"run_id":           runID,
+		"task_id":          taskID,
 		"path":             relPath,
 		"api_path":         apiPath,
 		"http_status":      status,
@@ -1080,7 +1179,7 @@ func (a *app) cmdFiles(args []string) int {
 	}
 
 	// 没有 --out：body 已原样写 stdout，元数据写 stderr。
-	fmt.Fprintf(a.stderr, "tpctl: 下载 %s（%s，HTTP %d，sha256=%s，scope=%s）\n",
+	fmt.Fprintf(a.stderr, "argus: 下载 %s（%s，HTTP %d，sha256=%s，scope=%s）\n",
 		relPath, humanBytes(size), status, sha, scope)
 	return exitOK
 }
@@ -1146,13 +1245,13 @@ func parseContentRangeTotal(header string) (int64, bool) {
 
 func pathEscape(id string) string { return url.PathEscape(id) }
 
-// normalizeRunFilePath 容忍两种产物路径写法：
-//   - artifacts 返回的 storage-root 相对路径（`<run_id>/tasks/...`）；
-//   - /files?path= 需要的 run 目录内相对路径（`tasks/...`）。
-func normalizeRunFilePath(runID, p string) string {
+// normalizeTaskFilePath 容忍两种产物路径写法：
+//   - artifacts 返回的 storage-root 相对路径（`<task_id>/attempts/...`）；
+//   - /files?path= 需要的 task 目录内相对路径（`attempts/...`）。
+func normalizeTaskFilePath(taskID, p string) string {
 	p = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(p), "/"))
-	if runID != "" {
-		p = strings.TrimPrefix(p, strings.TrimSpace(runID)+"/")
+	if taskID != "" {
+		p = strings.TrimPrefix(p, strings.TrimSpace(taskID)+"/")
 	}
 	return p
 }
@@ -1164,9 +1263,10 @@ func streamOrDefault(stream string) string {
 	return stream
 }
 
-func isTerminalRunStatus(status string) bool {
+// isTerminalTaskStatus 是 Task 终态（v2 4 个终态；无 completed_with_errors，D-73）。
+func isTerminalTaskStatus(status string) bool {
 	switch status {
-	case "succeeded", "completed_with_errors", "service_unavailable", "failed", "canceled":
+	case "succeeded", "service_unavailable", "failed", "canceled":
 		return true
 	default:
 		return false

@@ -10,6 +10,10 @@
 // （cluster-scoped）与 podgroups（namespaced）；轮询 + 15s TTL 缓存 + 单飞，失败退避 60s，
 // **不用 informer**（不需要 watch 语义，RBAC 也就可以只给 get/list）。
 //
+// 依赖方向（v2 调整）：快照 DTO（VolcanoQueue / VolcanoSnapshot）与降级四态常量定义在
+// **本包**，`internal/api` 反向消费（api 层用类型别名对齐即可）——底层包不 import 上层
+// 包，否则上层（api/orchestrator）改造期会连带打断底层包的独立编译。
+//
 // 红线（D-46）：不可达 ≠ 0 排队。任何降级都只产出 `available=false` + 四态 detail +
 // 空 queues，绝不渲染成"队列空闲 / 无排队"；也绝不阻塞 `/queue-status` 的其它两块。
 package k8s
@@ -30,9 +34,43 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
-
-	"github.com/ucm-system/testplane/server/internal/api"
 )
+
+// Volcano 快照的四个降级态（openapi `VolcanoSnapshot.detail` 枚举）。
+// 红线：**不可达 ≠ 0 排队**——任何一态都不得渲染成"空闲/无排队"。
+const (
+	VolcanoCRDMissing           = "crd_missing"           // 集群没装 Volcano
+	VolcanoRBACForbidden        = "rbac_forbidden"        // 有 CRD 但无权读
+	VolcanoSchedulerUnavailable = "scheduler_unavailable" // 超时/连不上/未接入
+	VolcanoDisabled             = "disabled"              // 装了但调度未启用
+)
+
+// VolcanoQueue 是 openapi `VolcanoQueue` 的投影（只读快照，不做单位换算）。
+type VolcanoQueue struct {
+	Name               string            `json:"name"`
+	State              *string           `json:"state"`
+	Capability         map[string]string `json:"capability"`
+	Allocated          map[string]string `json:"allocated"`
+	PendingJobs        int               `json:"pending_jobs"`
+	LongestWaitSeconds int               `json:"longest_wait_seconds"`
+	Reason             *string           `json:"reason"`
+}
+
+// VolcanoSnapshot 是 `queue-status.volcano` 块。Provider 为 nil 时默认降级为
+// scheduler_unavailable（未接入调度器探针 ≠ 没有排队）。
+type VolcanoSnapshot struct {
+	Available bool           `json:"available"`
+	Detail    *string        `json:"detail"`
+	Queues    []VolcanoQueue `json:"queues"`
+	Stale     bool           `json:"stale,omitempty"`
+}
+
+// VolcanoProvider 是本包对外提供的只读快照能力（api 层按此消费；dynamic client
+// 读 Volcano CRD，15s TTL + 单飞）。只读、不得阻塞 `/queue-status`：实现方必须
+// 自己带超时并在失败时返回降级快照。
+type VolcanoProvider interface {
+	VolcanoSnapshot(ctx context.Context) VolcanoSnapshot
+}
 
 const (
 	// VolcanoAPIGroup 是 Volcano 的 API 组（只读 queues/podgroups）。
@@ -68,7 +106,7 @@ type VolcanoOptions struct {
 	// Enabled=false 时直接降级为 `disabled`（平台侧关闭队列调度），不打 API。
 	Enabled bool
 	// Cluster 是队列名的前缀来源（`"<cluster>/<queue>"`，零契约变更；P0 单集群也带前缀，
-	// 取 TESTPLANE_CLUSTER_NAME）。为空则不带前缀。
+	// 取 AG_DEFAULT_CLUSTER）。为空则不带前缀。
 	Cluster string
 	// Namespaces 是 List podgroups 的 namespace 列表。空 = 全部 namespace（需要集群级
 	// list 权限，RBAC 已经给了）；元素为 `*` 也表示全部。
@@ -101,7 +139,7 @@ func (o VolcanoOptions) withDefaults() VolcanoOptions {
 	return o
 }
 
-// Volcano 是 api.VolcanoProvider 的真实实现（只读快照 + TTL 缓存 + 单飞）。
+// Volcano 是 VolcanoProvider 的真实实现（只读快照 + TTL 缓存 + 单飞）。
 //
 // 并发模型：`mu` 保护缓存与在飞标记；同一时刻最多一个 goroutine 在打 API
 // （`/queue-status` 是 30s 轮询的公共端点，看板一开就是多客户端同时打）。
@@ -110,15 +148,15 @@ type Volcano struct {
 	opt VolcanoOptions
 
 	mu         sync.Mutex
-	snap       api.VolcanoSnapshot // 最近一次刷新的结果（成功或降级）
-	at         time.Time           // 最近一次刷新的时刻
-	loaded     bool                // 是否已经刷过一次（区分"从没数据"与"上次数据")
-	inflight   chan struct{}       // 非 nil 表示有刷新在飞；关闭即完成
-	retryAfter time.Time           // 失败退避窗口：此刻之前不再刷新
-	failStreak int                 // 连续失败次数（只为"每轮只打一条日志"）
+	snap       VolcanoSnapshot // 最近一次刷新的结果（成功或降级）
+	at         time.Time       // 最近一次刷新的时刻
+	loaded     bool            // 是否已经刷过一次（区分"从没数据"与"上次数据")
+	inflight   chan struct{}   // 非 nil 表示有刷新在飞；关闭即完成
+	retryAfter time.Time       // 失败退避窗口：此刻之前不再刷新
+	failStreak int             // 连续失败次数（只为"每轮只打一条日志"）
 }
 
-var _ api.VolcanoProvider = (*Volcano)(nil)
+var _ VolcanoProvider = (*Volcano)(nil)
 
 // NewVolcano 按与 executor 相同的凭据链（in-cluster / kubeconfig，见 client.go）
 // 构造 dynamic client。配错了立刻报错，由调用方决定降级还是退出。
@@ -157,15 +195,15 @@ func NewVolcanoWithDynamic(dyn dynamic.Interface, vo VolcanoOptions) *Volcano {
 	return &Volcano{dyn: dyn, opt: vo}
 }
 
-// VolcanoSnapshot 实现 api.VolcanoProvider：命中 TTL 直接回缓存，未命中走单飞刷新，
+// VolcanoSnapshot 实现 VolcanoProvider：命中 TTL 直接回缓存，未命中走单飞刷新，
 // 刷新失败只降级本块（永远返回，不阻塞、不 panic、不返回 0 排队）。
-func (v *Volcano) VolcanoSnapshot(ctx context.Context) api.VolcanoSnapshot {
+func (v *Volcano) VolcanoSnapshot(ctx context.Context) VolcanoSnapshot {
 	if v == nil {
-		return volcanoUnavailable(api.VolcanoSchedulerUnavailable, false)
+		return volcanoUnavailable(VolcanoSchedulerUnavailable, false)
 	}
 	// 配置关闭：不打 API，直接四态里的 disabled（"平台未启用队列调度"）。
 	if !v.opt.Enabled {
-		return volcanoUnavailable(api.VolcanoDisabled, false)
+		return volcanoUnavailable(VolcanoDisabled, false)
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -230,21 +268,21 @@ func (v *Volcano) VolcanoSnapshot(ctx context.Context) api.VolcanoSnapshot {
 
 // currentLocked 返回当前（可能过期的）快照；从没刷新成功过就报 scheduler_unavailable。
 // 调用方必须持有 v.mu。
-func (v *Volcano) currentLocked() api.VolcanoSnapshot {
+func (v *Volcano) currentLocked() VolcanoSnapshot {
 	if v.loaded {
 		return v.snap
 	}
-	return volcanoUnavailable(api.VolcanoSchedulerUnavailable, false)
+	return volcanoUnavailable(VolcanoSchedulerUnavailable, false)
 }
 
 // refresh 打一次 API：先 queues（小、稳定），再 podgroups（大）；任一失败即整体降级
 // （openapi：不可达时 queues 为 `[]`，不做"半可用"）。
-func (v *Volcano) refresh(parent context.Context) (api.VolcanoSnapshot, error) {
+func (v *Volcano) refresh(parent context.Context) (VolcanoSnapshot, error) {
 	ctx, cancel := context.WithTimeout(parent, v.opt.Timeout)
 	defer cancel()
 
 	if v.dyn == nil {
-		return volcanoUnavailable(api.VolcanoSchedulerUnavailable, false),
+		return volcanoUnavailable(VolcanoSchedulerUnavailable, false),
 			fmt.Errorf("k8s: volcano dynamic client 未配置")
 	}
 
@@ -257,7 +295,7 @@ func (v *Volcano) refresh(parent context.Context) (api.VolcanoSnapshot, error) {
 		return volcanoUnavailable(classifyVolcanoError(err), false), fmt.Errorf("list podgroups: %w", err)
 	}
 
-	return api.VolcanoSnapshot{
+	return VolcanoSnapshot{
 		Available: true,
 		Queues:    v.buildQueues(queueList, groups, v.opt.Now()),
 	}, nil
@@ -313,17 +351,17 @@ type podGroup struct {
 }
 
 // buildQueues 把 Queue List + PodGroup 投影拼成 DTO 列表（字段映射见 C-4.8.1）。
-func (v *Volcano) buildQueues(list *unstructured.UnstructuredList, groups []podGroup, now time.Time) []api.VolcanoQueue {
+func (v *Volcano) buildQueues(list *unstructured.UnstructuredList, groups []podGroup, now time.Time) []VolcanoQueue {
 	byQueue := make(map[string][]podGroup, len(groups))
 	for _, g := range groups {
 		byQueue[g.queue] = append(byQueue[g.queue], g)
 	}
 
-	out := make([]api.VolcanoQueue, 0, len(list.Items))
+	out := make([]VolcanoQueue, 0, len(list.Items))
 	for i := range list.Items {
 		u := &list.Items[i]
 		name := u.GetName()
-		q := api.VolcanoQueue{
+		q := VolcanoQueue{
 			Name:       v.queueName(name),
 			State:      nestedStringPtr(u, "status", "state"),
 			Capability: nestedStringMap(u, "spec", "capability"),
@@ -450,30 +488,30 @@ func podGroupReason(u *unstructured.Unstructured) string {
 func classifyVolcanoError(err error) string {
 	switch {
 	case err == nil:
-		return api.VolcanoSchedulerUnavailable
+		return VolcanoSchedulerUnavailable
 	case apierrors.IsForbidden(err):
-		return api.VolcanoRBACForbidden
+		return VolcanoRBACForbidden
 	case apierrors.IsNotFound(err), meta.IsNoMatchError(err):
 		// CRD 没装：apiserver 对未知 group/version 回 404，discovery 缺失回 NoMatch。
-		return api.VolcanoCRDMissing
+		return VolcanoCRDMissing
 	default:
 		// 超时 / 连接失败 / 其余 —— 调度器不可达，不是"没有排队"。
-		return api.VolcanoSchedulerUnavailable
+		return VolcanoSchedulerUnavailable
 	}
 }
 
 // volcanoUnavailable 是唯一的降级出口：available=false + 空 queues（红线：不可达 ≠ 0 排队）。
-func volcanoUnavailable(detail string, stale bool) api.VolcanoSnapshot {
+func volcanoUnavailable(detail string, stale bool) VolcanoSnapshot {
 	d := detail
-	return api.VolcanoSnapshot{
+	return VolcanoSnapshot{
 		Available: false,
 		Detail:    &d,
-		Queues:    []api.VolcanoQueue{},
+		Queues:    []VolcanoQueue{},
 		Stale:     stale,
 	}
 }
 
-func detailOf(snap api.VolcanoSnapshot) string {
+func detailOf(snap VolcanoSnapshot) string {
 	if snap.Detail == nil {
 		return ""
 	}

@@ -13,28 +13,32 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 
+	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/ports"
 )
 
-// 执行层对外暴露的错误码（附录 D 的子集）。JobOutcome 没有专门的 code 字段，
-// 因此码以 "<CODE>: <人类可读细节>" 的形式放进 Message，由 OutcomeCode 取回。
+// 执行层对外暴露的错误码（附录 D v2 的子集；v2 更名 D-73：
+// TESTER_NONZERO_EXIT→RUNNER_NONZERO_EXIT、TASK_TIMEOUT→RUNNER_TIMEOUT）。
+// JobOutcome 没有专门的 code 字段，因此码以 "<CODE>: <人类可读细节>" 的形式放进
+// Message，由 OutcomeCode 取回。
 const (
-	CodeTesterNonZeroExit = "TESTER_NONZERO_EXIT"
-	CodeTaskTimeout       = "TASK_TIMEOUT"
-	CodeImagePullFailed   = "IMAGE_PULL_FAILED"
-	CodeMountUnavailable  = "MOUNT_UNAVAILABLE"
-	CodeInternalError     = "INTERNAL_ERROR"
-	CodeExecutorUnavail   = "EXECUTOR_UNAVAILABLE"
+	CodeRunnerNonZeroExit = domain.CodeRunnerNonzeroExit // "RUNNER_NONZERO_EXIT"
+	CodeRunnerTimeout     = domain.CodeRunnerTimeout     // "RUNNER_TIMEOUT"
+	CodeImagePullFailed   = domain.CodeImagePullFailed   // "IMAGE_PULL_FAILED"
+	CodeMountUnavailable  = domain.CodeMountUnavailable  // "MOUNT_UNAVAILABLE"
+	CodeInternalError     = domain.CodeInternalError     // "INTERNAL_ERROR"
+	CodeExecutorUnavail   = domain.CodeExecutorUnavailable
 	// CodeExecutorPodError 是 Pod 异常终止（Evicted/OOMKilled/节点驱逐）：
-	// 平台侧错误、可重试；detail.k8s_reason 保留 K8s 原文（票 #22）。
-	CodeExecutorPodError = "EXECUTOR_POD_ERROR"
+	// 平台侧错误、可重试；detail.k8s_reason 保留 K8s 原文原因（附录 D / 票 #22）。
+	CodeExecutorPodError = domain.CodeExecutorPodError
 )
 
-// 观测相位（ports.JobOutcome.Phase 的取值）。
+// 观测相位（ports.JobOutcome.Phase 的取值，附录 B 枚举）。
 const (
 	PhaseSucceeded = "succeeded"
 	PhaseFailed    = "failed"
 	PhaseTimeout   = "timeout"
+	PhaseCanceled  = "canceled"
 	PhaseUnknown   = "unknown"
 )
 
@@ -262,7 +266,7 @@ func classifyOutcome(job *batchv1.Job, pod *corev1.Pod, now time.Time) (*ports.J
 	if podTerminal {
 		out.Phase = phaseFromPod(podExit, podReason)
 		if isPodAbnormalReason(podReason) {
-			// Pod 异常终止（Evicted/OOMKilled/…）：平台侧错误码 + K8s 原文原因（票 #22）。
+			// Pod 异常终止（Evicted/OOMKilled/…）：平台侧错误码 + K8s 原文原因（附录 D）。
 			out.Phase = PhaseFailed
 			out.Message = CodeExecutorPodError + ": " + reasonText(podMessage, podReason)
 			out.K8sReason = podK8sReason
@@ -289,11 +293,11 @@ func classifyOutcome(job *batchv1.Job, pod *corev1.Pod, now time.Time) (*ports.J
 				out.FinishedAt = finished
 				if c.Reason == "DeadlineExceeded" {
 					out.Phase = PhaseTimeout
-					out.Message = CodeTaskTimeout + ": " + reasonText(c.Message, c.Reason)
+					out.Message = CodeRunnerTimeout + ": " + reasonText(c.Message, c.Reason)
 					return out, true
 				}
 				out.Phase = PhaseFailed
-				code := CodeTesterNonZeroExit
+				code := CodeRunnerNonZeroExit
 				if c.Reason == "BackoffLimitExceeded" {
 					code = reasonCodeFromPods(job, podReason, podExit)
 				}
@@ -304,7 +308,7 @@ func classifyOutcome(job *batchv1.Job, pod *corev1.Pod, now time.Time) (*ports.J
 		// Job 没写 condition 但墓碑字段已到：兜底判失败。
 		if job.Status.Failed > 0 && job.Status.Active == 0 && job.Status.Succeeded == 0 {
 			out.Phase = PhaseFailed
-			out.Message = CodeTesterNonZeroExit + ": job failed (" + reasonText("", "no condition") + ")"
+			out.Message = CodeRunnerNonZeroExit + ": job failed (" + reasonText("", "no condition") + ")"
 			out.FinishedAt = finished
 			return out, true
 		}
@@ -326,7 +330,7 @@ func jobTerminal(job *batchv1.Job) bool {
 }
 
 // isPodAbnormalReason 报告 Pod 是否因**平台/节点**原因异常终止。
-// 注意：**Unschedulable 不在此列**（06 §6.9 / 附录 D：仍留排队态，不许判失败）。
+// 注意：**Unschedulable 不在此列**（ARCHITECTURE §6.9 / 附录 D：仍留排队态，不许判失败）。
 func isPodAbnormalReason(reason string) bool {
 	switch reason {
 	case "Evicted", "OOMKilled", "NodeShutdown", "NodeAffinity", "UnexpectedAdmissionError",
@@ -353,7 +357,7 @@ func messageFor(phase string, exit *int32, reason, detail string) string {
 		b.WriteString("container exited 0")
 		return b.String()
 	}
-	code := CodeTesterNonZeroExit
+	code := CodeRunnerNonZeroExit
 	if reason == "OOMKilled" || reason == "Evicted" {
 		code = CodeInternalError
 	}
@@ -372,13 +376,6 @@ func messageFor(phase string, exit *int32, reason, detail string) string {
 	return b.String()
 }
 
-func messageForOutcome(phase string, exit *int32, reason, detail string) string {
-	if phase == PhaseSucceeded {
-		return "container exited 0"
-	}
-	return messageFor(phase, exit, reason, detail)
-}
-
 func reasonText(primary, fallback string) string {
 	if strings.TrimSpace(primary) != "" {
 		return truncate(primary, 256)
@@ -393,7 +390,7 @@ func reasonCodeFromPods(job *batchv1.Job, reason string, exit *int32) string {
 	if reason == "OOMKilled" || reason == "Evicted" {
 		return CodeInternalError
 	}
-	return CodeTesterNonZeroExit
+	return CodeRunnerNonZeroExit
 }
 
 // OutcomeCode 从 JobOutcome 取回附录 D 的错误码；成功时返回空串（execution §4.5）。
@@ -411,9 +408,11 @@ func OutcomeCode(o ports.JobOutcome) string {
 	case PhaseSucceeded:
 		return ""
 	case PhaseTimeout:
-		return CodeTaskTimeout
+		return CodeRunnerTimeout
+	case PhaseCanceled:
+		return domain.CodeCanceled
 	case PhaseFailed:
-		return CodeTesterNonZeroExit
+		return CodeRunnerNonZeroExit
 	default:
 		return CodeInternalError
 	}
@@ -421,7 +420,7 @@ func OutcomeCode(o ports.JobOutcome) string {
 
 func isKnownCode(code string) bool {
 	switch code {
-	case CodeTesterNonZeroExit, CodeTaskTimeout, CodeImagePullFailed,
+	case CodeRunnerNonZeroExit, CodeRunnerTimeout, CodeImagePullFailed,
 		CodeMountUnavailable, CodeInternalError, CodeExecutorUnavail,
 		CodeExecutorPodError:
 		return true
@@ -455,7 +454,7 @@ func ParseImageDigest(imageID string) string {
 	return marker + strings.ToLower(hexPart)
 }
 
-// podImageDigest 取 Pod 第一个容器（tester）的 imageID 并解析 digest。
+// podImageDigest 取 Pod 第一个容器（runner）的 imageID 并解析 digest（D-36）。
 func podImageDigest(pod *corev1.Pod) string {
 	for _, cs := range pod.Status.ContainerStatuses {
 		if d := ParseImageDigest(cs.ImageID); d != "" {
@@ -526,8 +525,8 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// JobState 是对账（C-3.5「重启恢复与对账」）需要的 Job 观测结论：
-// 编排层据此判断"任务已死但租约还在"的僵尸状态。
+// JobState 是对账（「重启恢复与对账」）需要的 Job 观测结论：
+// 编排层据此判断"执行记录已死但 Job 还在"的僵尸状态。
 type JobState struct {
 	// Exists 表示 K8s 里还能查到该 Job（false = 已被 GC/人工删除/从未创建成功）。
 	Exists bool
@@ -546,7 +545,7 @@ func (e *Executor) Probe(ctx context.Context, h ports.JobHandle) (JobState, erro
 	out, terminal, err := e.evaluate(ctx, h)
 	switch {
 	case errors.Is(err, ErrJobNotFound):
-		// Job 与 Pod 都不在了：任务已失联，交给编排层按 EXECUTOR_LOST 收口。
+		// Job 与 Pod 都不在了：任务已失联，交给编排层按对账流程收口。
 		return JobState{Exists: false}, nil
 	case err != nil:
 		return JobState{}, err

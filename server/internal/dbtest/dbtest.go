@@ -1,7 +1,7 @@
-// Package dbtest 是**测试专用**的数据库引导：把 `TESTPLANE_TEST_DATABASE_URL`
+// Package dbtest 是**测试专用**的数据库引导：把 `AG_TEST_DATABASE_URL`
 // 归一化到独立的 `*_test*` 库，并在不同测试包之间做隔离。
 //
-// 背景（Lead 报的 P0）：测试里的迁移/清表如果跑在 dev 库（`testplane`）上，会把真数据
+// 背景（Lead 报的 P0）：测试里的迁移/清表如果跑在 dev 库（`argus`）上，会把真数据
 // drop 掉。所以这里的硬规则是：
 //
 //   - 目标库名**必须**以 `_test` 结尾（自动派生），否则一律拒绝 DDL/DROP；
@@ -24,7 +24,7 @@ import (
 )
 
 // EnvVar 是测试库连接串的环境变量名。
-const EnvVar = "TESTPLANE_TEST_DATABASE_URL"
+const EnvVar = "AG_TEST_DATABASE_URL"
 
 // URL 返回该测试包独占的库连接串。没设环境变量时返回 "", nil（调用方应 t.Skip）。
 //
@@ -56,9 +56,9 @@ func URL(purpose string) (string, error) {
 // deriveName 派生测试库名：**始终**含 `_test`（安全闸门据此判断），
 // 不同 purpose 用不同后缀，避免不同测试包互相清表。
 //
-//	testplane      + store  -> testplane_test_store
-//	testplane_test + store  -> testplane_test_store
-//	testplane      + ""     -> testplane_test
+//	argus          + store  -> argus_test_store
+//	argus_test     + store  -> argus_test_store
+//	argus          + ""     -> argus_test
 func deriveName(dbName, purpose string) string {
 	base := dbName
 	if !strings.Contains(base, "_test") {

@@ -195,22 +195,22 @@ func (c *client) do(ctx context.Context, method, path string, query url.Values, 
 	return res, nil
 }
 
-// GetRun 实现 mcp.RunReader：GET /api/v1/runs/{id} 的原始 JSON。
-func (c *client) GetRun(ctx context.Context, runID string) ([]byte, error) {
-	res, err := c.get(ctx, "/api/v1/runs/"+url.PathEscape(runID), nil)
+// GetTask 实现 mcp.TaskReader：GET /api/v1/tasks/{id} 的原始 JSON。
+func (c *client) GetTask(ctx context.Context, taskID string) ([]byte, error) {
+	res, err := c.get(ctx, "/api/v1/tasks/"+url.PathEscape(taskID), nil)
 	if err != nil {
 		return nil, err
 	}
 	return res.Body, nil
 }
 
-// OpenRunEvents 实现 mcp.RunReader：打开 SSE。不可用时返回 mcp.SSEUnavailableError，
+// OpenTaskEvents 实现 mcp.TaskReader：打开 SSE。不可用时返回 mcp.SSEUnavailableError，
 // 由 mcp.Wait 自动降级为轮询；401/403 返回 *apiError（致命，不降级）。
-func (c *client) OpenRunEvents(ctx context.Context, runID string, lastEventID int64) (io.ReadCloser, error) {
+func (c *client) OpenTaskEvents(ctx context.Context, taskID string, lastEventID int64) (io.ReadCloser, error) {
 	if c.streamHTTP == nil {
 		return nil, &mcp.SSEUnavailableError{Reason: "未初始化 SSE 客户端"}
 	}
-	target := c.baseURL + "/api/v1/runs/" + url.PathEscape(runID) + "/events"
+	target := c.baseURL + "/api/v1/tasks/" + url.PathEscape(taskID) + "/events"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, &mcp.SSEUnavailableError{Reason: "构造事件流请求失败", Err: err}

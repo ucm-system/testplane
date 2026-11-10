@@ -1,12 +1,13 @@
-// Command tpctl 是 TestPlane 控制面的 Agent 亲和 CLI（P1，最小可用）。
+// Command argus 是 Argus 控制面的 Agent 亲和 CLI（v2，子命令式）。
 //
 // 定位：REST 的薄 adapter——子命令与 `server/api/openapi.yaml` 的端点一一对应，
 // 不新增业务语义、不缓存、不写文件、不代理凭据。规格见 design/impl/agent-integration.md。
 //
-//	tpctl submit -f run.yaml --json
-//	tpctl wait r-20261105-0001 --timeout 3600
-//	tpctl report r-20261105-0001 --md
-//	tpctl mcp            # stdio 上启动 MCP server
+//	argus submit -f task.yaml --json
+//	argus wait t-20261110-0001 --timeout 3600
+//	argus report t-20261110-0001 --md
+//	argus clean --task-id t-20261110-0001   # 泄漏重放（§9.3）
+//	argus mcp                               # stdio 上启动 MCP server
 package main
 
 import (
@@ -26,10 +27,10 @@ import (
 )
 
 // 退出码语义（详见 agent-integration.md §4.3）：Agent 只靠退出码就能分支，
-// 不需要解析输出。0/1/2/3 只在 wait 上区分"Run 的结局"。
+// 不需要解析输出。0/1/2/3 只在 wait 上区分"Task 的结局"。
 const (
 	exitOK          = 0
-	exitFailure     = 1 // 命令失败，或 Run 的失败类终态（failed / completed_with_errors / service_unavailable）
+	exitFailure     = 1 // 命令失败，或 Task 的失败类终态（failed / service_unavailable）
 	exitCanceled    = 2 // wait 等到 canceled
 	exitTimeout     = 3 // wait 到总超时仍未终态
 	exitUnreachable = 4 // 连不上控制面（DNS / 连接拒绝 / 传输超时）
@@ -55,7 +56,7 @@ type app struct {
 }
 
 func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("tpctl", flag.ContinueOnError)
+	fs := flag.NewFlagSet("argus", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
 	var (
@@ -65,13 +66,13 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		jsonOut    bool
 		stdio      bool
 	)
-	fs.StringVar(&baseURL, "base-url", envOr("TESTPLANE_BASE_URL", "http://127.0.0.1:8080"),
-		"控制面地址（$TESTPLANE_BASE_URL）")
-	fs.StringVar(&token, "token", envOr("TESTPLANE_TOKEN", "dev"),
-		"Bearer token（$TESTPLANE_TOKEN；dev 模式默认 dev）")
+	fs.StringVar(&baseURL, "base-url", envOr("AG_BASE_URL", "http://127.0.0.1:8080"),
+		"控制面地址（$AG_BASE_URL）")
+	fs.StringVar(&token, "token", envOr("AG_TOKEN", "dev"),
+		"Bearer token（$AG_TOKEN；dev 模式默认 dev）")
 	fs.StringVar(&timeoutStr, "timeout", "30s", "单次 HTTP 超时（秒或 Go duration）")
 	fs.BoolVar(&jsonOut, "json", false, "机器可读输出（也可写在子命令之后）")
-	fs.BoolVar(&stdio, "stdio", false, "以 stdio 启动 MCP server（等价 tpctl mcp）")
+	fs.BoolVar(&stdio, "stdio", false, "以 stdio 启动 MCP server（等价 argus mcp）")
 
 	pos, err := parseLeadingArgs(fs, argv)
 	if err != nil {
@@ -79,28 +80,28 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			usage(stdout)
 			return exitOK
 		}
-		fmt.Fprintf(stderr, "tpctl: %v\n", err)
-		fmt.Fprintln(stderr, "运行 `tpctl help` 查看用法")
+		fmt.Fprintf(stderr, "argus: %v\n", err)
+		fmt.Fprintln(stderr, "运行 `argus help` 查看用法")
 		return exitUsage
 	}
 
 	httpTimeout, err := parseDurationLoose(timeoutStr)
 	if err != nil {
-		fmt.Fprintf(stderr, "tpctl: --timeout %v\n", err)
+		fmt.Fprintf(stderr, "argus: --timeout %v\n", err)
 		return exitUsage
 	}
 	if httpTimeout <= 0 {
-		fmt.Fprintln(stderr, "tpctl: --timeout 必须大于 0")
+		fmt.Fprintln(stderr, "argus: --timeout 必须大于 0")
 		return exitUsage
 	}
 
-	// tpctl --stdio / tpctl mcp：直接把 stdio 交给 MCP server。
+	// argus --stdio / argus mcp：直接把 stdio 交给 MCP server。
 	if stdio && len(pos) == 0 {
 		return runMCP(baseURL, token, httpTimeout, stdin, stdout, stderr)
 	}
 	if len(pos) > 0 && pos[0] == "mcp" {
 		if len(pos) > 1 {
-			fmt.Fprintln(stderr, "tpctl mcp: 不接受参数（全局选项请写在 mcp 之前）")
+			fmt.Fprintln(stderr, "argus mcp: 不接受参数（全局选项请写在 mcp 之前）")
 			return exitUsage
 		}
 		return runMCP(baseURL, token, httpTimeout, stdin, stdout, stderr)
@@ -120,7 +121,7 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	api, err := newClient(baseURL, token, httpTimeout)
 	if err != nil {
-		fmt.Fprintf(stderr, "tpctl: %v\n", err)
+		fmt.Fprintf(stderr, "argus: %v\n", err)
 		return exitUsage
 	}
 	a := &app{
@@ -146,15 +147,19 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return a.cmdFiles(rest)
 	case "cancel":
 		return a.cmdCancel(rest)
-	case "testers":
-		return a.cmdTesters(rest)
+	case "runners":
+		return a.cmdRunners(rest)
+	case "retry":
+		return a.cmdRetry(rest)
+	case "clean":
+		return a.cmdClean(rest)
 	case "queue":
 		return a.cmdQueue(rest)
 	case "profiles":
 		return a.cmdProfiles(rest)
 	default:
-		fmt.Fprintf(stderr, "tpctl: 未知命令 %q\n", cmd)
-		fmt.Fprintln(stderr, "运行 `tpctl help` 查看用法")
+		fmt.Fprintf(stderr, "argus: 未知命令 %q\n", cmd)
+		fmt.Fprintln(stderr, "运行 `argus help` 查看用法")
 		return exitUsage
 	}
 }
@@ -162,12 +167,12 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 func runMCP(baseURL, token string, timeout time.Duration, stdin io.Reader, stdout, stderr io.Writer) int {
 	api, err := mcp.NewClient(baseURL, token, timeout)
 	if err != nil {
-		fmt.Fprintf(stderr, "tpctl mcp: %v\n", err)
+		fmt.Fprintf(stderr, "argus mcp: %v\n", err)
 		return exitUsage
 	}
 	srv := mcp.NewServer(api)
 	if err := srv.Serve(context.Background(), stdin, stdout); err != nil {
-		fmt.Fprintf(stderr, "tpctl mcp: %v\n", err)
+		fmt.Fprintf(stderr, "argus mcp: %v\n", err)
 		return exitFailure
 	}
 	return exitOK
@@ -185,7 +190,7 @@ func parseLeadingArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	return fs.Args(), nil
 }
 
-// parseArgs 让子命令的 flag 与位置参数可以交错（`tpctl wait r-1 --timeout 10`）。
+// parseArgs 让子命令的 flag 与位置参数可以交错（`argus wait r-1 --timeout 10`）。
 // Go 标准 flag 在第一个非 flag 处就停止解析，这里循环续解剩余部分。
 func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	fs.SetOutput(io.Discard)
@@ -239,8 +244,8 @@ func looksLikeJSON(s string) bool {
 }
 
 func (a *app) usageError(format string, args ...any) int {
-	fmt.Fprintf(a.stderr, "tpctl: "+format+"\n", args...)
-	fmt.Fprintln(a.stderr, "运行 `tpctl help` 查看用法")
+	fmt.Fprintf(a.stderr, "argus: "+format+"\n", args...)
+	fmt.Fprintln(a.stderr, "运行 `argus help` 查看用法")
 	return exitUsage
 }
 
@@ -277,9 +282,9 @@ func (a *app) fail(err error) int {
 			}
 			writeJSONLine(a.stderr, map[string]any{"error": payload})
 		} else {
-			fmt.Fprintf(a.stderr, "tpctl: %v\n", apiErr)
+			fmt.Fprintf(a.stderr, "argus: %v\n", apiErr)
 			if hasHint {
-				fmt.Fprintf(a.stderr, "tpctl: 下一步: %s\n", hint.NextAction)
+				fmt.Fprintf(a.stderr, "argus: 下一步: %s\n", hint.NextAction)
 			}
 		}
 		return exitFailure
@@ -296,13 +301,13 @@ func (a *app) fail(err error) int {
 				"hint":        hint.Hint,
 			}})
 		} else {
-			fmt.Fprintf(a.stderr, "tpctl: 连不上控制面 %s（%v）\n", a.baseURL, netErr.err)
-			fmt.Fprintf(a.stderr, "tpctl: 下一步: %s\n", hint.NextAction)
+			fmt.Fprintf(a.stderr, "argus: 连不上控制面 %s（%v）\n", a.baseURL, netErr.err)
+			fmt.Fprintf(a.stderr, "argus: 下一步: %s\n", hint.NextAction)
 		}
 		return exitUnreachable
 
 	default:
-		fmt.Fprintf(a.stderr, "tpctl: %v\n", err)
+		fmt.Fprintf(a.stderr, "argus: %v\n", err)
 		return exitFailure
 	}
 }
@@ -338,39 +343,41 @@ func rawOrNil(raw json.RawMessage) json.RawMessage {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintf(w, `tpctl %s — TestPlane 控制面 CLI（Agent 亲和）
+	fmt.Fprintf(w, `argus %s — Argus 控制面 CLI（Agent 亲和，v2 子命令式）
 
 用法:
-  tpctl [全局选项] <命令> [命令选项] [参数]
+  argus [全局选项] <命令> [命令选项] [参数]
 
 命令:
-  submit -f <manifest.yaml> [--dry-run]        提交 Run（Manifest 原样转发）
-  status <run_id>                              Run 摘要（状态/终态/计数/错误码/next_action）
-  wait <run_id> [--follow] [--timeout 3600] [--interval 3]
+  submit -f <task.yaml> [--dry-run]            提交 Task（顶层 task:；deploy XOR service）
+  status <task_id>                             Task 摘要（状态/终态/runner 计数/错误码/next_action）
+  wait <task_id> [--follow] [--timeout 3600] [--interval 3]
                                                等待终态；--follow 用 SSE，不可用时降级轮询
-  report <run_id> [--md]                       报告 JSON / Markdown 原文
-  logs <task_id> [--attempt 1] [--offset N] [--tail N]
-                                               Attempt 日志；X-Log-Offset 打到 stderr
-  artifacts <run_id> | --task <task_id> [--attempt 1]
-                                               产物清单（按 kind 分组）
-  files <run_id> <path> [--out <file>] [--range 0-1023]
+  report <task_id> [--md]                      报告 JSON / Markdown 原文
+  logs <task_id> [--attempt 1] [--runner-seq N] [--offset N] [--tail N]
+                                               runner 执行日志；X-Log-Offset 打到 stderr
+  artifacts <task_id> [--attempt 1 --runner-seq N]
+                                               产物清单（Task 级 / runner 级，按 kind 分组）
+  files <task_id> <path> [--out <file>] [--range 0-1023]
                                                下载产物；--out 落盘并打印 sha256
-  cancel <run_id> | --task <task_id>           取消 Run 或 Task，202 后回读确认
-  testers [--role test|pre_check] [--orphaned] Tester 目录
+  cancel <task_id>                             取消 Task（先执行 service-clean 再落 canceled）
+  retry --task-id <task_id>                    整 Task 重试（新 attempt 全量重跑含 fresh deploy）
+  clean --task-id <task_id> [--attempt N]      泄漏重放（§9.3；幂等）
+  runners [--role test|pre_check] [--orphaned] Runner 目录
   queue                                        队列与槽位（平台 + Volcano）
   profiles                                     Execution Profile 与挂载能力
   mcp                                          在 stdio 上启动 MCP server
   help                                         本帮助
 
 全局选项（写在命令之前，与 docker/kubectl 相同）:
-  --base-url <url>   默认 $TESTPLANE_BASE_URL 或 http://127.0.0.1:8080
-  --token <token>    默认 $TESTPLANE_TOKEN；dev 模式默认 dev
+  --base-url <url>   默认 $AG_BASE_URL 或 http://127.0.0.1:8080
+  --token <token>    默认 $AG_TOKEN；dev 模式默认 dev
   --timeout <dur>    单次 HTTP 超时，默认 30s（纯数字按秒）
   --json             机器可读输出（也可写在命令后）
   --stdio            等价于 mcp 子命令
 
 退出码:
-  0 成功   1 失败（命令失败，或 Run 的失败类终态）
+  0 成功   1 失败（命令失败，或 Task 的失败类终态）
   2 已取消  3 等待超时  4 连不上控制面  64 用法错误
 
 输出约定: --json 时 stdout 只写一个 JSON 文档；进度/告警写 stderr。

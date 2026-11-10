@@ -2,7 +2,8 @@ package domain
 
 import "fmt"
 
-// 本文件是 02-logical-view.md §2 的机器可执行版本：四套状态机的转移表。
+// 本文件是 02-logical-view.md §2 的机器可执行版本：两套状态机的转移表
+// （Task 平台层 + runner 执行记录实例层）。
 //
 // 铁律（02 §2、§3.6）：
 //   - 转移表是唯一合法边集合；表里没有的边 = ErrIllegalState（编程错误，不重试）；
@@ -11,6 +12,13 @@ import "fmt"
 //
 // 新增状态或转移必须同时改三处：本文件、design/views/02-logical-view.md §2、
 // server/migrations 的 CHECK 约束。
+//
+// v2 裁决（C-3.1/C-3.2、D-69/D-70）：
+//   - runner **没有重试回路**：failed→queued 边不存在；重试 = 整 Task 新 attempt；
+//   - pending/queued 的 runner 取消记 skipped（reason），**pending→canceled 与
+//     queued→canceled 边不存在**（传播到 clean 为止，service-clean 永不被 SKIPPED）；
+//   - Task 没有独立的 deploying/testing/cleanup 平台阶段：RUNNING 的内部推进 =
+//     runner 管道按序执行（D-70）。
 
 // edge 是转移表的主键：一条 from→to 的边。
 type edge struct {
@@ -20,75 +28,66 @@ type edge struct {
 
 // TransitionSpec 描述一条合法转移的静态属性。
 type TransitionSpec struct {
-	// Command 是设计文档里的命令名（enqueue / deploy_ready / succeed ...），
+	// Command 是设计文档里的命令名（enqueue / pipeline_start / succeed ...），
 	// 只用于日志与事件，不参与判定。
 	Command string
-	// Event 是写进 state_events.type 的事件类型（07 §7、C-9.1）。
+	// Event 是写进 state_events.type 的事件类型（§12.6、C-9.1）。
 	Event string
 }
 
-// 事件类型常量（07 §7）。
+// 事件类型常量（ARCHITECTURE §12.6 + §7.6；03-data-view state_events 注释）。
 const (
-	EventRunSubmitted        = "run.submitted"
-	EventRunStateChanged     = "run.state_changed"
-	EventRunFinished         = "run.finished"
-	EventTaskStateChanged    = "task.state_changed"
-	EventAttemptStarted      = "attempt.started"
-	EventAttemptFinished     = "attempt.finished"
-	EventDeployStateChanged  = "deploy.state_changed"
-	EventCleanupStarted      = "cleanup.started"
-	EventReportWritten       = "report.written"
-	EventResyncRequired      = "resync_required"
-	EventTesterStateChanged  = "tester.state_changed"
-	EventReportPendingIntent = "report.pending"
+	EventTaskSubmitted      = "submitted"
+	EventTaskStateChanged   = "state_changed"
+	EventTaskFinished       = "task_finished"
+	EventRunnerStateChanged = "runner.state_changed"
+	EventRunnerStarted      = "runner_started"
+	EventRunnerFinished     = "runner_finished"
+	EventExportsHarvested   = "exports_harvested"
+	EventCleanFinished      = "clean_finished"
+	EventCleanupFailed      = "cleanup_failed"
+	EventReportWritten      = "report.written"
+	EventResyncRequired     = "resync_required"
 )
 
-// ---- Run 转移表（R1–R10，02 §2.1）-----------------------------------------
+// ---- Task 转移表（C-3.2）---------------------------------------------------
 
-var runTransitions = map[edge]TransitionSpec{
-	// R1 提交成功进入编排
-	{RunSubmitted.Status(), RunQueued.Status()}: {Command: "Enqueue", Event: EventRunStateChanged},
-	// R2 有 deploy，开始部署
-	{RunQueued.Status(), RunDeploying.Status()}: {Command: "BeginDeploy", Event: EventDeployStateChanged},
-	// R3 无 deploy / service 模式，直接进入 testing
-	{RunQueued.Status(), RunTesting.Status()}: {Command: "BeginTesting", Event: EventRunStateChanged},
-	// R4 部署就绪，回填 Endpoint
-	{RunDeploying.Status(), RunTesting.Status()}: {Command: "DeployReady", Event: EventDeployStateChanged},
-	// R5 部署 blocked / 超窗
-	{RunDeploying.Status(), RunServiceUnavailable.Status()}: {Command: "DeployBlocked", Event: EventDeployStateChanged},
-	// R6 全部 Task 终态
-	{RunTesting.Status(), RunCleanup.Status()}: {Command: "BeginCleanup", Event: EventCleanupStarted},
-	// R7 终态判定
-	{RunCleanup.Status(), RunSucceeded.Status()}:           {Command: "Finish", Event: EventRunFinished},
-	{RunCleanup.Status(), RunCompletedWithErrors.Status()}: {Command: "Finish", Event: EventRunFinished},
-	{RunCleanup.Status(), RunServiceUnavailable.Status()}:  {Command: "Finish", Event: EventRunFinished},
-	// cleanup → failed 同时属于 R7（平台错误收口）与 R10，只登记一次，命令取 R10 的 Fail。
-	// R8 任意非终态 → cancelling
-	{RunSubmitted.Status(), RunCancelling.Status()}: {Command: "Cancel", Event: EventRunStateChanged},
-	{RunQueued.Status(), RunCancelling.Status()}:    {Command: "Cancel", Event: EventRunStateChanged},
-	{RunDeploying.Status(), RunCancelling.Status()}: {Command: "Cancel", Event: EventRunStateChanged},
-	{RunTesting.Status(), RunCancelling.Status()}:   {Command: "Cancel", Event: EventRunStateChanged},
-	{RunCleanup.Status(), RunCancelling.Status()}:   {Command: "Cancel", Event: EventRunStateChanged},
-	// R9 取消完成
-	{RunCancelling.Status(), RunCanceled.Status()}: {Command: "Canceled", Event: EventRunFinished},
-	// R10 任意非终态 → failed（平台侧不可恢复错误）
-	{RunSubmitted.Status(), RunFailed.Status()}:  {Command: "Fail", Event: EventRunFinished},
-	{RunQueued.Status(), RunFailed.Status()}:     {Command: "Fail", Event: EventRunFinished},
-	{RunDeploying.Status(), RunFailed.Status()}:  {Command: "Fail", Event: EventRunFinished},
-	{RunTesting.Status(), RunFailed.Status()}:    {Command: "Fail", Event: EventRunFinished},
-	{RunCleanup.Status(), RunFailed.Status()}:    {Command: "Fail", Event: EventRunFinished},
-	{RunCancelling.Status(), RunFailed.Status()}: {Command: "Fail", Event: EventRunFinished},
+var taskTransitions = map[edge]TransitionSpec{
+	// 落库完成，进入编排
+	{TaskSubmitted.Status(), TaskQueued.Status()}: {Command: "Enqueue", Event: EventTaskStateChanged},
+	// 编排器取到全局并发余量，开始推进 runner 管道（无部署阶段，D-70）
+	{TaskQueued.Status(), TaskRunning.Status()}: {Command: "BeginPipeline", Event: EventTaskStateChanged},
+	// service-clean 终态后的终态判定（C-5.8）
+	{TaskRunning.Status(), TaskSucceeded.Status()}:          {Command: "Finish", Event: EventTaskFinished},
+	{TaskRunning.Status(), TaskFailed.Status()}:             {Command: "Finish", Event: EventTaskFinished},
+	{TaskRunning.Status(), TaskServiceUnavailable.Status()}: {Command: "Finish", Event: EventTaskFinished},
+	// 取消：任意非终态 → cancelling（clean 执行完才落 canceled，C-6.1）
+	{TaskSubmitted.Status(), TaskCancelling.Status()}: {Command: "Cancel", Event: EventTaskStateChanged},
+	{TaskQueued.Status(), TaskCancelling.Status()}:    {Command: "Cancel", Event: EventTaskStateChanged},
+	{TaskRunning.Status(), TaskCancelling.Status()}:   {Command: "Cancel", Event: EventTaskStateChanged},
+	// 取消完成
+	{TaskCancelling.Status(), TaskCanceled.Status()}: {Command: "Canceled", Event: EventTaskFinished},
+	// 平台侧不可恢复错误（Executor 不可用、内部异常、DEPLOY_FAILED）：非终态 → failed。
+	// running→failed 同时是 Finish 与平台失败两条规则的边，只登记一次，命令取 Fail。
+	{TaskSubmitted.Status(), TaskFailed.Status()}: {Command: "Fail", Event: EventTaskFinished},
+	{TaskQueued.Status(), TaskFailed.Status()}:    {Command: "Fail", Event: EventTaskFinished},
+	// 整 Task 重试（§7.8 / 03 §4.5）：终态 → queued，随后走 queued→running 开新 attempt。
+	// **attempt_no + 1 在同一 Task 上追加**（D-68），历史 attempt 不覆盖；canceled 不可重试
+	// （取消是终局）。C-3.2 的转移表未列出这条边，按 §7.8 的语义补齐（见实现报告疑点）。
+	{TaskSucceeded.Status(), TaskQueued.Status()}:          {Command: "Retry", Event: EventTaskStateChanged},
+	{TaskFailed.Status(), TaskQueued.Status()}:             {Command: "Retry", Event: EventTaskStateChanged},
+	{TaskServiceUnavailable.Status(), TaskQueued.Status()}: {Command: "Retry", Event: EventTaskStateChanged},
 }
 
-// TerminalTaskStatuses 是 Task 的**终态**集合——唯一真源（04 §2.2 / 03 §3.2）。
+// TerminalTaskStatuses 是 Task 的**终态**集合——唯一真源（03 §3.2）。
 //
-// 与 Run 一样：Go 侧用 `TerminalTaskStatus(st)`，SQL 侧用
-// `status = ANY($n)` / `NOT (status = ANY($n))` 并传 `TerminalTaskStatusStrings()`。
+// Go 侧用 `TerminalTaskStatus(st)`，SQL 侧用 `status = ANY($n)` 并传
+// `TerminalTaskStatusStrings()`。
 var TerminalTaskStatuses = []TaskStatus{
 	TaskSucceeded,
 	TaskFailed,
+	TaskServiceUnavailable,
 	TaskCanceled,
-	TaskSkipped,
 }
 
 // TerminalTaskStatus 报告 Task 状态是否终态。
@@ -110,24 +109,42 @@ func TerminalTaskStatusStrings() []string {
 	return out
 }
 
-// TerminalRunStatuses 是 Run 的**终态**集合——唯一真源。
-//
-// 用途（禁止再各写一遍）：
-//   - Go 侧判定：`TerminalRunStatus(st)`；
-//   - SQL 侧判定：`status = ANY($n)`，把本切片的字符串形态传进去（`TerminalRunStatusStrings()`）。
-//
-// 依赖它的地方：retry 前置（run 必须终态才可重试）、"是否已有进行中的 retry"判定。
-var TerminalRunStatuses = []RunStatus{
-	RunSucceeded,
-	RunCompletedWithErrors,
-	RunFailed,
-	RunCanceled,
-	RunServiceUnavailable,
+// ---- runner 执行记录转移表（C-3.1）----------------------------------------
+
+var runnerTransitions = map[edge]TransitionSpec{
+	// 前一 runner 出终态（串行推进）或为管道第一个 runner；计算 waiting_reason
+	{RunnerPending.Status(), RunnerQueued.Status()}: {Command: "Queue", Event: EventRunnerStateChanged},
+	// upstream_abort / canceled（传播到 clean 为止）
+	{RunnerPending.Status(), RunnerSkipped.Status()}: {Command: "Skip", Event: EventRunnerStateChanged},
+	// 拿到全局 permit +（仅外接 endpoint_exclusive 时）端点槽位；创建 Job
+	{RunnerQueued.Status(), RunnerPreparing.Status()}: {Command: "Prepare", Event: EventRunnerStarted},
+	// upstream_abort / canceled（传播到 clean 为止）
+	{RunnerQueued.Status(), RunnerSkipped.Status()}: {Command: "Skip", Event: EventRunnerStateChanged},
+	// informer 观察到容器已启动；写 started_at
+	{RunnerPreparing.Status(), RunnerRunning.Status()}: {Command: "Start", Event: EventRunnerStateChanged},
+	// Job 创建失败 / 镜像拉取失败 / 挂载缺失；记录错误码
+	{RunnerPreparing.Status(), RunnerFailed.Status()}: {Command: "Fail", Event: EventRunnerFinished},
+	// 取消：删除 Job，释放租约
+	{RunnerPreparing.Status(), RunnerCanceled.Status()}: {Command: "Cancel", Event: EventRunnerFinished},
+	// 退出码 0 且产物契约满足（三选一 + result.json 合法 + exports 可解析）；收割 exports
+	{RunnerRunning.Status(), RunnerSucceeded.Status()}: {Command: "Succeed", Event: EventRunnerFinished},
+	// 非零退出 / 超时 / 结果缺失或非法 / EXPORT_INVALID
+	{RunnerRunning.Status(), RunnerFailed.Status()}: {Command: "Fail", Event: EventRunnerFinished},
+	// 运行期取消
+	{RunnerRunning.Status(), RunnerCanceled.Status()}: {Command: "Cancel", Event: EventRunnerFinished},
 }
 
-// TerminalRunStatus 报告 Run 状态是否终态（与 TerminalRunStatuses 同源）。
-func TerminalRunStatus(st RunStatus) bool {
-	for _, t := range TerminalRunStatuses {
+// TerminalRunnerStatuses 是 runner 执行记录的**终态**集合——唯一真源。
+var TerminalRunnerStatuses = []RunnerStatus{
+	RunnerSucceeded,
+	RunnerFailed,
+	RunnerSkipped,
+	RunnerCanceled,
+}
+
+// TerminalRunnerStatus 报告 runner 执行记录状态是否终态。
+func TerminalRunnerStatus(st RunnerStatus) bool {
+	for _, t := range TerminalRunnerStatuses {
 		if st == t {
 			return true
 		}
@@ -135,79 +152,23 @@ func TerminalRunStatus(st RunStatus) bool {
 	return false
 }
 
-// TerminalRunStatusStrings 返回终态集合的字符串形态，供 SQL 的 `status = ANY($n)` 使用。
-func TerminalRunStatusStrings() []string {
-	out := make([]string, 0, len(TerminalRunStatuses))
-	for _, t := range TerminalRunStatuses {
+// TerminalRunnerStatusStrings 返回 runner 终态集合的字符串形态（供 SQL 的 ANY($n) 使用）。
+func TerminalRunnerStatusStrings() []string {
+	out := make([]string, 0, len(TerminalRunnerStatuses))
+	for _, t := range TerminalRunnerStatuses {
 		out = append(out, string(t))
 	}
 	return out
-}
-
-// ---- Task 转移表（T1–T11，02 §2.2）---------------------------------------
-
-var taskTransitions = map[edge]TransitionSpec{
-	// T1 Pre-Check 通过 / precheck off → 入队
-	{TaskPending.Status(), TaskQueued.Status()}: {Command: "Queue", Event: EventTaskStateChanged},
-	// T2 pending 直接跳过
-	{TaskPending.Status(), TaskSkipped.Status()}: {Command: "Skip", Event: EventTaskStateChanged},
-	// T3 拿到槽位 + permit
-	{TaskQueued.Status(), TaskPreparing.Status()}: {Command: "Prepare", Event: EventTaskStateChanged},
-	// T4 queued 跳过
-	{TaskQueued.Status(), TaskSkipped.Status()}: {Command: "Skip", Event: EventTaskStateChanged},
-	// T5 容器已启动
-	{TaskPreparing.Status(), TaskRunning.Status()}: {Command: "Start", Event: EventTaskStateChanged},
-	// T6 Job / 镜像 / 挂载错误
-	{TaskPreparing.Status(), TaskFailed.Status()}: {Command: "Fail", Event: EventTaskStateChanged},
-	// T7 准备期取消
-	{TaskPreparing.Status(), TaskCanceled.Status()}: {Command: "Cancel", Event: EventTaskStateChanged},
-	// T8 exit=0 且 result 合法
-	{TaskRunning.Status(), TaskSucceeded.Status()}: {Command: "Succeed", Event: EventTaskStateChanged},
-	// T9 非零退出 / 超时 / 结果非法
-	{TaskRunning.Status(), TaskFailed.Status()}: {Command: "Fail", Event: EventTaskStateChanged},
-	// T10 运行期取消
-	{TaskRunning.Status(), TaskCanceled.Status()}: {Command: "Cancel", Event: EventTaskStateChanged},
-	// T11 重试（failed → queued）
-	{TaskFailed.Status(), TaskQueued.Status()}: {Command: "Retry", Event: EventTaskStateChanged},
-	// T12 重试（skipped → queued）：skipped 多是上游失败连带跳过，重跑有意义
-	// （01-use-case-view UC-12、impl/control-plane §C-5.8、issue #40-1）
-	{TaskSkipped.Status(), TaskQueued.Status()}: {Command: "Retry", Event: EventTaskStateChanged},
-}
-
-// ---- Attempt 转移表（02 §2.3）--------------------------------------------
-
-var attemptTransitions = map[edge]TransitionSpec{
-	{AttemptPreparing.Status(), AttemptRunning.Status()}:  {Command: "Start", Event: EventAttemptStarted},
-	{AttemptPreparing.Status(), AttemptFailed.Status()}:   {Command: "Fail", Event: EventAttemptFinished},
-	{AttemptPreparing.Status(), AttemptCanceled.Status()}: {Command: "Cancel", Event: EventAttemptFinished},
-	{AttemptRunning.Status(), AttemptSucceeded.Status()}:  {Command: "Succeed", Event: EventAttemptFinished},
-	{AttemptRunning.Status(), AttemptFailed.Status()}:     {Command: "Fail", Event: EventAttemptFinished},
-	{AttemptRunning.Status(), AttemptCanceled.Status()}:   {Command: "Cancel", Event: EventAttemptFinished},
-}
-
-// ---- Tester 转移表（02 §2.4）--------------------------------------------
-
-var testerTransitions = map[edge]TransitionSpec{
-	{TesterScanned.Status(), TesterValid.Status()}:       {Command: "Validate", Event: EventTesterStateChanged},
-	{TesterScanned.Status(), TesterRejected.Status()}:    {Command: "Reject", Event: EventTesterStateChanged},
-	{TesterValid.Status(), TesterRegistered.Status()}:    {Command: "Register", Event: EventTesterStateChanged},
-	{TesterRegistered.Status(), TesterOrphaned.Status()}: {Command: "Orphan", Event: EventTesterStateChanged},
-	{TesterRegistered.Status(), TesterRejected.Status()}: {Command: "Reject", Event: EventTesterStateChanged},
-	{TesterOrphaned.Status(), TesterRegistered.Status()}: {Command: "Register", Event: EventTesterStateChanged},
 }
 
 // ---- 查询入口 ------------------------------------------------------------
 
 func tableOf(entity EntityType) (map[edge]TransitionSpec, error) {
 	switch entity {
-	case EntityRun:
-		return runTransitions, nil
 	case EntityTask:
 		return taskTransitions, nil
-	case EntityAttempt:
-		return attemptTransitions, nil
-	case EntityTester:
-		return testerTransitions, nil
+	case EntityRunnerRun:
+		return runnerTransitions, nil
 	}
 	return nil, fmt.Errorf("%w: unknown entity %q", ErrIllegalState, entity)
 }
@@ -222,24 +183,14 @@ func LookupTransition(entity EntityType, from, to Status) (TransitionSpec, bool)
 	return spec, ok
 }
 
-// RunTransition 报告 Run 的 from→to 是否合法。
-func RunTransition(from, to RunStatus) (TransitionSpec, bool) {
-	return LookupTransition(EntityRun, from.Status(), to.Status())
-}
-
 // TaskTransition 报告 Task 的 from→to 是否合法。
 func TaskTransition(from, to TaskStatus) (TransitionSpec, bool) {
 	return LookupTransition(EntityTask, from.Status(), to.Status())
 }
 
-// AttemptTransition 报告 Attempt 的 from→to 是否合法。
-func AttemptTransition(from, to AttemptStatus) (TransitionSpec, bool) {
-	return LookupTransition(EntityAttempt, from.Status(), to.Status())
-}
-
-// TesterTransition 报告 Tester 的 from→to 是否合法。
-func TesterTransition(from, to TesterState) (TransitionSpec, bool) {
-	return LookupTransition(EntityTester, from.Status(), to.Status())
+// RunnerTransition 报告 runner 执行记录的 from→to 是否合法。
+func RunnerTransition(from, to RunnerStatus) (TransitionSpec, bool) {
+	return LookupTransition(EntityRunnerRun, from.Status(), to.Status())
 }
 
 // CountTransitions 返回该实体转移表的边数；测试与文档对齐用。
@@ -253,53 +204,17 @@ func CountTransitions(entity EntityType) int {
 
 // ---- 状态分组 ------------------------------------------------------------
 
-// RunNonTerminal 是 Run 的全部非终态（R8/R10 的 From 集合）。
-func RunNonTerminal() []RunStatus {
-	return []RunStatus{RunSubmitted, RunQueued, RunDeploying, RunTesting, RunCleanup, RunCancelling}
-}
-
 // TaskNonTerminal 是 Task 的全部非终态。
 func TaskNonTerminal() []TaskStatus {
-	return []TaskStatus{TaskPending, TaskQueued, TaskPreparing, TaskRunning}
+	return []TaskStatus{TaskSubmitted, TaskQueued, TaskRunning, TaskCancelling}
 }
 
-// IsTerminal 报告 Attempt 是否终态。
-func (s AttemptStatus) IsTerminal() bool {
-	switch s {
-	case AttemptSucceeded, AttemptFailed, AttemptCanceled:
-		return true
-	}
-	return false
+// RunnerNonTerminal 是 runner 执行记录的全部非终态。
+func RunnerNonTerminal() []RunnerStatus {
+	return []RunnerStatus{RunnerPending, RunnerQueued, RunnerPreparing, RunnerRunning}
 }
 
-// IsTerminal 报告 Tester 是否终态（注册表状态里只有 rejected 是"不会自动前进"的）。
-func (s TesterState) IsTerminal() bool { return s == TesterRejected }
-
-// IsTerminalStatus 是给 Kernel 用的通用判定。
-func IsTerminalStatus(entity EntityType, s Status) bool {
-	switch entity {
-	case EntityRun:
-		return RunStatus(s).IsTerminal()
-	case EntityTask:
-		return TaskStatus(s).IsTerminal()
-	case EntityAttempt:
-		return AttemptStatus(s).IsTerminal()
-	case EntityTester:
-		return TesterState(s).IsTerminal()
-	}
-	return false
-}
-
-// Statuses 把一组强类型 Run 状态降级成 Kernel 需要的 []Status。
-func RunStatuses(in ...RunStatus) []Status {
-	out := make([]Status, len(in))
-	for i, s := range in {
-		out[i] = s.Status()
-	}
-	return out
-}
-
-// TaskStatuses 把一组强类型 Task 状态降级成 Kernel 需要的 []Status。
+// Statuses 把一组强类型 Task 状态降级成 Kernel 需要的 []Status。
 func TaskStatuses(in ...TaskStatus) []Status {
 	out := make([]Status, len(in))
 	for i, s := range in {
@@ -308,8 +223,8 @@ func TaskStatuses(in ...TaskStatus) []Status {
 	return out
 }
 
-// AttemptStatuses 把一组强类型 Attempt 状态降级成 Kernel 需要的 []Status。
-func AttemptStatuses(in ...AttemptStatus) []Status {
+// Statuses 把一组强类型 runner 状态降级成 Kernel 需要的 []Status。
+func RunnerStatuses(in ...RunnerStatus) []Status {
 	out := make([]Status, len(in))
 	for i, s := range in {
 		out[i] = s.Status()
@@ -317,42 +232,53 @@ func AttemptStatuses(in ...AttemptStatus) []Status {
 	return out
 }
 
+// IsTerminalStatus 是给 Kernel 用的通用判定。
+func IsTerminalStatus(entity EntityType, s Status) bool {
+	switch entity {
+	case EntityTask:
+		return TaskStatus(s).IsTerminal()
+	case EntityRunnerRun:
+		return RunnerStatus(s).IsTerminal()
+	}
+	return false
+}
+
 // ---- 守卫（纯函数）------------------------------------------------------
 
-// ValidSkipReason 报告 reason 是否是 tasks.status_reason 允许的 skip 取值
-// （03 §3.2 tasks_skipped_reason_ck 的五个值）。
+// ValidSkipReason 报告 reason 是否是 task_runners.status_reason 允许的 skip 取值
+// （03 §3.2 task_runners_skipped_reason_ck：upstream_abort | canceled）。
 func ValidSkipReason(reason string) bool {
 	switch reason {
-	case SkipUpstreamAbort, SkipCanceled, SkipDeployFailed, SkipServiceUnavailable, SkipPlatformError:
+	case SkipUpstreamAbort, SkipCanceled:
 		return true
 	}
 	return false
 }
 
-// ValidWaitingReason 报告 reason 是否是 tasks.waiting_reason 的六个取值。
+// ValidWaitingReason 报告 reason 是否是 task_runners.waiting_reason 的合法取值
+// （C-4.7：平台自身两项 + K8s/Volcano 三项）。
 func ValidWaitingReason(reason string) bool {
 	switch reason {
-	case WaitPrecheckGate, WaitSlotWaiting, WaitGlobalLimit, WaitQueueFull,
-		WaitInsufficientResources, WaitGangPending:
+	case WaitSlotWaiting, WaitGlobalLimit, WaitQueueFull, WaitInsufficientResources, WaitGangPending:
 		return true
 	}
 	return false
 }
 
-// ValidRunStatus / ValidTaskStatus / ValidAttemptStatus 是插入前的枚举兜底校验。
-func ValidRunStatus(s Status) bool {
-	switch RunStatus(s) {
-	case RunSubmitted, RunQueued, RunDeploying, RunTesting, RunCleanup, RunCancelling,
-		RunSucceeded, RunCompletedWithErrors, RunServiceUnavailable, RunFailed, RunCanceled:
-		return true
-	}
-	return false
-}
-
+// ValidTaskStatus / ValidRunnerStatus / ValidAttemptStatus 是插入前的枚举兜底校验。
 func ValidTaskStatus(s Status) bool {
 	switch TaskStatus(s) {
-	case TaskPending, TaskQueued, TaskPreparing, TaskRunning,
-		TaskSucceeded, TaskFailed, TaskCanceled, TaskSkipped:
+	case TaskSubmitted, TaskQueued, TaskRunning, TaskCancelling,
+		TaskSucceeded, TaskFailed, TaskServiceUnavailable, TaskCanceled:
+		return true
+	}
+	return false
+}
+
+func ValidRunnerStatus(s Status) bool {
+	switch RunnerStatus(s) {
+	case RunnerPending, RunnerQueued, RunnerPreparing, RunnerRunning,
+		RunnerSucceeded, RunnerFailed, RunnerSkipped, RunnerCanceled:
 		return true
 	}
 	return false
@@ -360,7 +286,7 @@ func ValidTaskStatus(s Status) bool {
 
 func ValidAttemptStatus(s Status) bool {
 	switch AttemptStatus(s) {
-	case AttemptPreparing, AttemptRunning, AttemptSucceeded, AttemptFailed, AttemptCanceled:
+	case AttemptRunning, AttemptSucceeded, AttemptFailed, AttemptCanceled:
 		return true
 	}
 	return false

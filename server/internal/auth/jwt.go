@@ -26,7 +26,7 @@ type jwtClaims struct {
 	Nonce    string          `json:"nonce"`
 }
 
-// rawClaims 保留任意 claim，便于按 TESTPLANE_ROLE_CLAIM 取 groups（含数组/字符串两种形态）。
+// rawClaims 保留任意 claim，便于按 AG_OIDC_ROLE_CLAIM 取 groups（含数组/字符串两种形态）。
 type rawClaims map[string]any
 
 // jwks 是 JWKS 文档（只取 RSA 签名 key）。

@@ -16,30 +16,38 @@ import (
 	"github.com/ucm-system/testplane/server/internal/ports"
 )
 
-// sampleSpec 复刻 design/impl/execution.md §2.2 的渲染输入。
+// sampleSpec 复刻 design/impl/execution.md §2.2 的渲染输入（Job Spec 2.0：
+// 三元组定位、command = runner entry、args 恒空、env 全 AG_*）。
 func sampleSpec() ports.JobSpec {
 	return ports.JobSpec{
-		RunID:         "r-20261103-0001",
+		SpecVersion:   ports.JobSpecVersion2,
 		TaskID:        "t-0001",
-		AttemptID:     "t-0001-a1",
 		AttemptNo:     1,
-		TesterName:    "endpoint-probe",
-		TesterVersion: "1.0.0",
-		TesterRole:    "pre_check",
-		Image:         "registry.dev.huawei.com/testplane/endpoint-probe:1.0.0",
-		Entry:         "/tester/run.sh",
-		Args:          []string{"--wait_timeout_seconds=600", "--retry_interval_seconds=15"},
-		Env:           map[string]string{"ENDPOINT_EXTRA": "x", "TZ": "UTC"},
-		Namespace:     "testplane",
+		Seq:           2,
+		RunnerName:    "endpoint-probe",
+		RunnerVersion: "1.0.0",
+		Role:          domain.RolePreCheck,
+		Image:         "registry.dev.huawei.com/argus/endpoint-probe:1.0.0",
+		Command:       []string{"/runner/run.sh"}, // runner.yaml.entry（exec form 数组，D-66）
+		Env: map[string]string{
+			"AG_SERVED_URL":        "http://10.0.0.10:8000/v1",
+			"AG_SERVED_MODEL_NAME": "Qwen3-32B",
+			"ENDPOINT_EXTRA":       "x",
+			"TZ":                   "UTC",
+		},
+		Namespace: "argus",
 		Resources: domain.ResourceRequest{
 			CPU: "1", Memory: "256Mi",
 			GPU: domain.GPURequest{Resource: "nvidia.com/gpu", Count: 0},
 		},
-		OutputDir:      "/storage-root/r-20261103-0001/tasks/t-0001/attempts/1",
-		StoragePVC:     "testplane-artifacts",
+		OutputDir:      "/storage-root/t-0001/attempts/1/runners/2",
+		InputDir:       "/storage-root/t-0001/attempts/1/input/2",
+		StoragePVC:     "argus-storage",
 		TimeoutSeconds: 900,
-		SecretEnv:      []string{"ENDPOINT_API_KEY=tp-secret-endpoint-prod-qwen/api_key"},
-		Annotations:    map[string]string{},
+		SecretEnv: []ports.SecretEnvRef{
+			{Name: "ENDPOINT_API_KEY", SecretRef: "argus-secret-endpoint-prod-qwen/api_key"},
+		},
+		Annotations: map[string]string{},
 	}
 }
 
@@ -49,10 +57,10 @@ func TestRenderMatchesDesignSection22(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 
-	if job.Name != "tp-t-0001-a1" {
-		t.Errorf("job name = %q, want tp-t-0001-a1", job.Name)
+	if job.Name != "argus-t-0001-1-2" {
+		t.Errorf("job name = %q, want argus-t-0001-1-2", job.Name)
 	}
-	if job.Namespace != "testplane" {
+	if job.Namespace != "argus" {
 		t.Errorf("namespace = %q", job.Namespace)
 	}
 
@@ -72,13 +80,19 @@ func TestRenderMatchesDesignSection22(t *testing.T) {
 	if job.Spec.TTLSecondsAfterFinished != nil {
 		t.Errorf("ttlSecondsAfterFinished must not be set")
 	}
+	if job.Spec.Selector != nil {
+		t.Errorf("selector must not be set")
+	}
 
 	pod := job.Spec.Template.Spec
 	if pod.RestartPolicy != corev1.RestartPolicyNever {
 		t.Errorf("restartPolicy = %q", pod.RestartPolicy)
 	}
 	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
-		t.Errorf("automountServiceAccountToken must be false")
+		t.Errorf("automountServiceAccountToken must be false（D-72：runner 不绑 ServiceAccount）")
+	}
+	if pod.ServiceAccountName != "" {
+		t.Errorf("serviceAccountName = %q, want empty", pod.ServiceAccountName)
 	}
 	if pod.EnableServiceLinks == nil || *pod.EnableServiceLinks {
 		t.Errorf("enableServiceLinks must be false")
@@ -104,20 +118,21 @@ func TestRenderMatchesDesignSection22(t *testing.T) {
 		t.Fatalf("containers = %d, want 1", len(pod.Containers))
 	}
 	c := pod.Containers[0]
-	if c.Name != TesterContainerName {
-		t.Errorf("container name = %q", c.Name)
+	if c.Name != RunnerContainerName {
+		t.Errorf("container name = %q, want %q", c.Name, RunnerContainerName)
 	}
 	if c.Image != sampleSpec().Image {
-		t.Errorf("image = %q (platform must not rewrite the reference)", c.Image)
+		t.Errorf("image = %q (platform must not rewrite the reference, K-3)", c.Image)
 	}
 	if c.ImagePullPolicy != corev1.PullIfNotPresent {
 		t.Errorf("imagePullPolicy = %q, want IfNotPresent for a pinned tag", c.ImagePullPolicy)
 	}
-	if len(c.Command) != 1 || c.Command[0] != "/tester/run.sh" {
-		t.Errorf("command = %#v, want [/tester/run.sh]", c.Command)
+	// command = runner.yaml.entry（exec form 数组）；args 恒空（D-66）。
+	if len(c.Command) != 1 || c.Command[0] != "/runner/run.sh" {
+		t.Errorf("command = %#v, want [/runner/run.sh]", c.Command)
 	}
-	if len(c.Args) != 2 || c.Args[1] != "--retry_interval_seconds=15" {
-		t.Errorf("args = %#v", c.Args)
+	if len(c.Args) != 0 {
+		t.Errorf("args = %#v, want empty（D-66：业务输入走输入文件，argv 恒空）", c.Args)
 	}
 	if c.SecurityContext == nil || c.SecurityContext.ReadOnlyRootFilesystem == nil || !*c.SecurityContext.ReadOnlyRootFilesystem {
 		t.Errorf("container must run with readOnlyRootFilesystem")
@@ -127,32 +142,47 @@ func TestRenderMatchesDesignSection22(t *testing.T) {
 		t.Errorf("capabilities.drop = %+v", c.SecurityContext.Capabilities)
 	}
 
-	// 环境变量：平台三元组强制注入，用户变量按字典序，TZ 被覆写。
+	// 环境变量：AG_* 元信息强制注入，公共参数与业务变量按字典序，TZ/HOME 覆写。
 	env := map[string]corev1.EnvVar{}
 	var names []string
 	for _, e := range c.Env {
 		env[e.Name] = e
 		names = append(names, e.Name)
 	}
-	for _, want := range []string{TestplaneEnvRunID, TestplaneEnvTaskID, TestplaneEnvAttemptID, TestplaneEnvTZ, TestplaneEnvHome, "ENDPOINT_EXTRA", "ENDPOINT_API_KEY"} {
+	for _, want := range []string{
+		EnvTaskID, EnvAttempt, EnvRunnerSeq, EnvParamsFile, EnvOutputDir,
+		EnvTZ, EnvHome, "AG_SERVED_URL", "AG_SERVED_MODEL_NAME", "ENDPOINT_EXTRA", "ENDPOINT_API_KEY",
+	} {
 		if _, ok := env[want]; !ok {
 			t.Errorf("env %s missing (have %v)", want, names)
 		}
 	}
-	if got := env[TestplaneEnvAttemptID].Value; got != "t-0001-a1" {
-		t.Errorf("TESTPLANE_ATTEMPT_ID = %q", got)
+	if got := env[EnvTaskID].Value; got != "t-0001" {
+		t.Errorf("AG_TASK_ID = %q", got)
 	}
-	if got := env[TestplaneEnvTZ].Value; got != DefaultTZ {
+	if got := env[EnvAttempt].Value; got != "1" {
+		t.Errorf("AG_ATTEMPT = %q", got)
+	}
+	if got := env[EnvRunnerSeq].Value; got != "2" {
+		t.Errorf("AG_RUNNER_SEQ = %q", got)
+	}
+	if got := env[EnvParamsFile].Value; got != "/workspace/input/params.jsonl" {
+		t.Errorf("AG_PARAMS_FILE = %q", got)
+	}
+	if got := env[EnvOutputDir].Value; got != OutputMountPath {
+		t.Errorf("AG_OUTPUT_DIR = %q", got)
+	}
+	if got := env[EnvTZ].Value; got != DefaultTZ {
 		t.Errorf("TZ must be overridden to %q, got %q", DefaultTZ, got)
 	}
-	if got := env[TestplaneEnvHome].Value; got != "/tmp" {
+	if got := env[EnvHome].Value; got != "/tmp" {
 		t.Errorf("HOME = %q", got)
 	}
 	sec := env["ENDPOINT_API_KEY"]
 	if sec.ValueFrom == nil || sec.ValueFrom.SecretKeyRef == nil {
 		t.Fatalf("secret env must use secretKeyRef: %+v", sec)
 	}
-	if sec.ValueFrom.SecretKeyRef.Name != "tp-secret-endpoint-prod-qwen" ||
+	if sec.ValueFrom.SecretKeyRef.Name != "argus-secret-endpoint-prod-qwen" ||
 		sec.ValueFrom.SecretKeyRef.Key != "api_key" {
 		t.Errorf("secretKeyRef = %+v", sec.ValueFrom.SecretKeyRef)
 	}
@@ -168,47 +198,107 @@ func TestRenderMatchesDesignSection22(t *testing.T) {
 		t.Errorf("gpu must not be rendered when count == 0")
 	}
 
-	// 挂载：output 带 subPath，/tmp 是 emptyDir。
-	var output, tmp *corev1.VolumeMount
+	// 挂载：input 只读 + output 读写，都带 subPath（attempts/<n>/...）；/tmp 是 emptyDir。
+	m := map[string]*corev1.VolumeMount{}
 	for i := range c.VolumeMounts {
-		switch c.VolumeMounts[i].Name {
-		case "output":
-			output = &c.VolumeMounts[i]
-		case "tmp":
-			tmp = &c.VolumeMounts[i]
+		m[c.VolumeMounts[i].Name] = &c.VolumeMounts[i]
+	}
+	if v := m["output"]; v == nil || v.MountPath != OutputMountPath ||
+		v.SubPath != "t-0001/attempts/1/runners/2" || v.ReadOnly {
+		t.Fatalf("output mount = %+v", v)
+	}
+	if v := m["input"]; v == nil || v.MountPath != InputMountPath ||
+		v.SubPath != "t-0001/attempts/1/input/2" || !v.ReadOnly {
+		t.Fatalf("input mount = %+v", v)
+	}
+	if v := m["tmp"]; v == nil || v.MountPath != "/tmp" {
+		t.Fatalf("tmp mount = %+v", v)
+	}
+	vols := map[string]*corev1.Volume{}
+	for i := range pod.Volumes {
+		vols[pod.Volumes[i].Name] = &pod.Volumes[i]
+	}
+	if v := vols["output"]; v == nil || v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != "argus-storage" {
+		t.Errorf("output volume = %+v (PVC 统一 argus-storage，D-41)", v)
+	}
+	// execution §2.2：input 卷 claim 级不带 ReadOnly（RWX PVC），只读由 volumeMount 强制。
+	if v := vols["input"]; v == nil || v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != "argus-storage" {
+		t.Errorf("input volume = %+v", v)
+	}
+	// StorageRO=true 时 claim 级才置只读（Profile 的只读存储开关）。
+	specRO := sampleSpec()
+	specRO.StorageRO = true
+	jobRO, err := Render(specRO)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range jobRO.Spec.Template.Spec.Volumes {
+		if v.Name == "input" && (v.PersistentVolumeClaim == nil || !v.PersistentVolumeClaim.ReadOnly) {
+			t.Errorf("StorageRO=true must set claim-level read-only on input: %+v", v)
 		}
 	}
-	if output == nil || output.MountPath != OutputMountPath || output.SubPath != "r-20261103-0001/tasks/t-0001/attempts/1" {
-		t.Fatalf("output mount = %+v", output)
-	}
-	if tmp == nil || tmp.MountPath != "/tmp" {
-		t.Fatalf("tmp mount = %+v", tmp)
-	}
 
-	// label / annotation。
+	// label / annotation（§2.3，D-66：argus.io/*）。
 	for k, want := range map[string]string{
-		LabelManaged: "true",
-		LabelRun:     "r-20261103-0001",
-		LabelTask:    "t-0001",
-		LabelAttempt: "1",
-		LabelRole:    "pre_check",
-		LabelTester:  "endpoint-probe",
-		LabelApp:     "testplane",
+		LabelManaged:   "true",
+		LabelTask:      "t-0001",
+		LabelAttempt:   "1",
+		LabelRunnerSeq: "2",
+		LabelRole:      "pre_check",
+		LabelApp:       "argus",
 	} {
 		if got := job.Labels[k]; got != want {
 			t.Errorf("label %s = %q, want %q", k, got, want)
 		}
 	}
-	if got := job.Labels[LabelJobID]; got != JobID("t-0001", 1) {
-		t.Errorf("job-id label = %q, want %q", got, JobID("t-0001", 1))
+	if got := job.Labels[LabelJobID]; got != JobID("t-0001", 1, 2) {
+		t.Errorf("job-id label = %q, want %q", got, JobID("t-0001", 1, 2))
 	}
-	for _, k := range []string{AnnSpecHash, AnnTesterVersion, AnnTimeoutSeconds, AnnRequestedBy} {
+	for _, k := range []string{AnnSpecHash, AnnRunnerVersion, AnnTimeoutSeconds, AnnRequestedBy} {
 		if job.Annotations[k] == "" {
 			t.Errorf("annotation %s missing", k)
 		}
 	}
 	if !strings.HasPrefix(job.Annotations[AnnSpecHash], "sha256:") {
 		t.Errorf("spec-hash = %q", job.Annotations[AnnSpecHash])
+	}
+	if got := job.Spec.Template.Annotations[AnnRunnerKey]; got != "t-0001:1:2" {
+		t.Errorf("pod template runner-key = %q, want t-0001:1:2", got)
+	}
+}
+
+// D-66：AG_PARAMS_FILE 的扩展名由 input_format 决定——编排层经 spec.Env 覆盖，
+// 执行层透传（不感知 input_format，D-67）。
+func TestRenderParamsFileFromEnv(t *testing.T) {
+	spec := sampleSpec()
+	spec.Env = map[string]string{"AG_PARAMS_FILE": "/workspace/input/params.yaml"}
+	job, err := Render(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == EnvParamsFile {
+			if e.Value != "/workspace/input/params.yaml" {
+				t.Errorf("AG_PARAMS_FILE = %q, want the orchestrator-provided path", e.Value)
+			}
+			return
+		}
+	}
+	t.Fatal("AG_PARAMS_FILE missing")
+}
+
+// D-72 硬规则：渲染出的 Job 绝不能带 ownerReferences（Job 回收的级联删除会
+// 杀掉 Genet 管理的活服务）。
+func TestRenderNeverSetsOwnerReferences(t *testing.T) {
+	job, err := Render(sampleSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(job.OwnerReferences) != 0 {
+		t.Errorf("job ownerReferences = %+v, want none (D-72)", job.OwnerReferences)
+	}
+	if len(job.Spec.Template.OwnerReferences) != 0 {
+		t.Errorf("pod template ownerReferences = %+v, want none (D-72)", job.Spec.Template.OwnerReferences)
 	}
 }
 
@@ -226,36 +316,44 @@ func TestSpecHashIsStableAndSensitive(t *testing.T) {
 	}
 
 	spec := sampleSpec()
-	spec.Args = append(spec.Args, "--max_tokens=1")
+	spec.Command = []string{"/runner/run.sh", "--wait_timeout_seconds=600"}
 	c, err := Render(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if a.Annotations[AnnSpecHash] == c.Annotations[AnnSpecHash] {
-		t.Errorf("spec-hash must change when args change")
+		t.Errorf("spec-hash must change when command changes")
 	}
 }
 
 func TestJobNameIsDNS1123AndDeterministic(t *testing.T) {
-	spec := sampleSpec()
-	spec.TaskID = "t-0007"
-	spec.AttemptNo = 3
-	want := Naming(spec.RunID, spec.TaskID, spec.AttemptNo)
-	if want != "tp-t-0007-a3" {
+	want := Naming("t-0007", 3, 1)
+	if want != "argus-t-0007-3-1" {
 		t.Errorf("Naming = %q", want)
 	}
-	if again := Naming(spec.RunID, spec.TaskID, spec.AttemptNo); again != want {
+	if again := Naming("t-0007", 3, 1); again != want {
 		t.Errorf("Naming is not deterministic: %q vs %q", again, want)
 	}
 
-	long := sampleSpec()
-	long.TaskID = strings.Repeat("t-very-long-task-identifier", 3)
-	name := Naming(long.RunID, long.TaskID, 12)
-	if len(name) > maxJobNameLen {
-		t.Errorf("name %q exceeds %d chars", name, maxJobNameLen)
+	long := Naming(strings.Repeat("t-very-long-task-identifier", 3), 1, 12)
+	if len(long) > maxJobNameLen {
+		t.Errorf("name %q exceeds %d chars", long, maxJobNameLen)
 	}
-	if strings.HasSuffix(name, "-") || strings.Contains(name, "_") || strings.ToLower(name) != name {
-		t.Errorf("name %q is not a valid DNS-1123 label", name)
+	if strings.HasSuffix(long, "-") || strings.Contains(long, "_") || strings.ToLower(long) != long {
+		t.Errorf("name %q is not a valid DNS-1123 label", long)
+	}
+}
+
+func TestJobIDDeterministic(t *testing.T) {
+	a := JobID("t-0001", 1, 2)
+	if a != JobID("t-0001", 1, 2) {
+		t.Errorf("JobID not deterministic")
+	}
+	if a == JobID("t-0001", 1, 3) || a == JobID("t-0001", 2, 2) {
+		t.Errorf("JobID must differ across attempt/seq")
+	}
+	if !strings.HasPrefix(a, "j-") || len(a) != len("j-")+8 {
+		t.Errorf("JobID = %q, want j-XXXXXXXX", a)
 	}
 }
 
@@ -265,12 +363,17 @@ func TestRenderRejectsInvalidSpecs(t *testing.T) {
 		mutate func(*ports.JobSpec)
 		target error
 	}{
+		{"wrong spec version", func(s *ports.JobSpec) { s.SpecVersion = "1.0" }, ErrBadSpecVersion},
 		{"empty task", func(s *ports.JobSpec) { s.TaskID = "" }, ErrSpecInvalid},
 		{"empty image", func(s *ports.JobSpec) { s.Image = "" }, ErrSpecInvalid},
 		{"zero attempt", func(s *ports.JobSpec) { s.AttemptNo = 0 }, ErrSpecInvalid},
+		{"zero seq", func(s *ports.JobSpec) { s.Seq = 0 }, ErrSpecInvalid},
+		{"empty command", func(s *ports.JobSpec) { s.Command = nil }, ErrSpecInvalid},
+		{"bad role", func(s *ports.JobSpec) { s.Role = "bench" }, ErrSpecInvalid},
 		{"timeout over max", func(s *ports.JobSpec) { s.TimeoutSeconds = maxTimeoutSeconds + 1 }, ErrSpecInvalid},
-		{"no storage pvc", func(s *ports.JobSpec) { s.StoragePVC = "" }, ErrSpecInvalid},
-		{"output dir mismatch", func(s *ports.JobSpec) { s.OutputDir = "/storage-root/other/tasks/x/attempts/1" }, ErrBadPath},
+		{"empty output dir", func(s *ports.JobSpec) { s.OutputDir = "" }, ErrSpecInvalid},
+		{"output dir mismatch", func(s *ports.JobSpec) { s.OutputDir = "/storage-root/other/attempts/1/runners/2" }, ErrBadPath},
+		{"input dir mismatch", func(s *ports.JobSpec) { s.InputDir = "/storage-root/t-0001/attempts/1/input/9" }, ErrBadPath},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -284,6 +387,21 @@ func TestRenderRejectsInvalidSpecs(t *testing.T) {
 				t.Fatalf("error = %v, want %v", err, tc.target)
 			}
 		})
+	}
+}
+
+// D-41：StoragePVC 缺省时渲染统一 PVC 名 argus-storage。
+func TestRenderDefaultsStoragePVC(t *testing.T) {
+	spec := sampleSpec()
+	spec.StoragePVC = ""
+	job, err := Render(spec)
+	if err != nil {
+		t.Fatalf("empty StoragePVC must default to %q: %v", DefaultStoragePVC, err)
+	}
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName != DefaultStoragePVC {
+			t.Errorf("pvc claim = %q, want %q", v.PersistentVolumeClaim.ClaimName, DefaultStoragePVC)
+		}
 	}
 }
 
@@ -325,14 +443,21 @@ func TestRenderImagePullPolicy(t *testing.T) {
 	}
 }
 
-func TestOutputSubPathValidation(t *testing.T) {
-	good, err := OutputSubPath("r-1", "t-1", 2)
-	if err != nil || good != "r-1/tasks/t-1/attempts/2" {
-		t.Fatalf("OutputSubPath = %q, %v", good, err)
+func TestSubPathValidation(t *testing.T) {
+	goodOut, err := OutputSubPath("t-1", 2, 3)
+	if err != nil || goodOut != "t-1/attempts/2/runners/3" {
+		t.Fatalf("OutputSubPath = %q, %v", goodOut, err)
+	}
+	goodIn, err := InputSubPath("t-1", 2, 3)
+	if err != nil || goodIn != "t-1/attempts/2/input/3" {
+		t.Fatalf("InputSubPath = %q, %v", goodIn, err)
 	}
 	for _, bad := range []string{"../escape", "r 1"} {
-		if _, err := OutputSubPath(bad, "t-1", 1); err == nil {
+		if _, err := OutputSubPath(bad, 1, 1); err == nil {
 			t.Errorf("OutputSubPath(%q) must fail", bad)
+		}
+		if _, err := InputSubPath(bad, 1, 1); err == nil {
+			t.Errorf("InputSubPath(%q) must fail", bad)
 		}
 	}
 }
@@ -353,15 +478,15 @@ func TestParseImageDigest(t *testing.T) {
 	}
 }
 
-// TestRenderSkipsUnboundSecretEnv 覆盖 lead 指出的防御性问题：
-// `tasks.secret_env` 里只声明变量名（secret_ref 为空）时，执行层必须**跳过 + 告警**，
-// 不能 fail Attempt——"required 却没绑定"是提交期校验的责任（C-5.1 第 9 条）。
+// TestRenderSkipsUnboundSecretEnv 覆盖防御性问题：
+// secret_env 只声明变量名（secret_ref 为空）时，执行层必须**跳过 + 告警**，
+// 不能 fail 执行记录——"required 却没绑定"是提交期校验的责任（C-5.1）。
 func TestRenderSkipsUnboundSecretEnv(t *testing.T) {
 	spec := sampleSpec()
-	spec.SecretEnv = []string{
-		"ENDPOINT_API_KEY",                     // 未绑定：跳过 + WARN
-		"BOUND_KEY=tp-secret-endpoint/api_key", // 绑定：生成 secretKeyRef
-		"COLON_KEY=tp-secret-endpoint:token",   // 冒号形态：同样接受
+	spec.SecretEnv = []ports.SecretEnvRef{
+		{Name: "ENDPOINT_API_KEY"},                                      // 未绑定：跳过 + WARN
+		{Name: "BOUND_KEY", SecretRef: "argus-secret-endpoint/api_key"}, // 绑定：生成 secretKeyRef
+		{Name: "COLON_KEY", SecretRef: "argus-secret-endpoint:token"},   // 冒号形态：同样接受
 	}
 	job, warnings, err := RenderWithWarnings(spec)
 	if err != nil {
@@ -384,7 +509,7 @@ func TestRenderSkipsUnboundSecretEnv(t *testing.T) {
 		if !ok || v.ValueFrom == nil || v.ValueFrom.SecretKeyRef == nil {
 			t.Fatalf("env %s must use secretKeyRef: %+v", name, v)
 		}
-		if v.ValueFrom.SecretKeyRef.Name != "tp-secret-endpoint" || v.ValueFrom.SecretKeyRef.Key != wantKey {
+		if v.ValueFrom.SecretKeyRef.Name != "argus-secret-endpoint" || v.ValueFrom.SecretKeyRef.Key != wantKey {
 			t.Errorf("env %s secretKeyRef = %+v", name, v.ValueFrom.SecretKeyRef)
 		}
 	}
@@ -399,10 +524,10 @@ func TestRenderSkipsUnboundSecretEnv(t *testing.T) {
 	}
 }
 
-// TestRenderEmptySecretEnvIsFine 保证 []string{} / 空串不会触发任何告警。
+// TestRenderEmptySecretEnvIsFine 保证空占位项（name 与 ref 都空）不会触发告警。
 func TestRenderEmptySecretEnvIsFine(t *testing.T) {
 	spec := sampleSpec()
-	spec.SecretEnv = []string{"", "   "}
+	spec.SecretEnv = []ports.SecretEnvRef{{}, {Name: "   ", SecretRef: "   "}}
 	job, warnings, err := RenderWithWarnings(spec)
 	if err != nil || len(warnings) != 0 {
 		t.Fatalf("err=%v warnings=%v", err, warnings)
@@ -416,14 +541,14 @@ func TestRenderEmptySecretEnvIsFine(t *testing.T) {
 func TestSubmitWarnsOnUnboundSecret(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	var logged []string
-	ex := NewWithNamespace(cs, "testplane", Options{
+	ex := NewWithNamespace(cs, "argus", Options{
 		PollInterval: 20 * time.Millisecond,
 		Logf: func(format string, args ...any) {
 			logged = append(logged, fmt.Sprintf(format, args...))
 		},
 	})
 	spec := sampleSpec()
-	spec.SecretEnv = []string{"ENDPOINT_API_KEY"}
+	spec.SecretEnv = []ports.SecretEnvRef{{Name: "ENDPOINT_API_KEY"}}
 	if _, err := ex.Submit(context.Background(), spec); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}

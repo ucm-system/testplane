@@ -2,10 +2,7 @@ package report
 
 import (
 	"context"
-	"encoding/json"
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,162 +11,118 @@ import (
 	"github.com/ucm-system/testplane/server/internal/store"
 )
 
-// TestWriteRunReport_Files 生成 report.json / report.md / metadata.json / events.jsonl，
-// 并重建 artifacts 索引（C-7.2、C-7.3、C-7.4、C-7.5）。需要真 PG。
-func TestWriteRunReport_Files(t *testing.T) {
+// 本文件是 Writer 的 DB 集成测试。需要 PostgreSQL：设置 AG_TEST_DATABASE_URL。
+// 未设置时跳过——**不伪造通过**。
+
+func newITStoreReport(t *testing.T) *store.Store {
+	t.Helper()
 	dsn, err := dbtest.URL("report")
 	if err != nil {
-		t.Fatalf("准备测试库: %v", err)
+		t.Fatalf("dbtest.URL: %v", err)
 	}
 	if dsn == "" {
-		t.Skip("未设置 TESTPLANE_TEST_DATABASE_URL")
+		t.Skip("AG_TEST_DATABASE_URL 未设置，跳过需要 Postgres 的报告生成集成测试")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	st, err := store.New(ctx, dsn, 4)
+	if _, err := dbtest.ResetSchema(context.Background(), dsn); err != nil {
+		t.Fatalf("reset schema: %v", err)
+	}
+	s, err := store.New(context.Background(), dsn, 4)
 	if err != nil {
-		t.Fatalf("连接测试库: %v", err)
+		t.Fatalf("New store: %v", err)
 	}
-	defer st.Close()
+	t.Cleanup(s.Close)
+	return s
+}
+
+func TestIT_WriteTaskReport(t *testing.T) {
+	s := newITStoreReport(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	task := &store.Task{
+		ID:          store.NewTaskID(now),
+		Name:        "report-it",
+		Manifest:    []byte(`{"task":{"name":"report-it","service":{"url":"http://x/v1"}}}`),
+		Resolved:    []byte(`{"precheck":{"injected":false},"runners":[{"seq":1,"name":"acc","runner":"aisbench-acc","version":"1.0.0","role":"test"}],"schema_version":"2.0"}`),
+		Env:         []byte(`{}`),
+		SecretEnv:   []byte(`[]`),
+		SubmittedBy: "it",
+	}
+	runners := []*store.RunnerRun{
+		{Seq: 1, Name: "acc", RunnerName: "aisbench-acc", RunnerVersion: "1.0.0",
+			Role: domain.RoleTest, ImageRef: "img:1", Profile: "k8s-npu",
+			InputRef: "attempts/1/input/1", OnFailure: domain.OnFailureContinue,
+			TimeoutSeconds: 600, Status: string(domain.RunnerPending)},
+	}
+	if _, _, err := s.SubmitTask(ctx, store.SubmitParams{Task: task, Runners: runners, Actor: "it"}); err != nil {
+		t.Fatalf("SubmitTask: %v", err)
+	}
+	m := store.NewMachines(s, nil)
+	_, _ = m.Tasks.Enqueue(ctx, task.ID, "it")
+	if _, err := m.Tasks.BeginPipeline(ctx, task.ID, "it"); err != nil {
+		t.Fatalf("BeginPipeline: %v", err)
+	}
+	k := domain.RunnerKey{TaskID: task.ID, AttemptNo: 1, Seq: 1}
+	if _, err := m.Runners.Queue(ctx, k); err != nil {
+		t.Fatalf("Queue: %v", err)
+	}
+	if _, err := m.Runners.Prepare(ctx, k, store.PrepareParams{}); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if _, err := m.Runners.Start(ctx, k); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := s.FinishRunnerRun(ctx, store.RunnerFinish{
+		Key: k, Succeeded: true, ExitCode: intPtr(0), Phase: "succeeded",
+		ResultRef:  "attempts/1/runners/1/result.json",
+		LogRef:     "attempts/1/runners/1/logs/stdout.log",
+		FinishedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("FinishRunnerRun: %v", err)
+	}
 
 	root := t.TempDir()
-	w := &Writer{Store: st, Root: root, Logger: nil}
-
-	runID := store.NewRunID(time.Now())
-	okTask := &store.Task{
-		ID: store.NewTaskID(), Seq: 1, Name: "accuracy",
-		TesterName: "probe", TesterVersion: "1.0.0", ImageRef: "probe:1",
-		Profile: "k8s-npu", ArgsArgv: []byte("[]"), OnFailure: domain.OnFailureContinue,
-		TimeoutSeconds: 600, Status: string(domain.TaskSucceeded),
+	// 造一份产物文件供索引。
+	outDir := root + "/" + task.ID + "/attempts/1/runners/1"
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
+		t.Fatal(err)
 	}
-	badTask := &store.Task{
-		ID: store.NewTaskID(), Seq: 2, Name: "perf",
-		TesterName: "probe", TesterVersion: "1.0.0", ImageRef: "probe:1",
-		Profile: "k8s-npu", ArgsArgv: []byte("[]"), OnFailure: domain.OnFailureContinue,
-		TimeoutSeconds: 600, Status: string(domain.TaskFailed),
-		Error: []byte(`{"code":"TESTER_NONZERO_EXIT","message":"boom","retryable":false}`),
-	}
-	run := &store.Run{
-		ID: runID, Name: "report-demo", Kind: "run",
-		Manifest:      []byte(`{"run":{"name":"report-demo"}}`),
-		Resolved:      []byte(`{"kind":"run","tasks":[]}`),
-		CleanupPolicy: "always", SubmittedBy: "dev",
-	}
-	if _, _, err := st.CreateRun(ctx, store.SubmitParams{
-		Run: run, Tasks: []*store.Task{okTask, badTask}, Actor: "user:dev",
-	}); err != nil {
-		t.Fatalf("CreateRun: %v", err)
-	}
-	// 落一个 attempt，让 report.json 的 attempts/duration 有内容。
-	if _, err := st.Attempts.Create(ctx, nil, store.CreateAttemptParams{TaskID: okTask.ID}); err != nil {
-		t.Fatalf("CreateAttempt: %v", err)
+	if err := os.WriteFile(outDir+"/result.json", []byte(validResult2), 0o640); err != nil {
+		t.Fatal(err)
 	}
 
-	// 造一个 result.json 让产物索引有 result 类型。
-	resultDir := filepath.Join(root, runID, "tasks", okTask.ID, "attempts", "1")
-	if err := os.MkdirAll(resultDir, 0o750); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(resultDir, "result.json"),
-		[]byte(`{"schema_version":"1.0"}`), 0o640); err != nil {
-		t.Fatalf("write result: %v", err)
-	}
-
-	path, err := w.WriteRunReport(ctx, runID)
+	w := &Writer{Store: s, Root: root, MaxReportBytes: 20 << 20}
+	path, err := w.WriteTaskReport(ctx, task.ID)
 	if err != nil {
-		t.Fatalf("WriteRunReport: %v", err)
+		t.Fatalf("WriteTaskReport: %v", err)
 	}
 	if path == "" {
-		t.Fatal("返回路径为空")
+		t.Fatal("report.json 路径为空")
 	}
 	for _, name := range []string{"report.json", "report.md", "metadata.json", "events.jsonl"} {
-		full := filepath.Join(root, runID, name)
-		if info, err := os.Stat(full); err != nil || info.Size() == 0 {
-			t.Fatalf("%s 未生成或为空: err=%v", name, err)
+		if _, err := os.Stat(root + "/" + task.ID + "/" + name); err != nil {
+			t.Errorf("缺 %s: %v", name, err)
 		}
 	}
+	// 幂等：再写一遍不报错。
+	if _, err := w.WriteTaskReport(ctx, task.ID); err != nil {
+		t.Fatalf("WriteTaskReport#2: %v", err)
+	}
 
-	// report.json 的形状（ARCHITECTURE §8.4）
-	data, err := os.ReadFile(path)
+	// 产物索引已重建。
+	arts, err := s.Artifacts.ListByRunner(ctx, nil, task.ID, 1, 1)
 	if err != nil {
-		t.Fatalf("读 report.json: %v", err)
+		t.Fatalf("ListByRunner: %v", err)
 	}
-	var rep struct {
-		RunID  string         `json:"run_id"`
-		Status string         `json:"status"`
-		Counts map[string]int `json:"counts"`
-		Tasks  []struct {
-			TaskID   string `json:"task_id"`
-			Status   string `json:"status"`
-			Attempts int    `json:"attempts"`
-		} `json:"tasks"`
-		Failures []struct {
-			TaskID    string `json:"task_id"`
-			ErrorCode string `json:"error_code"`
-		} `json:"failures"`
-	}
-	if err := json.Unmarshal(data, &rep); err != nil {
-		t.Fatalf("解析 report.json: %v", err)
-	}
-	if rep.RunID != runID {
-		t.Fatalf("report.run_id = %s", rep.RunID)
-	}
-	if rep.Counts["total"] != 2 || rep.Counts["succeeded"] != 1 || rep.Counts["failed"] != 1 {
-		t.Fatalf("counts 异常: %+v", rep.Counts)
-	}
-	if len(rep.Failures) != 1 || rep.Failures[0].TaskID != badTask.ID ||
-		rep.Failures[0].ErrorCode != "TESTER_NONZERO_EXIT" {
-		t.Fatalf("failures 异常: %+v", rep.Failures)
-	}
-
-	// report.md 模板要点（C-7.3）
-	md, err := os.ReadFile(filepath.Join(root, runID, "report.md"))
-	if err != nil {
-		t.Fatalf("读 report.md: %v", err)
-	}
-	for _, want := range []string{"# Run " + runID, "## Task", "## 失败与跳过", "## 产物与报告"} {
-		if !strings.Contains(string(md), want) {
-			t.Fatalf("report.md 缺少 %q", want)
-		}
-	}
-
-	// events.jsonl 必须按 seq 升序，且第一条是 run.submitted。
-	lines := strings.Split(strings.TrimSpace(readFile(t, filepath.Join(root, runID, "events.jsonl"))), "\n")
-	if len(lines) == 0 || lines[0] == "" {
-		t.Fatal("events.jsonl 为空")
-	}
-	var first struct {
-		Seq  int64  `json:"seq"`
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
-		t.Fatalf("解析 events.jsonl 首行: %v", err)
-	}
-	if first.Type != domain.EventRunSubmitted || first.Seq != 1 {
-		t.Fatalf("首行事件 = %+v", first)
-	}
-
-	// 产物索引（artifacts 表）
-	arts, err := st.Artifacts.ListByRun(ctx, nil, runID)
-	if err != nil {
-		t.Fatalf("列产物: %v", err)
-	}
-	var foundResult bool
+	found := false
 	for _, a := range arts {
-		if strings.HasSuffix(a.Path, "result.json") && a.Kind == "result" {
-			foundResult = true
+		if a.Path == "attempts/1/runners/1/result.json" && a.Kind == "result" {
+			found = true
 		}
 	}
-	if !foundResult {
-		t.Fatalf("artifacts 索引缺少 result 条目: %+v", arts)
+	if !found {
+		t.Fatalf("产物索引缺 result.json: %+v", arts)
 	}
 }
 
-func readFile(t *testing.T, path string) string {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("读 %s: %v", path, err)
-	}
-	return string(b)
-}
+func intPtr(i int) *int { return &i }

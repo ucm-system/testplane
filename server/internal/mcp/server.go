@@ -162,7 +162,7 @@ func (s *Server) initialize(params json.RawMessage) map[string]any {
 			"tools": map[string]any{},
 		},
 		"serverInfo": map[string]any{
-			"name":    "testplane",
+			"name":    "argus",
 			"version": s.version,
 		},
 	}

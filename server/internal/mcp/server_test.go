@@ -220,7 +220,7 @@ func TestInitializeNegotiatesProtocolVersion(t *testing.T) {
 	if result.Capabilities.Tools == nil {
 		t.Error("capabilities.tools 必须存在（即使为空对象）")
 	}
-	if result.ServerInfo.Name != "testplane" || result.ServerInfo.Version != Version {
+	if result.ServerInfo.Name != "argus" || result.ServerInfo.Version != Version {
 		t.Errorf("serverInfo = %+v", result.ServerInfo)
 	}
 }
@@ -255,17 +255,19 @@ func TestToolsList(t *testing.T) {
 	}
 
 	want := []string{
-		"testplane_submit_run",
-		"testplane_get_run",
-		"testplane_wait_run",
-		"testplane_cancel_run",
-		"testplane_list_testers",
-		"testplane_get_report",
-		"testplane_get_logs",
-		"testplane_list_artifacts",
-		"testplane_get_file",
-		"testplane_queue_status",
-		"testplane_list_profiles",
+		"argus_submit_task",
+		"argus_get_task",
+		"argus_wait_task",
+		"argus_cancel_task",
+		"argus_retry_task",
+		"argus_clean_task",
+		"argus_list_runners",
+		"argus_get_report",
+		"argus_get_logs",
+		"argus_list_artifacts",
+		"argus_get_file",
+		"argus_queue_status",
+		"argus_list_profiles",
 	}
 	if len(result.Tools) != len(want) {
 		t.Fatalf("工具数 = %d，期望 %d", len(result.Tools), len(want))
@@ -286,63 +288,63 @@ func TestToolsList(t *testing.T) {
 		}
 	}
 
-	submit := got["testplane_submit_run"]
+	submit := got["argus_submit_task"]
 	required, _ := submit.InputSchema["required"].([]any)
 	if len(required) != 1 || required[0] != "manifest" {
-		t.Errorf("submit_run.required = %v，期望 [manifest]", submit.InputSchema["required"])
+		t.Errorf("submit_task.required = %v，期望 [manifest]", submit.InputSchema["required"])
 	}
 	props, _ := submit.InputSchema["properties"].(map[string]any)
 	if _, ok := props["dry_run"]; !ok {
-		t.Error("submit_run 缺少 dry_run 参数")
+		t.Error("submit_task 缺少 dry_run 参数")
 	}
-	waitProps, _ := got["testplane_wait_run"].InputSchema["properties"].(map[string]any)
+	waitProps, _ := got["argus_wait_task"].InputSchema["properties"].(map[string]any)
 	if _, ok := waitProps["timeout_seconds"]; !ok {
 		t.Error("wait_run 缺少 timeout_seconds 参数")
 	}
 	if _, ok := waitProps["follow"]; !ok {
 		t.Error("wait_run 缺少 follow 参数")
 	}
-	fileProps, _ := got["testplane_get_file"].InputSchema["properties"].(map[string]any)
+	fileProps, _ := got["argus_get_file"].InputSchema["properties"].(map[string]any)
 	if _, ok := fileProps["range"]; !ok {
 		t.Error("get_file 缺少 range 参数")
 	}
-	fileRequired, _ := got["testplane_get_file"].InputSchema["required"].([]any)
+	fileRequired, _ := got["argus_get_file"].InputSchema["required"].([]any)
 	if len(fileRequired) != 2 {
 		t.Errorf("get_file.required = %v，期望 [run_id path]", fileRequired)
 	}
-	if got["testplane_queue_status"].InputSchema["additionalProperties"] != false {
+	if got["argus_queue_status"].InputSchema["additionalProperties"] != false {
 		t.Error("queue_status 的 inputSchema 应为空对象（additionalProperties=false）")
 	}
 }
 
 // ---- tools/call：成功路径 -------------------------------------------------
 
-func TestToolsCallGetRunSuccess(t *testing.T) {
+func TestToolsCallGetTaskSuccess(t *testing.T) {
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/runs/r-20261105-0001" {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/tasks/t-20261110-0001" {
 			t.Errorf("意外的请求: %s %s", r.Method, r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			t.Errorf("Authorization = %q", got)
 		}
-		if got := r.Header.Get("User-Agent"); !strings.HasPrefix(got, "testplane-mcp/") {
+		if got := r.Header.Get("User-Agent"); !strings.HasPrefix(got, "argus-mcp/") {
 			t.Errorf("User-Agent = %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"r-20261105-0001","status":"testing","task_counts":{"total":2,"succeeded":1,"failed":0}}`)
+		_, _ = io.WriteString(w, `{"id":"t-20261110-0001","status":"running","task_counts":{"total":2,"succeeded":1,"failed":0}}`)
 	}))
 
 	resp := h.call(t, 3, "tools/call", map[string]any{
-		"name":      "testplane_get_run",
-		"arguments": map[string]any{"run_id": "r-20261105-0001"},
+		"name":      "argus_get_task",
+		"arguments": map[string]any{"task_id": "t-20261110-0001"},
 	})
 	res := decodeToolResult(t, resp)
 	if res.IsError {
-		t.Fatalf("get_run 不应 isError: %s", res.Content[0].Text)
+		t.Fatalf("get_task 不应 isError: %s", res.Content[0].Text)
 	}
 	body := decodeToolJSON(t, res.Content[0].Text)
-	if body["status"] != "testing" || body["id"] != "r-20261105-0001" {
-		t.Errorf("get_run 返回 %+v", body)
+	if body["status"] != "running" || body["id"] != "t-20261110-0001" {
+		t.Errorf("get_task 返回 %+v", body)
 	}
 }
 
@@ -356,12 +358,12 @@ func TestToolsCallSubmitRunDryRun(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		gotBody, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"valid":false,"issues":[{"path":"tests[0].args","code":"PUBLIC_PARAM_CONFLICT","message":"--url 由平台注入"}]}`)
+		_, _ = io.WriteString(w, `{"valid":false,"issues":[{"path":"runners[0].input","code":"INPUT_SYNTAX","message":"--url 由平台注入"}]}`)
 	}))
 
-	manifest := `{"run":{"name":"x","service":{"url":"http://mock:18080/v1"},"tests":[]}}`
+	manifest := `{"task":{"name":"x","service":{"url":"http://mock:18080/v1"},"runners":[]}}`
 	resp := h.call(t, 4, "tools/call", map[string]any{
-		"name": "testplane_submit_run",
+		"name": "argus_submit_task",
 		"arguments": map[string]any{
 			"manifest": manifest,
 			"dry_run":  true,
@@ -371,7 +373,7 @@ func TestToolsCallSubmitRunDryRun(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("dry_run 的业务结果不是 isError: %s", res.Content[0].Text)
 	}
-	if gotPath != "/api/v1/runs" || gotQuery != "dry_run=true" {
+	if gotPath != "/api/v1/tasks" || gotQuery != "dry_run=true" {
 		t.Errorf("请求路径/查询 = %s?%s", gotPath, gotQuery)
 	}
 	if gotCT != "application/json" {
@@ -393,10 +395,10 @@ func TestToolsCallSubmitRunYAML(t *testing.T) {
 	var gotCT string
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotCT = r.Header.Get("Content-Type")
-		_, _ = io.WriteString(w, `{"run":{"id":"r-1","status":"queued","kind":"run"},"tasks":[]}`)
+		_, _ = io.WriteString(w, `{"task":{"id":"t-1","status":"queued","current_attempt":1},"runners":[]}`)
 	}))
 	resp := h.call(t, 5, "tools/call", map[string]any{
-		"name":      "testplane_submit_run",
+		"name":      "argus_submit_task",
 		"arguments": map[string]any{"manifest": "run:\n  name: x\n"},
 	})
 	if res := decodeToolResult(t, resp); res.IsError {
@@ -415,13 +417,13 @@ func TestToolsCallWaitRunSucceeds(t *testing.T) {
 		if n >= 3 {
 			status = "succeeded"
 		}
-		_, _ = fmt.Fprintf(w, `{"id":"r-1","status":%q,"task_counts":{"total":2,"succeeded":2}}`, status)
+		_, _ = fmt.Fprintf(w, `{"id":"t-1","status":%q,"task_counts":{"total":2,"succeeded":2}}`, status)
 	}))
 
 	resp := h.call(t, 6, "tools/call", map[string]any{
-		"name": "testplane_wait_run",
+		"name": "argus_wait_task",
 		"arguments": map[string]any{
-			"run_id":           "r-1",
+			"task_id":          "t-1",
 			"timeout_seconds":  5,
 			"interval_seconds": 0.02,
 		},
@@ -441,12 +443,12 @@ func TestToolsCallWaitRunSucceeds(t *testing.T) {
 
 func TestToolsCallWaitRunTimesOut(t *testing.T) {
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"id":"r-1","status":"testing"}`)
+		_, _ = io.WriteString(w, `{"id":"t-1","status":"running"}`)
 	}))
 	resp := h.call(t, 7, "tools/call", map[string]any{
-		"name": "testplane_wait_run",
+		"name": "argus_wait_task",
 		"arguments": map[string]any{
-			"run_id":           "r-1",
+			"task_id":          "t-1",
 			"timeout_seconds":  0.15,
 			"interval_seconds": 0.03,
 		},
@@ -456,26 +458,26 @@ func TestToolsCallWaitRunTimesOut(t *testing.T) {
 		t.Fatalf("timeout 不是 isError（它只是本次等待没等到终态）: %s", res.Content[0].Text)
 	}
 	body := decodeToolJSON(t, res.Content[0].Text)
-	if body["outcome"] != "timeout" || body["terminal"] != false || body["status"] != "testing" {
+	if body["outcome"] != "timeout" || body["terminal"] != false || body["status"] != "running" {
 		t.Errorf("wait timeout 返回 %+v", body)
 	}
 }
 
-func TestToolsCallCancelRun(t *testing.T) {
+func TestToolsCallCancelTask(t *testing.T) {
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs/r-1/cancel":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks/t-1/cancel":
 			w.WriteHeader(http.StatusAccepted)
-			_, _ = io.WriteString(w, `{"run_id":"r-1","status":"cancelling"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runs/r-1":
-			_, _ = io.WriteString(w, `{"id":"r-1","status":"canceled"}`)
+			_, _ = io.WriteString(w, `{"task_id":"t-1","status":"cancelling"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/t-1":
+			_, _ = io.WriteString(w, `{"id":"t-1","status":"canceled"}`)
 		default:
 			t.Errorf("意外请求: %s %s", r.Method, r.URL.Path)
 		}
 	}))
 	resp := h.call(t, 8, "tools/call", map[string]any{
-		"name":      "testplane_cancel_run",
-		"arguments": map[string]any{"run_id": "r-1"},
+		"name":      "argus_cancel_task",
+		"arguments": map[string]any{"task_id": "t-1"},
 	})
 	res := decodeToolResult(t, resp)
 	if res.IsError {
@@ -492,8 +494,14 @@ func TestToolsCallCancelRun(t *testing.T) {
 
 func TestToolsCallGetLogsReportsOffset(t *testing.T) {
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/tasks/t-1/attempts/2/logs" {
-			t.Errorf("路径 = %q", r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/t-1":
+			_, _ = io.WriteString(w, `{"id":"t-1","status":"failed","runners":[{"seq":3,"status":"failed","error_code":"RUNNER_NONZERO_EXIT"},{"seq":1,"status":"succeeded"}]}`)
+			return
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/t-1/attempts/2/runners/3/logs":
+			// 命中断言在下面
+		default:
+			t.Errorf("意外请求: %s %s", r.Method, r.URL.Path)
 		}
 		if got := r.URL.Query().Get("tail"); got != "5" {
 			t.Errorf("tail = %q", got)
@@ -503,7 +511,7 @@ func TestToolsCallGetLogsReportsOffset(t *testing.T) {
 		_, _ = io.WriteString(w, "hello log\n")
 	}))
 	resp := h.call(t, 9, "tools/call", map[string]any{
-		"name": "testplane_get_logs",
+		"name": "argus_get_logs",
 		"arguments": map[string]any{
 			"task_id": "t-1",
 			"attempt": 2,
@@ -528,20 +536,20 @@ func TestToolsCallGetLogsReportsOffset(t *testing.T) {
 
 func TestToolsCallGetReportMarkdown(t *testing.T) {
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/runs/r-1/report.md" {
+		if r.URL.Path != "/api/v1/tasks/t-1/report.md" {
 			t.Errorf("路径 = %q", r.URL.Path)
 		}
-		_, _ = io.WriteString(w, "# r-1\n\n- 状态：succeeded\n")
+		_, _ = io.WriteString(w, "# t-1\n\n- 状态：succeeded\n")
 	}))
 	resp := h.call(t, 10, "tools/call", map[string]any{
-		"name":      "testplane_get_report",
-		"arguments": map[string]any{"run_id": "r-1", "format": "markdown"},
+		"name":      "argus_get_report",
+		"arguments": map[string]any{"task_id": "t-1", "format": "markdown"},
 	})
 	res := decodeToolResult(t, resp)
 	if res.IsError {
 		t.Fatalf("report 不应 isError: %s", res.Content[0].Text)
 	}
-	if res.Content[0].Text != "# r-1\n\n- 状态：succeeded\n" {
+	if res.Content[0].Text != "# t-1\n\n- 状态：succeeded\n" {
 		t.Errorf("markdown 原文被改写: %q", res.Content[0].Text)
 	}
 }
@@ -552,11 +560,11 @@ func TestToolsCallHTTPErrorIsIsError(t *testing.T) {
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"code":"NOT_FOUND","message":"Run 不存在","detail":{"run_id":"r-404"},"retryable":false,"trace_id":"01JABC"}`)
+		_, _ = io.WriteString(w, `{"code":"NOT_FOUND","message":"Task 不存在","detail":{"task_id":"t-404"},"retryable":false,"trace_id":"01JABC"}`)
 	}))
 	resp := h.call(t, 11, "tools/call", map[string]any{
-		"name":      "testplane_get_run",
-		"arguments": map[string]any{"run_id": "r-404"},
+		"name":      "argus_get_task",
+		"arguments": map[string]any{"task_id": "t-404"},
 	})
 	if resp.Error != nil {
 		t.Fatalf("REST 错误应映射成 isError，而不是协议错误: %+v", resp.Error)
@@ -577,10 +585,10 @@ func TestToolsCallProfiles(t *testing.T) {
 		if r.URL.Path != "/api/v1/profiles" {
 			t.Errorf("路径 = %q", r.URL.Path)
 		}
-		_, _ = io.WriteString(w, `{"items":[{"name":"k8s-npu","cluster":"cluster-01","namespace":"testplane","mounts":[],"scheduler":"default","deploy_timeout_seconds":259200}],"has_more":false}`)
+		_, _ = io.WriteString(w, `{"items":[{"name":"k8s-npu","cluster":"cluster-01","namespace":"argus","mounts":[],"scheduler":"default","deploy_timeout_seconds":259200}],"has_more":false}`)
 	}))
 	resp := h.call(t, 12, "tools/call", map[string]any{
-		"name":      "testplane_list_profiles",
+		"name":      "argus_list_profiles",
 		"arguments": map[string]any{},
 	})
 	res := decodeToolResult(t, resp)
@@ -597,19 +605,19 @@ func TestToolsCallProfiles(t *testing.T) {
 func TestToolsCallListArtifactsRunAndTask(t *testing.T) {
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runs/r-1/artifacts":
+		case "/api/v1/tasks/t-1/artifacts":
 			_, _ = io.WriteString(w, `{"items":[{"path":"report.json","kind":"report","size_bytes":12}],"by_kind":{"report":[{"path":"report.json","kind":"report","size_bytes":12}]},"total_size_bytes":12}`)
-		case "/api/v1/tasks/t-1/attempts/2/artifacts":
-			_, _ = io.WriteString(w, `{"items":[{"path":"tasks/t-1/attempts/2/result.json","kind":"result","size_bytes":34,"task_id":"t-1"}],"by_kind":{"result":[{"path":"tasks/t-1/attempts/2/result.json","kind":"result","size_bytes":34,"task_id":"t-1"}]},"total_size_bytes":34}`)
+		case "/api/v1/tasks/t-1/attempts/2/runners/2/artifacts":
+			_, _ = io.WriteString(w, `{"items":[{"path":"attempts/2/runners/2/result.json","kind":"result","size_bytes":34,"attempt_no":2,"runner_seq":2}],"by_kind":{"result":[]},"total_size_bytes":34}`)
 		default:
 			t.Errorf("意外路径: %s", r.URL.Path)
 		}
 	}))
 
-	// Run 级
+	// Task 级
 	resp := h.call(t, 20, "tools/call", map[string]any{
-		"name":      "testplane_list_artifacts",
-		"arguments": map[string]any{"run_id": "r-1"},
+		"name":      "argus_list_artifacts",
+		"arguments": map[string]any{"task_id": "t-1"},
 	})
 	res := decodeToolResult(t, resp)
 	if res.IsError {
@@ -622,8 +630,8 @@ func TestToolsCallListArtifactsRunAndTask(t *testing.T) {
 
 	// Attempt 级
 	resp = h.call(t, 21, "tools/call", map[string]any{
-		"name":      "testplane_list_artifacts",
-		"arguments": map[string]any{"task_id": "t-1", "attempt": 2},
+		"name":      "argus_list_artifacts",
+		"arguments": map[string]any{"task_id": "t-1", "attempt": 2, "runner_seq": 2},
 	})
 	res = decodeToolResult(t, resp)
 	if res.IsError {
@@ -634,18 +642,13 @@ func TestToolsCallListArtifactsRunAndTask(t *testing.T) {
 		t.Errorf("attempt artifacts = %+v", body)
 	}
 
-	// XOR 校验
-	for _, args := range []map[string]any{
-		{},
-		{"run_id": "r-1", "task_id": "t-1"},
-	} {
-		resp = h.call(t, 22, "tools/call", map[string]any{
-			"name":      "testplane_list_artifacts",
-			"arguments": args,
-		})
-		if resp.Error == nil || resp.Error.Code != codeInvalidParams {
-			t.Errorf("artifacts 参数 %v 应返回 -32602，实际 %+v", args, resp.Error)
-		}
+	// 缺 task_id → -32602。
+	resp = h.call(t, 22, "tools/call", map[string]any{
+		"name":      "argus_list_artifacts",
+		"arguments": map[string]any{},
+	})
+	if resp.Error == nil || resp.Error.Code != codeInvalidParams {
+		t.Errorf("缺 task_id 应返回 -32602，实际 %+v", resp.Error)
 	}
 }
 
@@ -654,7 +657,7 @@ func TestToolsCallGetFileSummary(t *testing.T) {
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotRange = r.Header.Get("Range")
-		if r.URL.Query().Get("path") != "tasks/t-1/attempts/1/logs/stdout.log" {
+		if r.URL.Query().Get("path") != "attempts/1/logs/stdout.log" {
 			t.Errorf("path 查询 = %q", r.URL.Query().Get("path"))
 		}
 		w.Header().Set("Content-Range", "bytes 0-15/16")
@@ -662,10 +665,10 @@ func TestToolsCallGetFileSummary(t *testing.T) {
 		_, _ = io.WriteString(w, "hello log line\n")
 	}))
 	resp := h.call(t, 23, "tools/call", map[string]any{
-		"name": "testplane_get_file",
+		"name": "argus_get_file",
 		"arguments": map[string]any{
-			"run_id":    "r-1",
-			"path":      "r-1/tasks/t-1/attempts/1/logs/stdout.log", // artifacts 风格：带 run_id 前缀
+			"task_id":   "t-1",
+			"path":      "t-1/attempts/1/logs/stdout.log", // artifacts 风格：带 task_id 前缀
 			"max_bytes": 1024,
 		},
 	})
@@ -673,12 +676,12 @@ func TestToolsCallGetFileSummary(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("get_file 不应 isError: %s", res.Content[0].Text)
 	}
-	if gotPath != "/api/v1/runs/r-1/files" || gotRange != "bytes=0-1023" {
+	if gotPath != "/api/v1/tasks/t-1/files" || gotRange != "bytes=0-1023" {
 		t.Errorf("请求形状不对: path=%q range=%q", gotPath, gotRange)
 	}
 	body := decodeToolJSON(t, res.Content[0].Text)
-	if body["api_path"] != "tasks/t-1/attempts/1/logs/stdout.log" {
-		t.Errorf("api_path = %v，期望剥离 run_id 前缀", body["api_path"])
+	if body["api_path"] != "attempts/1/logs/stdout.log" {
+		t.Errorf("api_path = %v，期望剥离 task_id 前缀", body["api_path"])
 	}
 	if body["encoding"] != "text" || body["preview"] != "hello log line\n" {
 		t.Errorf("预览 = %+v", body)
@@ -697,8 +700,8 @@ func TestToolsCallGetFileSummary(t *testing.T) {
 		_, _ = w.Write([]byte{0x00, 0x01, 0xff, 0xfe})
 	}))
 	resp = h2.call(t, 24, "tools/call", map[string]any{
-		"name":      "testplane_get_file",
-		"arguments": map[string]any{"run_id": "r-1", "path": "bin.dat", "max_bytes": 1024},
+		"name":      "argus_get_file",
+		"arguments": map[string]any{"task_id": "t-1", "path": "bin.dat", "max_bytes": 1024},
 	})
 	res = decodeToolResult(t, resp)
 	if res.IsError {
@@ -714,12 +717,13 @@ func TestHintsCoverKnownCodes(t *testing.T) {
 	// 附录 D 全部错误码 + 两个合成/终态码：每个都要有 next_action。
 	required := []string{
 		"VALIDATION_ERROR", "UNAUTHENTICATED", "FORBIDDEN", "NOT_FOUND", "CONFLICT",
-		"TESTER_NOT_FOUND", "TESTER_VERSION_PINNED", "TESTER_INVALID",
-		"EXECUTION_PROFILE_NOT_FOUND", "RUN_TOO_LARGE", "RESOURCE_EXHAUSTED",
-		"ARTIFACT_QUOTA_EXCEEDED", "EXECUTOR_UNAVAILABLE", "EXECUTOR_POD_ERROR",
-		"IMAGE_PULL_FAILED", "MOUNT_UNAVAILABLE", "ENDPOINT_UNREACHABLE", "PRECHECK_FAILED",
-		"TASK_TIMEOUT", "TESTER_NONZERO_EXIT", "RESULT_MISSING", "RESULT_INVALID",
-		"CLEANUP_FAILED", "CANCELED", "INTERNAL_ERROR", "DEPLOY_FAILED", "DEPLOY_BLOCKED",
+		"RUNNER_NOT_FOUND", "RUNNER_VERSION_PINNED", "RUNNER_INVALID",
+		"EXECUTION_PROFILE_NOT_FOUND", "TASK_TOO_LARGE", "ATTEMPT_EXHAUSTED",
+		"RESOURCE_EXHAUSTED", "ARTIFACT_QUOTA_EXCEEDED", "EXECUTOR_UNAVAILABLE",
+		"EXECUTOR_POD_ERROR", "IMAGE_PULL_FAILED", "MOUNT_UNAVAILABLE", "EXPORT_INVALID",
+		"ENDPOINT_UNREACHABLE", "PRECHECK_FAILED", "RUNNER_TIMEOUT", "RUNNER_NONZERO_EXIT",
+		"RESULT_MISSING", "RESULT_INVALID", "CLEANUP_FAILED", "CANCELED", "INTERNAL_ERROR",
+		"DEPLOY_FAILED", "DEPLOY_BLOCKED",
 		"SERVICE_UNAVAILABLE", "UNREACHABLE",
 	}
 	for _, code := range required {
@@ -738,9 +742,9 @@ func TestHintsCoverKnownCodes(t *testing.T) {
 	// 抽检 lead 指定的语义，防止后续改坏。
 	checks := map[string]string{
 		"PRECHECK_FAILED":      "precheck",
-		"DEPLOY_FAILED":        "不要重试",
-		"DEPLOY_BLOCKED":       "volcano",
-		"TASK_TIMEOUT":         "timeout",
+		"DEPLOY_FAILED":        "argus retry",
+		"DEPLOY_BLOCKED":       "deploy",
+		"RUNNER_TIMEOUT":       "timeout",
 		"RESULT_MISSING":       "result.json",
 		"FORBIDDEN":            "operator",
 		"VALIDATION_ERROR":     "issues",
@@ -756,7 +760,7 @@ func TestHintsCoverKnownCodes(t *testing.T) {
 	if _, ok := HintForError("SOME_NEW_CODE"); ok {
 		t.Error("未知错误码不应有提示")
 	}
-	if _, ok := HintForRunStatus("canceled"); !ok {
+	if _, ok := HintForTaskStatus("canceled"); !ok {
 		t.Error("canceled 终态应有提示")
 	}
 }
@@ -765,8 +769,8 @@ func TestHintsCoverKnownCodes(t *testing.T) {
 
 func TestReadSSEParsesFrames(t *testing.T) {
 	stream := ": ping\n\n" +
-		"id: 7\nevent: run.state_changed\ndata: {\"seq\":7,\"to\":\"testing\"}\n\n" +
-		"id: 8\nevent: run.finished\ndata: line1\ndata: line2\n\n"
+		"id: 7\nevent: state_changed\ndata: {\"seq\":7,\"to\":\"running\"}\n\n" +
+		"id: 8\nevent: task_finished\ndata: line1\ndata: line2\n\n"
 	var frames []SSEFrame
 	if err := ReadSSE(strings.NewReader(stream), func(f SSEFrame) error {
 		frames = append(frames, f)
@@ -777,10 +781,10 @@ func TestReadSSEParsesFrames(t *testing.T) {
 	if len(frames) != 2 {
 		t.Fatalf("帧数 = %d，期望 2（注释不计）", len(frames))
 	}
-	if frames[0].ID != "7" || !frames[0].HasID || frames[0].Event != "run.state_changed" {
+	if frames[0].ID != "7" || !frames[0].HasID || frames[0].Event != "state_changed" {
 		t.Errorf("第一帧 = %+v", frames[0])
 	}
-	if frames[1].Event != "run.finished" || string(frames[1].Data) != "line1\nline2" {
+	if frames[1].Event != "task_finished" || string(frames[1].Data) != "line1\nline2" {
 		t.Errorf("第二帧 = %+v", frames[1])
 	}
 }
@@ -789,20 +793,20 @@ func TestWaitFollowUsesSSE(t *testing.T) {
 	var gets int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runs/r-1":
+		case "/api/v1/tasks/t-1":
 			n := atomic.AddInt32(&gets, 1)
-			status := "testing"
+			status := "running"
 			if n >= 2 {
 				status = "succeeded"
 			}
-			_, _ = fmt.Fprintf(w, `{"id":"r-1","status":%q,"task_counts":{"total":1,"succeeded":1}}`, status)
-		case "/api/v1/runs/r-1/events":
+			_, _ = fmt.Fprintf(w, `{"id":"t-1","status":%q,"task_counts":{"total":1,"succeeded":1}}`, status)
+		case "/api/v1/tasks/t-1/events":
 			if got := r.Header.Get("Accept"); got != "text/event-stream" {
 				t.Errorf("Accept = %q", got)
 			}
 			writeSSE(t, w,
-				"id: 1\nevent: run.state_changed\ndata: {\"seq\":1,\"type\":\"run.state_changed\",\"to\":\"succeeded\"}\n\n",
-				"id: 2\nevent: run.finished\ndata: {\"seq\":2,\"type\":\"run.finished\",\"to\":\"succeeded\"}\n\n",
+				"id: 1\nevent: state_changed\ndata: {\"seq\":1,\"type\":\"state_changed\",\"to\":\"succeeded\"}\n\n",
+				"id: 2\nevent: task_finished\ndata: {\"seq\":2,\"type\":\"task_finished\",\"to\":\"succeeded\"}\n\n",
 			)
 		default:
 			t.Errorf("意外路径: %s", r.URL.Path)
@@ -814,7 +818,7 @@ func TestWaitFollowUsesSSE(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := Wait(context.Background(), c, "r-1", WaitOptions{
+	res, err := Wait(context.Background(), c, "t-1", WaitOptions{
 		Timeout: 2 * time.Second, Interval: 20 * time.Millisecond, Follow: true,
 	})
 	if err != nil {
@@ -832,15 +836,15 @@ func TestWaitFollowFallsBackToPoll(t *testing.T) {
 	var gets int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runs/r-1/events":
+		case "/api/v1/tasks/t-1/events":
 			http.Error(w, `{"code":"NOT_FOUND","message":"no sse"}`, http.StatusNotFound)
-		case "/api/v1/runs/r-1":
+		case "/api/v1/tasks/t-1":
 			n := atomic.AddInt32(&gets, 1)
-			status := "testing"
+			status := "running"
 			if n >= 2 {
 				status = "succeeded"
 			}
-			_, _ = fmt.Fprintf(w, `{"id":"r-1","status":%q}`, status)
+			_, _ = fmt.Fprintf(w, `{"id":"t-1","status":%q}`, status)
 		default:
 			t.Errorf("意外路径: %s", r.URL.Path)
 		}
@@ -849,7 +853,7 @@ func TestWaitFollowFallsBackToPoll(t *testing.T) {
 	c, _ := NewClient(srv.URL, "dev", 5*time.Second)
 
 	var fallback string
-	res, err := Wait(context.Background(), c, "r-1", WaitOptions{
+	res, err := Wait(context.Background(), c, "t-1", WaitOptions{
 		Timeout: 2 * time.Second, Interval: 20 * time.Millisecond, Follow: true,
 		OnFallback: func(reason string) { fallback = reason },
 	})
@@ -867,22 +871,22 @@ func TestWaitFollowReconnectsWithLastEventID(t *testing.T) {
 	var lastID string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runs/r-1":
+		case "/api/v1/tasks/t-1":
 			n := atomic.AddInt32(&gets, 1)
-			status := "testing"
+			status := "running"
 			if n >= 3 {
 				status = "succeeded"
 			}
-			_, _ = fmt.Fprintf(w, `{"id":"r-1","status":%q}`, status)
-		case "/api/v1/runs/r-1/events":
+			_, _ = fmt.Fprintf(w, `{"id":"t-1","status":%q}`, status)
+		case "/api/v1/tasks/t-1/events":
 			n := atomic.AddInt32(&eventsCalls, 1)
 			if n == 1 {
-				// 发一条事件就断线（不写 run.finished）。
+				// 发一条事件就断线（不写 task_finished）。
 				writeSSE(t, w, "id: 5\nevent: task.state_changed\ndata: {\"seq\":5,\"type\":\"task.state_changed\",\"to\":\"running\"}\n\n")
 				return
 			}
 			lastID = r.Header.Get("Last-Event-ID")
-			writeSSE(t, w, "id: 6\nevent: run.finished\ndata: {\"seq\":6,\"type\":\"run.finished\",\"to\":\"succeeded\"}\n\n")
+			writeSSE(t, w, "id: 6\nevent: task_finished\ndata: {\"seq\":6,\"type\":\"task_finished\",\"to\":\"succeeded\"}\n\n")
 		default:
 			t.Errorf("意外路径: %s", r.URL.Path)
 		}
@@ -890,7 +894,7 @@ func TestWaitFollowReconnectsWithLastEventID(t *testing.T) {
 	defer srv.Close()
 	c, _ := NewClient(srv.URL, "dev", 5*time.Second)
 
-	res, err := Wait(context.Background(), c, "r-1", WaitOptions{
+	res, err := Wait(context.Background(), c, "t-1", WaitOptions{
 		Timeout: 3 * time.Second, Interval: 20 * time.Millisecond, Follow: true,
 		ReconnectBackoff: 10 * time.Millisecond, MaxReconnects: 3,
 	})
@@ -912,20 +916,20 @@ func TestWaitFollowSuppressesReplayNoise(t *testing.T) {
 	var gets int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runs/r-1":
+		case "/api/v1/tasks/t-1":
 			n := atomic.AddInt32(&gets, 1)
-			status := "testing"
+			status := "running"
 			if n >= 2 {
 				status = "succeeded"
 			}
-			_, _ = fmt.Fprintf(w, `{"id":"r-1","status":%q}`, status)
-		case "/api/v1/runs/r-1/events":
-			// 从 seq=1 回放：queued→testing 是历史，cleanup→succeeded 是新的。
+			_, _ = fmt.Fprintf(w, `{"id":"t-1","status":%q}`, status)
+		case "/api/v1/tasks/t-1/events":
+			// 从 seq=1 回放：queued→running 是历史，running→succeeded 是新的。
 			writeSSE(t, w,
-				"id: 1\nevent: run.state_changed\ndata: {\"seq\":1,\"to\":\"queued\"}\n\n",
-				"id: 2\nevent: run.state_changed\ndata: {\"seq\":2,\"to\":\"testing\"}\n\n",
-				"id: 3\nevent: run.state_changed\ndata: {\"seq\":3,\"to\":\"cleanup\"}\n\n",
-				"id: 4\nevent: run.finished\ndata: {\"seq\":4,\"to\":\"succeeded\"}\n\n",
+				"id: 1\nevent: state_changed\ndata: {\"seq\":1,\"to\":\"queued\"}\n\n",
+				"id: 2\nevent: state_changed\ndata: {\"seq\":2,\"to\":\"running\"}\n\n",
+				"id: 3\nevent: state_changed\ndata: {\"seq\":3,\"to\":\"running\"}\n\n",
+				"id: 4\nevent: task_finished\ndata: {\"seq\":4,\"to\":\"succeeded\"}\n\n",
 			)
 		default:
 			t.Errorf("意外路径: %s", r.URL.Path)
@@ -935,7 +939,7 @@ func TestWaitFollowSuppressesReplayNoise(t *testing.T) {
 	c, _ := NewClient(srv.URL, "dev", 5*time.Second)
 
 	var statuses []string
-	res, err := Wait(context.Background(), c, "r-1", WaitOptions{
+	res, err := Wait(context.Background(), c, "t-1", WaitOptions{
 		Timeout: 2 * time.Second, Interval: 20 * time.Millisecond, Follow: true,
 		OnStatus: func(status string) { statuses = append(statuses, status) },
 	})
@@ -945,7 +949,7 @@ func TestWaitFollowSuppressesReplayNoise(t *testing.T) {
 	if res.Mode != "sse" || res.Outcome != "success" {
 		t.Errorf("Wait 结果 = %+v", res)
 	}
-	want := []string{"testing", "cleanup", "succeeded"}
+	want := []string{"running", "succeeded"}
 	if strings.Join(statuses, ",") != strings.Join(want, ",") {
 		t.Errorf("OnStatus 序列 = %v，期望 %v（回放的历史 queued 应被抑制）", statuses, want)
 	}
@@ -955,14 +959,14 @@ func TestToolsCallWaitRunFollow(t *testing.T) {
 	var gets int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runs/r-1/events":
-			writeSSE(t, w, "id: 3\nevent: run.finished\ndata: {\"seq\":3,\"type\":\"run.finished\",\"to\":\"failed\"}\n\n")
-		case "/api/v1/runs/r-1":
+		case "/api/v1/tasks/t-1/events":
+			writeSSE(t, w, "id: 3\nevent: task_finished\ndata: {\"seq\":3,\"type\":\"task_finished\",\"to\":\"failed\"}\n\n")
+		case "/api/v1/tasks/t-1":
 			if atomic.AddInt32(&gets, 1) == 1 {
-				_, _ = io.WriteString(w, `{"id":"r-1","status":"testing"}`)
+				_, _ = io.WriteString(w, `{"id":"t-1","status":"running"}`)
 				return
 			}
-			_, _ = io.WriteString(w, `{"id":"r-1","status":"failed","error":{"code":"PRECHECK_FAILED","message":"precheck failed","retryable":false}}`)
+			_, _ = io.WriteString(w, `{"id":"t-1","status":"failed","error":{"code":"PRECHECK_FAILED","message":"precheck failed","retryable":false}}`)
 		default:
 			t.Errorf("意外路径: %s", r.URL.Path)
 		}
@@ -972,9 +976,9 @@ func TestToolsCallWaitRunFollow(t *testing.T) {
 	h := startHarness(t, c, srv)
 
 	resp := h.call(t, 25, "tools/call", map[string]any{
-		"name": "testplane_wait_run",
+		"name": "argus_wait_task",
 		"arguments": map[string]any{
-			"run_id": "r-1", "timeout_seconds": 5, "follow": true,
+			"task_id": "t-1", "timeout_seconds": 5, "follow": true,
 		},
 	})
 	res := decodeToolResult(t, resp)
@@ -1004,7 +1008,7 @@ func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 func TestUnknownToolReturnsInvalidParams(t *testing.T) {
 	h := newHarness(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	resp := h.call(t, 14, "tools/call", map[string]any{
-		"name":      "testplane_make_coffee",
+		"name":      "argus_make_coffee",
 		"arguments": map[string]any{},
 	})
 	if resp.Error == nil || resp.Error.Code != codeInvalidParams {
@@ -1017,7 +1021,7 @@ func TestMissingRequiredArgumentReturnsInvalidParams(t *testing.T) {
 		t.Error("参数非法时不应访问控制面")
 	}))
 	resp := h.call(t, 15, "tools/call", map[string]any{
-		"name":      "testplane_get_run",
+		"name":      "argus_get_task",
 		"arguments": map[string]any{},
 	})
 	if resp.Error == nil || resp.Error.Code != codeInvalidParams {
@@ -1065,8 +1069,8 @@ func TestTransportErrorBecomesIsError(t *testing.T) {
 	}
 	h := startHarness(t, c, nil)
 	resp := h.call(t, 17, "tools/call", map[string]any{
-		"name":      "testplane_get_run",
-		"arguments": map[string]any{"run_id": "r-1"},
+		"name":      "argus_get_task",
+		"arguments": map[string]any{"task_id": "t-1"},
 	})
 	res := decodeToolResult(t, resp)
 	if !res.IsError {
@@ -1077,4 +1081,57 @@ func TestTransportErrorBecomesIsError(t *testing.T) {
 	if errObj["code"] != "UNREACHABLE" {
 		t.Errorf("code = %v，期望 UNREACHABLE", errObj["code"])
 	}
+}
+
+func TestToolsCallRetryTaskExhausted(t *testing.T) {
+	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/tasks/t-1/retry" {
+			t.Errorf("意外请求: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"code":"ATTEMPT_EXHAUSTED","message":"attempt 上限","detail":{"attempt_max":3},"retryable":false,"trace_id":"01JRE"}`)
+	}))
+	resp := h.call(t, 30, "tools/call", map[string]any{
+		"name":      "argus_retry_task",
+		"arguments": map[string]any{"task_id": "t-1"},
+	})
+	res := decodeToolResult(t, resp)
+	if !res.IsError {
+		t.Fatalf("ATTEMPT_EXHAUSTED 应 isError: %s", res.Content[0].Text)
+	}
+	body := decodeToolJSON(t, res.Content[0].Text)
+	errObj, _ := body["error"].(map[string]any)
+	if errObj["code"] != "ATTEMPT_EXHAUSTED" || errObj["http_status"] != float64(409) {
+		t.Errorf("错误对象 = %+v", errObj)
+	}
+	if !strings.Contains(fmt.Sprint(errObj["next_action"]), "attempt") {
+		t.Errorf("应带 next_action: %+v", errObj)
+	}
+}
+
+func TestToolsCallCleanTaskForwardsAttempt(t *testing.T) {
+	var gotQuery, gotBody string
+	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/tasks/t-1/clean" {
+			t.Errorf("路径 = %q", r.URL.Path)
+		}
+		gotQuery = r.URL.RawQuery
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, `{"task_id":"t-1","attempt_no":1,"runner":{"seq":5,"name":"service-clean-replay","runner_name":"service-clean","status":"queued"}}`)
+	}))
+	resp := h.call(t, 31, "tools/call", map[string]any{
+		"name":      "argus_clean_task",
+		"arguments": map[string]any{"task_id": "t-1", "attempt": 1},
+	})
+	res := decodeToolResult(t, resp)
+	if res.IsError {
+		t.Fatalf("clean 不应 isError: %s", res.Content[0].Text)
+	}
+	if gotBody != `{"attempt":1}` {
+		t.Errorf("body = %q", gotBody)
+	}
+	_ = gotQuery
 }

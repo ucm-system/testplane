@@ -11,11 +11,12 @@ import (
 	"github.com/ucm-system/testplane/server/internal/ports"
 )
 
-// Pod 日志读取（D-59：Deploy 日志落盘的数据源）。
+// Pod 日志读取（D-59：部署 Pod 日志落盘的数据源；v2 落盘位置移入 deploy runner
+// 产物目录 runners/<deploy_seq>/logs/，D-71，采集侧接口不变）。
 //
 // 只读：`pods` 列表 + `pods/log` 流。平台**不**授予 `pods/exec`（execution §8）。
-// 与 Tester 的 `Logs(handle)` 分开：这里要对 Genet namespace 里任意 Pod/容器抓日志，
-// 还要能抓 previous（重启前的上一份容器日志）。
+// 与 runner 的 `Logs(handle)` 分开：这里要对 Genet namespace 里任意 Pod/容器抓日志，
+// 还要能抓 previous（重启前的上一份容器日志，§8.6）。
 
 // ListPods 按 namespace 列出 Pod 及其容器状态（restarts/last_exit 供"补 previous 段"判定）。
 func (e *Executor) ListPods(ctx context.Context, namespace string) ([]ports.PodInfo, error) {
@@ -58,7 +59,7 @@ func (e *Executor) StreamLogs(ctx context.Context, namespace, pod, container str
 	return rc, nil
 }
 
-// 编译期断言：Executor 实现了可选的 PodLogSource（D-59）。
+// 编译期断言：Executor 实现了可选的 PodLogSource（D-59 / execution §7.2）。
 var _ ports.PodLogSource = (*Executor)(nil)
 
 func podInfoOf(pod *corev1.Pod) ports.PodInfo {

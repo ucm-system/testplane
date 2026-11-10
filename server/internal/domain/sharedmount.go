@@ -12,7 +12,7 @@ import (
 // 内联 `volumes[].nfs` 会被 PodSecurity `restricted:latest` 拒绝（研究 #69 实测），
 // 所以平台**不新增 volume source 类型**，统一挂载复用 MountSpec.Source 那条 PVC 路径。
 
-// SharedMountSpec 是平台级统一挂载的一条配置（Helm values → 平台配置，**不来自 tester.yaml**）。
+// SharedMountSpec 是平台级统一挂载的一条配置（Helm values → 平台配置，**不来自 runner.yaml**）。
 type SharedMountSpec struct {
 	// Name 是 volume 名（渲染前会 sanitize 并去重）。
 	Name string `json:"name" yaml:"name"`
@@ -26,18 +26,18 @@ type SharedMountSpec struct {
 
 // 平台保留挂载点（**唯一常量集**）。
 //
-// #74：之前有两套不一致的集合 —— registry.go 的 reservedMountPaths 有 `/tester`，
-// render.go 的 used 集合没有 `/tester`，于是 `/tester` 提交期被拒、渲染期却放行。
+// #74：之前有两套不一致的集合 —— registry.go 的 reservedMountPaths 有 `/runner`，
+// render.go 的 used 集合没有 `/runner`，于是 `/runner` 提交期被拒、渲染期却放行。
 // 现在两边都从 here 取。
 const (
-	// WorkspaceOutputPath 是产物目录（平台写，Tester 写）。
+	// WorkspaceOutputPath 是产物目录（平台写，Runner 写）。
 	WorkspaceOutputPath = "/workspace/output"
 	// WorkspaceInputPath 是可选输入目录（只读）。
 	WorkspaceInputPath = "/workspace/input"
 	// TmpPath 配合只读根：/tmp 必须是可写 emptyDir。
 	TmpPath = "/tmp"
-	// TesterDirPath 是 Tester 镜像目录（入口 /tester/run.sh 所在）。
-	TesterDirPath = "/tester"
+	// RunnerDirPath 是 Runner 镜像目录（entry 由 runner.yaml.entry 声明，如 /runner/run.sh）。
+	RunnerDirPath = "/runner"
 )
 
 // 默认统一挂载路径（D-63：两条独立条目，可指向同一或不同 PVC）。
@@ -48,13 +48,13 @@ const (
 
 // ReservedMountPaths 返回"平台保留 + 统一挂载"的 mount_path 集合（path → 人类可读原因）。
 //
-// 统一挂载路径也算保留：Tester 自己的 mounts[] 与它们同路径 → 提交期 400（D-63 ⑤）。
+// 统一挂载路径也算保留：Runner 自己的 mounts[] 与它们同路径 → 提交期 400（D-63 ⑤）。
 func ReservedMountPaths(shared []SharedMountSpec) map[string]string {
 	out := map[string]string{
 		WorkspaceOutputPath: "platform output directory",
 		WorkspaceInputPath:  "platform input directory",
 		TmpPath:             "platform tmp directory",
-		TesterDirPath:       "tester image directory",
+		RunnerDirPath:       "runner image directory",
 	}
 	for _, s := range shared {
 		p := cleanMountPath(s.MountPath)
@@ -85,13 +85,13 @@ func cleanMountPath(p string) string {
 	return path.Clean(p)
 }
 
-// MountPathConflicts 报告 Tester 自己的 mounts 是否与平台保留/统一挂载冲突。
+// MountPathConflicts 报告 Runner 自己的 mounts 是否与平台保留/统一挂载冲突。
 //
 // 返回冲突的 mount_path → 原因（**不做只读交集**：同路径一律拒绝，D-63 ⑤）。
-func MountPathConflicts(testerMounts []MountSpec, shared []SharedMountSpec) map[string]string {
+func MountPathConflicts(runnerMounts []MountSpec, shared []SharedMountSpec) map[string]string {
 	reserved := ReservedMountPaths(shared)
 	conflicts := map[string]string{}
-	for _, m := range testerMounts {
+	for _, m := range runnerMounts {
 		p := cleanMountPath(m.MountPath)
 		if reason, ok := reserved[p]; ok {
 			conflicts[p] = reason
@@ -112,7 +112,7 @@ func NormalizeSharedMounts(in []SharedMountSpec) ([]SharedMountSpec, error) {
 		WorkspaceOutputPath: "platform output directory",
 		WorkspaceInputPath:  "platform input directory",
 		TmpPath:             "platform tmp directory",
-		TesterDirPath:       "tester image directory",
+		RunnerDirPath:       "runner image directory",
 	}
 	for i, s := range in {
 		item := s

@@ -17,7 +17,7 @@ import (
 	"testing"
 )
 
-// 本文件用 httptest 假控制面驱动 tpctl，断言命令输出、退出码与请求形状。
+// 本文件用 httptest 假控制面驱动 argus，断言命令输出、退出码与请求形状。
 // 全部离线：不需要 PostgreSQL / K8s / 真控制面。
 
 func runCLI(t *testing.T, baseURL string, args ...string) (int, string, string) {
@@ -27,8 +27,8 @@ func runCLI(t *testing.T, baseURL string, args ...string) (int, string, string) 
 
 func runCLIWithStdin(t *testing.T, baseURL, stdin string, args ...string) (int, string, string) {
 	t.Helper()
-	t.Setenv("TESTPLANE_BASE_URL", baseURL)
-	t.Setenv("TESTPLANE_TOKEN", "test-token")
+	t.Setenv("AG_BASE_URL", baseURL)
+	t.Setenv("AG_TOKEN", "test-token")
 	var stdout, stderr bytes.Buffer
 	code := run(args, strings.NewReader(stdin), &stdout, &stderr)
 	return code, stdout.String(), stderr.String()
@@ -78,7 +78,7 @@ func TestSubmitJSON(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		gotBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusAccepted)
-		_, _ = io.WriteString(w, `{"run":{"id":"r-1","status":"queued","kind":"run","submitted_at":"2026-11-05T01:00:00Z"},"tasks":[{"id":"t-0","name":"precheck","status":"pending"},{"id":"t-1","name":"acc","status":"pending"}]}`)
+		_, _ = io.WriteString(w, `{"task":{"id":"t-1","status":"queued","submitted_at":"2026-11-05T01:00:00Z","current_attempt":1},"runners":[{"seq":1,"name":"precheck","runner":"endpoint-probe","role":"pre_check","status":"pending"},{"seq":2,"name":"acc","runner":"aisbench-acc","role":"test","status":"pending"}]}`)
 	})
 
 	dir := t.TempDir()
@@ -91,19 +91,19 @@ func TestSubmitJSON(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
-	if gotPath != "/api/v1/runs" || gotCT != "application/yaml" || gotAuth != "Bearer test-token" {
+	if gotPath != "/api/v1/tasks" || gotCT != "application/yaml" || gotAuth != "Bearer test-token" {
 		t.Errorf("请求形状不对: path=%s ct=%s auth=%s", gotPath, gotCT, gotAuth)
 	}
 	if string(gotBody) != "run:\n  name: smoke\n" {
 		t.Errorf("Manifest 被改写: %q", gotBody)
 	}
 	out := decodeJSON(t, stdout)
-	if out["run_id"] != "r-1" || out["status"] != "queued" {
+	if out["task_id"] != "t-1" || out["status"] != "queued" {
 		t.Errorf("submit 输出 = %+v", out)
 	}
-	tasks, _ := out["tasks"].([]any)
-	if len(tasks) != 2 {
-		t.Errorf("tasks 数 = %d，期望 2", len(tasks))
+	runners, _ := out["runners"].([]any)
+	if len(runners) != 2 {
+		t.Errorf("runners 数 = %d，期望 2", len(runners))
 	}
 }
 
@@ -133,7 +133,7 @@ func TestSubmitFromStdin(t *testing.T) {
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
 		gotCT = r.Header.Get("Content-Type")
 		w.WriteHeader(http.StatusAccepted)
-		_, _ = io.WriteString(w, `{"run":{"id":"r-2","status":"queued","kind":"run"},"tasks":[]}`)
+		_, _ = io.WriteString(w, `{"task":{"id":"t-2","status":"queued","submitted_at":"2026-11-05T01:00:00Z","current_attempt":1},"runners":[]}`)
 	})
 	code, _, stderr := runCLIWithStdin(t, srv.URL, `{"run":{"name":"x"}}`, "submit", "-f", "-", "--json")
 	if code != exitOK {
@@ -148,22 +148,22 @@ func TestSubmitFromStdin(t *testing.T) {
 
 func TestStatusJSON(t *testing.T) {
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/runs/r-1" {
+		if r.URL.Path != "/api/v1/tasks/t-1" {
 			t.Errorf("路径 = %q", r.URL.Path)
 		}
-		_, _ = io.WriteString(w, `{"id":"r-1","name":"smoke","kind":"run","status":"testing","submitted_at":"2026-11-05T01:00:00Z","task_counts":{"total":2,"pending":1,"running":1,"succeeded":0,"failed":0,"skipped":0},"error":null,"tasks":[{"id":"t-0","name":"precheck","status":"succeeded","attempts":1},{"id":"t-1","name":"acc","status":"running","attempts":1}]}`)
+		_, _ = io.WriteString(w, `{"id":"t-1","name":"smoke","status":"running","submitted_at":"2026-11-05T01:00:00Z","runner_counts":{"total":2,"pending":1,"running":1,"succeeded":0,"failed":0,"skipped":0},"error":null,"runners":[{"seq":1,"name":"precheck","status":"succeeded"},{"seq":2,"name":"acc","status":"running","waiting_reason":null}]}`)
 	})
-	code, stdout, stderr := runCLI(t, srv.URL, "status", "r-1", "--json")
+	code, stdout, stderr := runCLI(t, srv.URL, "status", "t-1", "--json")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
 	out := decodeJSON(t, stdout)
-	if out["run_id"] != "r-1" || out["status"] != "testing" || out["terminal"] != false {
+	if out["task_id"] != "t-1" || out["status"] != "running" || out["terminal"] != false {
 		t.Errorf("status 输出 = %+v", out)
 	}
-	tasks, _ := out["tasks"].([]any)
-	if len(tasks) != 2 {
-		t.Errorf("tasks 数 = %d", len(tasks))
+	runners, _ := out["runners"].([]any)
+	if len(runners) != 2 {
+		t.Errorf("runners 数 = %d", len(runners))
 	}
 }
 
@@ -177,7 +177,8 @@ func TestWaitRunOutcomes(t *testing.T) {
 	}{
 		{name: "succeeded", status: "succeeded", wantCode: exitOK, wantOut: "success", wantCalls: 1},
 		{name: "failed", status: "failed", wantCode: exitFailure, wantOut: "failed", wantCalls: 1},
-		{name: "completed_with_errors", status: "completed_with_errors", wantCode: exitFailure, wantOut: "failed", wantCalls: 1},
+		{name: "service_unavailable_blocked", status: "service_unavailable", wantCode: exitFailure, wantOut: "failed", wantCalls: 1},
+		{name: "service_unavailable", status: "service_unavailable", wantCode: exitFailure, wantOut: "failed", wantCalls: 1},
 		{name: "service_unavailable", status: "service_unavailable", wantCode: exitFailure, wantOut: "failed", wantCalls: 1},
 		{name: "canceled", status: "canceled", wantCode: exitCanceled, wantOut: "canceled", wantCalls: 1},
 	}
@@ -186,9 +187,9 @@ func TestWaitRunOutcomes(t *testing.T) {
 			var calls int32
 			srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
 				atomic.AddInt32(&calls, 1)
-				_, _ = io.WriteString(w, `{"id":"r-1","status":"`+tc.status+`","task_counts":{"total":1,"succeeded":1,"failed":0}}`)
+				_, _ = io.WriteString(w, `{"id":"t-1","status":"`+tc.status+`","runner_counts":{"total":1,"succeeded":1,"failed":0}}`)
 			})
-			code, stdout, stderr := runCLI(t, srv.URL, "wait", "r-1", "--timeout", "5", "--interval", "0.01", "--json")
+			code, stdout, stderr := runCLI(t, srv.URL, "wait", "t-1", "--timeout", "5", "--interval", "0.01", "--json")
 			if code != tc.wantCode {
 				t.Fatalf("退出码 = %d，期望 %d（stderr=%s）", code, tc.wantCode, stderr)
 			}
@@ -207,13 +208,13 @@ func TestWaitPollsUntilTerminal(t *testing.T) {
 	var calls int32
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&calls, 1)
-		status := "testing"
+		status := "running"
 		if n >= 3 {
 			status = "succeeded"
 		}
-		_, _ = io.WriteString(w, `{"id":"r-1","status":"`+status+`"}`)
+		_, _ = io.WriteString(w, `{"id":"t-1","status":"`+status+`"}`)
 	})
-	code, stdout, stderr := runCLI(t, srv.URL, "wait", "r-1", "--timeout", "5", "--interval", "0.01", "--json")
+	code, stdout, stderr := runCLI(t, srv.URL, "wait", "t-1", "--timeout", "5", "--interval", "0.01", "--json")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
@@ -221,21 +222,21 @@ func TestWaitPollsUntilTerminal(t *testing.T) {
 	if out["outcome"] != "success" {
 		t.Errorf("wait 输出 = %+v", out)
 	}
-	if !strings.Contains(stderr, "status=testing") {
+	if !strings.Contains(stderr, "status=running") {
 		t.Errorf("stderr 应包含状态变化进度，实际 %q", stderr)
 	}
 }
 
 func TestWaitTimeoutExitsThree(t *testing.T) {
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"id":"r-1","status":"testing"}`)
+		_, _ = io.WriteString(w, `{"id":"t-1","status":"running"}`)
 	})
-	code, stdout, stderr := runCLI(t, srv.URL, "wait", "r-1", "--timeout", "0.15", "--interval", "0.03", "--json")
+	code, stdout, stderr := runCLI(t, srv.URL, "wait", "t-1", "--timeout", "0.15", "--interval", "0.03", "--json")
 	if code != exitTimeout {
 		t.Fatalf("退出码 = %d，期望 3（stderr=%s）", code, stderr)
 	}
 	out := decodeJSON(t, stdout)
-	if out["outcome"] != "timeout" || out["status"] != "testing" {
+	if out["outcome"] != "timeout" || out["status"] != "running" {
 		t.Errorf("wait 超时输出 = %+v", out)
 	}
 }
@@ -248,7 +249,7 @@ func TestWaitUnreachableExitsFour(t *testing.T) {
 	addr := ln.Addr().String()
 	_ = ln.Close()
 
-	code, _, stderr := runCLI(t, "http://"+addr, "wait", "r-1", "--timeout", "1")
+	code, _, stderr := runCLI(t, "http://"+addr, "wait", "t-1", "--timeout", "1")
 	if code != exitUnreachable {
 		t.Fatalf("退出码 = %d，期望 4（stderr=%s）", code, stderr)
 	}
@@ -262,12 +263,12 @@ func TestWaitUnreachableExitsFour(t *testing.T) {
 func TestReportMarkdown(t *testing.T) {
 	const md = "# r-1\n\n- 状态：succeeded\n"
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/runs/r-1/report.md" {
+		if r.URL.Path != "/api/v1/tasks/t-1/report.md" {
 			t.Errorf("路径 = %q", r.URL.Path)
 		}
 		_, _ = io.WriteString(w, md)
 	})
-	code, stdout, stderr := runCLI(t, srv.URL, "report", "r-1", "--md")
+	code, stdout, stderr := runCLI(t, srv.URL, "report", "t-1", "--md")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
@@ -278,16 +279,16 @@ func TestReportMarkdown(t *testing.T) {
 
 func TestReportJSONPrettyAndCompact(t *testing.T) {
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"run_id":"r-1","status":"succeeded","counts":{"total":1,"succeeded":1,"failed":0,"skipped":0,"canceled":0},"tasks":[],"failures":[]}`)
+		_, _ = io.WriteString(w, `{"task_id":"t-1","attempt_no":1,"status":"succeeded","counts":{"total":1,"succeeded":1,"failed":0,"skipped":0,"canceled":0},"runners":[],"failures":[]}`)
 	})
-	code, pretty, _ := runCLI(t, srv.URL, "report", "r-1")
+	code, pretty, _ := runCLI(t, srv.URL, "report", "t-1")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d", code)
 	}
-	if !strings.Contains(pretty, "\n  \"run_id\"") {
+	if !strings.Contains(pretty, "\n  \"task_id\"") {
 		t.Errorf("默认输出应为缩进 JSON，实际 %q", pretty)
 	}
-	code, compact, _ := runCLI(t, srv.URL, "report", "r-1", "--json")
+	code, compact, _ := runCLI(t, srv.URL, "report", "t-1", "--json")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d", code)
 	}
@@ -299,6 +300,11 @@ func TestReportJSONPrettyAndCompact(t *testing.T) {
 func TestLogsReportsOffsetToStderr(t *testing.T) {
 	var gotPath, gotTail string
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/tasks/t-1":
+			_, _ = io.WriteString(w, `{"id":"t-1","status":"failed","runners":[{"seq":2,"name":"acc","status":"failed"},{"seq":1,"name":"precheck","status":"succeeded"}]}`)
+			return
+		}
 		gotPath = r.URL.Path
 		gotTail = r.URL.Query().Get("tail")
 		w.Header().Set("X-Log-Offset", "4096")
@@ -308,7 +314,7 @@ func TestLogsReportsOffsetToStderr(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
-	if gotPath != "/api/v1/tasks/t-1/attempts/2/logs" || gotTail != "5" {
+	if gotPath != "/api/v1/tasks/t-1/attempts/2/runners/2/logs" || gotTail != "5" {
 		t.Errorf("请求形状不对: path=%q tail=%q", gotPath, gotTail)
 	}
 	if !strings.Contains(stderr, "X-Log-Offset: 4096") {
@@ -320,7 +326,7 @@ func TestLogsReportsOffsetToStderr(t *testing.T) {
 	}
 
 	// 非 JSON 模式：stdout 是日志原文，stderr 仍是续读坐标。
-	code, stdout, _ = runCLI(t, srv.URL, "logs", "t-1", "--attempt", "2")
+	code, stdout, _ = runCLI(t, srv.URL, "logs", "t-1", "--attempt", "2", "--runner-seq", "2")
 	if code != exitOK || stdout != "hello log\n" {
 		t.Errorf("原文模式: code=%d stdout=%q", code, stdout)
 	}
@@ -331,14 +337,14 @@ func TestCancelTask(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks/t-1/cancel":
 			w.WriteHeader(http.StatusAccepted)
-			_, _ = io.WriteString(w, `{"task_id":"t-1","run_id":"r-1","status":"canceling"}`)
+			_, _ = io.WriteString(w, `{"id":"t-1","status":"failed","runners":[{"seq":2,"name":"acc","status":"failed","error_code":"RUNNER_NONZERO_EXIT"},{"seq":1,"name":"precheck","status":"succeeded"}]}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/t-1":
 			_, _ = io.WriteString(w, `{"id":"t-1","status":"canceled"}`)
 		default:
 			t.Errorf("意外请求: %s %s", r.Method, r.URL.Path)
 		}
 	})
-	code, stdout, stderr := runCLI(t, srv.URL, "cancel", "--task", "t-1", "--json")
+	code, stdout, stderr := runCLI(t, srv.URL, "cancel", "--task-id", "t-1", "--json")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
@@ -351,34 +357,34 @@ func TestCancelTask(t *testing.T) {
 func TestCancelRun(t *testing.T) {
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/runs/r-1/cancel":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks/t-1/cancel":
 			w.WriteHeader(http.StatusAccepted)
-			_, _ = io.WriteString(w, `{"run_id":"r-1","status":"cancelling"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runs/r-1":
-			_, _ = io.WriteString(w, `{"id":"r-1","status":"cancelling"}`)
+			_, _ = io.WriteString(w, `{"task_id":"t-1","status":"cancelling"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/t-1":
+			_, _ = io.WriteString(w, `{"id":"t-1","status":"cancelling"}`)
 		default:
 			t.Errorf("意外请求: %s %s", r.Method, r.URL.Path)
 		}
 	})
-	code, stdout, _ := runCLI(t, srv.URL, "cancel", "r-1", "--json")
+	code, stdout, _ := runCLI(t, srv.URL, "cancel", "t-1", "--json")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d", code)
 	}
 	out := decodeJSON(t, stdout)
-	if out["target"] != "run" || out["status"] != "cancelling" {
+	if out["target"] != "task" || out["status"] != "cancelling" {
 		t.Errorf("cancel 输出 = %+v", out)
 	}
 }
 
 // ---- testers / queue / profiles / 用法 -----------------------------------
 
-func TestTestersJSON(t *testing.T) {
+func TestRunnersJSON(t *testing.T) {
 	var gotQuery string
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.RawQuery
-		_, _ = io.WriteString(w, `{"items":[{"name":"endpoint-probe","version":"1.0.0","role":"pre_check"}],"has_more":false}`)
+		_, _ = io.WriteString(w, `{"items":[{"name":"endpoint-probe","version":"1.0.0","role":"pre_check","latest":true,"retired":false,"orphaned":false}],"has_more":false}`)
 	})
-	code, stdout, _ := runCLI(t, srv.URL, "testers", "--role", "pre_check", "--orphaned", "--json")
+	code, stdout, _ := runCLI(t, srv.URL, "runners", "--role", "pre_check", "--orphaned", "--json")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d", code)
 	}
@@ -389,19 +395,19 @@ func TestTestersJSON(t *testing.T) {
 	out := decodeJSON(t, stdout)
 	items, _ := out["items"].([]any)
 	if len(items) != 1 {
-		t.Errorf("testers 输出 = %+v", out)
+		t.Errorf("runners 输出 = %+v", out)
 	}
 }
 
 func TestQueueHuman(t *testing.T) {
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"generated_at":"2026-11-05T01:00:00Z","slots":{"concurrency_max":20,"active":7,"available":13,"endpoints":[]},"waiting":{"total":2,"by_reason":{"precheck_gate":2}},"volcano":{"available":false,"detail":"scheduler_unavailable"}}`)
+		_, _ = io.WriteString(w, `{"generated_at":"2026-11-05T01:00:00Z","slots":{"concurrency_max":20,"active":7,"available":13,"endpoints":[]},"waiting":{"total":2,"by_reason":{"slot_waiting":2}},"volcano":{"available":false,"detail":"scheduler_unavailable"}}`)
 	})
 	code, stdout, stderr := runCLI(t, srv.URL, "queue")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
-	for _, want := range []string{"active 7/20", "waiting: 2", "precheck_gate", "scheduler_unavailable"} {
+	for _, want := range []string{"active 7/20", "waiting: 2", "slot_waiting", "scheduler_unavailable"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("queue 输出缺少 %q：%s", want, stdout)
 		}
@@ -413,7 +419,7 @@ func TestProfiles(t *testing.T) {
 		if r.URL.Path != "/api/v1/profiles" {
 			t.Errorf("路径 = %q", r.URL.Path)
 		}
-		_, _ = io.WriteString(w, `{"items":[{"name":"k8s-npu","cluster":"cluster-01","namespace":"testplane","scheduler":"default","queue":null,"mounts":[{"name":"dataset","pvc":"data-pvc"}],"deploy_timeout_seconds":259200}],"has_more":false}`)
+		_, _ = io.WriteString(w, `{"items":[{"name":"k8s-npu","cluster":"cluster-01","namespace":"argus","scheduler":"default","queue":null,"mounts":[{"name":"dataset","pvc":"data-pvc"}],"deploy_timeout_seconds":259200}],"has_more":false}`)
 	})
 	code, stdout, stderr := runCLI(t, srv.URL, "profiles")
 	if code != exitOK {
@@ -439,16 +445,16 @@ func TestProfiles(t *testing.T) {
 func TestArtifactsRunAndTask(t *testing.T) {
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runs/r-1/artifacts":
+		case "/api/v1/tasks/t-1/artifacts":
 			_, _ = io.WriteString(w, `{"items":[{"path":"report.json","kind":"report","size_bytes":12},{"path":"result.json","kind":"result","size_bytes":34,"task_id":"t-1"}],"by_kind":{"report":[{"path":"report.json","kind":"report","size_bytes":12}],"result":[{"path":"result.json","kind":"result","size_bytes":34,"task_id":"t-1"}]},"total_size_bytes":46}`)
-		case "/api/v1/tasks/t-1/attempts/2/artifacts":
-			_, _ = io.WriteString(w, `{"items":[{"path":"tasks/t-1/attempts/2/result.json","kind":"result","size_bytes":34}],"by_kind":{},"total_size_bytes":34}`)
+		case "/api/v1/tasks/t-1/attempts/2/runners/2/artifacts":
+			_, _ = io.WriteString(w, `{"items":[{"path":"attempts/2/runners/2/result.json","kind":"result","size_bytes":34}],"by_kind":{},"total_size_bytes":34}`)
 		default:
 			t.Errorf("意外路径: %s", r.URL.Path)
 		}
 	})
 
-	code, stdout, stderr := runCLI(t, srv.URL, "artifacts", "r-1")
+	code, stdout, stderr := runCLI(t, srv.URL, "artifacts", "t-1")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
@@ -458,7 +464,7 @@ func TestArtifactsRunAndTask(t *testing.T) {
 		}
 	}
 
-	code, stdout, _ = runCLI(t, srv.URL, "artifacts", "--task", "t-1", "--attempt", "2", "--json")
+	code, stdout, _ = runCLI(t, srv.URL, "artifacts", "t-1", "--attempt", "2", "--runner-seq", "2", "--json")
 	if code != exitOK {
 		t.Fatalf("--json 退出码 = %d", code)
 	}
@@ -471,7 +477,7 @@ func TestArtifactsRunAndTask(t *testing.T) {
 func TestFilesToOutWithRange(t *testing.T) {
 	var gotRange, gotPath string
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/runs/r-1/files" {
+		if r.URL.Path != "/api/v1/tasks/t-1/files" {
 			t.Errorf("路径 = %q", r.URL.Path)
 		}
 		gotRange = r.Header.Get("Range")
@@ -483,12 +489,12 @@ func TestFilesToOutWithRange(t *testing.T) {
 	})
 
 	out := filepath.Join(t.TempDir(), "nested", "stdout.log")
-	code, stdout, stderr := runCLI(t, srv.URL, "files", "r-1", "tasks/t-1/attempts/1/logs/stdout.log",
+	code, stdout, stderr := runCLI(t, srv.URL, "files", "t-1", "attempts/1/runners/2/logs/stdout.log",
 		"--range", "0-4", "--out", out, "--json")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
-	if gotRange != "bytes=0-4" || gotPath != "tasks/t-1/attempts/1/logs/stdout.log" {
+	if gotRange != "bytes=0-4" || gotPath != "attempts/1/runners/2/logs/stdout.log" {
 		t.Errorf("请求形状不对: range=%q path=%q", gotRange, gotPath)
 	}
 	data, err := os.ReadFile(out)
@@ -512,7 +518,7 @@ func TestFilesToStdout(t *testing.T) {
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "plain body")
 	})
-	code, stdout, stderr := runCLI(t, srv.URL, "files", "r-1", "raw/a.log")
+	code, stdout, stderr := runCLI(t, srv.URL, "files", "t-1", "raw/a.log")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
@@ -530,13 +536,13 @@ func TestFilesStripsRunIDPrefix(t *testing.T) {
 		gotPath = r.URL.Query().Get("path")
 		_, _ = io.WriteString(w, "data")
 	})
-	// artifacts 返回的 path 带 <run_id>/ 前缀；files 应自动剥成 run 内相对路径。
-	code, _, stderr := runCLI(t, srv.URL, "files", "r-1", "r-1/tasks/t-1/attempts/1/result.json", "--json", "--out", filepath.Join(t.TempDir(), "f.json"))
+	// artifacts 返回的 path 带 <task_id>/ 前缀；files 应自动剥成 task 内相对路径。
+	code, _, stderr := runCLI(t, srv.URL, "files", "t-1", "t-1/attempts/1/runners/2/result.json", "--json", "--out", filepath.Join(t.TempDir(), "f.json"))
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
-	if gotPath != "tasks/t-1/attempts/1/result.json" {
-		t.Errorf("path 查询 = %q，期望剥离 run_id 前缀", gotPath)
+	if gotPath != "attempts/1/runners/2/result.json" {
+		t.Errorf("path 查询 = %q，期望剥离 task_id 前缀", gotPath)
 	}
 }
 
@@ -556,7 +562,7 @@ func TestFilesStreamsLargeDownload(t *testing.T) {
 		_, _ = io.CopyN(w, zeroReader{}, size)
 	})
 	out := filepath.Join(t.TempDir(), "big.bin")
-	code, stdout, stderr := runCLI(t, srv.URL, "files", "r-1", "raw/big.bin", "--out", out, "--json")
+	code, stdout, stderr := runCLI(t, srv.URL, "files", "t-1", "raw/big.bin", "--out", out, "--json")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
@@ -574,7 +580,7 @@ func TestFilesJSONRequiresOut(t *testing.T) {
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("用法错误不应访问控制面")
 	})
-	code, _, _ := runCLI(t, srv.URL, "files", "r-1", "raw/a.log", "--json")
+	code, _, _ := runCLI(t, srv.URL, "files", "t-1", "raw/a.log", "--json")
 	if code != exitUsage {
 		t.Fatalf("退出码 = %d，期望 64", code)
 	}
@@ -584,26 +590,26 @@ func TestWaitFollowSSE(t *testing.T) {
 	var gets int32
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runs/r-1":
+		case "/api/v1/tasks/t-1":
 			n := atomic.AddInt32(&gets, 1)
-			status := "testing"
+			status := "running"
 			if n >= 2 {
 				status = "succeeded"
 			}
-			_, _ = fmt.Fprintf(w, `{"id":"r-1","name":"smoke","status":%q,"task_counts":{"total":1,"succeeded":1}}`, status)
-		case "/api/v1/runs/r-1/events":
+			_, _ = fmt.Fprintf(w, `{"id":"t-1","name":"smoke","status":%q,"runner_counts":{"total":1,"succeeded":1}}`, status)
+		case "/api/v1/tasks/t-1/events":
 			if r.Header.Get("Accept") != "text/event-stream" {
 				t.Errorf("Accept = %q", r.Header.Get("Accept"))
 			}
 			writeSSEFrames(t, w,
-				"id: 1\nevent: run.state_changed\ndata: {\"seq\":1,\"type\":\"run.state_changed\",\"to\":\"succeeded\"}\n\n",
-				"id: 2\nevent: run.finished\ndata: {\"seq\":2,\"type\":\"run.finished\",\"to\":\"succeeded\"}\n\n",
+				"id: 1\nevent: state_changed\ndata: {\"seq\":1,\"type\":\"state_changed\",\"to\":\"succeeded\"}\n\n",
+				"id: 2\nevent: task_finished\ndata: {\"seq\":2,\"type\":\"task_finished\",\"to\":\"succeeded\"}\n\n",
 			)
 		default:
 			t.Errorf("意外路径: %s", r.URL.Path)
 		}
 	})
-	code, stdout, stderr := runCLI(t, srv.URL, "wait", "r-1", "--follow", "--timeout", "5", "--json")
+	code, stdout, stderr := runCLI(t, srv.URL, "wait", "t-1", "--follow", "--timeout", "5", "--json")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
@@ -611,7 +617,7 @@ func TestWaitFollowSSE(t *testing.T) {
 	if out["wait_mode"] != "sse" || out["outcome"] != "success" || out["status"] != "succeeded" {
 		t.Errorf("wait --follow 输出 = %+v", out)
 	}
-	if !strings.Contains(stderr, "status=testing") {
+	if !strings.Contains(stderr, "status=running") {
 		t.Errorf("stderr 应带状态进度，实际 %q", stderr)
 	}
 }
@@ -621,26 +627,26 @@ func TestWaitFollowReconnects(t *testing.T) {
 	var lastID string
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runs/r-1/events":
+		case "/api/v1/tasks/t-1/events":
 			if atomic.AddInt32(&events, 1) == 1 {
-				// 发一条事件后断线（没有 run.finished）。
-				writeSSEFrames(t, w, "id: 5\nevent: task.state_changed\ndata: {\"seq\":5,\"type\":\"task.state_changed\",\"to\":\"running\"}\n\n")
+				// 发一条事件后断线（没有 task_finished）。
+				writeSSEFrames(t, w, "id: 5\nevent: state_changed\ndata: {\"seq\":5,\"type\":\"task.state_changed\",\"to\":\"running\"}\n\n")
 				return
 			}
 			lastID = r.Header.Get("Last-Event-ID")
-			writeSSEFrames(t, w, "id: 6\nevent: run.finished\ndata: {\"seq\":6,\"type\":\"run.finished\",\"to\":\"succeeded\"}\n\n")
-		case "/api/v1/runs/r-1":
+			writeSSEFrames(t, w, "id: 6\nevent: task_finished\ndata: {\"seq\":6,\"type\":\"task_finished\",\"to\":\"succeeded\"}\n\n")
+		case "/api/v1/tasks/t-1":
 			n := atomic.AddInt32(&gets, 1)
-			status := "testing"
+			status := "running"
 			if n >= 3 {
 				status = "succeeded"
 			}
-			_, _ = fmt.Fprintf(w, `{"id":"r-1","name":"smoke","status":%q}`, status)
+			_, _ = fmt.Fprintf(w, `{"id":"t-1","name":"smoke","status":%q}`, status)
 		default:
 			t.Errorf("意外路径: %s", r.URL.Path)
 		}
 	})
-	code, stdout, stderr := runCLI(t, srv.URL, "wait", "r-1", "--follow", "--timeout", "5", "--json")
+	code, stdout, stderr := runCLI(t, srv.URL, "wait", "t-1", "--follow", "--timeout", "5", "--json")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
@@ -660,20 +666,20 @@ func TestWaitFollowFallsBackToPoll(t *testing.T) {
 	var gets int32
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/runs/r-1/events":
+		case "/api/v1/tasks/t-1/events":
 			http.Error(w, "no sse", http.StatusNotFound)
-		case "/api/v1/runs/r-1":
+		case "/api/v1/tasks/t-1":
 			n := atomic.AddInt32(&gets, 1)
-			status := "testing"
+			status := "running"
 			if n >= 2 {
 				status = "succeeded"
 			}
-			_, _ = fmt.Fprintf(w, `{"id":"r-1","name":"smoke","status":%q}`, status)
+			_, _ = fmt.Fprintf(w, `{"id":"t-1","name":"smoke","status":%q}`, status)
 		default:
 			t.Errorf("意外路径: %s", r.URL.Path)
 		}
 	})
-	code, stdout, stderr := runCLI(t, srv.URL, "wait", "r-1", "--follow", "--interval", "0.02", "--timeout", "5", "--json")
+	code, stdout, stderr := runCLI(t, srv.URL, "wait", "t-1", "--follow", "--interval", "0.02", "--timeout", "5", "--json")
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr)
 	}
@@ -691,9 +697,9 @@ func TestErrorNextActionCLI(t *testing.T) {
 	srv := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = io.WriteString(w, `{"code":"VALIDATION_ERROR","message":"字段不合法","retryable":false,"trace_id":"01J","detail":{"issues":[{"path":"tests[0].args","code":"ARGS_LEX_ERROR","message":"未闭合引号"}]}}`)
+		_, _ = io.WriteString(w, `{"code":"VALIDATION_ERROR","message":"字段不合法","retryable":false,"trace_id":"01J","detail":{"issues":[{"path":"runners[0].input","code":"INPUT_SYNTAX","message":"语法错误","line":1}]}}`)
 	})
-	code, _, stderr := runCLI(t, srv.URL, "status", "r-1", "--json")
+	code, _, stderr := runCLI(t, srv.URL, "status", "t-1", "--json")
 	if code != exitFailure {
 		t.Fatalf("退出码 = %d，期望 1", code)
 	}
@@ -708,9 +714,9 @@ func TestErrorNextActionCLI(t *testing.T) {
 
 	// 2) Run 终态失败：wait 的 JSON 带 next_action，人读模式打 stderr。
 	srv2 := newFakeControlPlane(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"id":"r-1","name":"smoke","status":"failed","error":{"code":"PRECHECK_FAILED","message":"precheck failed","retryable":false}}`)
+		_, _ = io.WriteString(w, `{"id":"t-1","name":"smoke","status":"failed","error":{"code":"PRECHECK_FAILED","message":"precheck failed","retryable":false}}`)
 	})
-	code, stdout, stderr := runCLI(t, srv2.URL, "wait", "r-1", "--timeout", "5", "--json")
+	code, stdout, stderr := runCLI(t, srv2.URL, "wait", "t-1", "--timeout", "5", "--json")
 	if code != exitFailure {
 		t.Fatalf("退出码 = %d，期望 1", code)
 	}
@@ -727,12 +733,13 @@ func TestErrorHintForEveryCode(t *testing.T) {
 	// CLI 侧把共享映射接进 fail()：每个已知错误码都要在 --json stderr 里带 error.next_action。
 	codes := []string{
 		"VALIDATION_ERROR", "UNAUTHENTICATED", "FORBIDDEN", "NOT_FOUND", "CONFLICT",
-		"TESTER_NOT_FOUND", "TESTER_VERSION_PINNED", "TESTER_INVALID",
-		"EXECUTION_PROFILE_NOT_FOUND", "RUN_TOO_LARGE", "RESOURCE_EXHAUSTED",
-		"ARTIFACT_QUOTA_EXCEEDED", "EXECUTOR_UNAVAILABLE", "EXECUTOR_POD_ERROR",
-		"IMAGE_PULL_FAILED", "MOUNT_UNAVAILABLE", "ENDPOINT_UNREACHABLE", "PRECHECK_FAILED",
-		"TASK_TIMEOUT", "TESTER_NONZERO_EXIT", "RESULT_MISSING", "RESULT_INVALID",
-		"CLEANUP_FAILED", "CANCELED", "INTERNAL_ERROR", "DEPLOY_FAILED", "DEPLOY_BLOCKED",
+		"RUNNER_NOT_FOUND", "RUNNER_VERSION_PINNED", "RUNNER_INVALID",
+		"EXECUTION_PROFILE_NOT_FOUND", "TASK_TOO_LARGE", "ATTEMPT_EXHAUSTED",
+		"RESOURCE_EXHAUSTED", "ARTIFACT_QUOTA_EXCEEDED", "EXECUTOR_UNAVAILABLE",
+		"EXECUTOR_POD_ERROR", "IMAGE_PULL_FAILED", "MOUNT_UNAVAILABLE", "EXPORT_INVALID",
+		"ENDPOINT_UNREACHABLE", "PRECHECK_FAILED", "RUNNER_TIMEOUT", "RUNNER_NONZERO_EXIT",
+		"RESULT_MISSING", "RESULT_INVALID", "CLEANUP_FAILED", "CANCELED", "INTERNAL_ERROR",
+		"DEPLOY_FAILED", "DEPLOY_BLOCKED",
 		"SERVICE_UNAVAILABLE",
 	}
 	for _, code := range codes {
@@ -777,11 +784,11 @@ func TestUsageErrors(t *testing.T) {
 		{name: "submit without file", args: []string{"submit"}},
 		{name: "status without id", args: []string{"status"}},
 		{name: "cancel without target", args: []string{"cancel"}},
-		{name: "wait bad interval", args: []string{"wait", "r-1", "--interval", "0"}},
+		{name: "wait bad interval", args: []string{"wait", "t-1", "--interval", "0"}},
 		{name: "logs bad stream", args: []string{"logs", "t-1", "--stream", "both"}},
 		{name: "artifacts without id", args: []string{"artifacts"}},
-		{name: "artifacts task with positional", args: []string{"artifacts", "r-1", "--task", "t-1"}},
-		{name: "files without path", args: []string{"files", "r-1"}},
+		{name: "artifacts too many args", args: []string{"artifacts", "a", "b"}},
+		{name: "files without path", args: []string{"files", "t-1"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -798,7 +805,7 @@ func TestHelpExitsZero(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("help 退出码 = %d", code)
 	}
-	if !strings.Contains(stdout, "tpctl") || !strings.Contains(stdout, "退出码") {
+	if !strings.Contains(stdout, "argus") || !strings.Contains(stdout, "退出码") {
 		t.Errorf("help 输出不完整: %s", stdout)
 	}
 	if code, _, _ := runCLI(t, "http://127.0.0.1:1", "--help"); code != exitOK {
@@ -812,11 +819,11 @@ func TestGlobalFlagsBeforeCommand(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer custom-token" {
 			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
 		}
-		_, _ = io.WriteString(w, `{"id":"r-1","status":"succeeded"}`)
+		_, _ = io.WriteString(w, `{"id":"t-1","status":"succeeded"}`)
 	})
-	t.Setenv("TESTPLANE_BASE_URL", "http://127.0.0.1:1") // 故意给错的默认值
+	t.Setenv("AG_BASE_URL", "http://127.0.0.1:1") // 故意给错的默认值
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--base-url", srv.URL, "--token", "custom-token", "status", "r-1", "--json"},
+	code := run([]string{"--base-url", srv.URL, "--token", "custom-token", "status", "t-1", "--json"},
 		strings.NewReader(""), &stdout, &stderr)
 	if code != exitOK {
 		t.Fatalf("退出码 = %d，stderr=%s", code, stderr.String())

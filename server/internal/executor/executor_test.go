@@ -25,7 +25,7 @@ func newFakeExecutor(objs ...runtime.Object) (*Executor, *fake.Clientset) {
 
 func newFakeExecutorWith(poll time.Duration, objs ...runtime.Object) (*Executor, *fake.Clientset) {
 	cs := fake.NewSimpleClientset(objs...)
-	return NewWithNamespace(cs, "testplane", Options{
+	return NewWithNamespace(cs, "argus", Options{
 		PollInterval: poll,
 		WatchTimeout: 2 * time.Second,
 		CancelWait:   200 * time.Millisecond,
@@ -41,7 +41,7 @@ func TestSubmitIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
-	if h1.JobName != "tp-t-0001-a1" {
+	if h1.JobName != "argus-t-0001-1-2" {
 		t.Fatalf("handle = %+v", h1)
 	}
 	h2, err := ex.Submit(ctx, sampleSpec())
@@ -51,12 +51,12 @@ func TestSubmitIsIdempotent(t *testing.T) {
 	if h1 != h2 {
 		t.Errorf("idempotent submit returned different handles: %+v vs %+v", h1, h2)
 	}
-	jobs, err := cs.BatchV1().Jobs("testplane").List(ctx, metav1.ListOptions{})
+	jobs, err := cs.BatchV1().Jobs("argus").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(jobs.Items) != 1 {
-		t.Fatalf("jobs = %d, want exactly 1 (job_id idempotency, §2.3)", len(jobs.Items))
+		t.Fatalf("jobs = %d, want exactly 1（幂等键 = (task,attempt,seq) 派生，§2.3）", len(jobs.Items))
 	}
 }
 
@@ -67,7 +67,8 @@ func TestSubmitDetectsSpecConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := sampleSpec()
-	spec.Args = append(spec.Args, "--max_tokens=1")
+	// 修改 env（等价于 v1 的"追加 argv"：任何会改变渲染结果的变化都必须冲突）。
+	spec.Env = map[string]string{"AG_EXTRA": "1"}
 	_, err := ex.Submit(ctx, spec)
 	if !errors.Is(err, ErrSpecConflict) {
 		t.Fatalf("err = %v, want ErrSpecConflict", err)
@@ -83,6 +84,24 @@ func TestSubmitReportsRenderErrors(t *testing.T) {
 	}
 }
 
+func TestSubmitHonorsExplicitJobID(t *testing.T) {
+	ex, cs := newFakeExecutor()
+	ctx := context.Background()
+	spec := sampleSpec()
+	spec.JobID = "j-deadbeef"
+	h, err := ex.Submit(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := cs.BatchV1().Jobs("argus").Get(ctx, h.JobName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := job.Labels[LabelJobID]; got != "j-deadbeef" {
+		t.Errorf("job-id label = %q, want the caller-frozen j-deadbeef", got)
+	}
+}
+
 func TestWatchFallsBackToPollingAndNotifiesOnce(t *testing.T) {
 	ex, cs := newFakeExecutor()
 	ctx := context.Background()
@@ -90,7 +109,7 @@ func TestWatchFallsBackToPollingAndNotifiesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// watch 不可用 → 必须退回 2s 轮询（这里缩短为 20ms）。
+	// watch 不可用 → 必须退回轮询（这里缩短为 20ms）。
 	cs.PrependWatchReactor("jobs", func(action k8stesting.Action) (bool, watch.Interface, error) {
 		return true, nil, errors.New("watch unavailable")
 	})
@@ -108,7 +127,7 @@ func TestWatchFallsBackToPollingAndNotifiesOnce(t *testing.T) {
 
 	// 模拟 Job 完成。
 	time.Sleep(60 * time.Millisecond)
-	job, err := cs.BatchV1().Jobs("testplane").Get(ctx, h.JobName, metav1.GetOptions{})
+	job, err := cs.BatchV1().Jobs("argus").Get(ctx, h.JobName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,9 +136,9 @@ func TestWatchFallsBackToPollingAndNotifiesOnce(t *testing.T) {
 	}}
 	now := metav1.Now()
 	job.Status.CompletionTime = &now
-	if _, err := cs.BatchV1().Jobs("testplane").UpdateStatus(ctx, job, metav1.UpdateOptions{}); err != nil {
+	if _, err := cs.BatchV1().Jobs("argus").UpdateStatus(ctx, job, metav1.UpdateOptions{}); err != nil {
 		// fake tracker 没有分 status 子资源时，走普通 Update。
-		if _, uerr := cs.BatchV1().Jobs("testplane").Update(ctx, job, metav1.UpdateOptions{}); uerr != nil {
+		if _, uerr := cs.BatchV1().Jobs("argus").Update(ctx, job, metav1.UpdateOptions{}); uerr != nil {
 			t.Fatalf("update job: %v / %v", err, uerr)
 		}
 	}
@@ -172,7 +191,7 @@ func TestWatchUsesWatchEvents(t *testing.T) {
 		t.Fatal("watch was never established")
 	}
 
-	job, err := cs.BatchV1().Jobs("testplane").Get(ctx, h.JobName, metav1.GetOptions{})
+	job, err := cs.BatchV1().Jobs("argus").Get(ctx, h.JobName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +199,7 @@ func TestWatchUsesWatchEvents(t *testing.T) {
 		Type: batchv1.JobFailed, Status: corev1.ConditionTrue,
 		Reason: "DeadlineExceeded", Message: "Job was active longer than specified deadline",
 	}}
-	if _, err := cs.BatchV1().Jobs("testplane").Update(ctx, job, metav1.UpdateOptions{}); err != nil {
+	if _, err := cs.BatchV1().Jobs("argus").Update(ctx, job, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update job: %v", err)
 	}
 	select {
@@ -235,26 +254,26 @@ func TestCancelDeletesJobAndPods(t *testing.T) {
 	// 造一个属于该 Job 的 Pod。
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "tp-t-0001-a1-abcde",
-			Namespace: "testplane",
+			Name:      "argus-t-0001-1-2-abcde",
+			Namespace: "argus",
 			Labels: map[string]string{
 				LabelManaged: "true",
-				LabelJobID:   JobID("t-0001", 1),
+				LabelJobID:   JobID("t-0001", 1, 2),
 				labelJobName: h.JobName,
 			},
 		},
 	}
-	if _, err := cs.CoreV1().Pods("testplane").Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+	if _, err := cs.CoreV1().Pods("argus").Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := ex.Cancel(ctx, h); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
-	if _, err := cs.BatchV1().Jobs("testplane").Get(ctx, h.JobName, metav1.GetOptions{}); err == nil {
+	if _, err := cs.BatchV1().Jobs("argus").Get(ctx, h.JobName, metav1.GetOptions{}); err == nil {
 		t.Errorf("job still exists after Cancel")
 	}
-	pods, err := cs.CoreV1().Pods("testplane").List(ctx, metav1.ListOptions{})
+	pods, err := cs.CoreV1().Pods("argus").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +288,7 @@ func TestCancelDeletesJobAndPods(t *testing.T) {
 
 func TestWatchOnMissingJobReturnsNotFound(t *testing.T) {
 	ex, _ := newFakeExecutor()
-	err := ex.Watch(context.Background(), ports.JobHandle{Namespace: "testplane", JobName: "tp-x-a1"},
+	err := ex.Watch(context.Background(), ports.JobHandle{Namespace: "argus", JobName: "argus-x-9-9"},
 		observerFunc(func(context.Context, ports.JobOutcome) error { return nil }))
 	if !errors.Is(err, ErrJobNotFound) {
 		t.Fatalf("err = %v, want ErrJobNotFound", err)
@@ -294,7 +313,7 @@ func TestClassifyOutcomeFromPods(t *testing.T) {
 		if !terminal || out.Phase != PhaseFailed {
 			t.Fatalf("out = %+v terminal=%v", out, terminal)
 		}
-		if OutcomeCode(*out) != CodeTesterNonZeroExit {
+		if OutcomeCode(*out) != CodeRunnerNonZeroExit {
 			t.Errorf("code = %q", OutcomeCode(*out))
 		}
 		if out.ImageDigest != digest {
@@ -314,7 +333,7 @@ func TestClassifyOutcomeFromPods(t *testing.T) {
 			}},
 		}}
 		out, terminal := classifyOutcome(nil, pod, time.Unix(1_700_000_000, 0))
-		// Pod 异常终止统一归 EXECUTOR_POD_ERROR（票 #22），不再是笼统的 INTERNAL_ERROR。
+		// Pod 异常终止统一归 EXECUTOR_POD_ERROR（附录 D），不再是笼统的 INTERNAL_ERROR。
 		if !terminal || OutcomeCode(*out) != CodeExecutorPodError {
 			t.Fatalf("out = %+v code=%q", out, OutcomeCode(*out))
 		}
@@ -344,7 +363,7 @@ func TestClassifyOutcomeFromPods(t *testing.T) {
 			Reason: "DeadlineExceeded", Message: "deadline",
 		}}}}
 		out, terminal := classifyOutcome(job, nil, time.Unix(1_700_000_000, 0))
-		if !terminal || out.Phase != PhaseTimeout || OutcomeCode(*out) != CodeTaskTimeout {
+		if !terminal || out.Phase != PhaseTimeout || OutcomeCode(*out) != CodeRunnerTimeout {
 			t.Fatalf("out = %+v", out)
 		}
 	})
@@ -364,8 +383,9 @@ func TestOutcomeCodeDefaults(t *testing.T) {
 		want string
 	}{
 		{ports.JobOutcome{Phase: PhaseSucceeded}, ""},
-		{ports.JobOutcome{Phase: PhaseTimeout}, CodeTaskTimeout},
-		{ports.JobOutcome{Phase: PhaseFailed}, CodeTesterNonZeroExit},
+		{ports.JobOutcome{Phase: PhaseTimeout}, CodeRunnerTimeout},
+		{ports.JobOutcome{Phase: PhaseCanceled}, domain.CodeCanceled},
+		{ports.JobOutcome{Phase: PhaseFailed}, CodeRunnerNonZeroExit},
 		{ports.JobOutcome{Phase: PhaseUnknown}, CodeInternalError},
 		{ports.JobOutcome{Phase: PhaseFailed, Message: CodeMountUnavailable + ": no pvc"}, CodeMountUnavailable},
 	}

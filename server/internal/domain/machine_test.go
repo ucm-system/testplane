@@ -2,84 +2,45 @@ package domain
 
 import "testing"
 
-// 这张表是 02-logical-view.md §2 转移表的**独立抄写**：实现与文档任何一侧漂移，
-// 这里就会失败。新增/删除转移必须同时改文档、machine.go 与本表。
-var wantRunEdges = []struct {
-	from, to RunStatus
-	command  string
-}{
-	{RunSubmitted, RunQueued, "Enqueue"},
-	{RunQueued, RunDeploying, "BeginDeploy"},
-	{RunQueued, RunTesting, "BeginTesting"},
-	{RunDeploying, RunTesting, "DeployReady"},
-	{RunDeploying, RunServiceUnavailable, "DeployBlocked"},
-	{RunTesting, RunCleanup, "BeginCleanup"},
-	{RunCleanup, RunSucceeded, "Finish"},
-	{RunCleanup, RunCompletedWithErrors, "Finish"},
-	{RunCleanup, RunServiceUnavailable, "Finish"},
-	// cleanup→failed 同时是 R7 与 R10 的边，只登记一次（命令取 R10 的 Fail），见下表 R10。
-	{RunSubmitted, RunCancelling, "Cancel"},
-	{RunQueued, RunCancelling, "Cancel"},
-	{RunDeploying, RunCancelling, "Cancel"},
-	{RunTesting, RunCancelling, "Cancel"},
-	{RunCleanup, RunCancelling, "Cancel"},
-	{RunCancelling, RunCanceled, "Canceled"},
-	{RunSubmitted, RunFailed, "Fail"},
-	{RunQueued, RunFailed, "Fail"},
-	{RunDeploying, RunFailed, "Fail"},
-	{RunTesting, RunFailed, "Fail"},
-	{RunCleanup, RunFailed, "Fail"},
-	{RunCancelling, RunFailed, "Fail"},
-}
-
+// 这张表是 02-logical-view.md §2 / impl/control-plane §C-3 转移表的**独立抄写**：
+// 实现与文档任何一侧漂移，这里就会失败。新增/删除转移必须同时改文档、machine.go 与本表。
 var wantTaskEdges = []struct {
 	from, to TaskStatus
 	command  string
 }{
-	{TaskPending, TaskQueued, "Queue"},
-	{TaskPending, TaskSkipped, "Skip"},
-	{TaskQueued, TaskPreparing, "Prepare"},
-	{TaskQueued, TaskSkipped, "Skip"},
-	{TaskPreparing, TaskRunning, "Start"},
-	{TaskPreparing, TaskFailed, "Fail"},
-	{TaskPreparing, TaskCanceled, "Cancel"},
-	{TaskRunning, TaskSucceeded, "Succeed"},
-	{TaskRunning, TaskFailed, "Fail"},
-	{TaskRunning, TaskCanceled, "Cancel"},
+	{TaskSubmitted, TaskQueued, "Enqueue"},
+	{TaskQueued, TaskRunning, "BeginPipeline"},
+	{TaskRunning, TaskSucceeded, "Finish"},
+	{TaskRunning, TaskFailed, "Finish"},
+	{TaskRunning, TaskServiceUnavailable, "Finish"},
+	{TaskSubmitted, TaskCancelling, "Cancel"},
+	{TaskQueued, TaskCancelling, "Cancel"},
+	{TaskRunning, TaskCancelling, "Cancel"},
+	{TaskCancelling, TaskCanceled, "Canceled"},
+	// 平台侧不可恢复错误（R10 语义保留：Executor 不可用 / 内部异常 / DEPLOY_FAILED）。
+	// running→failed 同时是 Finish 与 Fail 的边，只登记一次，命令取 Fail。
+	{TaskSubmitted, TaskFailed, "Fail"},
+	{TaskQueued, TaskFailed, "Fail"},
+	// 整 Task 重试（§7.8 / 03 §4.5）：终态 → queued（同一 Task attempt_no+1，D-68）。
+	{TaskSucceeded, TaskQueued, "Retry"},
 	{TaskFailed, TaskQueued, "Retry"},
-	// T12 重试：skipped → queued（issue #40-1 / UC-12 / §C-5.8）
-	{TaskSkipped, TaskQueued, "Retry"},
+	{TaskServiceUnavailable, TaskQueued, "Retry"},
 }
 
-var wantAttemptEdges = []struct {
-	from, to AttemptStatus
+var wantRunnerEdges = []struct {
+	from, to RunnerStatus
+	command  string
 }{
-	{AttemptPreparing, AttemptRunning},
-	{AttemptPreparing, AttemptFailed},
-	{AttemptPreparing, AttemptCanceled},
-	{AttemptRunning, AttemptSucceeded},
-	{AttemptRunning, AttemptFailed},
-	{AttemptRunning, AttemptCanceled},
-}
-
-func TestTransitionTable_RunMatchesDesign(t *testing.T) {
-	if got, want := CountTransitions(EntityRun), len(wantRunEdges); got != want {
-		t.Fatalf("Run 转移表边数 = %d, 设计文档 = %d", got, want)
-	}
-	for _, e := range wantRunEdges {
-		t.Run(string(e.from)+"->"+string(e.to), func(t *testing.T) {
-			spec, ok := RunTransition(e.from, e.to)
-			if !ok {
-				t.Fatalf("缺少合法转移 %s -> %s", e.from, e.to)
-			}
-			if spec.Command != e.command {
-				t.Fatalf("命令 = %q, 期望 %q", spec.Command, e.command)
-			}
-			if spec.Event == "" {
-				t.Fatalf("转移 %s -> %s 缺事件类型", e.from, e.to)
-			}
-		})
-	}
+	{RunnerPending, RunnerQueued, "Queue"},
+	{RunnerPending, RunnerSkipped, "Skip"},
+	{RunnerQueued, RunnerPreparing, "Prepare"},
+	{RunnerQueued, RunnerSkipped, "Skip"},
+	{RunnerPreparing, RunnerRunning, "Start"},
+	{RunnerPreparing, RunnerFailed, "Fail"},
+	{RunnerPreparing, RunnerCanceled, "Cancel"},
+	{RunnerRunning, RunnerSucceeded, "Succeed"},
+	{RunnerRunning, RunnerFailed, "Fail"},
+	{RunnerRunning, RunnerCanceled, "Cancel"},
 }
 
 func TestTransitionTable_TaskMatchesDesign(t *testing.T) {
@@ -95,48 +56,39 @@ func TestTransitionTable_TaskMatchesDesign(t *testing.T) {
 			if spec.Command != e.command {
 				t.Fatalf("命令 = %q, 期望 %q", spec.Command, e.command)
 			}
+			if spec.Event == "" {
+				t.Fatalf("转移 %s -> %s 缺事件类型", e.from, e.to)
+			}
 		})
 	}
 }
 
-func TestTransitionTable_AttemptMatchesDesign(t *testing.T) {
-	if got, want := CountTransitions(EntityAttempt), len(wantAttemptEdges); got != want {
-		t.Fatalf("Attempt 转移表边数 = %d, 设计文档 = %d", got, want)
+func TestTransitionTable_RunnerMatchesDesign(t *testing.T) {
+	if got, want := CountTransitions(EntityRunnerRun), len(wantRunnerEdges); got != want {
+		t.Fatalf("runner 转移表边数 = %d, 设计文档 = %d", got, want)
 	}
-	for _, e := range wantAttemptEdges {
-		if _, ok := AttemptTransition(e.from, e.to); !ok {
-			t.Fatalf("缺少合法转移 %s -> %s", e.from, e.to)
-		}
+	for _, e := range wantRunnerEdges {
+		t.Run(string(e.from)+"->"+string(e.to), func(t *testing.T) {
+			spec, ok := RunnerTransition(e.from, e.to)
+			if !ok {
+				t.Fatalf("缺少合法转移 %s -> %s", e.from, e.to)
+			}
+			if spec.Command != e.command {
+				t.Fatalf("命令 = %q, 期望 %q", spec.Command, e.command)
+			}
+		})
 	}
 }
 
-// 非法边：终态不可逆、跳步、回退。每类各取代表，且对全表做一次穷举。
+// 非法边：终态不可逆、跳步、回退、重试回路。每类各取代表。
 func TestTransitionTable_IllegalEdgesRejected(t *testing.T) {
-	illegalRuns := []struct{ from, to RunStatus }{
-		{RunSucceeded, RunQueued},
-		{RunFailed, RunCancelling},
-		{RunCanceled, RunTesting},
-		{RunSubmitted, RunSucceeded}, // 跳过 cleanup
-		{RunQueued, RunCleanup},      // 跳过 testing
-		{RunTesting, RunSucceeded},   // 终态只能由 cleanup 判定
-		{RunCancelling, RunQueued},   // 取消不可回退
-		{RunCleanup, RunTesting},     // cleanup 不能回 testing
-	}
-	for _, e := range illegalRuns {
-		if _, ok := RunTransition(e.from, e.to); ok {
-			t.Errorf("非法转移被接受: %s -> %s", e.from, e.to)
-		}
-	}
-
 	illegalTasks := []struct{ from, to TaskStatus }{
-		{TaskPending, TaskRunning},   // 跳步
-		{TaskQueued, TaskCanceled},   // C-3.1：未开始的取消记 skipped
-		{TaskPending, TaskCanceled},  // 同上
+		{TaskSubmitted, TaskRunning}, // 跳步（无部署/测试平台阶段，D-70）
+		{TaskCancelling, TaskQueued}, // 取消不可回退
+		{TaskCancelling, TaskFailed}, // 取消只能落 canceled（clean finally）
 		{TaskSucceeded, TaskFailed},  // 终态不可逆
-		{TaskSucceeded, TaskQueued},  // 终态不可逆
-		{TaskCanceled, TaskQueued},   // 终态不可逆（skipped→queued 是 T12 重试，合法）
-		{TaskRunning, TaskPreparing}, // 回退
-		{TaskPreparing, TaskQueued},  // 回退
+		{TaskSucceeded, TaskRunning}, // 重试也要先进 queued
+		{TaskCanceled, TaskQueued},   // 取消是终局（canceled 不可重试，§7.6）
 	}
 	for _, e := range illegalTasks {
 		if _, ok := TaskTransition(e.from, e.to); ok {
@@ -144,56 +96,50 @@ func TestTransitionTable_IllegalEdgesRejected(t *testing.T) {
 		}
 	}
 
-	illegalAttempts := []struct{ from, to AttemptStatus }{
-		{AttemptSucceeded, AttemptRunning},
-		{AttemptFailed, AttemptSucceeded},
-		{AttemptCanceled, AttemptFailed},
-		{AttemptPreparing, AttemptSucceeded}, // 必须先 running
+	illegalRunners := []struct{ from, to RunnerStatus }{
+		{RunnerPending, RunnerRunning},   // 跳步
+		{RunnerQueued, RunnerCanceled},   // C-3.1：未开始的取消记 skipped(canceled)
+		{RunnerPending, RunnerCanceled},  // 同上
+		{RunnerFailed, RunnerQueued},     // **重试回路不存在**（D-69）
+		{RunnerSkipped, RunnerQueued},    // skipped 是终态（重试 = 整 Task 新 attempt）
+		{RunnerSucceeded, RunnerFailed},  // 终态不可逆
+		{RunnerRunning, RunnerPreparing}, // 回退
 	}
-	for _, e := range illegalAttempts {
-		if _, ok := AttemptTransition(e.from, e.to); ok {
+	for _, e := range illegalRunners {
+		if _, ok := RunnerTransition(e.from, e.to); ok {
 			t.Errorf("非法转移被接受: %s -> %s", e.from, e.to)
 		}
 	}
 }
 
-// 穷举：任何 from 是终态、to 是任何状态，若表里存在边则说明终态可逆。
+// 穷举：终态的出边只允许**唯一的**整 Task 重试回边（终态→queued，§7.8/03 §4.5），
+// 其余任何出边都说明终态可逆。
 func TestTransitionTable_TerminalStatesAreAbsorbing(t *testing.T) {
-	runStates := []RunStatus{RunSubmitted, RunQueued, RunDeploying, RunTesting, RunCleanup,
-		RunCancelling, RunSucceeded, RunCompletedWithErrors, RunServiceUnavailable, RunFailed, RunCanceled}
-	for _, from := range runStates {
-		if !from.IsTerminal() {
-			continue
-		}
-		for _, to := range runStates {
-			if _, ok := RunTransition(from, to); ok {
-				t.Errorf("Run 终态 %s 存在出边 -> %s", from, to)
-			}
-		}
-	}
-
-	taskStates := []TaskStatus{TaskPending, TaskQueued, TaskPreparing, TaskRunning,
-		TaskSucceeded, TaskFailed, TaskCanceled, TaskSkipped}
+	taskStates := []TaskStatus{TaskSubmitted, TaskQueued, TaskRunning, TaskCancelling,
+		TaskSucceeded, TaskFailed, TaskServiceUnavailable, TaskCanceled}
 	for _, from := range taskStates {
-		// Task 的"终态"允许**唯一的**回边：failed|skipped → queued（T11/T12 重试，
-		// 见 01 UC-12 / impl/control-plane §C-5.8 / 07 §8）。其余状态不得有出边。
 		if !from.IsTerminal() {
 			continue
 		}
 		for _, to := range taskStates {
 			if _, ok := TaskTransition(from, to); ok {
-				retryEdge := to == TaskQueued && (from == TaskFailed || from == TaskSkipped)
+				retryEdge := to == TaskQueued && from != TaskCanceled
 				if !retryEdge {
-					t.Errorf("Task 终态 %s 存在出边 -> %s", from, to)
+					t.Errorf("Task 终态 %s 存在非重试出边 -> %s", from, to)
 				}
 			}
 		}
 	}
 
-	for _, from := range []AttemptStatus{AttemptSucceeded, AttemptFailed, AttemptCanceled} {
-		for _, to := range []AttemptStatus{AttemptPreparing, AttemptRunning, AttemptSucceeded, AttemptFailed, AttemptCanceled} {
-			if _, ok := AttemptTransition(from, to); ok {
-				t.Errorf("Attempt 终态 %s 存在出边 -> %s", from, to)
+	runnerStates := []RunnerStatus{RunnerPending, RunnerQueued, RunnerPreparing, RunnerRunning,
+		RunnerSucceeded, RunnerFailed, RunnerSkipped, RunnerCanceled}
+	for _, from := range runnerStates {
+		if !from.IsTerminal() {
+			continue
+		}
+		for _, to := range runnerStates {
+			if _, ok := RunnerTransition(from, to); ok {
+				t.Errorf("runner 终态 %s 存在出边 -> %s（v2 无重试回路，D-69）", from, to)
 			}
 		}
 	}
@@ -221,16 +167,14 @@ func TestEffectsForTransition(t *testing.T) {
 		want         EffectKind
 		wantPresence bool
 	}{
-		{"task 终态释放租约", EntityTask, TaskRunning.Status(), TaskSucceeded.Status(), EffectReleaseLeases, true},
-		{"task 成功不写事件之外的东西", EntityTask, TaskRunning.Status(), TaskSucceeded.Status(), EffectWriteReportIntent, false},
-		{"task 失败释放租约", EntityTask, TaskRunning.Status(), TaskFailed.Status(), EffectReleaseLeases, true},
-		{"task 重试排 backoff", EntityTask, TaskFailed.Status(), TaskQueued.Status(), EffectScheduleRetry, true},
-		{"task 入队无副作用", EntityTask, TaskPending.Status(), TaskQueued.Status(), EffectReleaseLeases, false},
-		{"run 取消收口", EntityRun, RunTesting.Status(), RunCancelling.Status(), EffectSkipUnfinished, true},
-		{"run 取消标记", EntityRun, RunTesting.Status(), RunCancelling.Status(), EffectMarkCancelRequested, true},
-		{"run 失败收口", EntityRun, RunTesting.Status(), RunFailed.Status(), EffectSkipUnfinished, true},
-		{"run ready 回填", EntityRun, RunDeploying.Status(), RunTesting.Status(), EffectBackfillEndpoint, true},
-		{"attempt 终态释放租约", EntityAttempt, AttemptRunning.Status(), AttemptFailed.Status(), EffectReleaseLeases, true},
+		{"runner 终态释放租约", EntityRunnerRun, RunnerRunning.Status(), RunnerSucceeded.Status(), EffectReleaseLeases, true},
+		{"runner 失败释放租约", EntityRunnerRun, RunnerRunning.Status(), RunnerFailed.Status(), EffectReleaseLeases, true},
+		{"runner 非终态无副作用", EntityRunnerRun, RunnerQueued.Status(), RunnerPreparing.Status(), EffectReleaseLeases, false},
+		{"task 取消收口", EntityTask, TaskRunning.Status(), TaskCancelling.Status(), EffectSkipUnfinished, true},
+		{"task 取消标记", EntityTask, TaskRunning.Status(), TaskCancelling.Status(), EffectMarkCancelRequested, true},
+		{"task 平台失败收口", EntityTask, TaskRunning.Status(), TaskFailed.Status(), EffectCloseActive, true},
+		{"task 终态写报告意图", EntityTask, TaskRunning.Status(), TaskSucceeded.Status(), EffectWriteReportIntent, true},
+		{"task 入队无副作用", EntityTask, TaskSubmitted.Status(), TaskQueued.Status(), EffectReleaseLeases, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -244,14 +188,44 @@ func TestEffectsForTransition(t *testing.T) {
 }
 
 func TestValidSkipReason(t *testing.T) {
-	for _, ok := range []string{SkipUpstreamAbort, SkipCanceled, SkipDeployFailed, SkipServiceUnavailable, SkipPlatformError} {
+	for _, ok := range []string{SkipUpstreamAbort, SkipCanceled} {
 		if !ValidSkipReason(ok) {
 			t.Errorf("LegalReason %q 应合法", ok)
 		}
 	}
-	for _, bad := range []string{"", "whatever", "upstream_abortt"} {
+	for _, bad := range []string{"", "whatever", "deploy_failed", "platform_error"} {
 		if ValidSkipReason(bad) {
 			t.Errorf("非法 skip reason %q 被接受", bad)
 		}
+	}
+}
+
+func TestValidWaitingReason(t *testing.T) {
+	for _, ok := range []string{WaitSlotWaiting, WaitGlobalLimit, WaitQueueFull, WaitInsufficientResources, WaitGangPending} {
+		if !ValidWaitingReason(ok) {
+			t.Errorf("waiting reason %q 应合法（C-4.7）", ok)
+		}
+	}
+	for _, bad := range []string{"", "precheck_gate", "unknown"} {
+		if ValidWaitingReason(bad) {
+			t.Errorf("非法 waiting reason %q 被接受（v2 取消 precheck_gate，D-69）", bad)
+		}
+	}
+}
+
+func TestRunnerKeyRoundTrip(t *testing.T) {
+	k := RunnerKey{TaskID: "t-20261110-0001", AttemptNo: 2, Seq: 3}
+	if !k.Valid() {
+		t.Fatal("key 应有效")
+	}
+	got, ok := ParseRunnerKey(k.ID())
+	if !ok {
+		t.Fatalf("ParseRunnerKey(%q) 失败", k.ID())
+	}
+	if got != k {
+		t.Fatalf("round trip = %+v, 期望 %+v", got, k)
+	}
+	if _, ok := ParseRunnerKey("garbage"); ok {
+		t.Fatal("垃圾串不应解析成功")
 	}
 }
