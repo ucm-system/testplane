@@ -4,7 +4,7 @@
 #   - 提交 deploy Run（fake Genet），断言 deploy.state 依次经过
 #     queued -> accepted/deploying -> ready；
 #   - endpoint.source = genet；precheck succeeded；Run 终态 succeeded；
-#   - 终态后 helm release（namespace testplane-mock）为空。
+#   - 终态后 helm release（namespace argus-mock）为空。
 # 失败路径（-FailureOnly，fake-genet 用 -sim-error 500）：
 #   - Run failed，error.code=DEPLOY_FAILED，retryable=false，state_events 有 cleanup.failed。
 # Blocked 路径（-BlockedOnly，fake-genet 用 -sim-blocked）：
@@ -16,8 +16,8 @@
 param(
     [string]$BaseUrl = 'http://127.0.0.1:8107',
     [string]$User = 'dev',
-    [string]$HelmNamespace = 'testplane-mock',
-    [string]$Namespace = 'testplane',
+    [string]$HelmNamespace = 'argus-mock',
+    [string]$Namespace = 'argus',
     [string]$OutDir = '',
     [int]$TerminalTimeoutSeconds = 300,
     [int]$HelmWaitSeconds = 60,
@@ -45,7 +45,7 @@ function Invoke-Api {
 function New-Manifest {
     param([string]$Stamp)
     return @"
-{"run":{"name":"deploy-check-$Stamp","deploy":{"provider":"genet","parameters":{"model_name":"mock-llm"}},"precheck":"auto","tests":[{"name":"probe","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"args":"--wait_timeout_seconds=60"}]}}
+{"task":{"name":"deploy-check-$Stamp","deploy":{"provider":"genet","spec":"model_name: mock-llm"},"precheck":"auto","runners":[{"name":"probe","runner":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"input":"{\"wait_timeout_seconds\":60}","on_failure":"continue"}]}}
 "@
 }
 
@@ -62,10 +62,10 @@ function Get-HelmReleases {
     if ($LASTEXITCODE -ne 0) { throw "kubectl get helm release secrets 失败：$($out -join ' ')" }
     $items = @(($out | ConvertFrom-Json).items)
     # 只数平台 Deploy 自己的 release：mock-llm/mock-llm-fail 是基础设施，
-    # tp-demo-manual 是人工演示 release（Lead 2026-11-05），都不算平台残留。
+    # arg-demo-manual 是人工演示 release（Lead 2026-11-05），都不算平台残留。
     $items = @($items | Where-Object {
         $rel = [string]$_.metadata.labels.name
-        $rel -notlike 'mock-llm*' -and $rel -notlike 'tp-demo-*'
+        $rel -notlike 'mock-llm*' -and $rel -notlike 'arg-demo-*'
     })
     return [pscustomobject]@{ source = 'k8s-secrets（helm CLI 不在 PATH）'; items = $items }
 }
@@ -73,9 +73,9 @@ function Get-HelmReleases {
 if ($DryRun) {
     Write-Host "deploy-check dry-run（不连后端、不写集群）" -ForegroundColor Cyan
     Write-Host "  base_url=$BaseUrl helm_ns=$HelmNamespace"
-    Write-Host "  正常：deploy queued→accepted/deploying→ready；endpoint.source=genet；Run succeeded；helm list 空"
-    Write-Host "  失败（-FailureOnly，fake-genet -sim-error 500）：Run failed / DEPLOY_FAILED / retryable=false / cleanup.failed"
-    Write-Host "  blocked（-BlockedOnly，fake-genet -sim-blocked）：Run service_unavailable / DEPLOY_BLOCKED / retryable=true / detail.reason=blocked / uninstall=verified"
+    Write-Host "  正常：deploy 排队→受理/部署→ready（deploy-state.json）；endpoint 经 deploy 导出注入；Task succeeded；helm list 空"
+    Write-Host "  失败（-FailureOnly，fake-genet -sim-error 500）：Task failed / DEPLOY_FAILED / retryable=false / cleanup_failed 事件"
+    Write-Host "  blocked（-BlockedOnly，fake-genet -sim-blocked）：Task service_unavailable / DEPLOY_BLOCKED / retryable=true / detail.reason=blocked / uninstall=verified"
     Write-Host (New-Manifest -Stamp (Get-Date -Format 'yyyyMMdd-HHmmss'))
     Write-Host "dry-run OK" -ForegroundColor Green
     exit 0
@@ -91,21 +91,21 @@ Write-Host ("deploy 形态验收：{0}（{1}）" -f $BaseUrl, $(if ($FailureOnly
 $null = Invoke-WebRequest -UseBasicParsing "$BaseUrl/healthz" -TimeoutSec 5
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$submitted = Invoke-Api -Method POST -Path '/api/v1/runs' -Body (New-Manifest -Stamp $stamp)
-$runId = [string]$submitted.run.id
-Write-Host "已提交 Run $runId"
+$submitted = Invoke-Api -Method POST -Path '/api/v1/tasks' -Body (New-Manifest -Stamp $stamp)
+$runId = [string]$submitted.task.id
+Write-Host "已提交 Task $runId"
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $trace = @()
 $states = @()
 $run = $null
 while ($sw.Elapsed.TotalSeconds -lt $TerminalTimeoutSeconds) {
-    $run = Invoke-Api -Method GET -Path "/api/v1/runs/$runId"
+    $run = Invoke-Api -Method GET -Path "/api/v1/tasks/$runId"
     $ds = $run.deploy.state
     if ($ds) { if ($states.Count -eq 0 -or $states[-1] -ne $ds) { $states += $ds } }
     $line = "t+{0:N1}s status={1} deploy={2}" -f $sw.Elapsed.TotalSeconds, $run.status, $ds
     if ($trace.Count -eq 0 -or $trace[-1] -ne $line) { $trace += $line; Write-Host "  $line" }
-    if ($run.status -in @('succeeded', 'failed', 'service_unavailable', 'completed_with_errors', 'canceled')) { break }
+    if ($run.status -in @('succeeded', 'failed', 'service_unavailable', 'failed', 'canceled')) { break }
     Start-Sleep -Milliseconds 500
 }
 $sw.Stop()
@@ -118,13 +118,13 @@ if ($FailureOnly) {
     Add-Check 'run.failed' ($run.status -eq 'failed') ("status=" + $run.status + "，耗时 " + $elapsed + "s")
     Add-Check 'run.error_deploy_failed' ($run.error.code -eq 'DEPLOY_FAILED') ("error.code=" + $run.error.code)
     Add-Check 'run.error_not_retryable' ($run.error.retryable -eq $false) ("retryable=" + $run.error.retryable)
-    $events = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/events/history?limit=500").items
+    $events = (Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/events/history?limit=500").items
     $cleanupFailed = @($events | Where-Object { $_.type -eq 'cleanup.failed' }).Count
     # 部署失败没有 Attempt 终态钩子；卸载收口由对账 tick 兜底（默认 60s），等它出现。
     $cSw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($cleanupFailed -eq 0 -and $cSw.Elapsed.TotalSeconds -lt $CleanupWaitSeconds) {
         Start-Sleep -Seconds 2
-        $events = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/events/history?limit=500").items
+        $events = (Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/events/history?limit=500").items
         $cleanupFailed = @($events | Where-Object { $_.type -eq 'cleanup.failed' }).Count
     }
     Add-Check 'events.cleanup_failed' ($cleanupFailed -gt 0) ("cleanup.failed=" + $cleanupFailed + "，等待 " + [math]::Round($cSw.Elapsed.TotalSeconds, 1) + "s")
@@ -144,7 +144,7 @@ if ($BlockedOnly) {
         $u = $run.deploy.uninstall
         if ($u -and $u.state -eq 'verified') { break }
         Start-Sleep -Seconds 1
-        $run = Invoke-Api -Method GET -Path "/api/v1/runs/$runId"
+        $run = Invoke-Api -Method GET -Path "/api/v1/tasks/$runId"
     }
     $uSw.Stop()
 
@@ -187,14 +187,14 @@ if ($BlockedOnly) {
 Add-Check 'run.succeeded' ($run.status -eq 'succeeded') ("status=" + $run.status + "，耗时 " + $elapsed + "s")
 Add-Check 'endpoint.source_genet' ($run.endpoint.source -eq 'genet') ("source=" + $run.endpoint.source + "，url=" + $run.endpoint.url)
 
-$tasks = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/tasks?limit=200").items
+$tasks = (Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/runners?limit=200").items
 $pre = @($tasks | Where-Object { $_.name -eq 'precheck' })[0]
 Add-Check 'precheck.succeeded' ($null -ne $pre -and $pre.status -eq 'succeeded') $(if ($pre) { "precheck=" + $pre.status } else { '没有 precheck Task' })
 
 # deploy.state 顺序：从事件取，避免只看轮询末值。
 # 事件里 queued 有两条来源：run.state_changed(to=queued) 和 deploy.state_changed.payload.deploy.state=queued；
 # 初版只读 payload.state，漏了 queued，且把轮询 states 追加在事件序列后又制造了重复段。
-$events = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/events/history?limit=500").items
+$events = (Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/events/history?limit=500").items
 $eventStates = @()
 foreach ($ev in $events) {
     if ($ev.type -ne 'deploy.state_changed') { continue }

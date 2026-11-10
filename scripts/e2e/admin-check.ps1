@@ -4,9 +4,9 @@
 # 前置：
 #   1) 控制面可访问（默认 http://127.0.0.1:8093），dev 模式角色 admin；
 #   2) rotate 真集群用例要求 D-55 的窄授权已 apply（否则 verified 用例按设计判红）：
-#        pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace testplane `
+#        pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace argus `
 #          -SecretName tp-secret-endpoint-mock -Out deploy/k8s/rbac-secret-rotate.yaml
-#        kubectl --context kind-testplane apply -f deploy/k8s/rbac-secret-rotate.yaml
+#        kubectl --context kind-argus apply -f deploy/k8s/rbac-secret-rotate.yaml
 #      该用例走的是**部署的 SA**（控制面 Pod 的 ServiceAccount），不是本机 admin kubeconfig。
 #
 # 用法：pwsh scripts/e2e/admin-check.ps1 -BaseUrl http://127.0.0.1:8093
@@ -15,7 +15,7 @@ param(
     [string]$User = 'dev',
     [string]$MockURL = 'http://mock-llm.default.svc:18080/v1',
     [string]$SlowMockURL = 'http://mock-llm-slow.default.svc:18080/v1',
-    [string]$Namespace = 'testplane',
+    [string]$Namespace = 'argus',
     # rotate 正向用例的目标 Secret（deploy 预置的 mock 端点密钥，key=api_key）。
     [string]$RotateSecretName = 'tp-secret-endpoint-mock',
     [string]$RotateSecretKey = 'api_key'
@@ -52,7 +52,7 @@ $profile = "e2e-profile-$stamp"
 $secretRef = "e2e-secret-$stamp"
 
 # ---- clusters + profiles CRUD -------------------------------------------
-$r = Call POST '/api/v1/admin/clusters' @{ name = $cluster; api_server = 'https://127.0.0.1:6443'; kubeconfig_key = 'kind-testplane'; description = 'e2e admin check' }
+$r = Call POST '/api/v1/admin/clusters' @{ name = $cluster; api_server = 'https://127.0.0.1:6443'; kubeconfig_key = 'kind-argus'; description = 'e2e admin check' }
 $j = JsonOf $r
 Add-Check 'cluster.create_201' ($r.StatusCode -eq 201 -and $j.name -eq $cluster) ("status=" + $r.StatusCode + " name=" + $j.name)
 Add-Check 'cluster.no_kubeconfig_echo' ($r.Content -notmatch 'BEGIN |apiVersion:|clusters:') '响应不含 kubeconfig 内容'
@@ -120,43 +120,41 @@ Add-Check 'audit.rotate_verified_recorded' ($verified -ge 1) ("secret_rotated ve
 
 # ---- 人工清理产物：非终态 409 / 终态 200 + 列表清空 --------------------
 $slowManifest = @{
-    run = @{
+    task = @{
         name = "admin-slow-$stamp"; service = @{ url = $SlowMockURL; model_name = 'mock-llm' }; precheck = 'off';
-        cleanup = @{ policy = 'never' };
-        tests = @(@{ name = 'slow-a'; tester = 'endpoint-probe'; version = '1.0.0'; execution = @{ profile = 'k8s-npu' }; args = '--wait_timeout_seconds=30 --retry_interval_seconds=1' })
+        runners = @(@{ name = 'slow-a'; runner = 'endpoint-probe'; version = '1.0.0'; execution = @{ profile = 'k8s-npu' }; input = '{"wait_timeout_seconds":30,"retry_interval_seconds":1}'; on_failure = 'continue' })
     }
 } | ConvertTo-Json -Depth 8 -Compress
-$r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method POST -Uri "$BaseUrl/api/v1/runs" -Headers $headers -ContentType 'application/json' -Body $slowManifest
-$slowRun = (JsonOf $r).run.id
+$r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method POST -Uri "$BaseUrl/api/v1/tasks" -Headers $headers -ContentType 'application/json' -Body $slowManifest
+$slowRun = (JsonOf $r).task.id
 Add-Check 'cleanup.nonterminal_submit' ($r.StatusCode -eq 202 -and $slowRun) ("run=" + $slowRun)
 if ($slowRun) {
-    $r = Call DELETE "/api/v1/admin/runs/$slowRun/artifacts"
+    $r = Call DELETE "/api/v1/admin/tasks/$slowRun/artifacts"
     $j = JsonOf $r
     Add-Check 'cleanup.nonterminal_409' ($r.StatusCode -eq 409 -and $j.code -eq 'CONFLICT') ("status=" + $r.StatusCode + " code=" + $j.code)
-    $null = Call POST "/api/v1/runs/$slowRun/cancel"
+    $null = Call POST "/api/v1/tasks/$slowRun/cancel"
 }
 
 $manifest = @{
-    run = @{
+    task = @{
         name = "admin-artifact-$stamp"; service = @{ url = $MockURL; model_name = 'mock-llm' }; precheck = 'off';
-        cleanup = @{ policy = 'never' };
-        tests = @(@{ name = 'artifact-a'; tester = 'endpoint-probe'; version = '1.0.0'; execution = @{ profile = 'k8s-npu' }; args = '--wait_timeout_seconds=10 --retry_interval_seconds=1' })
+        runners = @(@{ name = 'artifact-a'; runner = 'endpoint-probe'; version = '1.0.0'; execution = @{ profile = 'k8s-npu' }; input = '{"wait_timeout_seconds":10,"retry_interval_seconds":1}'; on_failure = 'continue' })
     }
 } | ConvertTo-Json -Depth 8 -Compress
-$r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method POST -Uri "$BaseUrl/api/v1/runs" -Headers $headers -ContentType 'application/json' -Body $manifest
-$artifactRun = (JsonOf $r).run.id
+$r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method POST -Uri "$BaseUrl/api/v1/tasks" -Headers $headers -ContentType 'application/json' -Body $manifest
+$artifactRun = (JsonOf $r).task.id
 Add-Check 'cleanup.terminal_submit' ($r.StatusCode -eq 202 -and $artifactRun) ("run=" + $artifactRun)
 if ($artifactRun) {
     $deadline = (Get-Date).AddSeconds(120)
     do {
         Start-Sleep -Seconds 1
-        $run = JsonOf (Call GET "/api/v1/runs/$artifactRun")
-    } while ($run.status -notin @('succeeded', 'failed', 'completed_with_errors', 'service_unavailable', 'canceled') -and (Get-Date) -lt $deadline)
-    Add-Check 'cleanup.run_terminal' ($run.status -in @('succeeded', 'failed', 'completed_with_errors', 'service_unavailable', 'canceled')) ("status=" + $run.status)
-    $r = Call DELETE "/api/v1/admin/runs/$artifactRun/artifacts"
+        $run = JsonOf (Call GET "/api/v1/tasks/$artifactRun")
+    } while ($run.status -notin @('succeeded', 'failed', 'service_unavailable', 'canceled') -and (Get-Date) -lt $deadline)
+    Add-Check 'cleanup.run_terminal' ($run.status -in @('succeeded', 'failed', 'service_unavailable', 'canceled')) ("status=" + $run.status)
+    $r = Call DELETE "/api/v1/admin/tasks/$artifactRun/artifacts"
     $j = JsonOf $r
     Add-Check 'cleanup.terminal_200' ($r.StatusCode -eq 200) ("status=" + $r.StatusCode)
-    $r = Call GET "/api/v1/runs/$artifactRun/artifacts"
+    $r = Call GET "/api/v1/tasks/$artifactRun/artifacts"
     $j = JsonOf $r
     Add-Check 'cleanup.artifacts_empty' ($r.StatusCode -eq 200 -and @($j.items).Count -eq 0) ("items=" + @($j.items).Count)
 }

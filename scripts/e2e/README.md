@@ -15,7 +15,7 @@
 | 前端冒烟（`pnpm build`、`GET /`） | ✅ build 通过、`GET /` 200 text/html |
 | 失败注入（经平台，`service_unavailable` 路径） | ✅ 5/5（success/500/401/200包错误/slow-ready） |
 | 一成一败混合结果（#15） | ✅ `mixed-result-check.ps1` 11/11 |
-| 重启恢复演练（#9） | ✅ `restart-drill.ps1` 13/13（新镜像；Run `r-Q0VT`） |
+| 重启恢复演练（#9） | ✅ `restart-drill.ps1` 13/13（新镜像；Task `r-Q0VT`） |
 | Web UI Playwright 冒烟（#16） | ✅ **3 passed**（ui-smoke + viewer/operator 取消） |
 | deploy 形态（PR #18） | ✅ 正常 9/9；blocked 7/7；500 4/4（超窗仅单测） |
 | 产物持久化（#14） | ✅ `artifact-persistence-check.ps1` **44/44**（两种 path 形态 + 删前对象名/删后按名复查 + hold-until + 控制面重启后 sha256 一致） |
@@ -29,7 +29,7 @@ tools/e2e/               # e2e CLI（独立 module）+ fake 控制面单测
 scripts/e2e/
 ├── README.md            # 本文件
 ├── run-local.ps1        # 一键：起 mock-llm + 跑 e2e
-├── artifact-persistence-check.ps1  # 产物持久化 #14：Pod/Job 消失后 sha256 不变
+├── artifact-persistence-check.ps1  # 产物持久化 #14：runner Job/Pod 消失后 sha256 不变
 ├── probe-check.ps1      # 用真实 endpoint-probe 反验 mock-llm（五种场景）
 └── kind/mock-llm.yaml   # Kind 里的 mock-llm Deployment + Service
 ```
@@ -41,7 +41,7 @@ scripts/e2e/
   Windows 没有 `make`，按 `deploy/README`（Lead 提供）或 infra 的命令起；不要占用 5433。
 - 控制面的 Registry 能看到 `endpoint-probe`，且存在可用的 `execution_profile`
   （内置模板默认 `k8s-npu`，用 `--profile` 改）。
-- dev 鉴权（MVP 裁决）：`TESTPLANE_AUTH_MODE=dev`，`Authorization: Bearer <subject>` 即用户名，
+- dev 鉴权（MVP 裁决）：`AG_AUTH_MODE=dev`，`Authorization: Bearer <subject>` 即用户名，
   不带则用 `dev`、角色 `admin`；`GET /api/v1/auth/me` 可自检。
 
 ## 1. 起 mock-llm（宿主，:18080）
@@ -84,8 +84,8 @@ pwsh scripts/e2e/run-local.ps1
 pwsh scripts/e2e/run-local.ps1 -Expect succeeded -Profile k8s-npu
 ```
 
-不传 `-MockURL` 时自动探测 kind 里 `mock-llm` Service（`testplane-mock` / `default` /
-`testplane` / `testplane-svc`），探测不到才回退 `http://127.0.0.1:18080/v1`；
+不传 `-MockURL` 时自动探测 kind 里 `mock-llm` Service（`argus-mock` / `default` /
+`argus` / `argus-svc`），探测不到才回退 `http://127.0.0.1:18080/v1`；
 避免“kind 场景必须带参数才对”的假失败。
 
 控制面没起时它**明确报错并退出 3**，不会留下 mock 进程：
@@ -104,7 +104,7 @@ cd tools/e2e
 go build -o ..\..\bin\e2e .
 
 ..\..\bin\e2e run  --mode service            # 提交 + 等待 + 断言（一条命令）
-..\..\bin\e2e submit --mode service          # 只提交，打印 run_id
+..\..\bin\e2e submit --mode service          # 只提交，打印 task_id
 ..\..\bin\e2e wait   --run-id r-...
 ..\..\bin\e2e assert --run-id r-...
 ```
@@ -144,7 +144,7 @@ pwsh scripts/e2e/timeout-check.ps1 -BaseUrl http://127.0.0.1:8093
 pwsh scripts/e2e/timeout-check.ps1 -DryRun
 ```
 
-期望：`precheck:"off"` + 单个 test Task 超时 → Run `failed`（TASK_TIMEOUT 属平台 C 类）；
+期望：`precheck:"off"` + 单个 test runner 超时 → Task `failed`（RUNNER_TIMEOUT 属平台侧终止，错误码 `RUNNER_TIMEOUT`）；
 Attempt 容差 `timeout + 30s`（独立于轮询变量）；事件接受
 `task.state_changed + payload.error.code=TASK_TIMEOUT`；kubectl/docker 查询失败同样 fail-fast。
 
@@ -161,8 +161,8 @@ pwsh scripts/e2e/restart-drill.ps1 -RecoveryTimeoutSeconds 1   # 负向：必须
 
 - 先用 `kind/mock-llm-delayed.yaml`（15s 后才就绪）制造 running 窗口；
 - 提交 2 个 test，等 testing + Attempt running，然后
-  `kubectl delete pod -l app.kubernetes.io/name=testplaned --grace-period=0 --force`；
-- 脚本自己管理 port-forward（8100 → 恢复后 8101），断言新 Pod Ready、Run 终态、
+  `kubectl delete pod -l app.kubernetes.io/name=argusd --grace-period=0 --force`；
+- 脚本自己管理 port-forward（8100 → 恢复后 8101），断言新 Pod Ready、Task 终态、
   租约/Job 清空、`attempt.finished` 有对账痕迹；`-RecoveryTimeoutSeconds 1` 时
   必须 exit 1（验证不会把“没恢复”当 PASS）。
 
@@ -175,9 +175,9 @@ pwsh scripts/e2e/mixed-result-check.ps1 -BaseUrl http://127.0.0.1:8096 -SkipAppl
 
 - `kind/mixed-router.yaml` 按 `Authorization` 分流：Task A `ENDPOINT_API_KEY=ok` →
   mock-llm（成功），Task B `ENDPOINT_API_KEY=fail` → mock-llm-500（失败）；
-- 首次用 `kind load docker-image python:3.12-alpine --name testplane` 把 router 镜像装进集群；
-- 断言 Run `completed_with_errors`、A succeeded/B failed、report counts 1/1、
-  failures 非空、Run.error 取首个失败 Task（Pre-Check 优先）。
+- 首次用 `kind load docker-image python:3.12-alpine --name argus` 把 router 镜像装进集群；
+- 断言 Task `failed`（v2：`completed_with_errors` 并入 `failed`，D-73）、A succeeded/B failed、report counts 1/1、
+  failures 非空、Task.error 取首个失败 runner。
 
 ## 3.3 Web UI Playwright 冒烟（#16）
 
@@ -199,13 +199,14 @@ pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107 -BlockedOnly  #
 pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107 -FailureOnly  # fake-genet -sim-error 500
 ```
 
-- 正常：`deploy:{provider:"genet"}` → `deploy.state` 依次 `queued → accepted/deploying → ready`，
-  `endpoint.source=genet`，precheck `succeeded`，Run `succeeded`；终态后
-  `helm list -n testplane-mock` 为空（本机无 helm CLI 时用 Helm release Secret 等价判断）。
-- blocked：`-BlockedOnly` 断言 Run `service_unavailable`、`DEPLOY_BLOCKED` retryable=true、
+- 正常：`deploy:{provider:"genet",spec:"<yaml 文本>"}` → service-deploy runner（seq=1）按
+  `deploy-state.json` 报告排队/部署/ready，endpoint 经 deploy 导出（`AG_SERVED_*`）注入，
+  precheck `succeeded`，Task `succeeded`；终态后 `helm list -n argus-mock` 为空
+  （本机无 helm CLI 时用 Helm release Secret 等价判断）。
+- blocked：`-BlockedOnly` 断言 Task `service_unavailable`、`DEPLOY_BLOCKED` retryable=true、
   `deploy.failure.detail.reason=blocked`、`uninstall.state=verified`。
-- 500：`-FailureOnly` 断言 Run `failed`、`DEPLOY_FAILED` retryable=false，
-  并最多等 90s 让对账写出 `cleanup.failed` state event。
+- 500：`-FailureOnly` 断言 Task `failed`、`DEPLOY_FAILED` retryable=false，
+  并最多等 90s 让 service-clean 落 `cleanup_failed` 事件（clean 为 finally 语义，D-70）。
 - **超窗 blocked 不做端到端**：配置下限 1h（`03 §3.2` CHECK），端到端构造不现实；
   由 genet 72h 单测 + 编排层 blocked 单测覆盖。
 
@@ -215,9 +216,9 @@ pwsh scripts/e2e/deploy-check.ps1 -BaseUrl http://127.0.0.1:8107 -FailureOnly  #
 pwsh scripts/e2e/artifact-persistence-check.ps1
 ```
 
-2-test service Run 完成后记录 `/artifacts` 条目/大小/result 数与
-`tasks/<task>/attempts/1/result.json` sha256；删除 Job/Pod 后要求条目数、大小、
-result 数、路径集合、sha256 **完全一致**，再 `rollout restart testplaned` 复核；
+2-runner service Task 完成后记录 `/artifacts` 条目/大小/result 数与
+`tasks/<task>/attempts/1/runners/<seq>/result.json` sha256（v2 产物布局，D-68）；删除 runner Job/Pod 后要求条目数、大小、
+result 数、路径集合、sha256 **完全一致**，再 `rollout restart deploy/argusd` 复核；
 同时验 attempt artifacts、`Range: bytes=0-9` → 206+10B、不存在 path 404、
 `../../etc/passwd` 400；两种 `/files` path 形态（artifacts 原始 `r-xxx/...` 与 run 相对）都要 200 且 sha 一致；带前缀 `r-xxx/../../etc/passwd` 也要 400。实跑 `r-20261105-GEEX` **44/44 PASS**；Job/Pod 删前按名记录并断言存在，删后按名复查，hold-until 期间不被删。
 
@@ -228,20 +229,20 @@ pwsh scripts/e2e/retry-check.ps1 -BaseUrl http://127.0.0.1:8093
 ```
 
 脚本在 host `:18181` 起一个临时 mock-llm（`ready-after=4s`），提交 auto precheck + 一个
-`retry-a` Task。等 precheck succeeded 后**立刻停 mock**，让 `retry-a` 失败；Run 终态后重启 mock，
-再取 plan / retry。断言：precheck 进 `reuse`、`retry-a` 进 `rerun`；retry 202 + `new_run_id` +
-`retry_of`；新 Run 成功、新 precheck `attempts=0`（复用）、`retry-a` 新 Attempt 成功；
-新 Run 再取 plan 为 `retryable=false, reason=nothing_to_retry`；重复 POST retry → 409；
-旧 failed Task 单 Task retry 202 且 `attempt_no>=2`。mock 进程按 host.docker.internal
-暴露给 kind，所以 Run 的 service URL 用 `http://host.docker.internal:18181/v1`。
+`retry-a` runner。等 precheck succeeded 后**立刻停 mock**，让 `retry-a` 失败；Task 终态后重启 mock，
+再 POST retry。v2 语义（D-69/D-73）：重试 = 整 Task 新 attempt **全量重跑**（含 precheck 重新执行，
+无 retry-plan 复用，无 per-runner retry 端点）。断言：retry 202 + `attempt_no` 递增；重复 POST retry → 409；
+同一 Task 成功、precheck 与 `retry-a` 在新 attempt 里重新跑到 succeeded；
+attempts 列表至少 2 条（attempt_no 1/2）。mock 进程按 host.docker.internal
+暴露给 kind，所以 Task 的 service URL 用 `http://host.docker.internal:18181/v1`。
 
 ## 3.7 管理面（P1 admin）
 
 ```powershell
 # 前置：D-55 的窄授权已 apply（否则 rotate_verified 用例按设计判红）
-pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace testplane `
-  -SecretName tp-secret-endpoint-mock -Out deploy/k8s/rbac-secret-rotate.yaml
-kubectl --context kind-testplane apply -f deploy/k8s/rbac-secret-rotate.yaml
+pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace argus `
+  -SecretName argus-secret-endpoint-mock -Out deploy/k8s/rbac-secret-rotate.yaml
+kubectl --context kind-argus apply -f deploy/k8s/rbac-secret-rotate.yaml
 
 pwsh scripts/e2e/admin-check.ps1 -BaseUrl http://127.0.0.1:8093
 ```
@@ -250,40 +251,40 @@ pwsh scripts/e2e/admin-check.ps1 -BaseUrl http://127.0.0.1:8093
 （目标不存在 → **404**；RBAC 未 apply 时只接受 **503 `EXECUTOR_UNAVAILABLE` + `detail.reason=forbidden|k8s_unavailable`**，
 不再接受"裸 503"）、**rotate 正向真集群用例**（控制面 Pod 的 SA 身份，不是本机 admin kubeconfig：
 `200 + rotated=true + verified=true`，RBAC 没 apply 就红）、audit 有 `register`/`secret_rotated`
-（含 rejected 与 verified=true）、删除被引用 cluster → 409、终态 Run 人工清理产物 →
+（含 rejected 与 verified=true）、删除被引用 cluster → 409、终态 Task 人工清理产物 →
 200 且 `/artifacts` 清空、非终态清理 → 409。dev 模式固定 admin，viewer 403 需 OIDC 环境，
 见 `tools/contract/README.md` 的“RBAC 已知限制”。
 
 默认**严格**：report 必现（终态后 ≤2s，30s 等待足够）、`/logs` 必非空；只有显式
 `-AllowKnownGaps` 才把当前已知的 report/logs 缺口从失败项里剔除，修复后不要带这个开关。
 
-期望终态以 **C-5.8 终态判定优先级**为准（Lead 2026-11-05 已拍板）：
+期望终态以 **§7.5 Task 终态语义**为准（v2：`completed_with_errors` 并入 `failed`，D-73/D-35）：
 
-- **可重试**的 precheck 失败（窗口耗尽的 `PRECHECK_FAILED` / `ENDPOINT_UNREACHABLE`）→ Run `service_unavailable`；
-- **不可重试**的 precheck 失败（401/403、200 包错误、DNS/TLS）→ Run `completed_with_errors`，
-  precheck Task 是 `failed`（不是 `skipped`），其余 Task `skipped(upstream_abort)`；
-- 平台准备期失败（如 Job 创建失败 `EXECUTOR_UNAVAILABLE`）→ `completed_with_errors`，**不是** `failed`。
+- **可重试**的 precheck 失败（窗口耗尽的 `PRECHECK_FAILED` / `ENDPOINT_UNREACHABLE`）→ Task `service_unavailable`；
+- **不可重试**的 precheck 失败（401/403、200 包错误、DNS/TLS）→ Task `failed`，
+  precheck runner 是 `failed`（不是 `skipped`），其余 runner `skipped(upstream_abort)`；
+- 平台准备期失败（如 Job 创建失败 `EXECUTOR_UNAVAILABLE`）→ Task `failed`（平台侧失败，§7.5）。
 
-| 注入 | mock 启动参数 | 探针行为 | Run 终态 | 断言命令要点 |
+| 注入 | mock 启动参数 | 探针行为 | Task 终态 | 断言命令要点 |
 |---|---|---|---|---|
 | 5xx 持续 | `-fail=500` | 窗口内重试，用尽后 `PRECHECK_FAILED(retryable=true)` | `service_unavailable` | `--expect service_unavailable --expect-task-error-code PRECHECK_FAILED --expect-retryable=true`；其余 Task 必须 `skipped(upstream_abort)`、无 Attempt |
-| 认证失败 | `-fail=401` | **立即**失败，`retryable=false`，不耗满窗口 | `completed_with_errors` | `--expect completed_with_errors --expect-task-error-code PRECHECK_FAILED --expect-retryable=false` |
-| 200 包错误 | `-error-in-200` | **立即**失败，`retryable=false` | `completed_with_errors` | 同上 |
+| 认证失败 | `-fail=401` | **立即**失败，`retryable=false`，不耗满窗口 | `failed` | `--expect failed --expect-task-error-code PRECHECK_FAILED --expect-retryable=false` |
+| 200 包错误 | `-error-in-200` | **立即**失败，`retryable=false` | `failed` | 同上 |
 | 就绪慢（窗口够） | `-ready-after=12s` | 多次 503 后成功 | `succeeded` | `--expect succeeded`；事件里能看到多次 `attempt` 才成功 |
-| 就绪慢（窗口不够） | `-ready-after=3600s` | 窗口用尽，`retryable=true` | `service_unavailable` | 把 precheck 的 `--wait_timeout_seconds` 压到 5–10s（见下） |
+| 就绪慢（窗口不够） | `-ready-after=3600s` | 窗口用尽，`retryable=true` | `service_unavailable` | 把 precheck 的 `wait_timeout_seconds` 压到 5–10s（见下） |
 
 **关键前置**：内置 Manifest 的 precheck 等待窗口是 60s，失败注入会跑很久。
-要么用 `--manifest` 传自己写的 Manifest，把 precheck 的 `args` 压短：
+要么用 `--manifest` 传自己写的 Manifest，把 precheck 的输入窗口压短：
 
 ```yaml
-precheck:
-  tester: endpoint-probe
+precheck:                 # v2：显式对象（§10.1），参数走输入文件
+  runner: endpoint-probe
   version: "1.0.0"
-  args: "--wait_timeout_seconds=5 --retry_interval_seconds=1"
+  input: '{"wait_timeout_seconds":5,"retry_interval_seconds":1}'
 ```
 
-要么直接改 `--manifest` 里的 `deploy.parameters.endpoint` / `service.url` 指向注入端的端口。
-断言 `abort_run` 时注意：其余 Task 是 `skipped`（`reason=upstream_abort`），**不是 `canceled`**。
+要么直接改 `--manifest` 里的 `deploy.spec` / `service.url` 指向注入端的端口。
+断言 `abort_task` 时注意：其余 runner 是 `skipped`（`reason=upstream_abort`），**不是 `canceled`**。
 
 ## 4. Kind 里跑
 
@@ -291,18 +292,18 @@ precheck:
 # 0) 集群（注意：已有同名集群先删再建；extraMounts 只在建集群时生效）
 #    集群配置是模板，先渲染出本机路径，再建集群（见 deploy/README.md §2）
 pwsh deploy\kind\render.ps1
-.\.tools\kind.exe create cluster --config .data\kind-testplane.yaml
+.\.tools\kind.exe create cluster --config .data\kind-argus.yaml
 
 # 1) mock-llm 镜像：本地 build + load（不 push 任何仓库）
-docker build -t testplane/mock-llm:dev tools/mock-llm
-.\.tools\kind.exe load docker-image testplane/mock-llm:dev --name testplane
+docker build -t argus/mock-llm:dev tools/mock-llm
+.\.tools\kind.exe load docker-image argus/mock-llm:dev --name argus
 
 # 2) 部署 mock-llm（默认 namespace；要换就加 -n）
 kubectl apply -f scripts\e2e\kind\mock-llm.yaml
 kubectl rollout status deployment/mock-llm
 
 # 3) 控制面：按 infra 的 Helm/compose 起；宿主访问用 port-forward
-kubectl -n <testplane-ns> port-forward svc/testplane 8080:8080
+kubectl -n <argus-ns> port-forward svc/argus 8080:8080
 
 # 4) 跑 e2e（集群内地址，不是 127.0.0.1）
 bin\e2e run --mode deploy `
@@ -313,10 +314,10 @@ bin\e2e run --mode service `
   --mock-url http://mock-llm.default.svc.cluster.local:18080/v1
 ```
 
-- `--mock-url` 是**给 Tester Pod 用**的地址：Pod 里没有宿主 `127.0.0.1`，必须用 Service DNS。
-- `deploy` 模式最终 Endpoint 由 Genet 返回；`deploy.parameters.endpoint` 只是给 dev 假 Genet 的提示。
-  假 Genet 不认这个参数时，用 `--mode service` 或自己的 `--manifest`。
-- Tester Pod 需要拉得到 `endpoint-probe` 镜像（本地 kind 用 `kind load`，否则平台会 `IMAGE_PULL_FAILED`）。
+- `--mock-url` 是**给 runner Pod 用**的地址：Pod 里没有宿主 `127.0.0.1`，必须用 Service DNS。
+- `deploy` 模式最终 Endpoint 由 service-deploy runner 的 exports（`AG_SERVED_URL` 等）注入（D-71）；
+  假 Genet 不认 `deploy.spec` 时，用 `--mode service` 或自己的 `--manifest`。
+- Runner Pod 需要拉得到 `endpoint-probe` 镜像（本地 kind 用 `kind load`，否则平台会 `IMAGE_PULL_FAILED`）。
 
 ## 5. 用真实探针反验 mock（可重复）
 
@@ -325,7 +326,8 @@ pwsh scripts/e2e/probe-check.ps1
 ```
 
 它会起 5 个不同故障的 mock，把 `testers/endpoint-probe/run.sh` 只读挂进一次性 alpine 容器运行
-（不 build Tester 镜像、不改 `testers/`），逐场景比对 `result.json`。实测输出：
+（不 build 镜像、不改 `testers/`；业务参数经 `/workspace/input/params.jsonl` 注入），
+逐场景比对 `result.json`（产物契约三选一 D-74，endpoint-probe 产出 result.json）。实测输出：
 
 ```text
 scenario         ok exit status    code            retryable attempts seconds
@@ -345,12 +347,12 @@ error-in-200   True    1 failed    PRECHECK_FAILED False            1    0.50
 |---|---|
 | `e2e` 退出码 3 | 控制面没起或端口不是 8080；`--base-url` 是否指对 |
 | 所有接口 404 | `--api-prefix` 与后端挂载的前缀不一致（MVP 定稿 `/api/v1`） |
-| `TESTER_NOT_FOUND` | `GET /api/v1/testers` 里有没有 `endpoint-probe`；镜像内 Registry 扫描是否成功 |
+| `RUNNER_NOT_FOUND` | `GET /api/v1/runners` 里有没有 `endpoint-probe`；镜像内 Registry 扫描是否成功 |
 | `EXECUTION_PROFILE_NOT_FOUND` | `GET /api/v1/profiles` 的实际名字，用 `--profile` 传 |
 | `report.present` 失败 | 报告是异步写的；e2e 会在 404 上重试 30s，仍 404 才是真问题 |
 | `events.transitions_legal` 失败 | 详情里直接给出 `seq=… from -> to 不在转移表内`，对照 C-3.1/C-3.2 |
-| `sse.connect` 失败 | `GET /api/v1/runs/{id}/events` 没返回 `text/event-stream`（或路由缺失） |
-| Tester Pod 拉不到镜像 | `kind load docker-image ...` 或平台报 `IMAGE_PULL_FAILED` |
+| `sse.connect` 失败 | `GET /api/v1/tasks/{id}/events` 没返回 `text/event-stream`（或路由缺失） |
+| Runner Pod 拉不到镜像 | `kind load docker-image ...` 或平台报 `IMAGE_PULL_FAILED` |
 
 ## 7. 第二阶段待办（依赖别人）
 

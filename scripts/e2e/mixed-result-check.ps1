@@ -4,7 +4,7 @@
 #   mixed-fail -> Authorization: Bearer fail -> router -> mock-llm-500（失败）
 # 平台不允许 tests[].args 覆盖 --url，所以用 test 级 env ENDPOINT_API_KEY + router 分流；
 # 这也顺带验证了 Task 级 env 注入。
-# 期望：Run completed_with_errors；A succeeded / B failed；
+# 期望：Run failed；A succeeded / B failed；
 #       report.counts={total:2,succeeded:1,failed:1}；failures 非空；
 #       Run.error 取首个失败 Task（无 precheck 时即 B）。
 param(
@@ -65,19 +65,19 @@ if (-not $SkipApply) {
 }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$submitted = Invoke-Api -Method POST -Path '/api/v1/runs' -Body (New-Manifest -Stamp $stamp)
-$runId = [string]$submitted.run.id
+$submitted = Invoke-Api -Method POST -Path '/api/v1/tasks' -Body (New-Manifest -Stamp $stamp)
+$runId = [string]$submitted.task.id
 Write-Host "已提交 Run $runId（mixed-ok / mixed-fail）"
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $trace = @()
 $run = $null
 while ($sw.Elapsed.TotalSeconds -lt 120) {
-    $run = Invoke-Api -Method GET -Path "/api/v1/runs/$runId"
-    $brief = ($run.tasks | ForEach-Object { "$($_.name)=$($_.status)" }) -join ', '
+    $run = Invoke-Api -Method GET -Path "/api/v1/tasks/$runId"
+    $brief = ($run.runners | ForEach-Object { "$($_.name)=$($_.status)" }) -join ', '
     $line = "t+{0:N1}s status={1} tasks: {2}" -f $sw.Elapsed.TotalSeconds, $run.status, $brief
     if ($trace.Count -eq 0 -or $trace[-1] -ne $line) { $trace += $line; Write-Host "  $line" }
-    if ($run.status -in @('succeeded', 'completed_with_errors', 'failed', 'service_unavailable', 'canceled')) { break }
+    if ($run.status -in @('succeeded', 'failed', 'service_unavailable', 'canceled')) { break }
     Start-Sleep -Milliseconds 500
 }
 $sw.Stop()
@@ -85,10 +85,10 @@ $elapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
 
 Write-Host ""
 Write-Host "断言：" -ForegroundColor Cyan
-Add-Check 'run.terminal_completed_with_errors' ($run.status -eq 'completed_with_errors') ("status=" + $run.status + "，耗时 " + $elapsed + "s")
+Add-Check 'run.terminal_failed' ($run.status -eq 'failed') ("status=" + $run.status + "，耗时 " + $elapsed + "s")
 Add-Check 'run.within_120s' ($elapsed -le 120) ($elapsed.ToString() + "s <= 120s")
 
-$tasks = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/tasks?limit=200").items
+$tasks = (Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/runners?limit=200").items
 $a = @($tasks | Where-Object { $_.name -eq 'mixed-ok' })[0]
 $b = @($tasks | Where-Object { $_.name -eq 'mixed-fail' })[0]
 Add-Check 'tasks.present' ($null -ne $a -and $null -ne $b) ("tasks=" + $tasks.Count)
@@ -100,7 +100,7 @@ $report = $null
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline) {
     try {
-        $report = Invoke-Api -Method GET -Path "/api/v1/runs/$runId/report"
+        $report = Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/report"
         break
     } catch {
         Start-Sleep -Milliseconds 500

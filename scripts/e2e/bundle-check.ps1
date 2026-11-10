@@ -25,7 +25,7 @@ function JsonOf($r){ try{return $r.Content|ConvertFrom-Json}catch{return $null} 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 function Read-Bundle([string]$RunID) {
     $tmp = Join-Path $OutDir "bundle-$RunID.zip"
-    $r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -PassThru -Uri "$BaseUrl/api/v1/runs/$RunID/bundle" -Headers @{ Authorization="Bearer $User" } -OutFile $tmp
+    $r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -PassThru -Uri "$BaseUrl/api/v1/tasks/$RunID/bundle" -Headers @{ Authorization="Bearer $User" } -OutFile $tmp
     $bytes = [IO.File]::ReadAllBytes($tmp)
     $zip = [IO.Compression.ZipFile]::OpenRead($tmp)
     try {
@@ -43,11 +43,11 @@ try {
     Write-Host "Bundle 验收：$BaseUrl" -ForegroundColor Cyan
 
     # 终态 Run：优先挑最近有 artifacts 的 succeeded/failed 终态 Run。
-    $list = JsonOf (Call GET '/api/v1/runs?limit=50')
+    $list = JsonOf (Call GET '/api/v1/tasks?limit=50')
     $target = $null
     foreach ($r in @($list.items)) {
-        if ($r.status -in @('succeeded','failed','completed_with_errors','service_unavailable','canceled')) {
-            $arts = JsonOf (Call GET "/api/v1/runs/$($r.id)/artifacts")
+        if ($r.status -in @('succeeded','failed','service_unavailable','canceled')) {
+            $arts = JsonOf (Call GET "/api/v1/tasks/$($r.id)/artifacts")
             if (@($arts.items).Count -gt 0) { $target = $r; $targetArtifacts = @($arts.items); break }
         }
     }
@@ -64,9 +64,9 @@ try {
     } finally { $b.zip.Dispose() }
 
     # 非终态 Run：slow mock，bundle 必须 200 且 MANIFEST.missing 显式列 report.md。
-    $manifest = @{ run = @{ name = "bundle-nonterminal-$stamp"; service = @{ url=$SlowMockURL; model_name='mock-llm' }; precheck='off'; cleanup=@{policy='never'}; tests=@(@{name='slow-a'; tester='endpoint-probe'; version='1.0.0'; execution=@{profile='k8s-npu'}; args='--wait_timeout_seconds=30 --retry_interval_seconds=1'}) } } | ConvertTo-Json -Depth 8 -Compress
-    $r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method POST -Uri "$BaseUrl/api/v1/runs" -Headers $headers -ContentType 'application/json' -Body $manifest
-    $slowID = (JsonOf $r).run.id
+    $manifest = @{ task = @{ name = "bundle-nonterminal-$stamp"; service = @{ url=$SlowMockURL; model_name='mock-llm' }; precheck='off'; runners=@(@{name='slow-a'; runner='endpoint-probe'; version='1.0.0'; execution=@{profile='k8s-npu'}; input='{"wait_timeout_seconds":30,"retry_interval_seconds":1}'; on_failure='continue'}) } } | ConvertTo-Json -Depth 8 -Compress
+    $r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method POST -Uri "$BaseUrl/api/v1/tasks" -Headers $headers -ContentType 'application/json' -Body $manifest
+    $slowID = (JsonOf $r).task.id
     Add-Check 'nonterminal.submit' ($r.StatusCode -eq 202 -and $slowID) ("run=" + $slowID)
     $nb = Read-Bundle $slowID
     try {
@@ -74,7 +74,7 @@ try {
         Add-Check 'nonterminal.bundle_200' ($nb.status -eq 200) ("status=" + $nb.status)
         Add-Check 'nonterminal.terminal_false' ($nb.manifest.terminal -eq $false) ("terminal=" + $nb.manifest.terminal + " state=" + $nb.manifest.state)
         Add-Check 'nonterminal.missing_report_md' ($missing -contains 'report.md') ("missing=" + ($missing -join ','))
-    } finally { $nb.zip.Dispose(); $null = Call POST "/api/v1/runs/$slowID/cancel" }
+    } finally { $nb.zip.Dispose(); $null = Call POST "/api/v1/tasks/$slowID/cancel" }
 } catch {
     Add-Check 'bundle.exception' $false $_.Exception.Message
 }

@@ -1,7 +1,9 @@
-# TestPlane · 用真实 endpoint-probe 反验 mock-llm（Windows / pwsh）
+# Argus · 用真实 endpoint-probe 反验 mock-llm（Windows / pwsh）
 #
 # 这不是"再写一个探针"，而是让 testers/endpoint-probe/run.sh 原封不动跑在
-# 一次性 alpine 容器里，对准 mock-llm，验证五种现场下 Tester 的判定与设计一致：
+# 一次性 alpine 容器里，对准 mock-llm，验证五种现场下 Runner 的判定与设计一致：
+# （v2：业务参数经 /workspace/input/params.jsonl 注入；产物断言按 result.json——
+#   产物契约三选一（D-74），endpoint-probe 选择产出 result.json。）
 #
 #   ready            -> exit 0 / succeeded / 1 次探测
 #   slow-ready-15s   -> exit 0 / succeeded / 多次探测（窗口内重试）
@@ -14,7 +16,7 @@
 #   pwsh scripts/e2e/probe-check.ps1 -OutputRoot D:\tmp\qa-probe
 #
 # 前置：Docker 可用（首次会 build 一个带 jq/bash/curl 的 runner 镜像，之后走缓存）。
-# 不改 testers/、不 build Tester 镜像；run.sh 只读挂载进容器。
+# 不改 testers/、不 build Runner 镜像；run.sh 只读挂载进容器。
 #
 # 退出码：0 全部符合预期；1 有场景不符合；2 环境/构建问题。
 
@@ -36,10 +38,10 @@ if (-not (Test-Path -LiteralPath $probeScript)) {
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 
 # ---- 一次性 runner 镜像（jq/bash/curl）-------------------------------------
-$runnerImage = 'testplane/probe-runner:qa'
+$runnerImage = 'argus/probe-runner:qa'
 & docker image inspect $runnerImage *> $null
 if ($LASTEXITCODE -ne 0) {
-    $ctx = Join-Path ([System.IO.Path]::GetTempPath()) ("testplane-probe-runner-" + [guid]::NewGuid().ToString('N'))
+    $ctx = Join-Path ([System.IO.Path]::GetTempPath()) ("argus-probe-runner-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $ctx | Out-Null
     @'
 FROM alpine:3.20
@@ -57,7 +59,7 @@ RUN apk add --no-cache bash curl jq ca-certificates tzdata
 # ---- 编译并启动 5 个不同故障的 mock-llm ------------------------------------
 $tmp = [System.IO.Path]::GetTempPath()
 Push-Location (Join-Path $repo 'tools\mock-llm')
-$mockExe = Join-Path $tmp 'testplane-mock-llm.exe'
+$mockExe = Join-Path $tmp 'argus-mock-llm.exe'
 & go build -o $mockExe .
 Pop-Location
 if ($LASTEXITCODE -ne 0) {
@@ -66,11 +68,11 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $scenarios = @(
-    @{ Name = 'slow-ready-12s'; Port = 18105; MockArgs = @('-addr=:18105', '-ready-after=12s'); ProbeArgs = '--wait_timeout_seconds=30 --retry_interval_seconds=2'; Exit = 0; Status = 'succeeded'; Code = ''; Retryable = $null;  MinAttempts = 2; MaxSeconds = 60 }
-    @{ Name = 'ready';          Port = 18101; MockArgs = @('-addr=:18101');               ProbeArgs = '--wait_timeout_seconds=20 --retry_interval_seconds=1'; Exit = 0; Status = 'succeeded'; Code = ''; Retryable = $null;  MinAttempts = 1; MaxSeconds = 30 }
-    @{ Name = 'fail-401';       Port = 18102; MockArgs = @('-addr=:18102', '-fail=401');  ProbeArgs = '--wait_timeout_seconds=30 --retry_interval_seconds=1'; Exit = 1; Status = 'failed';    Code = 'PRECHECK_FAILED'; Retryable = $false; MinAttempts = 1; MaxSeconds = 20 }
-    @{ Name = 'fail-500';       Port = 18103; MockArgs = @('-addr=:18103', '-fail=500');  ProbeArgs = '--wait_timeout_seconds=2 --retry_interval_seconds=1';  Exit = 1; Status = 'failed';    Code = 'PRECHECK_FAILED'; Retryable = $true;  MinAttempts = 2; MaxSeconds = 30 }
-    @{ Name = 'error-in-200';   Port = 18104; MockArgs = @('-addr=:18104', '-error-in-200'); ProbeArgs = '--wait_timeout_seconds=30 --retry_interval_seconds=1'; Exit = 1; Status = 'failed'; Code = 'PRECHECK_FAILED'; Retryable = $false; MinAttempts = 1; MaxSeconds = 20 }
+    @{ Name = 'slow-ready-12s'; Port = 18105; MockArgs = @('-addr=:18105', '-ready-after=12s'); ParamsJson = '{"wait_timeout_seconds":30,"retry_interval_seconds":2}'; Exit = 0; Status = 'succeeded'; Code = ''; Retryable = $null;  MinAttempts = 2; MaxSeconds = 60 }
+    @{ Name = 'ready';          Port = 18101; MockArgs = @('-addr=:18101');               ParamsJson = '{"wait_timeout_seconds":20,"retry_interval_seconds":1}'; Exit = 0; Status = 'succeeded'; Code = ''; Retryable = $null;  MinAttempts = 1; MaxSeconds = 30 }
+    @{ Name = 'fail-401';       Port = 18102; MockArgs = @('-addr=:18102', '-fail=401');  ParamsJson = '{"wait_timeout_seconds":30,"retry_interval_seconds":1}'; Exit = 1; Status = 'failed';    Code = 'PRECHECK_FAILED'; Retryable = $false; MinAttempts = 1; MaxSeconds = 20 }
+    @{ Name = 'fail-500';       Port = 18103; MockArgs = @('-addr=:18103', '-fail=500');  ParamsJson = '{"wait_timeout_seconds":2,"retry_interval_seconds":1}'; Exit = 1; Status = 'failed';    Code = 'PRECHECK_FAILED'; Retryable = $true;  MinAttempts = 2; MaxSeconds = 30 }
+    @{ Name = 'error-in-200';   Port = 18104; MockArgs = @('-addr=:18104', '-error-in-200'); ParamsJson = '{"wait_timeout_seconds":30,"retry_interval_seconds":1}'; Exit = 1; Status = 'failed'; Code = 'PRECHECK_FAILED'; Retryable = $false; MinAttempts = 1; MaxSeconds = 20 }
 )
 
 $procs = @()
@@ -100,11 +102,15 @@ try {
     foreach ($s in $scenarios) {
         $outDir = Join-Path $OutputRoot $s.Name
         $null = New-Item -ItemType Directory -Force -Path $outDir
-        $inner = "bash /tester/run.sh --url=http://host.docker.internal:$($s.Port)/v1 --model_name=mock-llm $($s.ProbeArgs)"
+        # v2：业务参数只走输入文件（JSONL，§5.3），按约定路径挂载；公共参数走 CLI（§5.10）。
+        $paramsPath = Join-Path $outDir 'params.jsonl'
+        Set-Content -Encoding ascii -NoNewline -Path $paramsPath -Value $s.ParamsJson
+        $inner = "bash /runner/run.sh --url=http://host.docker.internal:$($s.Port)/v1 --model_name=mock-llm"
         $dockerArgs = @(
             'run', '--rm',
             '--add-host=host.docker.internal:host-gateway',
-            '-v', "${probeScript}:/tester/run.sh:ro",
+            '-v', "${probeScript}:/runner/run.sh:ro",
+            '-v', "${paramsPath}:/workspace/input/params.jsonl:ro",
             '-v', "${outDir}:/workspace/output",
             $runnerImage, 'sh', '-c', $inner
         )
