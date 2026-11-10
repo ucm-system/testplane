@@ -1,0 +1,72 @@
+name: service-clean
+version: 1.0.0
+display_name: 服务拆除（内置）
+description: |
+  内置 clean Runner：消费 deploy 导出的 AG_DEPLOY_REF（缺失时用确定性 releaseName 兜底并注明 fallback），
+  调 Genet OpenAPI 卸载 Helm release（DELETE /api/open/helm/releases/{name}?keepHistory=false&force=true，
+  只能走 Genet OpenAPI——直接 helm uninstall 会被 admission webhook 拒绝，D-54），
+  然后**判干净**：GET release 404 **且** GET /pods 的 items==[]（两查同时满足、查询本身成功；
+  查询失败 ≠ 为空，不判成功——R9/D-50/D-54）。资源已不存在 = 幂等成功（exit 0）；
+  判不干净/调用失败 exit 1（平台记 cleanup_failed，不改 Task 终态，§9.1/§9.4）。
+  finally 语义执行（§7.6）：成功/失败/取消/超时四条路径都会被排程执行。
+
+role: clean                     # 仅内置：用户目录声明 role: clean 一律拒绝注册（§5.1）
+on_failure: abort_task          # 内置 clean 必须声明（§7.3 / 注册校验强制）
+
+entry: ["/runner/run.sh"]       # exec form 数组；平台 exec 该数组、不经 shell、不追加 argv（§5.2）
+input_format: jsonl             # 本 Runner 无业务参数；平台按 jsonl 落盘（通常为空文件）
+
+# 镜像由 CI 构建产出（build/Dockerfile 与 README 构建节；§6.2）。平台不 build、不解析形态（§5.6）。
+# 本地联调 tag：argus-service-clean:dev（见 run-local.sh）。
+image: registry.dev.huawei.com/argus/service-clean:1.0.0
+
+resources:
+  cpu: "1"                      # 只调 Genet OpenAPI 查询/删除，不消耗加速卡
+  memory: "256Mi"
+  gpu: { resource: nvidia.com/gpu, count: 0 }
+
+concurrency:
+  endpoint_exclusive: false     # 拆除阶段服务已测完；endpoint_exclusive 仅外接模式有效（§6.7）
+
+mounts: []
+
+# clean 不产出下游 key（§5.12）。
+exports: []
+# 消费 deploy 的导出（§5.12 组合期校验闭合）。
+consumes: [AG_DEPLOY_REF]
+
+# 业务参数 schema（jsonl）：本 Runner 无业务参数（附录 C：无业务参数时必须显式 []）。
+parameters: []
+
+placeholder: |
+  {}
+  本 Runner 无业务参数（parameters: []）；平台按 jsonl 落盘空参数文件。
+  releaseName 来源优先级：AG_DEPLOY_REF（deploy 导出）> /workspace/input/deploy-state.json 副本
+  > 确定性兜底 "arg-"+sha256("${AG_TASK_ID}:${AG_ATTEMPT}")[:12]（日志注明 fallback）。
+
+# 运行期读取的环境变量（§12.4）。GENET_API_KEY 走 Task 级 secrets（§12.2 / D-72）。
+env:
+  AG_GENET_BASE_URL:
+    required: true
+    secret: false
+    description: "Genet OpenAPI 基地址（如 http://genet-backend.genet.svc:8080 或 genet-local 地址）。缺失时本 Runner 以退出码 2 失败。"
+  GENET_API_KEY:
+    required: true
+    secret: true
+    description: "Genet Open API Key（Bearer）——必须与部署时用的是同一把（namespace 绑定）。由 Task 级 secrets 注入；Runner 只读不打印（§12.4）。"
+  AG_CLEAN_VERIFY_TIMEOUT:
+    required: false
+    secret: false
+    description: "判干净验证循环的总窗口（秒），缺省 600；超窗未确认干净 → exit 1（cleanup_failed 语义）。"
+  AG_CLEAN_POLL_INITIAL_INTERVAL:
+    required: false
+    secret: false
+    description: "验证循环的初始间隔（秒），缺省 2；之后指数退避。"
+  AG_CLEAN_POLL_MAX_INTERVAL:
+    required: false
+    secret: false
+    description: "验证循环的退避间隔上限（秒），缺省 15。"
+  AG_DEPLOY_STATE_FILE:
+    required: false
+    secret: false
+    description: "deploy-state.json 副本路径（execution §9.4：挂进 /workspace/input 或经 env 给路径）；仅用于 AG_DEPLOY_REF 缺失时读取 release_name/namespace。"
