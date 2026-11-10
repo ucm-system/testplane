@@ -10,7 +10,7 @@ import { realApi } from './real'
 export const api: Api = USE_MOCK ? mockApi : realApi
 
 export { USE_MOCK, API_BASE, ApiClientError, getCurrentUser, setCurrentUser, isApiClientError, toApiError } from './client'
-export { subscribeRunEvents } from './sse'
+export { subscribeTaskEvents } from './sse'
 export type { SseStatus } from './sse'
 export type { Api, LogOptions } from './contract'
 export type * from './types'

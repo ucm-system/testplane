@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { BookOpen, Boxes, GitFork, Layers, List, PlusCircle, Server, ShieldCheck, Terminal } from 'lucide-react'
+import { Wordmark } from '@/components/app/Wordmark'
 import { USE_MOCK } from '@/api'
 import {
   Sidebar,
@@ -31,16 +32,16 @@ interface NavItem {
 
 const NAV_GROUPS: Array<{ title: string; items: NavItem[] }> = [
   {
-    title: '运行',
+    title: 'Task',
     items: [
       { to: '/', label: '概览', icon: Layers, end: true },
-      { to: '/submit', label: '提交运行', icon: PlusCircle },
+      { to: '/submit', label: '提交 Task', icon: PlusCircle },
     ],
   },
   {
     title: '能力',
     items: [
-      { to: '/testers', label: 'Tester 目录', icon: Boxes },
+      { to: '/runners', label: 'Runner 目录', icon: Boxes },
       // 集群与队列：**viewer 也可读**（design/views/07 §2.3：GET /clusters 与 /queue-status 是 viewer ✅）
       { to: '/clusters', label: '集群与队列', icon: Server },
     ],
@@ -56,7 +57,7 @@ const FOOTER_LINKS: Array<{ label: string; to: string; icon: typeof List; extern
   { label: '文档', to: '/docs', icon: BookOpen },
   { label: 'API', to: '/api', icon: Terminal },
   // lucide 1.x 不含品牌图标：用 GitFork 表示仓库
-  { label: 'GitHub', to: 'https://github.com/ucm-system/testplane', icon: GitFork, external: true },
+  { label: 'GitHub', to: 'https://github.com/ucm-system/argus', icon: GitFork, external: true },
 ]
 
 /** 路由是否命中导航项：`end` 项必须完全相等，其余按路径前缀匹配。 */
@@ -95,34 +96,22 @@ export function AppSidebar() {
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton asChild size="lg" tooltip="TestPlane" className="group-data-[collapsible=icon]:mx-auto">
-              <Link to="/" aria-label="TestPlane 首页" className="flex items-center gap-2">
+            <SidebarMenuButton asChild size="lg" tooltip="Argus" className="group-data-[collapsible=icon]:mx-auto">
+              <Link to="/" aria-label="Argus 首页" className="flex items-center gap-2">
                 {/*
-                  品牌图（用户提供的徽章 + 字标，一张整图）：
-                  展开态用完整 lockup `brand.webp`（760px / 30KB），
-                  折叠成 icon rail 时换成裁好的飞机图标 `brand-icon.webp`（128px / 6KB）——
-                  整图缩到 48px 宽会把字标压成一条黑线。
-                  源图 2172×724 PNG 815KB，转 webp 后两张加起来 36KB。
+                  品牌字标（SVG，图形 + 字母一体的身份标识）：
+                  展开态显示完整 lockup，折叠成 icon rail 时只剩图形。
                 */}
-                <img
-                  src="/brand.webp"
-                  alt="TestPlane"
-                  width={252}
-                  height={64}
-                  decoding="async"
-                  data-testid="sidebar-brand"
-                  className="h-8 w-auto select-none group-data-[collapsible=icon]:hidden"
-                />
-                <img
-                  src="/brand-icon.webp"
-                  alt=""
-                  aria-hidden
-                  width={96}
-                  height={69}
-                  decoding="async"
+                <span data-testid="sidebar-brand" className="group-data-[collapsible=icon]:hidden">
+                  <Wordmark height={26} />
+                </span>
+                <span
                   data-testid="sidebar-brand-icon"
-                  className="hidden h-6 w-auto shrink-0 select-none group-data-[collapsible=icon]:block"
-                />
+                  aria-hidden
+                  className="hidden h-6 shrink-0 items-center group-data-[collapsible=icon]:flex"
+                >
+                  <Wordmark height={20} />
+                </span>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
@@ -200,7 +189,7 @@ export function AppSidebar() {
             'group-data-[collapsible=icon]:hidden',
           )}
         >
-          {USE_MOCK ? '示意原型 · 数据为 mock' : 'TestPlane · 实时数据'}
+          {USE_MOCK ? '示意原型 · 数据为 mock' : 'Argus · 实时数据'}
         </p>
       </SidebarFooter>
     </Sidebar>

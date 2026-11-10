@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 /**
- * TestPlane Web —— 开发服务器把 /api 代理到控制面。
+ * Argus Web —— 开发服务器把 /api 代理到控制面。
  *
  * 代理目标取值顺序：`.env` / `.env.local` 里的 `TESTPLANE_BACKEND` → 进程环境变量 → 默认 `http://127.0.0.1:8080`。
  * 端口转发到别处时（例如 `127.0.0.1:8081`）写进 `web/.env.local` 即可：

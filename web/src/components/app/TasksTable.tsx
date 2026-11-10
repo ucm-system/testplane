@@ -4,8 +4,8 @@ import { Search, X } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
 import { api } from '@/api'
 import { toApiError } from '@/api/client'
-import type { ApiErrorBody, RunFacets, RunSummary } from '@/api/types'
-import { RunStatusBadge } from '@/components/app/StatusBadge'
+import type { ApiErrorBody, Task, TaskFacets } from '@/api/types'
+import { TaskStatusBadge } from '@/components/app/StatusBadge'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/card'
 import { DataTable } from '@/components/ui/data-table'
@@ -14,35 +14,31 @@ import { Input } from '@/components/ui/input'
 import { PAGE_SIZES, Pagination } from '@/components/ui/pagination'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/states'
-import { runStatusMeta } from '@/lib/status'
+import { taskStatusMeta } from '@/lib/status'
 import { formatDateTime, formatDuration, formatRelative, runDuration } from '@/lib/utils'
 
 /**
- * 全量 Run 表（D-62：从运行列表页搬到概览，与 KPI 同页共存）。
+ * 全量 Task 表（D-62：从运行列表搬到概览，与 KPI 同页共存）。
+ *
+ * v2（D-73）：数据来自 `GET /tasks`（Task 投影，runner 进度取 `runner_counts`）；
+ * facets 只有 status / submitter / runner 三个维度（`kind` 随占位 Run 概念取消）。
  *
  * D-61：真分页 + Excel 式表头列筛选。
+ *  - `GET /tasks?page=&page_size=&status=a,b&submitter=dev,qa&runner=` → 一页 items + `total`
+ *  - `GET /tasks/facets?同样过滤` → 表头下拉的候选值与计数（**每次筛选变化都重拉**）
  *
- * 数据全来自服务端：
- *  - `GET /runs?page=&page_size=&status=a,b&submitter=dev,qa&kind=&tester=` → 一页 items + `total`
- *  - `GET /runs/facets?同样过滤` → 表头下拉的候选值与计数（**每次筛选变化都重拉**，
- *    所以别的列一勾，本列的数字就跟着变 —— 这就是 Excel 的行为）
- *
- * 状态全进 URL：`page` / `page_size` / `status` / `submitter` / `kind` / `tester` / `q`。
+ * 状态全进 URL：`page` / `page_size` / `status` / `submitter` / `runner` / `q`。
  * 改筛选一律**重置到第 1 页**，否则会停在空页上。
- *
- * 关于 `q`：服务端没有全文搜索（07 §5.1 只有 status / kind / tester / submitter），
- * 所以它**只在本页内查找**，占位文案与 tooltip 都写清楚了 —— 有真分页之后再叫"筛选"就是误导。
  */
 
 const DEFAULT_PAGE_SIZE = 20
 
-type FacetKey = 'status' | 'submitter' | 'kind' | 'tester'
+type FacetKey = 'status' | 'submitter' | 'runner'
 
 const FACET_LABEL: Record<FacetKey, string> = {
   status: '状态',
   submitter: '提交人',
-  kind: '类型',
-  tester: 'Tester',
+  runner: 'Runner',
 }
 
 /** URL 里逗号分隔的多值 */
@@ -58,31 +54,29 @@ function pickPageSize(raw: string | null): number {
   return (PAGE_SIZES as readonly number[]).includes(value) ? value : DEFAULT_PAGE_SIZE
 }
 
-function progress(run: RunSummary): string {
-  const counts = run.task_counts
+function progress(task: Task): string {
+  const counts = task.runner_counts
   if (!counts) return '—'
-  return `${counts.succeeded} / ${counts.total}`
+  return `${counts.succeeded + counts.failed + (counts.skipped ?? 0) + (counts.canceled ?? 0) === 0 && counts.total === 0 ? '—' : `${counts.succeeded} / ${counts.total}`}`
 }
 
-export function RunsTable() {
+export function TasksTable() {
   const [params, setParams] = useSearchParams()
 
   const page = Math.max(1, Number(params.get('page') ?? 1) || 1)
   const pageSize = pickPageSize(params.get('page_size'))
   const statusRaw = params.get('status')
   const submitterRaw = params.get('submitter')
-  const kindRaw = params.get('kind')
-  const testerRaw = params.get('tester')
+  const runnerRaw = params.get('runner')
   const search = params.get('q') ?? ''
 
   const filters = useMemo(
     () => ({
       status: parseList(statusRaw),
       submitter: parseList(submitterRaw),
-      kind: parseList(kindRaw),
-      tester: parseList(testerRaw),
+      runner: parseList(runnerRaw),
     }),
-    [statusRaw, submitterRaw, kindRaw, testerRaw],
+    [statusRaw, submitterRaw, runnerRaw],
   )
 
   /** 改 URL；`resetPage` 时把 page 清掉（回到第 1 页） */
@@ -103,9 +97,9 @@ export function RunsTable() {
   const applyFacet = (key: FacetKey, values: string[]) =>
     updateQuery({ [key]: values.length > 0 ? values.join(',') : null }, { resetPage: true })
 
-  const [items, setItems] = useState<RunSummary[]>([])
+  const [items, setItems] = useState<Task[]>([])
   const [total, setTotal] = useState(0)
-  const [facets, setFacets] = useState<RunFacets | null>(null)
+  const [facets, setFacets] = useState<TaskFacets | null>(null)
   const [loading, setLoading] = useState(true)
   const [facetsLoading, setFacetsLoading] = useState(true)
   const [error, setError] = useState<ApiErrorBody | null>(null)
@@ -116,8 +110,7 @@ export function RunsTable() {
     () => ({
       status: filters.status.join(',') || undefined,
       submitter: filters.submitter.join(',') || undefined,
-      kind: filters.kind.join(',') || undefined,
-      tester: filters.tester.join(',') || undefined,
+      runner: filters.runner.join(',') || undefined,
     }),
     [filters],
   )
@@ -128,7 +121,7 @@ export function RunsTable() {
     setLoading(true)
     setError(null)
     api
-      .listRuns({ ...query, page, page_size: pageSize })
+      .listTasks({ ...query, page, page_size: pageSize })
       .then((result) => {
         if (id !== requestId.current) return
         setItems(result.items)
@@ -150,7 +143,7 @@ export function RunsTable() {
     let alive = true
     setFacetsLoading(true)
     api
-      .listRunFacets(query)
+      .listTaskFacets(query)
       .then((result) => {
         if (alive) setFacets(result)
       })
@@ -169,7 +162,7 @@ export function RunsTable() {
   const visible = useMemo(() => {
     const keyword = search.trim().toLowerCase()
     if (!keyword) return items
-    return items.filter((run) => `${run.id} ${run.name} ${run.submitted_by}`.toLowerCase().includes(keyword))
+    return items.filter((task) => `${task.id} ${task.name} ${task.submitted_by}`.toLowerCase().includes(keyword))
   }, [items, search])
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
@@ -179,14 +172,14 @@ export function RunsTable() {
   )
   const anyFilter = activeChips.length > 0 || Boolean(search)
 
-  const columns = useMemo<ColumnDef<RunSummary, unknown>[]>(
+  const columns = useMemo<ColumnDef<Task, unknown>[]>(
     () => [
       {
         id: 'id',
-        header: 'Run',
+        header: 'Task',
         meta: { className: 'whitespace-nowrap font-mono text-2xs' },
         cell: ({ row }) => (
-          <Link to={`/runs/${row.original.id}`} className="text-primary-text hover:underline">
+          <Link to={`/tasks/${row.original.id}`} className="text-primary-text hover:underline">
             {row.original.id}
           </Link>
         ),
@@ -210,34 +203,24 @@ export function RunsTable() {
               label={FACET_LABEL.status}
               selected={filters.status}
               buckets={facets?.status ?? []}
-              renderValue={(value) => runStatusMeta(value).label}
+              renderValue={(value) => taskStatusMeta(value).label}
               onApply={(values) => applyFacet('status', values)}
             />
           ),
         },
-        cell: ({ row }) => <RunStatusBadge status={row.original.status} />,
+        cell: ({ row }) => <TaskStatusBadge status={row.original.status} />,
       },
       {
-        id: 'kind',
-        header: FACET_LABEL.kind,
-        meta: {
-          filter: (
-            <FacetFilter
-              label={FACET_LABEL.kind}
-              selected={filters.kind}
-              buckets={facets?.kind ?? []}
-              renderValue={(value) => (value === 'task' ? '独立 Task' : 'Run')}
-              onApply={(values) => applyFacet('kind', values)}
-            />
-          ),
-        },
-        cell: ({ row }) => (row.original.kind === 'task' ? '独立 Task' : 'Run'),
-      },
-      {
-        id: 'task',
-        header: 'Task',
+        id: 'runners',
+        header: 'runner 进度',
         meta: { className: 'whitespace-nowrap tabular-nums' },
         cell: ({ row }) => progress(row.original),
+      },
+      {
+        id: 'attempt',
+        header: 'attempt',
+        meta: { className: 'whitespace-nowrap tabular-nums' },
+        cell: ({ row }) => (row.original.current_attempt === 0 ? '—' : `#${row.original.current_attempt}`),
       },
       {
         id: 'duration',
@@ -263,7 +246,7 @@ export function RunsTable() {
       },
       {
         id: 'submitted_at',
-        header: '创建时间',
+        header: '提交时间',
         meta: { className: 'whitespace-nowrap text-2xs text-fg-3' },
         cell: ({ row }) => (
           <span title={formatRelative(row.original.submitted_at)}>{formatDateTime(row.original.submitted_at)}</span>
@@ -277,11 +260,10 @@ export function RunsTable() {
 
   return (
     <>
-
       <Card>
         <CardHeader
           tone="ok"
-          title="全部 Run"
+          title="全部 Task"
           sub={
             loading
               ? '加载中…'
@@ -308,20 +290,20 @@ export function RunsTable() {
         />
 
         {/*
-          按 Tester 筛选：`Run` 列表投影里没有 tester 字段（03 §3.1 只到 submitted_by），
-          整列渲染 "—" 比不放更糟，所以这一维用**工具条上的漏斗**，候选值与计数仍来自 /runs/facets。
+          按 Runner 筛选：`Task` 投影里没有 runner 字段（03 §3.1 只到 submitted_by），
+          整列渲染 "—" 比不放更糟，所以这一维用**工具条上的漏斗**，候选值与计数仍来自 /tasks/facets。
         */}
         <div className="flex flex-wrap items-center gap-2 border-b border-line-soft px-5 py-2 text-2xs text-fg-3">
           <span className="flex items-center gap-1">
-            <span>按 Tester 筛选</span>
+            <span>按 Runner 筛选</span>
             <FacetFilter
-              label={FACET_LABEL.tester}
-              selected={filters.tester}
-              buckets={facets?.tester ?? []}
-              onApply={(values) => applyFacet('tester', values)}
+              label={FACET_LABEL.runner}
+              selected={filters.runner}
+              buckets={facets?.runner ?? []}
+              onApply={(values) => applyFacet('runner', values)}
             />
-            {filters.tester.length > 0 ? (
-              <span className="font-mono text-fg-2">{filters.tester.join('、')}</span>
+            {filters.runner.length > 0 ? (
+              <span className="font-mono text-fg-2">{filters.runner.join('、')}</span>
             ) : null}
           </span>
         </div>
@@ -360,7 +342,7 @@ export function RunsTable() {
               className="ml-auto"
               data-testid="clear-all-filters"
               onClick={() =>
-                updateQuery({ status: null, submitter: null, kind: null, tester: null, q: null }, { resetPage: true })
+                updateQuery({ status: null, submitter: null, runner: null, q: null }, { resetPage: true })
               }
             >
               清除全部
@@ -375,7 +357,7 @@ export function RunsTable() {
         ) : null}
 
         {loading && items.length === 0 ? (
-          <TableSkeleton rows={6} cols={9} />
+          <TableSkeleton rows={6} cols={8} />
         ) : outOfRange ? (
           <EmptyState
             data-testid="page-out-of-range"
@@ -392,14 +374,14 @@ export function RunsTable() {
             <DataTable
               columns={columns}
               data={visible}
-              rowTestId={(run) => `run-row-${run.id}`}
+              rowTestId={(task) => `task-row-${task.id}`}
               empty={
-                <div className="flex flex-col items-center gap-2 py-4" data-testid="runs-empty">
+                <div className="flex flex-col items-center gap-2 py-4" data-testid="tasks-empty">
                   <span className="text-sm font-medium text-fg-2">
-                    {anyFilter ? '当前筛选条件下没有 Run' : '还没有 Run'}
+                    {anyFilter ? '当前筛选条件下没有 Task' : '还没有 Task'}
                   </span>
                   <span className="text-2xs text-fg-3">
-                    {anyFilter ? '放宽列筛选，或者清除全部条件。' : '去「提交运行」创建第一个 Run。'}
+                    {anyFilter ? '放宽列筛选，或者清除全部条件。' : '去「提交 Task」创建第一个 Task。'}
                   </span>
                   {anyFilter ? (
                     <Button
@@ -407,7 +389,7 @@ export function RunsTable() {
                       data-testid="empty-clear-filters"
                       onClick={() =>
                         updateQuery(
-                          { status: null, submitter: null, kind: null, tester: null, q: null },
+                          { status: null, submitter: null, runner: null, q: null },
                           { resetPage: true },
                         )
                       }

@@ -2,11 +2,13 @@
  * Mock 数据源 —— 后端未起时把页面填满（`VITE_USE_MOCK=1`，**默认关**）。
  *
  * 规则：
- *  - 实现的是 `Api` 接口，字段形状与 `server/api/openapi.yaml` 一致；
+ *  - 实现的是 `Api` 接口，字段形状与 `server/api/openapi.yaml`（schema 2.0）一致；
  *    切真实接口时页面不改一行。
- *  - 数据有状态：提交 Run 会真的出现在列表里，取消走 cancelling → canceled，
- *    事件流（SSE）由 mock 按状态机推进 —— 用来验收「事件流实时追加」这一条。
- *  - 数据贴近 design/prototype/screenshots：同一批名字、同一批状态、同一套日志口径。
+ *  - 数据有状态：提交 Task 会真的出现在列表里，取消走 cancelling → canceled（clean 收口），
+ *    事件流（SSE）由 mock 按 runner 管道推进 —— 用来验收「事件流实时追加」这一条。
+ *  - v2 形态：Task / attempt / runner 投影（`(task_id, attempt_no, seq)` 定位）、
+ *    管道严格串行（service-deploy? → precheck → tests → service-clean?，D-70）、
+ *    `result_ref` 可空（产物三选一 D-74）、没有 args / retry / cleanup.policy。
  */
 import { ApiClientError, getCurrentUser } from './client'
 import type { Api, LogOptions } from './contract'
@@ -16,17 +18,12 @@ import type {
   Artifact,
   ArtifactList,
   Attempt,
-  AttemptStatus,
   AuditEntry,
   AuditQuery,
   CancelResult,
   Cluster,
   ClusterWrite,
   DashboardStats,
-  SharedMount,
-  SharedMountPatch,
-  SharedMountWrite,
-  Deploy,
   DeployLogEntry,
   DeployLogGap,
   DeployLogPod,
@@ -47,42 +44,36 @@ import type {
   Report,
   ReportCounts,
   ReportFailure,
-  ReportTask,
+  ReportRunner,
   Result,
   ResultMetric,
-  RetryBlockedItem,
-  RetryPlan,
-  RetryPlanReason,
-  RetryRerunItem,
-  RetryReuseItem,
-  RetryPolicy,
-  Run,
-  RunEvent,
-  RunEventType,
-  FacetBucket,
-  RunFacets,
-  RunFacetsQuery,
-  RunListQuery,
-  RunManifest,
-  RunStatus,
+  Runner,
+  RunnerExecution,
+  RunnerListQuery,
+  RunnerRole,
+  RunnerStatus,
+  RunnerWire,
   SecretWrite,
-  SkippedReason,
+  SharedMount,
+  SharedMountPatch,
+  SharedMountWrite,
   SubmitResult,
   Task,
-  TaskCancelResult,
   TaskDetail,
+  TaskEvent,
+  EventType,
+  FacetBucket,
+  TaskFacets,
+  TaskFacetsQuery,
   TaskListQuery,
+  TaskManifest,
   TaskRetryAccepted,
   TaskStatus,
-  TaskSummary,
-  Tester,
-  TesterListQuery,
-  TesterWire,
   ValidationIssue,
   WaitingReason,
   WaitingTask,
 } from './types'
-import { normalizeTester } from './normalize'
+import { normalizeRunner } from './normalize'
 import { applyIdentity, clearAuth, getAuthState } from './auth'
 
 /* ================================================================ 基础工具 */
@@ -103,7 +94,7 @@ function delay(ms = 180): Promise<void> {
 }
 
 /** 平台保留路径（D-63）：这些目录由平台写入，映射进来会互相踩 */
-const RESERVED_MOUNT_PATHS = ['/workspace/output', '/workspace/input', '/tmp', '/tester']
+const RESERVED_MOUNT_PATHS = ['/workspace/output', '/workspace/input', '/tmp', '/runner']
 
 function sharedMountValidation(issues: ValidationIssue[]): ApiClientError {
   return new ApiClientError(400, {
@@ -118,7 +109,6 @@ function sharedMountValidation(issues: ValidationIssue[]): ApiClientError {
 /**
  * 与后端一致的校验（D-65）：名称/路径/PVC 必填、路径必须 `/` 开头且不得命中保留路径、
  * 路径不得与其它挂载重复（`self` 是编辑中的那条，排除自身）。
- * 错误码只有 `REQUIRED` / `CONFLICT` 两种，`path` 指到具体字段，方便前端做字段级红字。
  */
 function validateSharedMount(body: SharedMountWrite, self: string | null): ValidationIssue[] {
   const issues: ValidationIssue[] = []
@@ -175,7 +165,7 @@ function endpointKeyOf(url: string): string {
   }
 }
 
-function endpointOf(url: string, modelName: string, source: Endpoint['source'], deployId?: string): Endpoint {
+function endpointOf(url: string, modelName: string, source: Endpoint['source'], deployRef?: string): Endpoint {
   return {
     url,
     key: endpointKeyOf(url),
@@ -183,24 +173,29 @@ function endpointOf(url: string, modelName: string, source: Endpoint['source'], 
     model_name: modelName,
     model_path: '',
     protocol: 'http',
-    deploy_id: deployId ?? null,
+    deploy_ref: deployRef ?? null,
   }
 }
 
-/* ================================================================ Tester 目录 */
+/** attempt 上限（`AG_ATTEMPT_MAX`，默认 3，§12.7）：超限 `ATTEMPT_EXHAUSTED`。 */
+const ATTEMPT_MAX = 3
 
-function testerWire(input: {
+/* ================================================================ Runner 目录（附录 C v2） */
+
+function runnerWire(input: {
   name: string
   version: string
   display_name: string
   description: string
-  role: 'pre_check' | 'test'
-  on_failure: 'continue' | 'abort_run'
+  role: RunnerRole
+  on_failure: 'continue' | 'abort_task'
   exclusive: boolean
+  input_format: 'jsonl' | 'yaml' | 'text'
   placeholder: string
-  parameters: TesterWire['parameters']
-  env?: TesterWire['env']
-}): TesterWire {
+  parameters: RunnerWire['parameters']
+  exports?: string[]
+  consumes?: string[]
+}): RunnerWire {
   return {
     name: input.name,
     version: input.version,
@@ -208,45 +203,50 @@ function testerWire(input: {
     description: input.description,
     role: input.role,
     on_failure: input.on_failure,
-    entry: '/tester/run.sh',
-    image: `registry.dev.huawei.com/testplane/${input.name}:${input.version}`,
-    resources: { cpu: '1', memory: '256Mi', gpu: { resource: 'nvidia.com/gpu', count: 0 } },
+    // exec form 数组（D-66）：平台 exec 该数组、argv 恒空
+    entry: ['/runner/run.sh'],
+    input_format: input.input_format,
+    image: `registry.dev.huawei.com/argus/${input.name}:${input.version}`,
+    resources: { cpu: '4', memory: '16Gi', gpu: { resource: 'nvidia.com/gpu', count: 0 } },
     concurrency: { endpoint_exclusive: input.exclusive },
     mounts: [],
     parameters: input.parameters,
-    env: input.env ?? {
+    exports: input.exports ?? [],
+    consumes: input.consumes ?? ['AG_SERVED_URL', 'AG_SERVED_MODEL_NAME'],
+    env: {
       ENDPOINT_API_KEY: { secret: true, description: 'Bearer token；不提供时按无鉴权探测' },
     },
     placeholder: input.placeholder,
     content_sha: 'sha256:mock',
-    source_file: `testers/${input.name}/tester.yaml`,
+    source_file: `runners/${input.name}/runner.yaml`,
     orphaned: false,
+    latest: true,
     registered_at: iso(60 * 24 * 7),
     registered_by: 'system',
   }
 }
 
-const TESTERS: TesterWire[] = [
-  testerWire({
+const RUNNERS: RunnerWire[] = [
+  runnerWire({
     name: 'endpoint-probe',
     version: '1.0.0',
     display_name: '服务就绪探测',
     description:
       '对已部署的 LLM 服务执行生成型探活：POST <url>/chat/completions，max_tokens=1、stream=true，首包 token 一到即判定可服务。',
     role: 'pre_check',
-    on_failure: 'abort_run',
+    on_failure: 'abort_task',
     exclusive: true,
-    placeholder: '--wait_timeout_seconds=600 --retry_interval_seconds=15',
-    parameters: {
-      url: { type: 'string', required: true, description: 'OpenAI 兼容 base URL；平台有值时注入，不得重复传' },
-      model_name: { type: 'string', description: '模型名；省略时从 /v1/models 取第一个' },
-      wait_timeout_seconds: { type: 'integer', default: '600', description: '就绪等待窗口（秒）' },
-      retry_interval_seconds: { type: 'integer', default: '15', description: '两次探测间隔（秒）' },
-      max_tokens: { type: 'integer', default: '1', description: '探活请求的 max_tokens，不要调大' },
-      stream: { type: 'boolean', default: 'true', description: '流式探活；true 时首 token 到达即通过' },
-    },
+    input_format: 'jsonl',
+    placeholder: '{"wait_timeout_seconds":600,"retry_interval_seconds":15}',
+    parameters: [
+      { name: 'wait_timeout_seconds', type: 'integer', required: false, default: 600, description: '就绪等待窗口（秒）' },
+      { name: 'retry_interval_seconds', type: 'integer', required: false, default: 15, description: '两次探测间隔（秒）' },
+      { name: 'max_tokens', type: 'integer', required: false, default: 1, description: '探活请求的 max_tokens，不要调大' },
+      { name: 'stream', type: 'boolean', required: false, default: true, description: '流式探活；true 时首 token 到达即通过' },
+    ],
+    exports: ['AG_PRECHECK_OK'],
   }),
-  testerWire({
+  runnerWire({
     name: 'aisbench-acc',
     version: '1.0.0',
     display_name: '数据集精度评测',
@@ -254,33 +254,31 @@ const TESTERS: TesterWire[] = [
     role: 'test',
     on_failure: 'continue',
     exclusive: false,
-    placeholder: '--dataset=/data/gsm8k.jsonl --limit=200',
-    parameters: {
-      url: { type: 'string', required: true, description: 'OpenAI 兼容 base URL' },
-      model_name: { type: 'string', required: true, description: '模型名' },
-      dataset: { type: 'string', required: true, description: '数据集在容器内的绝对路径' },
-      limit: { type: 'integer', description: '最多评测多少条样本' },
-    },
+    input_format: 'jsonl',
+    placeholder: '{"dataset":"/data/gsm8k.jsonl","limit":200}',
+    parameters: [
+      { name: 'dataset', type: 'string', required: true, description: '数据集在容器内的绝对路径' },
+      { name: 'limit', type: 'integer', required: false, description: '最多评测多少条样本' },
+    ],
   }),
-  testerWire({
+  runnerWire({
     name: 'aisbench-perf',
     version: '1.0.0',
     display_name: '性能压测',
-    description: '性能压测，输出 TTFT / TPOT / 吞吐。独占 Endpoint，避免与其它 Task 互相干扰。',
+    description: '性能压测，输出 TTFT / TPOT / 吞吐。独占 Endpoint，避免与其它 Task 的 runner 互相干扰。',
     role: 'test',
     on_failure: 'continue',
     exclusive: true,
-    placeholder: '--input_lens=[512,1024,4096] --output_lens=[128,512] --concurrency=[1,4,8,16]',
-    parameters: {
-      url: { type: 'string', required: true, description: 'OpenAI 兼容 base URL' },
-      model_name: { type: 'string', required: true, description: '模型名' },
-      input_lens: { type: 'list<int>', required: true, description: '输入长度列表' },
-      output_lens: { type: 'list<int>', required: true, description: '输出长度列表' },
-      concurrency: { type: 'list<int>', required: true, description: '并发档位' },
-    },
+    input_format: 'jsonl',
+    placeholder: '{"input_len":512,"output_len":128,"concurrency":8}',
+    parameters: [
+      { name: 'input_len', type: 'integer', required: true, description: '输入长度' },
+      { name: 'output_len', type: 'integer', required: true, description: '输出长度' },
+      { name: 'concurrency', type: 'integer', required: true, description: '并发档位' },
+    ],
   }),
-  // 票 #60：同名多版本 —— 0.2.0 是当前版，0.1.0 已退役（目录里已移除，历史 Run 仍按 name@version 引用）
-  testerWire({
+  // 票 #60 / D-60：同名多版本 —— 0.2.0 是当前版，0.1.0 已退役（目录里已移除，历史 Task 仍按 name@version 引用）
+  runnerWire({
     name: 'aisbench-sla',
     version: '0.2.0',
     display_name: 'SLA 时延评测',
@@ -288,17 +286,16 @@ const TESTERS: TesterWire[] = [
     role: 'test',
     on_failure: 'continue',
     exclusive: false,
-    placeholder: '--target_ttft_ms=800 --target_tpot_ms=30 --samples=200',
-    parameters: {
-      url: { type: 'string', required: true, description: 'OpenAI 兼容 base URL' },
-      model_name: { type: 'string', required: true, description: '模型名' },
-      target_ttft_ms: { type: 'integer', required: true, description: '首包时延目标（毫秒）' },
-      target_tpot_ms: { type: 'integer', description: '每 token 时延目标（毫秒）' },
-      samples: { type: 'integer', description: '采样条数' },
-    },
+    input_format: 'jsonl',
+    placeholder: '{"target_ttft_ms":800,"target_tpot_ms":30,"samples":200}',
+    parameters: [
+      { name: 'target_ttft_ms', type: 'integer', required: true, description: '首包时延目标（毫秒）' },
+      { name: 'target_tpot_ms', type: 'integer', required: false, description: '每 token 时延目标（毫秒）' },
+      { name: 'samples', type: 'integer', required: false, description: '采样条数' },
+    ],
   }),
   {
-    ...testerWire({
+    ...runnerWire({
       name: 'aisbench-sla',
       version: '0.1.0',
       display_name: 'SLA 时延评测',
@@ -306,53 +303,49 @@ const TESTERS: TesterWire[] = [
       role: 'test',
       on_failure: 'continue',
       exclusive: false,
-      placeholder: '--target_ttft_ms=900',
-      parameters: {
-        url: { type: 'string', required: true, description: 'OpenAI 兼容 base URL' },
-        model_name: { type: 'string', required: true, description: '模型名' },
-        target_ttft_ms: { type: 'integer', required: true, description: '首包时延目标（毫秒）' },
-      },
+      input_format: 'jsonl',
+      placeholder: '{"target_ttft_ms":900}',
+      parameters: [
+        { name: 'target_ttft_ms', type: 'integer', required: true, description: '首包时延目标（毫秒）' },
+      ],
     }),
     // 已退役：默认不出现在目录里，只有 ?include_retired=true 才回
     retired: true,
+    latest: false,
   },
-  testerWire({
-    name: 'evalscope-acc',
-    version: '2.3.0',
-    display_name: 'EvalScope 精度评测',
-    description: 'EvalScope 精度评测，适合跑多 benchmark 组合。',
+  runnerWire({
+    name: 'genet-yaml-check',
+    version: '1.1.0',
+    display_name: '部署描述静态检查',
+    description: '对 Genet 部署描述（YAML）做静态体检：必填段、缩进、显存估值。演示 input_format=yaml 的 Runner。',
     role: 'test',
     on_failure: 'continue',
     exclusive: false,
-    placeholder: '--dataset=mmlu --subset=abstract_algebra --limit=100',
-    parameters: {
-      url: { type: 'string', required: true, description: 'OpenAI 兼容 base URL' },
-      model_name: { type: 'string', required: true, description: '模型名' },
-      dataset: { type: 'string', required: true, description: 'benchmark 名称' },
-      subset: { type: 'string', description: '子集' },
-      limit: { type: 'integer', description: '样本上限' },
-    },
+    input_format: 'yaml',
+    placeholder: 'model: Qwen3-32B\nreplicas: 1\nresources:\n  gpu: 8',
+    parameters: [],
+    consumes: [],
   }),
 ]
 
 /* ================================================================ 内部状态 */
 
 interface MockState {
-  runs: Run[]
-  /** `${taskId}` → TaskDetail（含 attempts） */
   tasks: Record<string, TaskDetail>
-  /** 日志：`${taskId}#${attemptIdx}` → 文本 */
+  /** `${taskId}:${attemptNo}` → 该 attempt 的 runner 执行记录（按 seq 升序） */
+  attemptRunners: Record<string, RunnerExecution[]>
+  /** `${taskId}:${attemptNo}:${seq}` → runner 日志文本 */
   logs: Record<string, string>
-  /** 运行中日志的“新行”计数：模拟服务端 stdout 在两次轮询之间增长 */
-  attemptLogTicks: Record<string, number>
-  /** `${runId}#${pod}` → Deploy 日志行（持久化，轮询时按 offset 追加） */
+  /** 运行中日志的"新行"计数：模拟服务端 stdout 在两次轮询之间增长 */
+  logTicks: Record<string, number>
+  /** `${taskId}:${attemptNo}#${pod}` → Deploy 日志行（持久化，轮询时按 offset 追加） */
   deployLogLines: Record<string, string[]>
   deployLogTicks: Record<string, number>
-  /** `${runId}` → DeploySnapshot */
+  /** `${taskId}:${attemptNo}` → DeploySnapshot */
   deploys: Record<string, DeploySnapshot>
-  events: Record<string, RunEvent[]>
+  events: Record<string, TaskEvent[]>
   seq: Record<string, number>
-  testers: TesterWire[]
+  runners: RunnerWire[]
   clusters: Cluster[]
   /** `/admin/*` 的数据（P1） */
   profiles: ExecutionProfile[]
@@ -366,16 +359,16 @@ interface MockState {
 
 const state: MockState = {
   sharedMounts: [],
-  runs: [],
   tasks: {},
+  attemptRunners: {},
   logs: {},
-  attemptLogTicks: {},
+  logTicks: {},
   deployLogLines: {},
   deployLogTicks: {},
   deploys: {},
   events: {},
   seq: {},
-  testers: clone(TESTERS),
+  runners: clone(RUNNERS),
   clusters: [],
   profiles: [],
   adminClusters: [],
@@ -384,277 +377,335 @@ const state: MockState = {
   timers: new Map(),
 }
 
-/** mock 的“长时间运行”Task：状态机不推进它（用来演示 / 验证日志轮询） */
-const stickyTasks = new Set<string>()
+/** mock 的"长时间运行"runner：状态机不推进它（用来演示 / 验证日志轮询） */
+const stickyRunners = new Set<string>()
 
 /* ================================================================ 造数据 */
 
-interface TaskSeed {
-  seq: number
+interface RunnerSeed {
   name: string
-  tester: string
-  status: TaskStatus
-  args?: string
+  runner: string
+  role?: RunnerRole
+  status?: RunnerStatus
+  input?: string
   waiting?: WaitingReason
-  statusReason?: SkippedReason
+  statusReason?: 'upstream_abort' | 'canceled'
   error?: Failure
+  errorCode?: string
   startedMinAgo?: number
   durationSec?: number
-  attempts?: AttemptStatus[]
-  /** 自定义日志正文（用于演示滚动 / 长日志；不给就按 Tester 生成） */
-  logSeed?: string[]
-  /** 状态机不推进这个 Task（“长时间运行”演示 Run 用） */
   sticky?: boolean
 }
 
-interface RunSeed {
+interface TaskSeed {
   id: string
   name: string
-  status: RunStatus
+  status: TaskStatus
   submittedBy: string
   submittedMinAgo: number
   durationSec?: number
-  deploy?: Deploy
+  /** deploy 模式（含 Genet 部署描述原文）；不填则看 service */
+  deploySpec?: string
+  deployState?: 'queued' | 'accepted' | 'deploying' | 'ready' | 'blocked'
+  waitedSeconds?: number
   pods?: DeployPod[]
-  deployManifest?: Record<string, unknown> | null
-  endpoint?: Endpoint | null
+  /** 外接模式（service）：直接给已有服务 */
+  service?: { url: string; model_name?: string; model_path?: string }
   error?: Failure
   env?: Record<string, string>
   secrets?: Record<string, string>
-  cleanupPolicy?: Run['cleanup_policy']
-  tasks: TaskSeed[]
+  runners: RunnerSeed[]
+  /** 已跑过的 attempt 数 - 1（历史 attempt 全部 succeeded 略化） */
+  extraAttempts?: number
 }
 
-function attemptLog(taskSeed: TaskSeed, attempt: Attempt): string {
-  if (taskSeed.logSeed) return taskSeed.logSeed.join('\n')
-  const t = attempt.started_at
-    ? new Date(attempt.started_at).toLocaleTimeString('zh-CN', { hour12: false })
+/** 注入的内置 runner 名（D-70：用户不可手动添加）。 */
+const INJECTED = { deploy: 'service-deploy', precheck: 'precheck', clean: 'service-clean' } as const
+
+function runnerNameOf(seed: RunnerSeed): string {
+  if (seed.role === 'deploy') return INJECTED.deploy
+  if (seed.role === 'clean') return INJECTED.clean
+  if (seed.runner === 'endpoint-probe') return INJECTED.precheck
+  return seed.name
+}
+
+function runnerLog(seed: RunnerSeed, startedAt: string | null | undefined): string {
+  const t = startedAt
+    ? new Date(startedAt).toLocaleTimeString('zh-CN', { hour12: false })
     : '--:--:--'
-  if (taskSeed.tester === 'endpoint-probe') {
+  if (seed.role === 'deploy') {
     return [
-      `[${t}] 探活 <endpoint>/chat/completions model_name=Qwen3-32B max_tokens=1 stream=true`,
+      `[${t}] [genet] release arg-mock0001 install --no-wait`,
+      `[${t}] [genet] phase=deploying: pulling weights for Qwen3-32B`,
+      `[${t}] [genet] phase=ready: endpoint written to exports (AG_SERVED_URL)`,
+    ].join('\n')
+  }
+  if (seed.runner === 'endpoint-probe') {
+    return [
+      `[${t}] 探活 <AG_SERVED_URL>/chat/completions max_tokens=1 stream=true`,
       `[${t}] 第 1 次探测：未就绪 —— HTTP 503 {"error":"model loading"}`,
       `[${t}] 第 2 次探测：HTTP 200，收到 SSE 数据帧，服务可出 token`,
       `结论：status=succeeded（等待 38s）`,
     ].join('\n')
   }
-  if (attempt.status === 'failed') {
+  if (seed.role === 'clean') {
+    return [`[${t}] [genet] uninstall release arg-mock0001`, `[${t}] [genet] GET /releases/arg-mock0001 → 404，判定干净`].join('\n')
+  }
+  if (seed.status === 'failed') {
     return [
-      `[${t}] loading dataset ${taskSeed.args ?? ''}`,
-      `[${t}] ERROR connection reset by peer (attempt=${attempt.idx})`,
+      `[${t}] loading input ${seed.input ?? ''}`,
+      `[${t}] ERROR connection reset by peer (attempt=1)`,
       `[${t}] Traceback (most recent call last):`,
       `[${t}] requests.exceptions.ConnectionError: RemoteDisconnected`,
-      `结论：status=failed exit=1 code=TESTER_NONZERO_EXIT`,
+      `结论：status=failed exit=1 code=RUNNER_NONZERO_EXIT`,
     ].join('\n')
   }
-  if (taskSeed.tester === 'aisbench-perf') {
+  if (seed.runner === 'aisbench-perf') {
     return [
-      `[${t}] [sweep] input_lens=[512,1024,4096] output_lens=[128,512] concurrency=[1,4,8,16]`,
+      `[${t}] [sweep] input_len=512 output_len=128 concurrency=1..8`,
       `[${t}] [sweep] 24 combos, 24 ok`,
-      `[${t}] ttft_ms p95=143.7  tpot_ms mean=21.4  throughput=1482.6 tokens/s`,
+      `[${t}] ttft p95=143.7ms  tpot mean=21.4ms  throughput=1482.6 tokens/s`,
     ].join('\n')
   }
-  return [`[${t}] loading dataset ${taskSeed.args ?? ''}`, `[${t}] 200 samples done`, `[${t}] accuracy=0.8421`].join('\n')
+  return [`[${t}] input ${seed.input ?? ''}`, `[${t}] 200 samples done`, `[${t}] accuracy=0.8421`].join('\n')
 }
 
-function buildAttempts(taskId: string, seed: TaskSeed): Attempt[] {
-  const statuses = seed.attempts ?? (['pending', 'queued', 'skipped'].includes(seed.status) ? [] : [mapAttemptStatus(seed.status)])
-  return statuses.map((status, index) => {
-    const idx = index + 1
+/** 组装一个 attempt 的 runner 执行记录（严格串行：seq 从 1 递增）。 */
+function buildRunners(taskId: string, attemptNo: number, seeds: RunnerSeed[]): RunnerExecution[] {
+  return seeds.map((seed, index) => {
+    const seq = index + 1
+    const wire = state.runners.find((r) => r.name === seed.runner)
     const started = seed.startedMinAgo == null ? null : iso(seed.startedMinAgo)
     const startedAt = started ? new Date(started) : null
     const finishedAt =
       startedAt && seed.durationSec != null ? new Date(startedAt.getTime() + seed.durationSec * 1000).toISOString() : null
+    const status = seed.status ?? 'pending'
+    const hasResult = ['test', 'pre_check'].includes(seed.role ?? 'test') && status === 'succeeded'
     return {
-      id: `${taskId}-a${idx}`,
       task_id: taskId,
-      idx,
-      status,
-      phase: status === 'succeeded' ? 'Succeeded' : status === 'running' ? 'Running' : null,
-      exit_code: status === 'succeeded' ? 0 : status === 'failed' ? 1 : null,
+      attempt_no: attemptNo,
+      seq,
+      name: runnerNameOf(seed),
+      runner_name: seed.runner,
+      runner_version: wire?.version ?? '1.0.0',
+      role: seed.role ?? 'test',
+      image_ref: wire?.image ?? `registry.dev.huawei.com/argus/${seed.runner}:1.0.0`,
       image_digest: `sha256:${taskId.replace(/[^a-z0-9]/gi, '').slice(0, 12)}d1e7`,
+      profile: 'k8s-npu',
+      input_ref: `attempts/${attemptNo}/input/`,
+      on_failure: wire?.on_failure ?? 'continue',
+      timeout_seconds: 14400,
+      status,
+      status_reason: seed.statusReason ?? null,
+      waiting_reason: seed.waiting ?? null,
+      endpoint_key: null,
+      endpoint_exclusive: wire?.concurrency?.endpoint_exclusive ?? false,
+      exit_code: status === 'succeeded' ? 0 : status === 'failed' ? 1 : null,
+      error_code: seed.error?.code ?? (seed.errorCode as Failure['code'] | undefined) ?? null,
+      error: seed.error ?? null,
+      exports_ref: status === 'succeeded' ? `attempts/${attemptNo}/exports/${seq}.exports.env` : null,
+      // 产物三选一（D-74）：仅产出 result.json 时指向之；html/csv 或 deploy/clean 为 null
+      result_ref: hasResult ? `attempts/${attemptNo}/runners/${seq}/result.json` : null,
+      log_ref: `attempts/${attemptNo}/runners/${seq}/logs/stdout.log`,
       started_at: startedAt ? startedAt.toISOString() : null,
       finished_at: finishedAt,
-      log_ref: `tasks/${taskId}/attempts/${idx}/stdout.log`,
-      artifact_ref: null,
-      result_ref: status === 'succeeded' ? `tasks/${taskId}/attempts/${idx}/result.json` : null,
-      error: status === 'failed' ? (seed.error ?? null) : null,
-      executor_ref: { cluster: 'prod-npu-01', namespace: 'testplane', job: `tp-${taskId}-a${idx}` },
-    }
+      executor_ref: {
+        cluster: 'prod-npu-01',
+        namespace: 'argus',
+        job: `argus-${taskId}-1-${seq}`,
+      },
+    } satisfies RunnerExecution
   })
 }
 
-function mapAttemptStatus(status: TaskStatus): AttemptStatus {
-  switch (status) {
-    case 'preparing':
-      return 'preparing'
-    case 'running':
-      return 'running'
-    case 'succeeded':
-      return 'succeeded'
-    case 'failed':
-      return 'failed'
-    case 'canceled':
-      return 'canceled'
-    default:
-      return 'pending'
+function countsOf(runners: RunnerExecution[]): NonNullable<Task['runner_counts']> {
+  const counts = { total: runners.length, succeeded: 0, failed: 0, pending: 0, running: 0, skipped: 0, canceled: 0 }
+  for (const r of runners) {
+    if (r.status === 'succeeded') counts.succeeded += 1
+    else if (r.status === 'failed') counts.failed += 1
+    else if (r.status === 'skipped') counts.skipped += 1
+    else if (r.status === 'canceled') counts.canceled += 1
+    else if (['preparing', 'running'].includes(r.status)) counts.running += 1
+    else counts.pending += 1
   }
+  return counts
 }
 
-function emptyCounts(): NonNullable<Run['task_counts']> {
-  return { total: 0, pending: 0, running: 0, succeeded: 0, failed: 0, skipped: 0 }
+function isTerminalTask(status: TaskStatus): boolean {
+  return ['succeeded', 'failed', 'service_unavailable', 'canceled'].includes(status)
 }
 
-function seedRun(seed: RunSeed): Run {
-  const runId = seed.id
-  const summaries: TaskSummary[] = []
-  const counts = emptyCounts()
+function seedTask(seed: TaskSeed): TaskDetail {
+  const taskId = seed.id
+  const endpoint: Endpoint | null = seed.deploySpec
+    ? endpointOf('http://10.0.1.20:8000/v1', 'Qwen3-32B', 'genet', 'arg-mock0001')
+    : seed.service
+      ? endpointOf(seed.service.url, seed.service.model_name ?? 'Qwen3-32B', 'service')
+      : null
 
-  for (const taskSeed of seed.tasks) {
-    const taskId = `t-${runId.slice(2)}-${String(taskSeed.seq).padStart(2, '0')}`
-    const attempts = buildAttempts(taskId, taskSeed)
-    const currentAttempt = attempts.length
-    const tester = state.testers.find((t) => t.name === taskSeed.tester)
-    const task: TaskDetail = {
-      id: taskId,
-      run_id: runId,
-      seq: taskSeed.seq,
-      name: taskSeed.name,
-      tester_name: taskSeed.tester,
-      tester_version: tester?.version ?? '1.0.0',
-      image_ref: tester?.image ?? `registry.dev.huawei.com/testplane/${taskSeed.tester}:1.0.0`,
-      profile: 'k8s-npu',
-      args_raw: taskSeed.args ?? '',
-      args_argv: taskSeed.args ? taskSeed.args.split(/\s+/) : [],
-      injected_argv: [`--url=${seed.endpoint?.url ?? 'http://10.0.0.10:8000/v1'}`, `--model_name=Qwen3-32B`],
-      env: seed.env ?? {},
-      secret_env: Object.keys(seed.secrets ?? {}).map((name) => ({ name })),
-      on_failure: tester?.on_failure ?? 'continue',
-      timeout_seconds: 14400,
-      retry_policy: {} as RetryPolicy,
-      status: taskSeed.status,
-      status_reason: taskSeed.statusReason ?? null,
-      waiting_reason: taskSeed.waiting ?? null,
-      endpoint_key: seed.endpoint?.key ?? null,
-      endpoint_exclusive: tester?.concurrency?.endpoint_exclusive ?? false,
-      current_attempt: currentAttempt,
-      available_at: null,
-      cancel_requested: false,
-      // result.json 的定位（报告页据它去拉指标）：只有跑成功的 Attempt 才有
-      result_ref: attempts.find((attempt) => attempt.result_ref)?.result_ref ?? null,
-      error: taskSeed.error ?? null,
-      created_at: iso(seed.submittedMinAgo),
-      updated_at: iso(Math.max(0, seed.submittedMinAgo - 1)),
-      attempts,
-    }
-    state.tasks[taskId] = task
-    if (taskSeed.sticky) stickyTasks.add(taskId)
-    for (const attempt of attempts) {
-      state.logs[`${taskId}#${attempt.idx}`] = attemptLog(taskSeed, attempt)
-    }
-    summaries.push({
-      id: taskId,
-      name: task.name,
-      status: task.status,
-      waiting_reason: task.waiting_reason,
-      attempts: task.current_attempt,
-      error: task.error,
+  const extraAttempts = seed.extraAttempts ?? 0
+  const attemptNo = 1
+  const runners = buildRunners(taskId, attemptNo, seed.runners)
+  const attempts: Attempt[] = []
+  for (let i = 1; i <= extraAttempts; i += 1) {
+    attempts.push({
+      task_id: taskId,
+      attempt_no: i,
+      status: 'succeeded',
+      trigger: i === 1 ? 'initial' : 'retry',
+      input_ref: `attempts/${i}/input/`,
+      exports_ref: `attempts/${i}/exports/`,
+      deploy_state_ref: seed.deploySpec ? `attempts/${i}/deploy-state.json` : null,
+      error: null,
+      started_at: iso(seed.submittedMinAgo + 40 * (extraAttempts - i + 1)),
+      finished_at: iso(seed.submittedMinAgo + 30 * (extraAttempts - i + 1)),
     })
-
-    counts.total += 1
-    if (['pending', 'queued'].includes(task.status)) counts.pending = (counts.pending ?? 0) + 1
-    else if (['preparing', 'running'].includes(task.status)) counts.running = (counts.running ?? 0) + 1
-    else if (task.status === 'succeeded') counts.succeeded += 1
-    else if (['failed', 'canceled'].includes(task.status)) counts.failed += 1
-    else if (task.status === 'skipped') counts.skipped = (counts.skipped ?? 0) + 1
   }
-
-  const finished = ['succeeded', 'completed_with_errors', 'service_unavailable', 'failed', 'canceled'].includes(
-    seed.status,
-  )
-  const submittedAt = iso(seed.submittedMinAgo)
-  const run: Run = {
-    id: runId,
-    name: seed.name,
-    kind: 'run',
-    status: seed.status,
-    cleanup_policy: seed.cleanupPolicy ?? 'always',
-    submitted_by: seed.submittedBy,
-    submitted_at: submittedAt,
-    started_at: iso(Math.max(0, seed.submittedMinAgo - 0.2)),
-    finished_at: finished ? iso(Math.max(0, seed.submittedMinAgo - (seed.durationSec ?? 0) / 60)) : null,
-    endpoint: seed.endpoint ?? null,
-    deploy: seed.deploy ?? null,
+  attempts.push({
+    task_id: taskId,
+    attempt_no: attemptNo,
+    status: isTerminalTask(seed.status)
+      ? seed.status === 'succeeded'
+        ? 'succeeded'
+        : seed.status === 'canceled'
+          ? 'canceled'
+          : 'failed'
+      : 'running',
+    trigger: extraAttempts > 0 ? 'retry' : 'initial',
+    input_ref: `attempts/${attemptNo}/input/`,
+    exports_ref: `attempts/${attemptNo}/exports/`,
+    deploy_state_ref: seed.deploySpec ? `attempts/${attemptNo}/deploy-state.json` : null,
     error: seed.error ?? null,
-    task_counts: counts,
-    revision: 3,
-    tasks: summaries,
-  }
-  state.runs.push(run)
+    started_at: iso(Math.max(0, seed.submittedMinAgo - 0.2)),
+    finished_at: isTerminalTask(seed.status) ? iso(Math.max(0, seed.submittedMinAgo - (seed.durationSec ?? 0) / 60)) : null,
+  })
 
-  if (seed.deploy) {
-    state.deploys[runId] = {
-      run_id: runId,
-      deploy: seed.deploy,
-      manifest: seed.deployManifest ?? null,
-      pods: clone(seed.pods ?? []),
-      deploy_timeout_seconds: 259200,
-    }
-  } else {
-    state.deploys[runId] = { run_id: runId, deploy: null, manifest: null, pods: [] }
+  const deploy: DeploySnapshot = {
+    task_id: taskId,
+    deploy: seed.deploySpec
+      ? {
+          provider: 'genet',
+          spec: seed.deploySpec,
+          spec_digest: 'sha256:9f2a',
+          package_type: 'stack',
+          namespace: 'argus',
+          release_name: 'arg-mock0001',
+          deploy_state_ref: `attempts/1/deploy-state.json`,
+          phase: seed.deployState ?? 'ready',
+          genet_status: (seed.deployState ?? 'ready') === 'ready' ? 'deployed' : 'pending-install',
+          reason: seed.deployState === 'blocked' ? 'timeout' : null,
+          waited_seconds: seed.waitedSeconds ?? null,
+          pod_count: seed.pods?.length ?? null,
+          label_selector: 'app=genet-qwen3-32b',
+          queue:
+            seed.deployState === 'queued'
+              ? { phase: 'Pending', pending: 6, inqueue: 6, running: 0, position: null }
+              : null,
+          endpoint,
+          queued_at: iso(seed.submittedMinAgo),
+          ready_at: seed.deployState === 'ready' ? iso(Math.max(0, seed.submittedMinAgo - 4)) : null,
+          cancel_requested_at: null,
+          failure: null,
+          uninstall:
+            isTerminalTask(seed.status) && seed.deploySpec
+              ? { state: seed.status === 'canceled' ? 'verified' : 'verified', verified_at: iso(1), cleanup_errors: [] }
+              : null,
+        }
+      : null,
+    pods: clone(seed.pods ?? []),
+    deploy_timeout_seconds: 259200,
+  }
+  state.deploys[`${taskId}:${attemptNo}`] = deploy
+
+  const detail: TaskDetail = {
+    id: taskId,
+    name: seed.name,
+    status: seed.status,
+    submitted_by: seed.submittedBy,
+    submitted_at: iso(seed.submittedMinAgo),
+    started_at: iso(Math.max(0, seed.submittedMinAgo - 0.2)),
+    finished_at: isTerminalTask(seed.status)
+      ? iso(Math.max(0, seed.submittedMinAgo - (seed.durationSec ?? 0) / 60))
+      : null,
+    endpoint,
+    deploy: deploy.deploy,
+    env: seed.env ?? {},
+    secret_env: Object.entries(seed.secrets ?? {}).map(([name, secret_ref]) => ({ name, secret_ref })),
+    error: seed.error ?? null,
+    retry_of: null,
+    current_attempt: extraAttempts + 1,
+    runner_counts: countsOf(runners),
+    revision: 3,
+    attempts,
+    runners,
+  }
+  state.tasks[taskId] = detail
+  state.attemptRunners[`${taskId}:${attemptNo}`] = runners
+  for (const runner of runners) {
+    const seedForLog = seed.runners[runner.seq - 1]
+    if (seedForLog) state.logs[`${taskId}:${attemptNo}:${runner.seq}`] = runnerLog(seedForLog, runner.started_at)
+    if (seedForLog?.sticky) stickyRunners.add(`${taskId}:${attemptNo}:${runner.seq}`)
   }
 
   // 事件历史：给首屏一条可读的时间线
-  let seq = 0
+  let seqNo = 0
   const push = (
-    type: RunEventType,
+    type: EventType,
     from: string | null,
     to: string | null,
-    extra?: Partial<RunEvent>,
+    extra?: Partial<TaskEvent>,
   ) => {
-    seq += 1
-    const events = state.events[runId] ?? []
+    seqNo += 1
+    const events = state.events[taskId] ?? []
     events.push({
-      seq,
+      seq: seqNo,
       type,
-      run_id: runId,
-      task_id: extra?.task_id ?? null,
-      attempt_id: extra?.attempt_id ?? null,
-      at: iso(Math.max(0, seed.submittedMinAgo - seq * 0.3)),
+      task_id: taskId,
+      attempt_no: extra?.attempt_no ?? 1,
+      runner_seq: extra?.runner_seq ?? null,
+      at: iso(Math.max(0, seed.submittedMinAgo - seqNo * 0.3)),
       from,
       to,
       reason: extra?.reason ?? null,
       payload: extra?.payload ?? null,
     })
-    state.events[runId] = events
+    state.events[taskId] = events
   }
-  push('run.submitted', null, 'submitted', { payload: { task_count: summaries.length } })
-  if (seed.deploy) push('deploy.state_changed', null, seed.deploy.state)
-  for (const task of summaries) {
-    if (task.status === 'pending') continue
-    push('task.state_changed', 'pending', task.status, { task_id: task.id })
-    const terminal = ['succeeded', 'failed', 'canceled'].includes(task.status)
-    if (task.attempts > 0 && terminal) {
-      push('attempt.finished', 'running', task.status, { task_id: task.id, attempt_id: `${task.id}-a${task.attempts}` })
-    } else if (task.attempts > 0) {
-      push('attempt.started', null, 'running', { task_id: task.id, attempt_id: `${task.id}-a${task.attempts}` })
+  push('submitted', null, 'submitted', { payload: { runner_count: runners.length } })
+  for (const runner of runners) {
+    if (runner.status === 'pending' || runner.status === 'skipped') continue
+    if (runner.status === 'canceled') {
+      push('runner_finished', 'running', 'canceled', { runner_seq: runner.seq, payload: { status: 'canceled' } })
+      continue
+    }
+    if (runner.started_at) push('runner_started', null, 'running', { runner_seq: runner.seq })
+    if (runner.finished_at) {
+      push('runner_finished', 'running', runner.status, {
+        runner_seq: runner.seq,
+        payload: { status: runner.status, exit_code: runner.exit_code, error_code: runner.error_code },
+      })
+      if (runner.status === 'succeeded') push('exports_harvested', null, null, { runner_seq: runner.seq })
     }
   }
-  if (finished) push('run.finished', 'testing', seed.status)
-  state.seq[runId] = seq
+  if (isTerminalTask(seed.status)) {
+    push('clean_finished', 'running', 'succeeded')
+    push('task_finished', 'running', seed.status, { payload: { status: seed.status } })
+    push('report.written', null, null)
+  }
+  state.seq[taskId] = seqNo
 
-  return run
+  return detail
 }
 
 const PODS_SINGLE: DeployPod[] = [
-  { name: 'genet-qwen3-32b-0', role: 'main', node: 'npu-01', namespace: 'testplane', phase: 'Running', ready: true, restarts: 0 },
+  { name: 'genet-qwen3-32b-0', role: 'main', node: 'npu-01', restarts: 0, ready: true, started_at: iso(30), last_seen_at: iso(0) },
 ]
 
 const PODS_PD: DeployPod[] = [
-  { name: 'genet-qwen3-32b-router-0', role: 'router', node: 'npu-01', namespace: 'testplane', phase: 'Running', ready: true, restarts: 0 },
-  { name: 'genet-qwen3-32b-prefill-0', role: 'prefill', node: 'npu-01', namespace: 'testplane', phase: 'Running', ready: true, restarts: 0 },
-  { name: 'genet-qwen3-32b-decode-0', role: 'decode', node: 'npu-02', namespace: 'testplane', phase: 'Running', ready: true, restarts: 1 },
-  { name: 'genet-qwen3-32b-decode-1', role: 'decode', node: 'npu-03', namespace: 'testplane', phase: 'Running', ready: true, restarts: 0 },
+  { name: 'genet-qwen3-32b-router-0', role: 'router', node: 'npu-01', restarts: 0, ready: true, started_at: iso(30), last_seen_at: iso(0) },
+  { name: 'genet-qwen3-32b-prefill-0', role: 'prefill', node: 'npu-01', restarts: 0, ready: true, started_at: iso(30), last_seen_at: iso(0) },
+  { name: 'genet-qwen3-32b-decode-0', role: 'decode', node: 'npu-02', restarts: 1, ready: true, started_at: iso(30), last_seen_at: iso(0) },
+  { name: 'genet-qwen3-32b-decode-1', role: 'decode', node: 'npu-03', restarts: 0, ready: true, started_at: iso(30), last_seen_at: iso(0) },
 ]
 
 function seedAll(): void {
@@ -680,8 +731,8 @@ function seedAll(): void {
     {
       name: 'k8s-npu',
       cluster: 'prod-npu-01',
-      namespace: 'testplane',
-      mounts: [{ name: 'dataset', pvc: 'testplane-dataset', sub_path: null, kind: 'dataset' }],
+      namespace: 'argus',
+      mounts: [{ name: 'dataset', pvc: 'argus-dataset', sub_path: null, kind: 'dataset' }],
       scheduler: 'volcano',
       queue: 'npu-batch',
       image_pull_secrets: ['registry-cred'],
@@ -691,7 +742,7 @@ function seedAll(): void {
     {
       name: 'k8s-gpu',
       cluster: 'prod-gpu-02',
-      namespace: 'testplane',
+      namespace: 'argus',
       mounts: [],
       scheduler: 'default',
       queue: null,
@@ -705,7 +756,7 @@ function seedAll(): void {
     name: cluster.name,
     api_server: cluster.api_server,
     kubeconfig_key: `${cluster.name}.kubeconfig`,
-    namespace: 'testplane',
+    namespace: 'argus',
     description: cluster.description ?? null,
     last_check_at: cluster.last_check_at ?? null,
     last_check_result: cluster.last_check_result ?? null,
@@ -714,14 +765,14 @@ function seedAll(): void {
   state.secrets = [
     {
       name: 'endpoint/prod-qwen',
-      namespace: 'testplane',
+      namespace: 'argus',
       secret_name: 'endpoint-prod-qwen',
       key: 'api-key',
       description: '生产 Qwen 接入 token',
     },
     {
       name: 'registry/pull-secret',
-      namespace: 'testplane',
+      namespace: 'argus',
       secret_name: 'registry-cred',
       key: '.dockerconfigjson',
       description: '镜像拉取凭据',
@@ -734,10 +785,10 @@ function seedAll(): void {
       at: iso(180),
       actor: '林知微',
       role: 'operator',
-      action: 'run.submit',
-      object_type: 'run',
-      object_id: 'r-20261105-0006',
-      detail: { tasks: 4 },
+      action: 'task.submit',
+      object_type: 'task',
+      object_id: 't-20261105-0006',
+      detail: { runners: 6 },
     },
     {
       id: 'a-0002',
@@ -754,218 +805,225 @@ function seedAll(): void {
       at: iso(60),
       actor: '陈一鸣',
       role: 'operator',
-      action: 'run.cancel',
-      object_type: 'run',
-      object_id: 'r-20261105-0001',
+      action: 'task.cancel',
+      object_type: 'task',
+      object_id: 't-20261105-0001',
       detail: null,
     },
   ]
 
-  const model = 'Qwen3-32B'
-  const depReady: Deploy = {
-    provider: 'genet',
-    state: 'ready',
-    deployment_id: 'd-1001',
-    queue_position: null,
-    queue_reason: null,
-    queued_at: iso(120),
-    parameters_sha: 'sha256:9f2a',
-  }
+  const spec = 'model: Qwen3-32B\nreplicas: 1\nresources:\n  gpu: 8'
 
-  // 1) 成功：4 个 Task 全绿 + PD 分离 4 Pod
-  seedRun({
-    id: 'r-20261105-0006',
+  // 1) 成功：runner 管道全绿 + PD 分离 4 Pod
+  seedTask({
+    id: 't-20261105-0006',
     name: 'qwen3-32b-daily',
     status: 'succeeded',
     submittedBy: '林知微',
     submittedMinAgo: 96,
     durationSec: 1398,
+    deploySpec: spec,
+    deployState: 'ready',
+    pods: PODS_PD,
     env: { LOG_LEVEL: 'info', HTTP_TIMEOUT: '300' },
     secrets: { ENDPOINT_API_KEY: 'endpoint/prod-qwen' },
-    endpoint: endpointOf('http://10.0.0.10:8000/v1', model, 'genet', 'd-1001'),
-    deploy: depReady,
-    deployManifest: { model, replicas: 1, pd_disaggregation: true, npu_count: 4 },
-    pods: PODS_PD,
-    tasks: [
-      { seq: 0, name: 'precheck', tester: 'endpoint-probe', status: 'succeeded', startedMinAgo: 92, durationSec: 41 },
-      { seq: 1, name: 'accuracy-dataset-a', tester: 'aisbench-acc', status: 'succeeded', args: '--dataset=/data/gsm8k.jsonl --limit=200', startedMinAgo: 91, durationSec: 484 },
-      { seq: 2, name: 'accuracy-dataset-b', tester: 'aisbench-acc', status: 'succeeded', args: '--dataset=/data/mmlu.jsonl --limit=200', startedMinAgo: 91, durationSec: 411 },
-      { seq: 3, name: 'performance-sweep', tester: 'aisbench-perf', status: 'succeeded', args: '--input_lens=[512,1024,4096] --output_lens=[128,512] --concurrency=[1,4,8,16]', startedMinAgo: 50, durationSec: 432 },
+    runners: [
+      { name: 'service-deploy', runner: 'genet-internal', role: 'deploy', status: 'succeeded', startedMinAgo: 95, durationSec: 62 },
+      { name: 'precheck', runner: 'endpoint-probe', role: 'pre_check', status: 'succeeded', startedMinAgo: 92, durationSec: 41 },
+      { name: 'accuracy-dataset-a', runner: 'aisbench-acc', status: 'succeeded', input: '{"dataset":"/data/gsm8k.jsonl","limit":200}', startedMinAgo: 91, durationSec: 484 },
+      { name: 'accuracy-dataset-b', runner: 'aisbench-acc', status: 'succeeded', input: '{"dataset":"/data/mmlu.jsonl","limit":200}', startedMinAgo: 83, durationSec: 411 },
+      { name: 'performance-sweep', runner: 'aisbench-perf', status: 'succeeded', input: '{"input_len":512,"output_len":128,"concurrency":8}', startedMinAgo: 75, durationSec: 432 },
+      { name: 'service-clean', runner: 'genet-internal', role: 'clean', status: 'succeeded', startedMinAgo: 74, durationSec: 18 },
     ],
   })
 
-  // 2) Deploy 排队中（queued；D-46：没有位次，只有 queue_reason 原文）
-  seedRun({
-    id: 'r-20261105-0005',
+  // 2) Deploy 排队中（deploy-state.json phase=queued；D-46：只有计数没有位次，展示 waited_seconds）
+  seedTask({
+    id: 't-20261105-0005',
     name: 'qwen3-32b-canary',
-    status: 'deploying',
+    status: 'running',
     submittedBy: '陈一鸣',
     submittedMinAgo: 18,
+    deploySpec: spec,
+    deployState: 'queued',
+    waitedSeconds: 1080,
     env: { LOG_LEVEL: 'info' },
-    deploy: {
-      provider: 'genet',
-      state: 'queued',
-      deployment_id: null,
-      queue_position: null, // D-46：部署方没有位次，字段保留但恒 null
-      queue_reason: 'PodGroup phase=Pending, reason=Unschedulable(0/8 nodes available)',
-      queued_at: iso(18),
-      parameters_sha: 'sha256:1a2b',
-    },
-    deployManifest: { model, replicas: 1, canary: true },
     pods: [],
-    tasks: [
-      { seq: 0, name: 'precheck', tester: 'endpoint-probe', status: 'pending', waiting: 'precheck_gate' },
-      { seq: 1, name: 'smoke-acc', tester: 'aisbench-acc', status: 'pending', waiting: 'precheck_gate', args: '--dataset=/data/gsm8k.jsonl --limit=20' },
+    runners: [
+      { name: 'service-deploy', runner: 'genet-internal', role: 'deploy', status: 'running', startedMinAgo: 17 },
+      { name: 'precheck', runner: 'endpoint-probe', role: 'pre_check', status: 'pending' },
+      { name: 'smoke-acc', runner: 'aisbench-acc', status: 'pending', input: '{"dataset":"/data/gsm8k.jsonl","limit":20}' },
+      { name: 'service-clean', runner: 'genet-internal', role: 'clean', status: 'pending' },
     ],
   })
 
-  // 3) 执行中（service 模式，live：mock 会推事件把 Task 一个个跑完）
-  seedRun({
-    id: 'r-20261105-0004',
+  // 3) 执行中（外接模式，live：mock 会推事件把 runner 一个个跑完）
+  seedTask({
+    id: 't-20261105-0004',
     name: 'existing-service-smoke',
-    status: 'testing',
+    status: 'running',
     submittedBy: '林知微',
     submittedMinAgo: 4,
-    endpoint: endpointOf('http://10.0.0.30:8000/v1', model, 'service'),
-    tasks: [
-      { seq: 0, name: 'precheck', tester: 'endpoint-probe', status: 'succeeded', startedMinAgo: 4, durationSec: 5 },
-      { seq: 1, name: 'smoke-acc', tester: 'aisbench-acc', status: 'running', args: '--dataset=/data/gsm8k.jsonl --limit=200', startedMinAgo: 3 },
-      { seq: 2, name: 'perf-sweep', tester: 'aisbench-perf', status: 'queued', waiting: 'slot_waiting' },
+    service: { url: 'http://10.0.0.30:8000/v1', model_name: 'Qwen3-32B' },
+    runners: [
+      { name: 'precheck', runner: 'endpoint-probe', role: 'pre_check', status: 'succeeded', startedMinAgo: 4, durationSec: 5 },
+      { name: 'smoke-acc', runner: 'aisbench-acc', status: 'running', input: '{"dataset":"/data/gsm8k.jsonl","limit":200}', startedMinAgo: 3 },
+      { name: 'perf-sweep', runner: 'aisbench-perf', status: 'queued', waiting: 'slot_waiting' },
     ],
   })
 
-  // 3b) 运行中 + 长日志：Task 与 Deploy 日志都会在轮询时“长出新行”（日志面板回归用）
-  seedRun({
-    id: 'r-20261105-0007',
+  // 3b) 运行中 + 长日志：runner 与 Deploy 日志都会在轮询时"长出新行"（日志面板回归用）
+  seedTask({
+    id: 't-20261105-0007',
     name: 'live-log-stream',
-    status: 'testing',
+    status: 'running',
     submittedBy: '林知微',
     submittedMinAgo: 1,
-    endpoint: endpointOf('http://10.0.0.40:8000/v1', model, 'genet', 'd-1004'),
-    deploy: { ...depReady, deployment_id: 'd-1004', queued_at: iso(90) },
-    deployManifest: { model, replicas: 1 },
+    deploySpec: spec,
+    deployState: 'ready',
     pods: PODS_SINGLE,
-    tasks: [
-      { seq: 0, name: 'precheck', tester: 'endpoint-probe', status: 'succeeded', startedMinAgo: 2, durationSec: 20 },
+    runners: [
+      { name: 'service-deploy', runner: 'genet-internal', role: 'deploy', status: 'succeeded', startedMinAgo: 2, durationSec: 40 },
       {
-        seq: 1,
         name: 'stream-watch',
-        tester: 'aisbench-acc',
+        runner: 'aisbench-acc',
         status: 'running',
         startedMinAgo: 1,
-        // 状态机不推进这个 Task：Run 保持 testing，日志轮询能一直演示下去
+        // 状态机不推进这个 runner：Task 保持 running，日志轮询能一直演示下去
         sticky: true,
-        logSeed: [
-          ...Array.from(
-            { length: 40 },
-            (_, i) =>
-              `[00:00:${String(i % 60).padStart(2, '0')}] [stream] 第 ${i + 1} 行：input_len=${256 + i * 32} tokens/s=${1200 + i * 7}`,
-          ),
-          // 平台标记行：重启前的 previous 段与采集缺口（UI 要渲染成 warn / danger 分隔条）
-          '--- [container restarted #3 at 2026-11-05T06:44:11Z, previous exit: OOMKilled] ---',
-          '--- [log gap: 2026-11-05T06:44:12Z – 2026-11-05T06:46:30Z, collector restarted] ---',
-        ],
       },
+      { name: 'service-clean', runner: 'genet-internal', role: 'clean', status: 'pending' },
     ],
   })
+  // sticky runner 的日志种子：含平台标记行（UI 渲染成分隔条）
+  state.logs['t-20261105-0007:1:2'] = [
+    ...Array.from(
+      { length: 40 },
+      (_, i) =>
+        `[00:00:${String(i % 60).padStart(2, '0')}] [stream] 第 ${i + 1} 行：input_len=${256 + i * 32} tokens/s=${1200 + i * 7}`,
+    ),
+    '--- [container restarted #3 at 2026-11-05T06:44:11Z, previous exit: OOMKilled] ---',
+    '--- [log gap: 2026-11-05T06:44:12Z – 2026-11-05T06:46:30Z, collector restarted] ---',
+  ].join('\n')
 
-  // 4) 部分失败（1 个 FAILED）
-  seedRun({
-    id: 'r-20261105-0003',
+  // 4) failed（v2：completed_with_errors 已并入 failed，D-73）
+  seedTask({
+    id: 't-20261105-0003',
     name: 'qwen3-32b-daily',
-    status: 'completed_with_errors',
+    status: 'failed',
     submittedBy: '陈一鸣',
     submittedMinAgo: 240,
     durationSec: 1082,
-    endpoint: endpointOf('http://10.0.0.10:8000/v1', model, 'genet', 'd-1002'),
-    deploy: { ...depReady, deployment_id: 'd-1002', queued_at: iso(260) },
-    deployManifest: { model, replicas: 1 },
+    deploySpec: spec,
+    deployState: 'ready',
     pods: PODS_SINGLE,
-    tasks: [
-      { seq: 0, name: 'precheck', tester: 'endpoint-probe', status: 'succeeded', startedMinAgo: 238, durationSec: 12 },
+    runners: [
+      { name: 'service-deploy', runner: 'genet-internal', role: 'deploy', status: 'succeeded', startedMinAgo: 239, durationSec: 58 },
+      { name: 'precheck', runner: 'endpoint-probe', role: 'pre_check', status: 'succeeded', startedMinAgo: 238, durationSec: 12 },
       {
-        seq: 1,
         name: 'accuracy-dataset-a',
-        tester: 'aisbench-acc',
+        runner: 'aisbench-acc',
         status: 'failed',
-        args: '--dataset=/data/gsm8k.jsonl --limit=200',
+        input: '{"dataset":"/data/gsm8k.jsonl","limit":200}',
         startedMinAgo: 236,
         durationSec: 460,
-        error: { code: 'TESTER_NONZERO_EXIT', message: 'Tester 退出码 1（连接被对端重置）', retryable: true, detail: { exit_code: 1 } },
+        error: { code: 'RUNNER_NONZERO_EXIT', message: 'Runner 退出码 1（连接被对端重置）', retryable: true, detail: { exit_code: 1 } },
       },
-      { seq: 2, name: 'accuracy-dataset-b', tester: 'aisbench-acc', status: 'succeeded', args: '--dataset=/data/mmlu.jsonl --limit=200', startedMinAgo: 236, durationSec: 402 },
-      { seq: 3, name: 'performance-sweep', tester: 'aisbench-perf', status: 'skipped', statusReason: 'upstream_abort' },
+      { name: 'accuracy-dataset-b', runner: 'aisbench-acc', status: 'succeeded', input: '{"dataset":"/data/mmlu.jsonl","limit":200}', startedMinAgo: 228, durationSec: 402 },
+      { name: 'performance-sweep', runner: 'aisbench-perf', status: 'skipped', statusReason: 'upstream_abort' },
+      { name: 'service-clean', runner: 'genet-internal', role: 'clean', status: 'succeeded', startedMinAgo: 221, durationSec: 15 },
     ],
   })
 
-  // 5) 服务不可用（Pre-Check 失败）
-  seedRun({
-    id: 'r-20261105-0002',
+  // 5) 服务不可用（pre_check 失败）
+  seedTask({
+    id: 't-20261105-0002',
     name: 'qwen3-32b-canary',
     status: 'service_unavailable',
     submittedBy: '林知微',
     submittedMinAgo: 300,
     durationSec: 18060,
-    endpoint: endpointOf('http://10.0.0.31:8000/v1', model, 'genet', 'd-1003'),
-    deploy: { ...depReady, deployment_id: 'd-1003', queued_at: iso(330) },
-    deployManifest: { model, replicas: 1, canary: true },
+    deploySpec: spec,
+    deployState: 'ready',
     pods: PODS_SINGLE,
     error: {
       code: 'PRECHECK_FAILED',
-      message: 'Pre-Check 在 18000 秒窗口内未通过：服务持续返回 503',
+      message: 'pre_check 在 18000 秒窗口内未通过：服务持续返回 503',
       retryable: true,
       detail: { http_status: 503 },
     },
-    tasks: [
+    runners: [
+      { name: 'service-deploy', runner: 'genet-internal', role: 'deploy', status: 'succeeded', startedMinAgo: 299, durationSec: 55 },
       {
-        seq: 0,
         name: 'precheck',
-        tester: 'endpoint-probe',
+        runner: 'endpoint-probe',
+        role: 'pre_check',
         status: 'failed',
         startedMinAgo: 305,
         durationSec: 18000,
         error: { code: 'PRECHECK_FAILED', message: '等待窗口内服务始终未就绪', retryable: true, detail: { http_status: 503 } },
       },
-      { seq: 1, name: 'accuracy-dataset-a', tester: 'aisbench-acc', status: 'skipped', statusReason: 'upstream_abort' },
-      { seq: 2, name: 'performance-sweep', tester: 'aisbench-perf', status: 'skipped', statusReason: 'upstream_abort' },
+      { name: 'accuracy-dataset-a', runner: 'aisbench-acc', status: 'skipped', statusReason: 'upstream_abort' },
+      { name: 'performance-sweep', runner: 'aisbench-perf', status: 'skipped', statusReason: 'upstream_abort' },
+      { name: 'service-clean', runner: 'genet-internal', role: 'clean', status: 'succeeded', startedMinAgo: 5, durationSec: 14 },
     ],
   })
 
-  // 6) 已取消
-  seedRun({
-    id: 'r-20261105-0001',
+  // 6) 已取消（取消后 clean 收口，clean 完才落 canceled）
+  seedTask({
+    id: 't-20261105-0001',
     name: 'qwen3-32b-acc-200',
     status: 'canceled',
     submittedBy: '陈一鸣',
     submittedMinAgo: 420,
     durationSec: 753,
-    endpoint: endpointOf('http://10.0.0.11:8000/v1', model, 'service'),
-    tasks: [
-      { seq: 0, name: 'precheck', tester: 'endpoint-probe', status: 'succeeded', startedMinAgo: 419, durationSec: 4 },
-      { seq: 1, name: 'accuracy-dataset-a', tester: 'aisbench-acc', status: 'canceled', args: '--dataset=/data/gsm8k.jsonl --limit=200', startedMinAgo: 418, durationSec: 740 },
-      { seq: 2, name: 'performance-sweep', tester: 'aisbench-perf', status: 'skipped', statusReason: 'canceled' },
+    service: { url: 'http://10.0.0.11:8000/v1', model_name: 'Qwen3-32B' },
+    runners: [
+      { name: 'precheck', runner: 'endpoint-probe', role: 'pre_check', status: 'succeeded', startedMinAgo: 419, durationSec: 4 },
+      { name: 'accuracy-dataset-a', runner: 'aisbench-acc', status: 'canceled', input: '{"dataset":"/data/gsm8k.jsonl","limit":200}', startedMinAgo: 418, durationSec: 740 },
+      { name: 'performance-sweep', runner: 'aisbench-perf', status: 'skipped', statusReason: 'canceled' },
     ],
   })
 
-  // 7~10) 更早的成功记录（凑分页）
+  // 7) 重试产生的第二个 attempt（历史 attempt 略化为 succeeded）
+  seedTask({
+    id: 't-20261105-0008',
+    name: 'qwen3-32b-nightly',
+    status: 'running',
+    submittedBy: '林知微',
+    submittedMinAgo: 12,
+    deploySpec: spec,
+    deployState: 'deploying',
+    waitedSeconds: 240,
+    pods: PODS_SINGLE,
+    extraAttempts: 1,
+    runners: [
+      { name: 'service-deploy', runner: 'genet-internal', role: 'deploy', status: 'running', startedMinAgo: 11 },
+      { name: 'precheck', runner: 'endpoint-probe', role: 'pre_check', status: 'pending' },
+      { name: 'accuracy-dataset-a', runner: 'aisbench-acc', status: 'pending', input: '{"dataset":"/data/gsm8k.jsonl","limit":100}' },
+      { name: 'service-clean', runner: 'genet-internal', role: 'clean', status: 'pending' },
+    ],
+  })
+
+  // 8~11) 更早的成功记录（凑分页）
   const older: Array<[string, string, string, number]> = [
-    ['r-20261104-0014', 'qwen3-8b-nightly', '林知微', 1400],
-    ['r-20261104-0013', 'qwen3-32b-daily', '陈一鸣', 1500],
-    ['r-20261104-0012', 'evalscope-mmlu', '林知微', 1620],
-    ['r-20261104-0011', 'existing-service-smoke', 'dev', 1740],
+    ['t-20261104-0014', 'qwen3-8b-nightly', '林知微', 1400],
+    ['t-20261104-0013', 'qwen3-32b-daily', '陈一鸣', 1500],
+    ['t-20261104-0012', 'evalscope-mmlu', '林知微', 1620],
+    ['t-20261104-0011', 'existing-service-smoke', 'dev', 1740],
   ]
   for (const [id, name, by, minAgo] of older) {
-    seedRun({
+    seedTask({
       id,
       name,
       status: 'succeeded',
       submittedBy: by,
       submittedMinAgo: minAgo,
       durationSec: 900 + ((minAgo * 7) % 600),
-      endpoint: endpointOf('http://10.0.0.20:8000/v1', model, 'service'),
-      tasks: [
-        { seq: 0, name: 'precheck', tester: 'endpoint-probe', status: 'succeeded', startedMinAgo: minAgo - 1, durationSec: 3 },
-        { seq: 1, name: 'accuracy-dataset-a', tester: 'aisbench-acc', status: 'succeeded', args: '--dataset=/data/gsm8k.jsonl --limit=200', startedMinAgo: minAgo - 2, durationSec: 400 },
+      service: { url: 'http://10.0.0.20:8000/v1', model_name: 'Qwen3-32B' },
+      runners: [
+        { name: 'precheck', runner: 'endpoint-probe', role: 'pre_check', status: 'succeeded', startedMinAgo: minAgo - 1, durationSec: 3 },
+        { name: 'accuracy-dataset-a', runner: 'aisbench-acc', status: 'succeeded', input: '{"dataset":"/data/gsm8k.jsonl","limit":200}', startedMinAgo: minAgo - 2, durationSec: 400 },
       ],
     })
   }
@@ -975,37 +1033,37 @@ seedAll()
 
 /* ================================================================ 事件推送 */
 
-const listeners = new Map<string, Set<(e: RunEvent) => void>>()
+const listeners = new Map<string, Set<(e: TaskEvent) => void>>()
 
-function emit(runId: string, event: RunEvent): void {
-  for (const listener of listeners.get(runId) ?? []) listener(event)
+function emit(taskId: string, event: TaskEvent): void {
+  for (const listener of listeners.get(taskId) ?? []) listener(event)
 }
 
 function pushEvent(
-  runId: string,
-  type: RunEventType,
+  taskId: string,
+  type: EventType,
   from: string | null,
   to: string | null,
-  extra?: Partial<RunEvent>,
-): RunEvent {
-  const seq = (state.seq[runId] ?? 0) + 1
-  state.seq[runId] = seq
-  const event: RunEvent = {
+  extra?: Partial<TaskEvent>,
+): TaskEvent {
+  const seq = (state.seq[taskId] ?? 0) + 1
+  state.seq[taskId] = seq
+  const event: TaskEvent = {
     seq,
     type,
-    run_id: runId,
-    task_id: extra?.task_id ?? null,
-    attempt_id: extra?.attempt_id ?? null,
+    task_id: taskId,
+    attempt_no: extra?.attempt_no ?? null,
+    runner_seq: extra?.runner_seq ?? null,
     at: nowIso(),
     from,
     to,
     reason: extra?.reason ?? null,
     payload: extra?.payload ?? null,
   }
-  const events = state.events[runId] ?? []
+  const events = state.events[taskId] ?? []
   events.push(event)
-  state.events[runId] = events
-  emit(runId, event)
+  state.events[taskId] = events
+  emit(taskId, event)
   return event
 }
 
@@ -1033,11 +1091,11 @@ function auditLog(
 }
 
 /** 造一段 Deploy 日志（多 Pod、含重启前后的断点素材）。 */
-function deployLogLines(podName: string, runName: string): string[] {
+function deployLogSeed(podName: string, taskName: string): string[] {
   const lines: string[] = []
   const t = (m: number) => new Date(Date.now() - (30 - m) * 60_000).toLocaleTimeString('zh-CN', { hour12: false })
-  lines.push(`${t(0)} [genet] deploy accepted for ${runName}, creating pod ${podName}`)
-  lines.push(`${t(1)} [kubelet] Successfully pulled image "registry.dev.huawei.com/testplane/serving:1.0.0"`)
+  lines.push(`${t(0)} [genet] deploy accepted for ${taskName}, creating pod ${podName}`)
+  lines.push(`${t(1)} [kubelet] Successfully pulled image "registry.dev.huawei.com/argus/serving:1.0.0"`)
   lines.push(`${t(2)} [main] container started, loading model weights from /models/Qwen3-32B`)
   lines.push(`${t(3)} [main] weights loaded in 42.3s, initializing KV cache (blocks=2048)`)
   lines.push(`${t(4)} [main] WARNING: NPU memory usage 82% — consider reducing max_model_len`)
@@ -1052,250 +1110,194 @@ function deployLogLines(podName: string, runName: string): string[] {
   return lines
 }
 
-function isTerminal(status: RunStatus): boolean {
-  return ['succeeded', 'completed_with_errors', 'service_unavailable', 'failed', 'canceled'].includes(status)
+const RUNNER_FLOW: RunnerStatus[] = ['pending', 'queued', 'preparing', 'running', 'succeeded']
+const DEPLOY_PHASE_FLOW: Array<DeploySnapshot['deploy'] extends null ? never : NonNullable<DeploySnapshot['deploy']>['phase']> = [
+  'queued',
+  'accepted',
+  'deploying',
+  'ready',
+]
+type DeployPhase = (typeof DEPLOY_PHASE_FLOW)[number]
+
+/** 当前 attempt 里第一个未终态的 runner（严格串行管道）。 */
+function currentRunner(taskId: string, attemptNo: number): RunnerExecution | null {
+  const runners = state.attemptRunners[`${taskId}:${attemptNo}`] ?? []
+  return (
+    runners.find((r) => !['succeeded', 'failed', 'skipped', 'canceled'].includes(r.status)) ?? null
+  )
 }
 
-/**
- * mock 的 `result.json`：形状照 `Result` schema（ARCHITECTURE 附录 A）。
- *
- * 只有「跑成功、且真的产出了 result」的 Attempt 才有内容 —— 探测类 Tester 的 `metrics` 就是空数组，
- * 报告页要能据此显示「该 Tester 未上报指标」，而不是被塞一组假数值。
- */
-function mockResultFor(task: TaskDetail, attempt: Attempt): Result {
-  const started = attempt.started_at ? new Date(attempt.started_at).getTime() : null
-  const finished = attempt.finished_at ? new Date(attempt.finished_at).getTime() : null
-  const base = {
-    schema_version: '1.0',
-    run_id: task.run_id,
-    task_id: task.id,
-    attempt_id: attempt.id,
-    tester: { name: task.tester_name, version: task.tester_version, image_ref: task.image_ref },
-    status: attempt.status === 'failed' ? ('failed' as const) : ('succeeded' as const),
-    started_at: attempt.started_at ?? undefined,
-    finished_at: attempt.finished_at ?? undefined,
-    duration_ms: started != null && finished != null ? finished - started : undefined,
-    artifacts: [{ name: 'raw_results', path: 'raw/results.json', size_bytes: 2_048 }],
-  }
-
-  if (task.tester_name === 'endpoint-probe') {
-    return { ...base, metrics: [], notes: '探活只回答服务能否出 token，不产出指标。' }
-  }
-
-  if (task.tester_name === 'aisbench-perf') {
-    const metrics: ResultMetric[] = []
-    for (const [inputLen, concurrency] of [
-      [512, 1],
-      [4096, 8],
-    ] as const) {
-      const labels = { input_len: String(inputLen), output_len: '128', concurrency: String(concurrency) }
-      metrics.push(
-        { name: 'ttft', value: inputLen === 512 ? 82.4 : 143.7, unit: 'ms', statistic: 'p95', sample_size: 64, labels },
-        { name: 'tpot', value: inputLen === 512 ? 18.6 : 21.4, unit: 'ms', statistic: 'mean', sample_size: 64, labels },
-        {
-          name: 'throughput',
-          value: inputLen === 512 ? 1482.6 : 1290.2,
-          unit: 'tokens_per_s',
-          statistic: 'mean',
-          sample_size: 64,
-          labels,
-        },
-      )
-    }
-    return { ...base, metrics, notes: '压测组合：input_len × concurrency；同一组参数靠 labels 区分。' }
-  }
-
-  const metrics: ResultMetric[] = [
-    { name: 'accuracy', value: 0.8421, unit: 'score', statistic: 'mean', sample_size: 200, labels: { dataset: 'gsm8k', limit: '200' } },
-    { name: 'accuracy', value: 0.7355, unit: 'score', statistic: 'mean', sample_size: 200, labels: { dataset: 'mmlu', limit: '200' } },
-    { name: 'latency', value: 412.8, unit: 'ms', statistic: 'p95', sample_size: 200, labels: { dataset: 'gsm8k', limit: '200' } },
-    { name: 'sample_count', value: 200, unit: 'count', statistic: 'count', sample_size: 200, labels: { dataset: 'gsm8k', limit: '200' } },
-  ]
-  return { ...base, metrics, notes: '逐数据集 accuracy；指标名不编码维度，维度在 labels 里。' }
-}
-
-const TASK_FLOW: TaskStatus[] = ['pending', 'queued', 'preparing', 'running', 'succeeded']
-const DEPLOY_FLOW: Deploy['state'][] = ['queued', 'accepted', 'deploying', 'ready']
-
-function recomputeCounts(run: Run): void {
-  const counts = emptyCounts()
-  for (const summary of run.tasks ?? []) {
-    counts.total += 1
-    if (['pending', 'queued'].includes(summary.status)) counts.pending = (counts.pending ?? 0) + 1
-    else if (['preparing', 'running'].includes(summary.status)) counts.running = (counts.running ?? 0) + 1
-    else if (summary.status === 'succeeded') counts.succeeded += 1
-    else if (['failed', 'canceled'].includes(summary.status)) counts.failed += 1
-    else if (summary.status === 'skipped') counts.skipped = (counts.skipped ?? 0) + 1
-  }
-  run.task_counts = counts
-}
-
-function syncSummary(task: TaskDetail): void {
-  const run = state.runs.find((r) => r.id === task.run_id)
-  const summary = run?.tasks?.find((t) => t.id === task.id)
-  if (summary) {
-    summary.status = task.status
-    summary.attempts = task.current_attempt
-    summary.waiting_reason = task.waiting_reason
-    summary.error = task.error
-  }
-  if (run) recomputeCounts(run)
-}
-
-/** 推进一档 mock 状态（每 3.5s 一次，直到 Run 终态）。 */
-function step(runId: string): void {
-  const run = state.runs.find((r) => r.id === runId)
-  if (!run || isTerminal(run.status)) {
-    stopLive(runId)
+/** 推进一档 mock 状态（每 3.5s 一次，直到 Task 终态）。 */
+function step(taskId: string): void {
+  const task = state.tasks[taskId]
+  if (!task || isTerminalTask(task.status)) {
+    stopLive(taskId)
     return
   }
-  const snapshot = state.deploys[runId]
+  const attemptNo = task.current_attempt
+  const runners = state.attemptRunners[`${taskId}:${attemptNo}`] ?? []
 
-  // “长时间运行”的演示 Task：状态机不推进它；Run 因此保持非终态，日志轮询才有增量可拉
-  const runTasks = Object.values(state.tasks).filter((task) => task.run_id === runId)
-  const hasStickyRunning = runTasks.some(
-    (task) =>
-      stickyTasks.has(task.id) && !['succeeded', 'failed', 'skipped', 'canceled'].includes(task.status),
+  // "长时间运行"的演示 runner：状态机不推进它；Task 因此保持非终态，日志轮询才有增量可拉
+  const hasSticky = runners.some(
+    (r) => stickyRunners.has(`${taskId}:${attemptNo}:${r.seq}`) && r.status === 'running',
   )
-  if (hasStickyRunning) return
+  if (hasSticky) return
 
-  // Deploy 阶段优先推进
-  if (run.status === 'deploying' && run.deploy && snapshot) {
-    const index = DEPLOY_FLOW.indexOf(run.deploy.state)
-    if (index >= 0 && index < DEPLOY_FLOW.length - 1) {
-      const from = run.deploy.state
-      const to = DEPLOY_FLOW[index + 1] ?? 'ready'
-      run.deploy.state = to
-      if (to === 'ready') {
-        run.status = 'testing'
-        run.endpoint = endpointOf('http://10.0.1.20:8000/v1', 'Qwen3-32B', 'genet', run.deploy.deployment_id ?? undefined)
-        snapshot.pods = PODS_SINGLE.map((pod) => ({ ...pod, name: `genet-${run.name}-0` }))
+  // 取消收口（v2：先终止当前 runner → pending/queued 标 skipped → clean finally → canceled）
+  if (task.status === 'cancelling') {
+    for (const runner of runners) {
+      if (['pending', 'queued'].includes(runner.status)) {
+        runner.status = 'skipped'
+        runner.status_reason = 'canceled'
+      } else if (runner.status === 'running' || runner.status === 'preparing') {
+        runner.status = 'canceled'
+        runner.finished_at = nowIso()
+        pushEvent(taskId, 'runner_finished', 'running', 'canceled', {
+          attempt_no: attemptNo,
+          runner_seq: runner.seq,
+          payload: { status: 'canceled' },
+        })
       }
-      pushEvent(runId, 'deploy.state_changed', from, to)
+    }
+    if (task.deploy) {
+      task.deploy.uninstall = { state: 'verified', verified_at: nowIso(), cleanup_errors: [] }
+      pushEvent(taskId, 'clean_finished', null, 'verified', { attempt_no: attemptNo })
+    }
+    task.status = 'canceled'
+    task.finished_at = nowIso()
+    task.runner_counts = countsOf(runners)
+    const attempt = task.attempts.find((a) => a.attempt_no === attemptNo)
+    if (attempt) {
+      attempt.status = 'canceled'
+      attempt.finished_at = nowIso()
+    }
+    pushEvent(taskId, 'task_finished', 'cancelling', 'canceled', { attempt_no: attemptNo, payload: { status: 'canceled' } })
+    stopLive(taskId)
+    return
+  }
+
+  const runner = currentRunner(taskId, attemptNo)
+  if (!runner) {
+    // 所有 runner 收口 → 落终态（没有 failed 就 succeeded）
+    const failed = runners.some((r) => r.status === 'failed')
+    task.status = failed ? 'failed' : 'succeeded'
+    task.finished_at = nowIso()
+    task.runner_counts = countsOf(runners)
+    const attempt = task.attempts.find((a) => a.attempt_no === attemptNo)
+    if (attempt) {
+      attempt.status = failed ? 'failed' : 'succeeded'
+      attempt.finished_at = nowIso()
+    }
+    pushEvent(taskId, 'task_finished', 'running', task.status, { attempt_no: attemptNo, payload: { status: task.status } })
+    pushEvent(taskId, 'report.written', null, null, { attempt_no: attemptNo })
+    stopLive(taskId)
+    return
+  }
+
+  // deploy runner 运行中：推进 deploy-state 的 phase（queued → accepted → deploying → ready）
+  if (runner.role === 'deploy' && runner.status === 'running' && task.deploy) {
+    const phase = task.deploy.phase ?? 'queued'
+    const index = DEPLOY_PHASE_FLOW.indexOf(phase as DeployPhase)
+    if (index >= 0 && index < DEPLOY_PHASE_FLOW.length - 1) {
+      const next = DEPLOY_PHASE_FLOW[index + 1] ?? 'ready'
+      task.deploy.phase = next
+      task.deploy.genet_status = next === 'ready' ? 'deployed' : 'pending-install'
+      task.deploy.waited_seconds = (task.deploy.waited_seconds ?? 0) + 90
+      if (next === 'ready' && task.deploy.endpoint == null) {
+        task.deploy.endpoint = endpointOf('http://10.0.1.20:8000/v1', 'Qwen3-32B', 'genet', task.deploy.release_name ?? undefined)
+        task.endpoint = task.deploy.endpoint
+        const snapshot = state.deploys[`${taskId}:${attemptNo}`]
+        if (snapshot && snapshot.pods.length === 0) snapshot.pods = PODS_SINGLE.map((pod) => ({ ...pod, name: `genet-${task.name}-0` }))
+        pushEvent(taskId, 'exports_harvested', null, null, { attempt_no: attemptNo, runner_seq: runner.seq })
+      }
       return
     }
-    run.status = 'testing'
-    pushEvent(runId, 'run.state_changed', 'deploying', 'testing')
-    return
   }
 
-  // Task 阶段：每次推进第一个未终态的 Task
-  const task = Object.values(state.tasks)
-    .filter((t) => t.run_id === runId)
-    .sort((a, b) => a.seq - b.seq)
-    .find((t) => !['succeeded', 'failed', 'skipped', 'canceled'].includes(t.status))
-
-  if (task) {
-    const from = task.status
-    const index = TASK_FLOW.indexOf(task.status)
-    const to = TASK_FLOW[Math.min(index + 1, TASK_FLOW.length - 1)] ?? 'running'
-    task.status = to
-    if (to === 'queued') task.waiting_reason = null
-    if (to === 'running') {
-      task.current_attempt += 1
-      const attempt: Attempt = {
-        id: `${task.id}-a${task.current_attempt}`,
-        task_id: task.id,
-        idx: task.current_attempt,
-        status: 'running',
-        phase: 'Running',
-        exit_code: null,
-        image_digest: 'sha256:mock',
-        started_at: nowIso(),
-        finished_at: null,
-        log_ref: `tasks/${task.id}/attempts/${task.current_attempt}/stdout.log`,
-        error: null,
-        executor_ref: { cluster: 'prod-npu-01', namespace: 'testplane', job: `tp-${task.id}` },
-      }
-      task.attempts = [...task.attempts, attempt]
-      pushEvent(runId, 'attempt.started', null, 'running', { task_id: task.id, attempt_id: attempt.id })
+  const index = RUNNER_FLOW.indexOf(runner.status as RunnerStatus)
+  const to = RUNNER_FLOW[Math.min(index + 1, RUNNER_FLOW.length - 1)] ?? 'running'
+  runner.status = to
+  if (to === 'queued') runner.waiting_reason = null
+  if (to === 'running') {
+    runner.started_at = nowIso()
+    if (task.status === 'queued' || task.status === 'submitted') {
+      task.status = 'running'
+      task.started_at = nowIso()
+      pushEvent(taskId, 'state_changed', 'queued', 'running', { attempt_no: attemptNo })
     }
-    if (to === 'succeeded') {
-      const attempt = task.attempts[task.attempts.length - 1]
-      if (attempt) {
-        attempt.status = 'succeeded'
-        // phase 跟 status 一起收口，别让「成功」的 Attempt 还挂着 Running
-        attempt.phase = 'Succeeded'
-        attempt.exit_code = 0
-        attempt.finished_at = nowIso()
-      }
-      state.logs[`${task.id}#${task.current_attempt}`] = `[10:14:26] mock 运行结束\n结论：status=succeeded`
-      pushEvent(runId, 'attempt.finished', 'running', 'succeeded', {
-        task_id: task.id,
-        attempt_id: attempt?.id ?? null,
-      })
-    }
-    syncSummary(task)
-    pushEvent(runId, 'task.state_changed', from, to, { task_id: task.id })
+    pushEvent(taskId, 'runner_started', null, 'running', { attempt_no: attemptNo, runner_seq: runner.seq })
     return
   }
-
-  // 所有 Task 收口 → 清理 → 终态
-  if (run.status !== 'cleanup') {
-    run.status = 'cleanup'
-    pushEvent(runId, 'cleanup.started', 'testing', 'cleanup')
+  if (to === 'succeeded') {
+    runner.finished_at = nowIso()
+    runner.exit_code = 0
+    state.logs[`${taskId}:${attemptNo}:${runner.seq}`] =
+      `${state.logs[`${taskId}:${attemptNo}:${runner.seq}`] ?? ''}\n结论：status=succeeded`
+    pushEvent(taskId, 'runner_finished', 'running', 'succeeded', {
+      attempt_no: attemptNo,
+      runner_seq: runner.seq,
+      payload: { status: 'succeeded', exit_code: 0 },
+    })
+    pushEvent(taskId, 'exports_harvested', null, null, { attempt_no: attemptNo, runner_seq: runner.seq })
+    if (runner.role === 'clean') pushEvent(taskId, 'clean_finished', 'running', 'succeeded', { attempt_no: attemptNo })
+    task.runner_counts = countsOf(runners)
     return
   }
-  const failed = (run.tasks ?? []).some((t) => t.status === 'failed')
-  run.status = failed ? 'completed_with_errors' : 'succeeded'
-  run.finished_at = nowIso()
-  recomputeCounts(run)
-  pushEvent(runId, 'run.finished', 'cleanup', run.status)
-  stopLive(runId)
+  task.runner_counts = countsOf(runners)
 }
 
-function startLive(runId: string): void {
-  if (state.timers.has(runId)) return
-  const run = state.runs.find((r) => r.id === runId)
-  if (!run || isTerminal(run.status)) return
+function startLive(taskId: string): void {
+  if (state.timers.has(taskId)) return
+  const task = state.tasks[taskId]
+  if (!task || isTerminalTask(task.status)) return
   state.timers.set(
-    runId,
-    setInterval(() => step(runId), 3500),
+    taskId,
+    setInterval(() => step(taskId), 3500),
   )
 }
 
-function stopLive(runId: string): void {
-  const timer = state.timers.get(runId)
+function stopLive(taskId: string): void {
+  const timer = state.timers.get(taskId)
   if (timer !== undefined) {
     clearInterval(timer)
-    state.timers.delete(runId)
+    state.timers.delete(taskId)
   }
 }
 
 /** mock 版事件流：先回放历史，再按状态机持续推送。返回取消函数。 */
 export function subscribeMockEvents(
-  runId: string,
+  taskId: string,
   opts: {
     sinceSeq?: number
-    onEvent: (event: RunEvent) => void
+    onEvent: (event: TaskEvent) => void
     onOpen?: () => void
     onError?: (error: unknown) => void
   },
 ): () => void {
-  const run = state.runs.find((r) => r.id === runId)
-  if (!run) {
-    opts.onError?.(new ApiClientError(404, { code: 'NOT_FOUND', message: 'Run 不存在', retryable: false }))
+  const task = state.tasks[taskId]
+  if (!task) {
+    opts.onError?.(new ApiClientError(404, { code: 'NOT_FOUND', message: 'Task 不存在', retryable: false }))
     return () => {}
   }
 
-  const bucket = listeners.get(runId) ?? new Set()
-  listeners.set(runId, bucket)
+  const bucket = listeners.get(taskId) ?? new Set()
+  listeners.set(taskId, bucket)
   bucket.add(opts.onEvent)
 
   const since = opts.sinceSeq ?? 0
   setTimeout(() => {
     opts.onOpen?.()
-    for (const event of state.events[runId] ?? []) {
+    for (const event of state.events[taskId] ?? []) {
       if (event.seq > since) opts.onEvent(event)
     }
-    startLive(runId)
+    startLive(taskId)
   }, 60)
 
   return () => {
     bucket.delete(opts.onEvent)
     if (bucket.size === 0) {
-      listeners.delete(runId)
-      stopLive(runId)
+      listeners.delete(taskId)
+      stopLive(taskId)
     }
   }
 }
@@ -1314,32 +1316,31 @@ function paginate<T>(items: T[], cursor: string | null | undefined, limit: numbe
  * 列表与 facets 共用的过滤：多值用逗号，空值即不过滤。
  * 排序固定为提交时间倒序（07 §6「排序固定」）。
  */
-function filterRuns(query: RunListQuery): Run[] {
+function filterTasks(query: TaskListQuery): TaskDetail[] {
   const statuses = query.status?.split(',').filter(Boolean) ?? []
   const submitters = query.submitter?.split(',').filter(Boolean) ?? []
-  const testers = query.tester?.split(',').filter(Boolean) ?? []
-  const kinds = query.kind?.split(',').filter(Boolean) ?? []
+  const runnerNames = query.runner?.split(',').filter(Boolean) ?? []
 
-  return state.runs
-    .filter((r) => (statuses.length === 0 ? true : statuses.includes(r.status)))
-    .filter((r) => (kinds.length === 0 ? true : kinds.includes(r.kind)))
-    .filter((r) => (submitters.length === 0 ? true : submitters.includes(r.submitted_by)))
-    // Tester 过滤：服务端按 Task 的 Tester 归属筛 Run（mock 从 Task 表反查）
-    .filter((r) =>
-      testers.length === 0
+  return Object.values(state.tasks)
+    .filter((t) => (statuses.length === 0 ? true : statuses.includes(t.status)))
+    .filter((t) => (submitters.length === 0 ? true : submitters.includes(t.submitted_by)))
+    // Runner 过滤：服务端按 runner 执行记录的 runner_name 筛 Task
+    .filter((t) =>
+      runnerNames.length === 0
         ? true
-        : Object.values(state.tasks).some(
-            (task) => task.run_id === r.id && testers.includes(task.tester_name ?? ''),
+        : (state.attemptRunners[`${t.id}:${t.current_attempt}`] ?? []).some((r) =>
+            runnerNames.includes(r.runner_name),
           ),
     )
     .slice()
     .sort((a, b) => b.submitted_at.localeCompare(a.submitted_at))
 }
 
-function findRun(id: string): Run {
-  const run = state.runs.find((r) => r.id === id)
-  if (!run) notFound(`Run ${id}`)
-  return run
+function summarizeTask(task: TaskDetail): Task {
+  const { attempts: _attempts, runners: _runners, ...rest } = task
+  void _attempts
+  void _runners
+  return rest
 }
 
 function findTask(id: string): TaskDetail {
@@ -1348,102 +1349,137 @@ function findTask(id: string): TaskDetail {
   return task
 }
 
-let runCounter = 20
-function nextRunId(): string {
-  runCounter += 1
+function taskAttemptOf(task: TaskDetail, attempt?: number): number {
+  const n = attempt ?? task.current_attempt
+  if (!task.attempts.some((a) => a.attempt_no === n)) notFound(`Attempt #${n}（Task ${task.id}）`)
+  return n
+}
+
+function runnersOf(task: TaskDetail, attempt?: number): RunnerExecution[] {
+  const n = taskAttemptOf(task, attempt)
+  return state.attemptRunners[`${task.id}:${n}`] ?? []
+}
+
+function findRunner(task: TaskDetail, seq: number, attempt?: number): RunnerExecution {
+  const runners = runnersOf(task, attempt)
+  const runner = runners.find((r) => r.seq === seq)
+  if (!runner) notFound(`runner seq=${seq}（Task ${task.id}）`)
+  return runner
+}
+
+let taskCounter = 20
+function nextTaskId(): string {
+  taskCounter += 1
   const d = new Date()
   const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
-  return `r-${ymd}-${String(runCounter).padStart(4, '0')}`
+  return `t-${ymd}-${String(taskCounter).padStart(4, '0')}`
 }
 
-function summarizeRun(run: Run): Run {
-  const copy = clone(run)
-  delete copy.tasks
-  return copy
-}
-
-const PRE_CHECK_NAMES = new Set(['precheck'])
-
-/** Manifest 校验：只做平台明确会做的几条（形态互斥、Tester 存在、Tester 版本、公共参数冲突）。 */
-function validateManifest(manifest: RunManifest): ValidationIssue[] {
+/**
+ * Manifest 校验（C-5.1 的 mock 子集）：形态互斥（deploy XOR service，D-27）、name 必填（D-58）、
+ * runner 数 1..200（D-57/§12.7）、Runner/Profile 命中（RUNNER_NOT_FOUND / EXECUTION_PROFILE_NOT_FOUND）。
+ */
+function validateManifest(manifest: TaskManifest): ValidationIssue[] {
   const issues: ValidationIssue[] = []
-  const body = manifest.run
+  const body = manifest.task
   if (!body) {
-    issues.push({ path: 'run', code: 'VALIDATION_ERROR', message: '缺少 run 段' })
+    issues.push({ path: 'task', code: 'VALIDATION_ERROR', message: '缺少 task 段' })
     return issues
   }
-  if (!body.name?.trim()) issues.push({ path: 'run.name', code: 'VALIDATION_ERROR', message: 'Run 名称不能为空' })
+  if (!body.name?.trim()) issues.push({ path: 'task.name', code: 'VALIDATION_ERROR', message: 'Task 名称不能为空' })
   if (body.deploy && body.service) {
-    issues.push({ path: 'run', code: 'VALIDATION_ERROR', message: 'deploy 与 service 二选一，不能都给' })
+    issues.push({ path: 'task', code: 'VALIDATION_ERROR', message: 'deploy 与 service 二选一，不能都给（D-27）' })
   }
   if (!body.deploy && !body.service) {
-    issues.push({ path: 'run.service', code: 'VALIDATION_ERROR', message: 'deploy 与 service 必须给其一' })
+    issues.push({ path: 'task', code: 'VALIDATION_ERROR', message: 'deploy 与 service 必须给其一（D-27）' })
   }
-  if (body.deploy && !body.deploy.provider) {
-    issues.push({ path: 'run.deploy.provider', code: 'VALIDATION_ERROR', message: 'deploy 缺少 provider' })
+  if (body.deploy && body.deploy.provider !== 'genet') {
+    issues.push({ path: 'task.deploy.provider', code: 'VALIDATION_ERROR', message: 'deploy.provider 恒为 genet' })
   }
   if (body.service && !body.service.url?.trim()) {
-    issues.push({ path: 'run.service.url', code: 'VALIDATION_ERROR', message: 'service.url 必填' })
+    issues.push({ path: 'task.service.url', code: 'VALIDATION_ERROR', message: 'service.url 必填' })
   }
-  if (!body.tests || body.tests.length === 0) {
-    issues.push({ path: 'run.tests', code: 'VALIDATION_ERROR', message: '至少需要一个 Task' })
+  if (!body.runners || body.runners.length === 0) {
+    issues.push({ path: 'task.runners', code: 'VALIDATION_ERROR', message: '至少需要 1 个 runner（D-57）' })
   }
-  if ((body.tests?.length ?? 0) > 200) {
-    issues.push({ path: 'run.tests', code: 'RUN_TOO_LARGE', message: '单个 Run 最多 200 个 Task' })
+  if ((body.runners?.length ?? 0) > 200) {
+    issues.push({ path: 'task.runners', code: 'TASK_TOO_LARGE', message: '单个 Task 最多 200 个 runner（§12.7）' })
   }
-  body.tests?.forEach((test, index) => {
-    // TestSpec.name 契约必填：空名字必须报校验错误，否则 dry-run 会「假通过」
-    if (!test.name?.trim()) {
-      issues.push({ path: `tests[${index}].name`, code: 'VALIDATION_ERROR', message: 'Task 名称不能为空' })
+  body.runners?.forEach((spec, index) => {
+    if (!spec.name?.trim()) {
+      issues.push({ path: `task.runners[${index}].name`, code: 'VALIDATION_ERROR', message: 'runner 名称必填' })
     }
-    if (!test.tester) {
-      issues.push({ path: `tests[${index}].tester`, code: 'VALIDATION_ERROR', message: '必须选择 Tester' })
+    if (!spec.runner) {
+      issues.push({ path: `task.runners[${index}].runner`, code: 'VALIDATION_ERROR', message: '必须选择 Runner' })
       return
     }
-    const tester = state.testers.find((t) => t.name === test.tester)
-    if (!tester) {
-      issues.push({ path: `tests[${index}].tester`, code: 'TESTER_NOT_FOUND', message: `目录里没有 Tester「${test.tester}」` })
-    } else if (test.version && test.version !== tester.version) {
+    const runner = state.runners.find((r) => r.name === spec.runner && !r.retired)
+    if (!runner) {
+      issues.push({ path: `task.runners[${index}].runner`, code: 'RUNNER_NOT_FOUND', message: `目录里没有 Runner「${spec.runner}」` })
+    } else if (spec.version && spec.version !== runner.version) {
       issues.push({
-        path: `tests[${index}].version`,
-        code: 'TESTER_VERSION_PINNED',
-        message: `Tester ${test.tester} 只有版本 ${tester.version}`,
+        path: `task.runners[${index}].version`,
+        code: 'RUNNER_VERSION_PINNED',
+        message: `Runner ${spec.runner} 只有版本 ${runner.version}`,
       })
     }
-    if (!test.execution?.profile) {
-      issues.push({ path: `tests[${index}].execution.profile`, code: 'VALIDATION_ERROR', message: '必须指定执行环境 profile' })
-    }
-    const args = test.args ?? ''
-    for (const flag of ['--url', '--model_name', '--model_path']) {
-      if (new RegExp(`(^|\\s)${flag}[=\\s]`).test(args)) {
-        issues.push({
-          path: `tests[${index}].args`,
-          code: 'PUBLIC_PARAM_CONFLICT',
-          message: `${flag} 由平台注入，args 中不得出现`,
-        })
-      }
+    if (!spec.execution?.profile) {
+      issues.push({
+        path: `task.runners[${index}].execution.profile`,
+        code: 'EXECUTION_PROFILE_NOT_FOUND',
+        message: '必须指定 execution.profile',
+      })
     }
   })
   return issues
 }
 
-/* ================================================================ 测试钩子 */
+/** 提交体 → 最终执行序（service-deploy? → precheck? → tests → service-clean?，D-70）。 */
+function resolveRunnerSeeds(manifest: TaskManifest): RunnerSeed[] {
+  const body = manifest.task
+  const seeds: RunnerSeed[] = []
+  if (body.deploy) {
+    seeds.push({ name: INJECTED.deploy, runner: 'genet-internal', role: 'deploy', status: 'pending' })
+  }
+  const precheck = body.precheck ?? 'auto'
+  if (precheck !== 'off') {
+    const runner = precheck === 'auto' ? (state.runners.find((r) => r.role === 'pre_check')?.name ?? 'endpoint-probe') : precheck.runner
+    seeds.push({
+      name: INJECTED.precheck,
+      runner,
+      role: 'pre_check',
+      status: 'pending',
+      input: precheck === 'auto' ? undefined : precheck.input,
+    })
+  }
+  for (const spec of body.runners ?? []) {
+    seeds.push({ name: spec.name, runner: spec.runner, status: 'pending', input: spec.input })
+  }
+  if (body.deploy) {
+    seeds.push({ name: INJECTED.clean, runner: 'genet-internal', role: 'clean', status: 'pending' })
+  }
+  return seeds
+}
+
+/* ---------------------------------------------------------------- 测试钩子 */
 
 /**
  * mock 的角色注入（只用于本地验收 / Playwright）：
- * `localStorage['testplane:mock-role'] = 'viewer' | 'operator' | 'admin'`，或 URL 上 `?mock_role=viewer`。
+ * `localStorage['argus:mock-role'] = 'viewer' | 'operator' | 'admin'`，或 URL 上 `?mock_role=viewer`。
  * 注入后会带一个假的 `csrf_token`，让前端按 OIDC 会话处理（viewer 的写按钮才会置灰）。
+ * 旧键 `testplane:mock-role` 保留兼容（历史脚本）。
  */
 function mockRoleOverride(): string | null {
+  const pick = (value: string | null): string | null =>
+    value === 'viewer' || value === 'operator' || value === 'admin' ? value : null
   try {
-    const stored = localStorage.getItem('testplane:mock-role')
-    if (stored === 'viewer' || stored === 'operator' || stored === 'admin') return stored
+    const stored = pick(localStorage.getItem('argus:mock-role') ?? localStorage.getItem('testplane:mock-role'))
+    if (stored) return stored
   } catch {
     /* 隐私模式忽略 */
   }
   try {
-    const fromQuery = new URLSearchParams(window.location.search).get('mock_role')
-    if (fromQuery === 'viewer' || fromQuery === 'operator' || fromQuery === 'admin') return fromQuery
+    return pick(new URLSearchParams(window.location.search).get('mock_role'))
   } catch {
     /* ignore */
   }
@@ -1454,15 +1490,13 @@ export const mockApi: Api = {
   async getIdentity(): Promise<Identity> {
     await delay(80)
     // 默认 dev 模式（无 csrf_token → 不跳登录）。
-    // QA / Playwright 需要验角色时，用 `localStorage['testplane:mock-role']='viewer'`
-    // 或 URL 上的 `?mock_role=viewer` 注入 OIDC 角色（会带一个假 csrf_token）。
     const override = mockRoleOverride()
     if (override) {
       const identity: Identity = {
         user: `mock-${override}`,
         role: override,
         csrf_token: 'mock-csrf-token',
-        groups: [`testplane-${override}`],
+        groups: [`argus-${override}`],
       }
       applyIdentity(identity)
       return identity
@@ -1483,20 +1517,18 @@ export const mockApi: Api = {
       version: 'v0.0.0-mock',
       api_version: 'v1',
       features: {
-        deploy: true,
         dry_run: true,
         events_history: true,
-        events_sse: true,
-        queue_status: true,
         report_md: true,
-        standalone_task: true,
+        deploy_state: true,
+        queue_status: true,
       },
     }
   },
 
-  async listRuns(query: RunListQuery = {}): Promise<Page<Run>> {
+  async listTasks(query: TaskListQuery = {}): Promise<Page<Task>> {
     await delay()
-    const filtered = filterRuns(query).map(summarizeRun)
+    const filtered = filterTasks(query).map(summarizeTask)
 
     // offset 分页（UI）：回 total / page / page_size，next_cursor 恒为 null（D-61）
     if (query.page != null) {
@@ -1518,19 +1550,20 @@ export const mockApi: Api = {
   },
 
   /**
-   * 表头列筛选的候选值（D-61 / 07 §5.1）。
-   *
-   * facet 语义：算某一维度的计数时，只应用其它维度的过滤，不应用自己那维 ——
-   * 否则勾了 submitter=dev 之后，qa 就从候选里消失了，用户再也勾不回来。
+   * 表头列筛选的候选值（D-61 / 07 §5.1）。v2 维度：status / submitter / runner（kind 已取消）。
+   * facet 语义：算某一维度的计数时，只应用其它维度的过滤，不应用自己那维。
    */
-  async listRunFacets(query: RunFacetsQuery = {}): Promise<RunFacets> {
+  async listTaskFacets(query: TaskFacetsQuery = {}): Promise<TaskFacets> {
     await delay(60)
-    const count = (dimension: keyof RunFacetsQuery, keyOf: (run: Run) => string[]): FacetBucket[] => {
-      const others: RunFacetsQuery = { ...query }
+    const count = (
+      dimension: keyof TaskFacetsQuery,
+      keyOf: (task: TaskDetail) => string[],
+    ): FacetBucket[] => {
+      const others: TaskFacetsQuery = { ...query }
       delete others[dimension]
       const buckets = new Map<string, number>()
-      for (const run of filterRuns(others)) {
-        for (const value of keyOf(run)) buckets.set(value, (buckets.get(value) ?? 0) + 1)
+      for (const task of filterTasks(others)) {
+        for (const value of keyOf(task)) buckets.set(value, (buckets.get(value) ?? 0) + 1)
       }
       return [...buckets.entries()]
         .map(([value, n]) => ({ value, count: n }))
@@ -1538,111 +1571,403 @@ export const mockApi: Api = {
     }
 
     return {
-      status: count('status', (run) => [run.status]),
-      submitter: count('submitter', (run) => [run.submitted_by]),
-      kind: count('kind', (run) => [run.kind]),
-      // tester 维度按 Task 归属统计：一个 Run 里几个 Tester 就各记一次
-      tester: count('tester', (run) =>
-        [
-          ...new Set(
-            Object.values(state.tasks)
-              .filter((task) => task.run_id === run.id && task.tester_name)
-              .map((task) => task.tester_name as string),
-          ),
-        ].filter(Boolean),
+      status: count('status', (task) => [task.status]),
+      submitter: count('submitter', (task) => [task.submitted_by]),
+      runner: count('runner', (task) =>
+        [...new Set((state.attemptRunners[`${task.id}:${task.current_attempt}`] ?? []).map((r) => r.runner_name))].filter(
+          Boolean,
+        ),
       ),
     }
   },
 
-  async getRun(id: string): Promise<Run> {
-    await delay()
-    return clone(findRun(id))
-  },
-
-  async cancelRun(id: string): Promise<CancelResult> {
-    await delay()
-    const run = findRun(id)
-    if (isTerminal(run.status)) {
-      throw new ApiClientError(409, { code: 'CONFLICT', message: 'Run 已经是终态，无法取消', retryable: false })
-    }
-    run.status = 'cancelling'
-    pushEvent(id, 'run.state_changed', 'testing', 'cancelling')
-    setTimeout(() => {
-      run.status = 'canceled'
-      run.finished_at = nowIso()
-      for (const summary of run.tasks ?? []) {
-        const task = state.tasks[summary.id]
-        if (!task) continue
-        if (['pending', 'queued'].includes(task.status)) {
-          task.status = 'skipped'
-          task.status_reason = 'canceled'
-        } else if (!['succeeded', 'failed', 'skipped', 'canceled'].includes(task.status)) {
-          task.status = 'canceled'
-        }
-        syncSummary(task)
-      }
-      recomputeCounts(run)
-      pushEvent(id, 'run.finished', 'cancelling', 'canceled')
-      stopLive(id)
-    }, 1200)
-    return { run_id: id, status: 'cancelling' }
-  },
-
-  async listTasks(query: TaskListQuery = {}): Promise<Page<Task>> {
-    await delay()
-    const statuses = query.status?.split(',').filter(Boolean) ?? []
-    const all = Object.values(state.tasks)
-      .filter((t) => (statuses.length === 0 ? true : statuses.includes(t.status)))
-      .filter((t) => (query.tester ? t.tester_name === query.tester : true))
-      .sort((a, b) => a.run_id.localeCompare(b.run_id) || a.seq - b.seq)
-      .map((t) => {
-        const copy = clone(t)
-        delete (copy as Partial<TaskDetail>).attempts
-        return copy as Task
-      })
-    return paginate(all, query.cursor, query.limit ?? 50)
-  },
-
   async getTask(id: string): Promise<TaskDetail> {
-    await delay(90)
+    await delay()
     return clone(findTask(id))
   },
 
-  async cancelTask(id: string): Promise<TaskCancelResult> {
+  async cancelTask(id: string): Promise<CancelResult> {
     await delay()
     const task = findTask(id)
-    if (['succeeded', 'failed', 'skipped', 'canceled'].includes(task.status)) {
+    if (isTerminalTask(task.status)) {
       throw new ApiClientError(409, { code: 'CONFLICT', message: 'Task 已经是终态，无法取消', retryable: false })
     }
-    task.status = 'canceled'
-    task.cancel_requested = true
-    syncSummary(task)
-    pushEvent(task.run_id, 'task.state_changed', 'running', 'canceled', { task_id: task.id })
-    return { task_id: task.id, run_id: task.run_id, status: 'canceled' }
-  },
-
-  async listAttempts(taskId: string): Promise<Attempt[]> {
-    await delay(80)
-    return clone(findTask(taskId).attempts.sort((a, b) => a.idx - b.idx))
+    if (task.status !== 'cancelling') {
+      task.status = 'cancelling'
+      pushEvent(id, 'state_changed', 'running', 'cancelling', { attempt_no: task.current_attempt })
+      // clean 收口后再落 canceled（§7.6）；mock 里 1.2s 后 step() 完成
+      setTimeout(() => startLive(id), 300)
+    }
+    return { task_id: id, status: task.status }
   },
 
   /**
-   * Attempt 日志：支持 `offset` 游标（与真接口一致：只回游标之后的内容）。
-   *
-   * 运行中的 Attempt 在**带游标的轮询**里会多出一行：模拟服务端 stdout 在两次轮询之间持续增长，
-   * 让「追加而不是整块替换」「跟随最新」在 mock 下也能真实验收。
+   * 整 Task 重试（§7.8 / D-69）：新 attempt 全量重跑含 fresh deploy；历史 attempt 不覆盖。
+   * 409 CONFLICT = 仍在执行；409 ATTEMPT_EXHAUSTED = 达上限（AG_ATTEMPT_MAX，默认 3）。
    */
-  async getAttemptLogs(taskId: string, idx: number, opts: LogOptions = {}): Promise<LogChunk> {
+  async retryTask(id: string): Promise<TaskRetryAccepted> {
+    await delay(200)
+    const task = findTask(id)
+    if (!isTerminalTask(task.status)) {
+      throw new ApiClientError(409, { code: 'CONFLICT', message: 'Task 还在执行，不能重试（等待终态）', retryable: false })
+    }
+    if (task.current_attempt >= ATTEMPT_MAX) {
+      throw new ApiClientError(409, {
+        code: 'ATTEMPT_EXHAUSTED',
+        message: `attempt 已达上限（${ATTEMPT_MAX}），不能再重试`,
+        retryable: false,
+        detail: { attempt_max: ATTEMPT_MAX },
+      })
+    }
+    const attemptNo = task.current_attempt + 1
+    // 输入快照原样重用（落档 attempts/<n>/input/）；release 名按 (task_id, attempt_no) 重新派生（fresh deploy）
+    const seeds = (state.attemptRunners[`${task.id}:1`] ?? []).map((runner) => ({
+      name: runner.name,
+      runner: runner.runner_name,
+      role: runner.role,
+      status: 'pending' as RunnerStatus,
+      input: undefined,
+    }))
+    const runners = buildRunners(task.id, attemptNo, seeds)
+    state.attemptRunners[`${task.id}:${attemptNo}`] = runners
+
+    task.current_attempt = attemptNo
+    task.status = 'queued'
+    task.started_at = null
+    task.finished_at = null
+    task.error = null
+    task.runner_counts = countsOf(runners)
+    task.attempts.push({
+      task_id: task.id,
+      attempt_no: attemptNo,
+      status: 'running',
+      trigger: 'retry',
+      input_ref: `attempts/${attemptNo}/input/`,
+      exports_ref: `attempts/${attemptNo}/exports/`,
+      deploy_state_ref: task.deploy ? `attempts/${attemptNo}/deploy-state.json` : null,
+      error: null,
+      started_at: null,
+      finished_at: null,
+    })
+    if (task.deploy) {
+      // fresh deploy：新 release 名、phase 归零
+      task.deploy.release_name = `arg-${(task.id + String(attemptNo)).replace(/[^a-z0-9]/gi, '').padEnd(12, '0').slice(0, 12)}`
+      task.deploy.phase = 'queued'
+      task.deploy.genet_status = 'pending-install'
+      task.deploy.waited_seconds = 0
+      task.deploy.endpoint = null
+      task.deploy.uninstall = null
+      task.deploy.queued_at = nowIso()
+      task.deploy.ready_at = null
+      state.deploys[`${task.id}:${attemptNo}`] = clone({
+        task_id: task.id,
+        deploy: task.deploy,
+        pods: [],
+        deploy_timeout_seconds: 259200,
+      })
+      task.endpoint = null
+    }
+
+    for (const runner of runners) {
+      state.logs[`${task.id}:${attemptNo}:${runner.seq}`] = runnerLog(
+        { name: runner.name, runner: runner.runner_name, role: runner.role, status: 'pending' },
+        null,
+      )
+    }
+    pushEvent(task.id, 'submitted', null, 'queued', {
+      attempt_no: attemptNo,
+      payload: { trigger: 'retry', attempt_no: attemptNo },
+    })
+    auditLog('task.retry', 'task', task.id, { attempt_no: attemptNo })
+    setTimeout(() => startLive(task.id), 600)
+    return { task_id: task.id, attempt_no: attemptNo, status: 'queued' }
+  },
+
+  async listTaskAttempts(taskId: string): Promise<Attempt[]> {
+    await delay(80)
+    return clone(findTask(taskId).attempts.slice().sort((a, b) => a.attempt_no - b.attempt_no))
+  },
+
+  async listTaskRunners(taskId: string, query: { attempt?: number } = {}): Promise<RunnerExecution[]> {
+    await delay(90)
+    return clone(runnersOf(findTask(taskId), query.attempt))
+  },
+
+  async getTaskRunner(taskId: string, seq: number, query: { attempt?: number } = {}): Promise<RunnerExecution> {
+    await delay(90)
+    return clone(findRunner(findTask(taskId), seq, query.attempt))
+  },
+
+  async listRunnerArtifacts(
+    taskId: string,
+    seq: number,
+    query: { attempt?: number } = {},
+  ): Promise<ArtifactList> {
     await delay(90)
     const task = findTask(taskId)
-    const attempt = task.attempts.find((item) => item.idx === idx)
-    const key = `${taskId}#${idx}`
-    let text = state.logs[key] ?? '（该 Attempt 还没有日志）'
+    const runner = findRunner(task, seq, query.attempt)
+    const items: Artifact[] = [
+      {
+        path: `attempts/${runner.attempt_no}/runners/${runner.seq}/logs/stdout.log`,
+        kind: 'log',
+        size_bytes: 9_216,
+        sha256: null,
+        attempt_no: runner.attempt_no,
+        runner_seq: runner.seq,
+      },
+    ]
+    if (runner.result_ref) {
+      items.push({
+        path: runner.result_ref,
+        kind: 'result',
+        size_bytes: 2_048,
+        sha256: null,
+        attempt_no: runner.attempt_no,
+        runner_seq: runner.seq,
+      })
+    }
+    if (runner.exports_ref) {
+      items.push({
+        path: runner.exports_ref,
+        kind: 'export',
+        size_bytes: 512,
+        sha256: null,
+        attempt_no: runner.attempt_no,
+        runner_seq: runner.seq,
+      })
+    }
+    return { items, total_size_bytes: items.reduce((sum, item) => sum + item.size_bytes, 0) }
+  },
+
+  async listTaskArtifacts(taskId: string): Promise<ArtifactList> {
+    await delay(110)
+    const task = findTask(taskId)
+    const items: Artifact[] = [
+      { path: 'report.json', kind: 'report', size_bytes: 18_432, sha256: null, attempt_no: null, runner_seq: null },
+      { path: 'report.md', kind: 'report', size_bytes: 6_208, sha256: null, attempt_no: null, runner_seq: null },
+      { path: 'metadata.json', kind: 'other', size_bytes: 3_914, sha256: null, attempt_no: null, runner_seq: null },
+      { path: 'events.jsonl', kind: 'raw', size_bytes: 42_106, sha256: null, attempt_no: null, runner_seq: null },
+    ]
+    for (const attempt of task.attempts) {
+      for (const runner of state.attemptRunners[`${task.id}:${attempt.attempt_no}`] ?? []) {
+        items.push({
+          path: `attempts/${attempt.attempt_no}/runners/${runner.seq}/logs/stdout.log`,
+          kind: 'log',
+          size_bytes: 9_216,
+          sha256: null,
+          attempt_no: attempt.attempt_no,
+          runner_seq: runner.seq,
+        })
+        if (runner.result_ref) {
+          items.push({
+            path: runner.result_ref,
+            kind: 'result',
+            size_bytes: 2_048,
+            sha256: null,
+            attempt_no: attempt.attempt_no,
+            runner_seq: runner.seq,
+          })
+        }
+        if (runner.exports_ref) {
+          items.push({
+            path: runner.exports_ref,
+            kind: 'export',
+            size_bytes: 512,
+            sha256: null,
+            attempt_no: attempt.attempt_no,
+            runner_seq: runner.seq,
+          })
+        }
+        // 产物查看器的代表性 fixture（挂在 Task 0006 的三个 runner 下，§8.1 目录约定）：
+        // csv（通用表格）/ html（sandbox）/ 二进制（仅下载）/ 文本超 2MB（仅下载），另每 runner 一份 raw
+        if (task.id === 't-20261105-0006' && attempt.attempt_no === 1) {
+          const rawExtras: Array<{ suffix: string; kind: Artifact['kind']; size: number; seq: number }> = [
+            { suffix: 'raw/results.csv', kind: 'raw', size: 486, seq: 3 },
+            { suffix: 'raw/report.html', kind: 'result', size: 1_024, seq: 3 },
+            { suffix: 'raw/perf_summary.xlsx', kind: 'raw', size: 27, seq: 5 },
+            { suffix: 'raw/raw_dump.log', kind: 'log', size: 3_145_728, seq: 3 },
+          ]
+          for (const extra of rawExtras) {
+            if (extra.seq !== runner.seq) continue
+            items.push({
+              path: `attempts/${attempt.attempt_no}/runners/${runner.seq}/${extra.suffix}`,
+              kind: extra.kind,
+              size_bytes: extra.size,
+              sha256: null,
+              attempt_no: attempt.attempt_no,
+              runner_seq: runner.seq,
+            })
+          }
+        }
+      }
+      if (task.deploy) {
+        for (const pod of state.deploys[`${task.id}:${attempt.attempt_no}`]?.pods ?? []) {
+          items.push({
+            path: `attempts/${attempt.attempt_no}/runners/1/logs/${pod.name}.log`,
+            kind: 'log',
+            size_bytes: 12_880,
+            sha256: null,
+            attempt_no: attempt.attempt_no,
+            runner_seq: 1,
+          })
+        }
+      }
+    }
+    return { items, total_size_bytes: items.reduce((sum, item) => sum + item.size_bytes, 0) }
+  },
+
+  /** 整包下载（mock）：最小 zip 字节流，够让 UI/用例验"是 application/zip 且真的触发下载" */
+  async downloadBundle(taskId: string): Promise<Blob> {
+    await delay(150)
+    findTask(taskId)
+    return new Blob([`PK\u0003\u0004 argus mock bundle for ${taskId}`], { type: 'application/zip' })
+  },
+
+  /** 单文件下载（mock）：按后缀给合理 content-type 与代表性 fixture（csv / html / 二进制 / 超 2MB 文本）。 */
+  async downloadFile(taskId: string, path: string): Promise<Blob> {
+    await delay(80)
+    findTask(taskId)
+    if (/attempts\/\d+\/runners\/\d+\/logs\/.+\.(log|out)/.test(path)) {
+      // 产物查看器的"文本超限"fixture：raw_dump.log ≈ 3MB（60000 行 × ~52 字节）
+      if (path.includes('raw_dump')) {
+        const lines: string[] = []
+        for (let i = 0; i < 60000; i += 1) {
+          lines.push(`[2026-11-05T0${Math.floor(i / 3600) % 10}:${String(Math.floor(i / 60) % 60).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}Z] [stream] row ${i + 1} of 60000: input_len=${256 + (i % 64) * 32} tokens/s=${1200 + (i % 97) * 7} latency_ms=${(i % 89) * 3.5}`)
+        }
+        return new Blob([lines.join('\n')], { type: 'text/plain' })
+      }
+      return new Blob([`mock log of ${path}`], { type: 'text/plain' })
+    }
+    if (path.endsWith('.csv')) {
+      // RFC4180 fixture：含引号转义与带逗号的字段
+      const csv = [
+        'case,dataset,score,latency_p95_ms,note',
+        '1,gsm8k,0.8421,182.4,"baseline, seed=42"',
+        '2,mmlu,0.7355,201.9,full sweep',
+        '3,bbh,"0.61""quoted""",240.1,"多行\nnote inside quotes"',
+        '4,humaneval,0.5830,311.7,partial',
+      ].join('\n')
+      return new Blob([csv], { type: 'text/csv' })
+    }
+    if (path.endsWith('.html') || path.endsWith('.htm')) {
+      const html = [
+        '<!doctype html>',
+        '<html lang="zh-CN">',
+        '  <head><meta charset="utf-8"><title>mock result.html</title></head>',
+        '  <body>',
+        '    <h1>Qwen3-32B · accuracy-dataset-a</h1>',
+        '    <p>Runner 产出的 result.html（D-74 三选一）：sandbox 渲染、脚本禁用。</p>',
+        '    <table border="1"><tr><th>dataset</th><th>accuracy</th></tr><tr><td>gsm8k</td><td>0.8421</td></tr></table>',
+        "    <script>document.body.setAttribute('data-script-ran', 'yes')</script>",
+        '  </body>',
+        '</html>',
+      ].join('\n')
+      return new Blob([html], { type: 'text/html' })
+    }
+    // 二进制 fixture（xlsx）：PK zip 头 + 乱序字节，前端应只提供下载、不预览
+    if (path.endsWith('.xlsx')) {
+      const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00, 0x08, 0x00, 0x00, 0x00, 0x21, 0x00, 0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05])
+      return new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    }
+    const type = path.endsWith('.md')
+      ? 'text/markdown'
+      : path.endsWith('.jsonl') || path.endsWith('.env')
+        ? 'text/plain'
+        : path.endsWith('.json')
+          ? 'application/json'
+          : 'text/plain'
+    return new Blob([`mock content of ${path}`], { type })
+  },
+
+  /**
+   * mock 的 `result.json`：形状照 `Result` schema（附录 A **schema 2.0**）。
+   * 只有 test / pre_check 且 succeeded 的 runner 有 result；deploy / clean 无产物（404）。
+   */
+  async getRunnerResult(taskId: string, seq: number, query: { attempt?: number } = {}): Promise<Result> {
+    await delay(90)
+    const task = findTask(taskId)
+    const runner = findRunner(task, seq, query.attempt)
+    if (!['test', 'pre_check'].includes(runner.role)) {
+      throw new ApiClientError(404, {
+        code: 'NOT_FOUND',
+        message: `deploy / clean 角色没有 result.json（seq=${seq}）`,
+        detail: { produced: [] },
+        retryable: false,
+      })
+    }
+    if (runner.status !== 'succeeded' && runner.status !== 'failed') {
+      throw new ApiClientError(404, {
+        code: 'RESULT_MISSING',
+        message: '该 runner 还没有产物（未跑到或被跳过）',
+        detail: { produced: [] },
+        retryable: false,
+      })
+    }
+    const started = runner.started_at ? new Date(runner.started_at).getTime() : null
+    const finished = runner.finished_at ? new Date(runner.finished_at).getTime() : null
+    const base = {
+      schema_version: '2.0',
+      task_id: task.id,
+      attempt_no: runner.attempt_no,
+      runner_seq: runner.seq,
+      runner: { name: runner.runner_name, version: runner.runner_version, image_ref: runner.image_ref },
+      status: runner.status === 'failed' ? ('failed' as const) : ('succeeded' as const),
+      started_at: runner.started_at ?? undefined,
+      finished_at: runner.finished_at ?? undefined,
+      duration_ms: started != null && finished != null ? finished - started : undefined,
+      workload: { model_name: 'Qwen3-32B', dataset: 'gsm8k', input_len: 512, output_len: 128, concurrency: 8 },
+      artifacts: [{ name: 'raw_results', path: 'raw/results.json', size_bytes: 2_048 }],
+      error: runner.error ?? null,
+    }
+
+    if (runner.runner_name === 'endpoint-probe') {
+      return { ...base, metrics: [], notes: '探活只回答服务能否出 token，不产出指标。' }
+    }
+
+    if (runner.runner_name === 'aisbench-perf') {
+      const metrics: ResultMetric[] = []
+      for (const [inputLen, concurrency] of [
+        [512, 1],
+        [4096, 8],
+      ] as const) {
+        const labels = { input_len: inputLen, output_len: 128, concurrency }
+        metrics.push(
+          { name: 'ttft', value: inputLen === 512 ? 82.4 : 143.7, unit: 'ms', statistic: 'p95', sample_size: 64, labels },
+          { name: 'tpot', value: inputLen === 512 ? 18.6 : 21.4, unit: 'ms', statistic: 'mean', sample_size: 64, labels },
+          {
+            name: 'throughput',
+            value: inputLen === 512 ? 1482.6 : 1290.2,
+            unit: 'tokens_per_s',
+            statistic: 'mean',
+            sample_size: 64,
+            labels,
+          },
+        )
+      }
+      return { ...base, metrics, notes: '压测组合：input_len × concurrency；同一组参数靠 labels 区分。' }
+    }
+
+    const metrics: ResultMetric[] = [
+      { name: 'accuracy', value: 0.8421, unit: 'score', statistic: 'mean', sample_size: 200, labels: { dataset: 'gsm8k', limit: 200 } },
+      { name: 'accuracy', value: 0.7355, unit: 'score', statistic: 'mean', sample_size: 200, labels: { dataset: 'mmlu', limit: 200 } },
+      { name: 'latency', value: 412.8, unit: 'ms', statistic: 'p95', sample_size: 200, labels: { dataset: 'gsm8k', limit: 200 } },
+      { name: 'sample_count', value: 200, unit: 'count', statistic: 'count', sample_size: 200, labels: { dataset: 'gsm8k', limit: 200 } },
+    ]
+    return { ...base, metrics, notes: '逐数据集 accuracy；指标名不编码维度，维度在 labels 里。' }
+  },
+
+  async getRunnerLogs(taskId: string, seq: number, opts: LogOptions = {}): Promise<LogChunk> {
+    await delay(90)
+    const task = findTask(taskId)
+    const attemptNo = taskAttemptOf(task, opts.attempt)
+    const runner = findRunner(task, seq, attemptNo)
+    const key = `${taskId}:${attemptNo}:${seq}`
+    let text = state.logs[key] ?? '（该 runner 还没有日志）'
     const offset = Math.max(0, opts.offset ?? 0)
 
-    if (attempt?.status === 'running' && offset > 0) {
-      const tick = (state.attemptLogTicks[key] ?? 0) + 1
-      state.attemptLogTicks[key] = tick
+    if (runner.status === 'running' && offset > 0) {
+      const tick = (state.logTicks[key] ?? 0) + 1
+      state.logTicks[key] = tick
       const clock = new Date().toLocaleTimeString('zh-CN', { hour12: false })
       text = `${text}\n[${clock}] [mock] stdout 新行 #${tick}（运行中，轮询追加）`
       state.logs[key] = text
@@ -1652,87 +1977,66 @@ export const mockApi: Api = {
     return { text: chunk, offset: text.length, coverage: null }
   },
 
-  async getAttemptResult(taskId: string, idx: number): Promise<Result> {
+  async getTaskDeploy(taskId: string): Promise<DeploySnapshot> {
     await delay(90)
     const task = findTask(taskId)
-    const attempt = task.attempts.find((item) => item.idx === idx)
-    if (!attempt) notFound(`Attempt #${idx}（Task ${taskId}）`)
-    if (!attempt.result_ref) {
-      throw new ApiClientError(404, {
-        code: 'RESULT_MISSING',
-        message: '该 Attempt 没有 result.json（Tester 没产出，或这次执行没跑成功）',
-        detail: { task_id: taskId, idx },
-        retryable: false,
-      })
-    }
-    return clone(mockResultFor(task, attempt))
-  },
-
-  async getDeploy(runId: string): Promise<DeploySnapshot> {
-    await delay(90)
-    findRun(runId)
-    return clone(state.deploys[runId] ?? { run_id: runId, deploy: null, manifest: null, pods: [] })
+    const attemptNo = task.current_attempt
+    return clone(
+      state.deploys[`${taskId}:${attemptNo}`] ?? { task_id: taskId, deploy: task.deploy ?? null, pods: [] },
+    )
   },
 
   /**
-   * Deploy 日志（契约收窄后）：**`pod` 必选**，`offset` 只作用于该 Pod 的日志流，
-   * `tail_lines` 与 `offset` 二选一；`pods[]` / `gaps[]` 每次仍返回全部 Pod（页签渲染用）。
-   * 缺 `pod` → 400；`pod` 不存在 → 404（附 `available_pods[]`）。
+   * Deploy 日志（契约 v2）：`?pod=` 可选 —— 0 个 Pod 返回 200 + 空列表 + message（排队中 / 外接模式）；
+   * 1 个 Pod 直接服务；≥2 个不传 pod → 409 `pod_ambiguous`（不默默取第一个）；
+   * pod 不存在 → 404 `pod_not_found`（附 `available_pods[]`）。`pods[]` 始终返回全部 Pod（页签渲染用）。
    */
-  async getDeployLogs(runId: string, query: DeployLogQuery & { pod: string }): Promise<DeployLogs> {
+  async getTaskDeployLogs(taskId: string, query: DeployLogQuery = {}): Promise<DeployLogs> {
     await delay(110)
-    const run = findRun(runId)
-    const snapshot = state.deploys[runId] ?? { run_id: runId, deploy: run.deploy ?? null, manifest: null, pods: [] }
-    const deployState = snapshot.deploy?.state ?? null
-
-    const pods: DeployLogPod[] = snapshot.pods.map((pod, index) => ({
+    const task = findTask(taskId)
+    const attemptNo = taskAttemptOf(task, query.attempt)
+    const snapshot = state.deploys[`${taskId}:${attemptNo}`]
+    const pods: DeployLogPod[] = (snapshot?.pods ?? []).map((pod, index, all) => ({
       name: pod.name,
       ready: pod.ready ?? false,
       // 故意让最后一个 Pod 重启过：这样 gap（此处不连续）在 UI 上一定看得到
-      restarts: index === snapshot.pods.length - 1 ? 2 : 0,
-      started_at: iso(30),
+      restarts: index === all.length - 1 ? 2 : (pod.restarts ?? 0),
+      started_at: pod.started_at ?? iso(30),
       last_seen_at: iso(0),
     }))
     const gaps: DeployLogGap[] = pods
       .filter((pod) => pod.restarts > 0)
       .map((pod) => ({ pod: pod.name, from: iso(24), to: iso(22), reason: 'pod restarted' }))
 
-    if (!query.pod) {
-      throw new ApiClientError(400, {
-        code: 'VALIDATION_ERROR',
-        message: '必须是单 Pod 游标读取：缺少 pod 参数',
-        detail: { param: 'pod' },
-        retryable: false,
-      })
-    }
-    if (query.tail_lines && query.offset) {
-      throw new ApiClientError(400, {
-        code: 'VALIDATION_ERROR',
-        message: 'tail_lines 与 offset 只能二选一',
-        detail: { param: 'tail_lines' },
-        retryable: false,
-      })
-    }
-
-    // Pod 已回收（列表空且已过排队期）：200 + message + gaps 说明，不静默空数组
+    const phase = task.deploy?.phase ?? null
     if (pods.length === 0) {
-      const queued = deployState === 'queued' || deployState === 'accepted' || deployState === 'deploying'
+      const deploying = phase === 'queued' || phase === 'accepted' || phase === 'deploying'
       return {
-        run_id: runId,
+        task_id: taskId,
+        attempt_no: attemptNo,
         pods: [],
         entries: [],
-        gaps: queued
-          ? []
-          : [{ pod: query.pod, from: iso(40), to: iso(10), reason: 'pod recycled: 日志随 Pod 回收，MVP 未落盘' }],
+        gaps: [],
+        window: 'full',
         truncated: false,
         next_offset: 0,
-        message: queued
-          ? '部署还在排队（Volcano 层），Pod 尚未创建 —— 等 Pod 起来后这里会按 Pod 分页签显示日志。'
-          : 'Pod 已被回收，日志随 Pod 一起消失（MVP 未落盘）。',
+        message: deploying
+          ? '部署还在排队（Genet / Volcano 层），Pod 尚未创建 —— 等 Pod 起来后这里会按 Pod 分页签显示日志。'
+          : task.deploy
+            ? 'Pod 已被回收，日志随 Pod 一起消失（MVP 未落盘）。'
+            : '外接模式（无部署），没有部署 Pod 日志。',
       }
     }
 
-    const target = pods.find((pod) => pod.name === query.pod)
+    if (pods.length >= 2 && !query.pod) {
+      throw new ApiClientError(409, {
+        code: 'CONFLICT',
+        message: '该部署有多个 Pod，必须指定 pod 参数',
+        detail: { reason: 'pod_ambiguous', available_pods: pods.map((pod) => pod.name) },
+        retryable: false,
+      })
+    }
+    const target = pods.find((pod) => pod.name === query.pod) ?? (pods.length === 1 ? pods[0] : undefined)
     if (!target) {
       throw new ApiClientError(404, {
         code: 'NOT_FOUND',
@@ -1742,12 +2046,12 @@ export const mockApi: Api = {
       })
     }
 
-    // 日志行按 (run, pod) 持久化：游标 offset 才有稳定的行号语义；运行中轮询时追加新行
-    const streamKey = `${runId}#${target.name}`
-    const lines = state.deployLogLines[streamKey] ?? deployLogLines(target.name, run.name)
+    // 日志行按 (task, attempt, pod) 持久化：游标 offset 才有稳定的行号语义；运行中轮询时追加新行
+    const streamKey = `${taskId}:${attemptNo}#${target.name}`
+    const lines = state.deployLogLines[streamKey] ?? deployLogSeed(target.name, task.name)
     state.deployLogLines[streamKey] = lines
     const offset = query.tail_lines ? 0 : (query.offset ?? 0)
-    if (!isTerminal(run.status) && !query.tail_lines && offset > 0) {
+    if (!isTerminalTask(task.status) && !query.tail_lines && offset > 0) {
       const tick = (state.deployLogTicks[streamKey] ?? 0) + 1
       state.deployLogTicks[streamKey] = tick
       const clock = new Date().toLocaleTimeString('zh-CN', { hour12: false })
@@ -1771,36 +2075,38 @@ export const mockApi: Api = {
         : []
 
     return {
-      run_id: runId,
+      task_id: taskId,
+      attempt_no: attemptNo,
       pods,
       entries,
       gaps,
+      window: query.tail_lines && query.tail_lines > 0 ? 'tail' : 'full',
       truncated: next < tail.length,
       next_offset: next < tail.length ? next : 0,
     }
   },
 
-  async getEventsHistory(runId: string, sinceSeq = 0): Promise<RunEvent[]> {
+  async getEventsHistory(taskId: string, sinceSeq = 0): Promise<TaskEvent[]> {
     await delay(60)
-    return clone((state.events[runId] ?? []).filter((e) => e.seq > sinceSeq))
+    return clone((state.events[taskId] ?? []).filter((e) => e.seq > sinceSeq))
   },
 
-  async listTesters(query: TesterListQuery = {}): Promise<Tester[]> {
+  async listRunners(query: RunnerListQuery = {}): Promise<Runner[]> {
     await delay(90)
-    const visible = state.testers.filter((t) =>
-      query.include_retired ? true : !(t as { retired?: boolean }).retired,
+    const visible = state.runners.filter((r) =>
+      query.include_retired || query.orphaned ? true : !r.retired,
     )
     return visible
-      .filter((t) => (query.role ? t.role === query.role : true))
-      .filter((t) => (query.orphaned === undefined ? true : Boolean(t.orphaned) === query.orphaned))
-      .map((t) => normalizeTester(t))
+      .filter((r) => (query.role ? r.role === query.role : true))
+      .filter((r) => (query.orphaned === undefined ? true : Boolean(r.orphaned) === query.orphaned))
+      .map((r) => normalizeRunner(r))
   },
 
-  async getTester(name: string): Promise<Tester> {
+  async getRunner(name: string): Promise<Runner> {
     await delay(80)
-    const tester = state.testers.find((t) => t.name === name)
-    if (!tester) notFound(`Tester ${name}`)
-    return normalizeTester(tester)
+    const runner = state.runners.find((r) => r.name === name)
+    if (!runner) notFound(`Runner ${name}`)
+    return normalizeRunner(runner)
   },
 
   async listClusters(): Promise<Cluster[]> {
@@ -1810,32 +2116,25 @@ export const mockApi: Api = {
 
   async getQueueStatus(): Promise<QueueStatus> {
     await delay(90)
-    const pendingTasks: WaitingTask[] = []
-    for (const run of state.runs) {
-      if (isTerminal(run.status)) continue
-      for (const summary of run.tasks ?? []) {
-        if (!['pending', 'queued'].includes(summary.status)) continue
-        pendingTasks.push({
-          task_id: summary.id,
-          run_id: run.id,
-          name: summary.name,
-          status: summary.status,
-          waiting_reason: summary.waiting_reason ?? 'slot_waiting',
-          since: run.submitted_at,
+    const waitingRunners: WaitingTask[] = []
+    for (const task of Object.values(state.tasks)) {
+      if (isTerminalTask(task.status)) continue
+      for (const runner of state.attemptRunners[`${task.id}:${task.current_attempt}`] ?? []) {
+        if (runner.status !== 'queued') continue
+        waitingRunners.push({
+          task_id: task.id,
+          attempt_no: runner.attempt_no,
+          seq: runner.seq,
+          name: runner.name,
+          status: runner.status,
+          waiting_reason: runner.waiting_reason ?? 'slot_waiting',
         })
       }
     }
-    const byReason = {
-      precheck_gate: 0,
-      slot_waiting: 0,
-      global_limit: 0,
-      queue_full: 0,
-      insufficient_resources: 0,
-      gang_pending: 0,
-    }
-    for (const task of pendingTasks) byReason[task.waiting_reason] += 1
+    const byReason = { slot_waiting: 0, queue_full: 0, insufficient_resources: 0, gang_pending: 0 }
+    for (const runner of waitingRunners) byReason[runner.waiting_reason] += 1
 
-    const active = state.runs.filter((r) => ['testing', 'deploying'].includes(r.status)).length
+    const active = Object.values(state.tasks).filter((t) => t.status === 'running').length
     return {
       generated_at: nowIso(),
       slots: {
@@ -1844,10 +2143,9 @@ export const mockApi: Api = {
         available: Math.max(0, 20 - active),
         endpoints: [],
       },
-      waiting: { total: pendingTasks.length, by_reason: byReason, tasks: pendingTasks },
+      waiting: { total: waitingRunners.length, by_reason: byReason, runners: waitingRunners },
       volcano: {
         available: true,
-        // stale 在快照层：本次采样成功 → false（不可达时才置位，且那时 queues 恒为 []）
         stale: false,
         detail: null,
         queues: [
@@ -1872,7 +2170,7 @@ export const mockApi: Api = {
     }
   },
 
-  async submitRun(manifest: RunManifest): Promise<SubmitResult> {
+  async submitTask(manifest: TaskManifest): Promise<SubmitResult> {
     await delay(260)
     const issues = validateManifest(manifest)
     if (issues.length > 0) {
@@ -1886,234 +2184,167 @@ export const mockApi: Api = {
       })
     }
 
-    const body = manifest.run
-    const runId = nextRunId()
-    const submittedMinAgo = 0
-    const tasks: TaskSeed[] = []
+    const body = manifest.task
+    const taskId = nextTaskId()
+    const seeds = resolveRunnerSeeds(manifest)
+    const attemptNo = 1
+    const runners = buildRunners(taskId, attemptNo, seeds)
+    state.attemptRunners[`${taskId}:${attemptNo}`] = runners
 
-    const precheck = body.precheck ?? 'auto'
-    if (precheck !== 'off') {
-      const name = precheck === 'auto' ? 'precheck' : precheck.tester
-      tasks.push({
-        seq: 0,
-        name,
-        tester: precheck === 'auto' ? (state.testers.find((t) => t.role === 'pre_check')?.name ?? 'endpoint-probe') : precheck.tester,
-        status: 'pending',
-        waiting: 'precheck_gate',
-      })
-    }
-    body.tests?.forEach((test, index) => {
-      tasks.push({
-        seq: precheck === 'off' ? index : index + 1,
-        name: test.name,
-        tester: test.tester,
-        status: 'pending',
-        args: test.args,
-        waiting: body.deploy ? 'precheck_gate' : 'slot_waiting',
-      })
-    })
+    const endpoint: Endpoint | null = body.service
+      ? endpointOf(body.service.url, body.service.model_name ?? 'Qwen3-32B', 'service')
+      : null
 
-    const deploy: Deploy | undefined = body.deploy
-      ? {
-          provider: body.deploy.provider,
-          state: 'queued',
-          deployment_id: null,
-          queue_position: null, // D-46：没有位次
-          queue_reason: 'PodGroup phase=Pending, reason=Unschedulable(0/8 nodes available)',
-          queued_at: nowIso(),
-          parameters_sha: 'sha256:mock',
-        }
-      : undefined
-
-    const run = seedRun({
-      id: runId,
+    const detail: TaskDetail = {
+      id: taskId,
       name: body.name,
       status: 'submitted',
-      submittedBy: getCurrentUser(),
-      submittedMinAgo,
-      env: body.env,
-      secrets: body.secrets,
-      cleanupPolicy: body.cleanup?.policy ?? 'always',
-      deploy,
-      deployManifest: body.deploy?.parameters ?? null,
-      endpoint: body.service
-        ? endpointOf(body.service.url, body.service.model_name ?? 'Qwen3-32B', 'service')
+      submitted_by: getCurrentUser(),
+      submitted_at: nowIso(),
+      started_at: null,
+      finished_at: null,
+      endpoint,
+      deploy: body.deploy
+        ? {
+            provider: 'genet',
+            spec: body.deploy.spec ?? '',
+            spec_digest: 'sha256:mock',
+            package_type: 'stack',
+            namespace: null,
+            release_name: null,
+            deploy_state_ref: `attempts/1/deploy-state.json`,
+            phase: null, // runner 未启动时为 null（契约）
+            genet_status: null,
+            reason: null,
+            waited_seconds: 0,
+            pod_count: null,
+            label_selector: null,
+            queue: null,
+            endpoint: null,
+            queued_at: nowIso(),
+            ready_at: null,
+            cancel_requested_at: null,
+            failure: null,
+            uninstall: null,
+          }
         : null,
-      tasks,
-    })
+      env: body.env ?? {},
+      secret_env: Object.entries(body.secrets ?? {}).map(([name, secret_ref]) => ({ name, secret_ref })),
+      error: null,
+      retry_of: null,
+      current_attempt: 0, // 202 时刻为 0（attempt 在进入 running 时创建）
+      runner_counts: countsOf(runners),
+      revision: 1,
+      attempts: [],
+      runners,
+    }
+    state.tasks[taskId] = detail
+    state.deploys[`${taskId}:${attemptNo}`] = {
+      task_id: taskId,
+      deploy: detail.deploy ?? null,
+      pods: [],
+      deploy_timeout_seconds: 259200,
+    }
+    for (const runner of runners) {
+      state.logs[`${taskId}:${attemptNo}:${runner.seq}`] = runnerLog(
+        { name: runner.name, runner: runner.runner_name, role: runner.role, status: 'pending' },
+        null,
+      )
+    }
+    pushEvent(taskId, 'submitted', null, 'submitted', { payload: { runner_count: runners.length } })
 
-    // 后台推进：让「提交 → 详情页 → 事件流追加」在 mock 下也能完整演一遍
+    // 后台推进：attempt 1 创建 → runner 管道一个个跑（「提交 → 详情页 → 事件流追加」在 mock 下完整演一遍）
     setTimeout(() => {
-      const created = state.runs.find((r) => r.id === runId)
+      const created = state.tasks[taskId]
       if (!created) return
+      created.current_attempt = attemptNo
       created.status = 'queued'
-      pushEvent(runId, 'run.state_changed', 'submitted', 'queued')
+      created.attempts = [
+        {
+          task_id: taskId,
+          attempt_no: attemptNo,
+          status: 'running',
+          trigger: 'initial',
+          input_ref: `attempts/${attemptNo}/input/`,
+          exports_ref: `attempts/${attemptNo}/exports/`,
+          deploy_state_ref: created.deploy ? `attempts/${attemptNo}/deploy-state.json` : null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+        },
+      ]
+      pushEvent(taskId, 'state_changed', 'submitted', 'queued', { attempt_no: attemptNo })
       setTimeout(() => {
-        created.status = created.deploy ? 'deploying' : 'testing'
-        pushEvent(runId, 'run.state_changed', 'queued', created.status)
-        startLive(runId)
+        created.status = 'running'
+        created.started_at = nowIso()
+        pushEvent(taskId, 'state_changed', 'queued', 'running', { attempt_no: attemptNo })
+        startLive(taskId)
       }, 1800)
     }, 1200)
 
+    auditLog('task.submit', 'task', taskId, { runners: runners.length })
     return {
-      run: { id: run.id, status: run.status, kind: run.kind, submitted_at: run.submitted_at },
-      tasks: (run.tasks ?? []).map((t) => ({ id: t.id, name: t.name, status: t.status })),
+      task: { id: taskId, status: detail.status, submitted_at: detail.submitted_at, current_attempt: 0 },
+      runners: runners.map((runner) => ({
+        seq: runner.seq,
+        name: runner.name,
+        runner: runner.runner_name,
+        role: runner.role,
+        status: runner.status,
+      })),
     }
   },
 
-  async dryRun(manifest: RunManifest): Promise<DryRunResult> {
+  async dryRun(manifest: TaskManifest): Promise<DryRunResult> {
     await delay(220)
     const issues = validateManifest(manifest)
+    const body = manifest.task
+    const previewRunners = resolveRunnerSeeds(manifest).map((seed, index) => ({
+      seq: index + 1,
+      name: runnerNameOf(seed),
+      runner: seed.runner,
+      role: seed.role ?? 'test',
+      injected: seed.role === 'deploy' || seed.role === 'clean' || seed.runner === 'endpoint-probe',
+    }))
     return {
       valid: issues.length === 0,
       issues,
       resolved_preview: {
-        precheck: manifest.run?.precheck === 'off' ? 'off' : { tester: 'endpoint-probe', seq: 0 },
-        task_count: manifest.run?.tests?.length ?? 0,
-        skipped_precheck_names: [...PRE_CHECK_NAMES],
+        precheck: (body.precheck ?? 'auto') === 'off' ? { injected: false } : { injected: true, runner: 'endpoint-probe', version: '1.0.0' },
+        runners: previewRunners,
+        schema_version: '2.0',
       },
     }
   },
 
-  /* ---------------------------------------------------------------- 产物（契约内） */
-
-  /**
-   * Run 级产物清单：把"结果页要能下载的东西"列全 ——
-   * `report.json` / `report.md` / `metadata.json` / `events.jsonl` / 每个 Attempt 的日志与 result.json /
-   * Deploy 日志。真实后端由 `artifacts` 表给出，形状一致。
-   */
-  async listRunArtifacts(runId: string): Promise<ArtifactList> {
-    await delay(110)
-    const run = findRun(runId)
-    const prefix = `${runId}/`
-    const items: Artifact[] = [
-      { path: `${prefix}report.json`, kind: 'report', size_bytes: 18_432, sha256: null, task_id: null, attempt_id: null },
-      { path: `${prefix}report.md`, kind: 'report', size_bytes: 6_208, sha256: null, task_id: null, attempt_id: null },
-      { path: `${prefix}metadata.json`, kind: 'other', size_bytes: 3_914, sha256: null, task_id: null, attempt_id: null },
-      { path: `${prefix}events.jsonl`, kind: 'raw', size_bytes: 42_106, sha256: null, task_id: null, attempt_id: null },
-    ]
-    // D-59：Deploy 的每个 Pod 一份日志 + pods.json 拓扑快照（与后端落盘路径一致）
-    if (run.deploy) {
-      items.push({ path: `${prefix}deploy/pods.json`, kind: 'raw', size_bytes: 1_204, sha256: null, task_id: null, attempt_id: null })
-      for (const pod of state.deploys[runId]?.pods ?? []) {
-        items.push({
-          path: `${prefix}deploy/logs/${pod.name}.log`,
-          kind: 'log',
-          size_bytes: 12_880,
-          sha256: null,
-          task_id: null,
-          attempt_id: null,
-        })
-      }
-    }
-    for (const task of run.tasks ?? []) {
-      const detail = state.tasks[task.id]
-      if (!detail) continue
-      for (const attempt of detail.attempts ?? []) {
-        items.push({
-          path: `${prefix}tasks/${task.id}/attempts/${attempt.idx}/stdout.log`,
-          kind: 'log',
-          size_bytes: 9_216,
-          sha256: null,
-          task_id: task.id,
-          attempt_id: attempt.id,
-        })
-        items.push({
-          path: `${prefix}tasks/${task.id}/attempts/${attempt.idx}/result.json`,
-          kind: 'result',
-          size_bytes: 2_048,
-          sha256: null,
-          task_id: task.id,
-          attempt_id: attempt.id,
-        })
-      }
-    }
-    const byKind: Partial<Record<Artifact['kind'], Artifact[]>> = {}
-    for (const item of items) byKind[item.kind] = [...(byKind[item.kind] ?? []), item]
-    return {
-      items,
-      by_kind: byKind,
-      total_size_bytes: items.reduce((sum, item) => sum + item.size_bytes, 0),
-    }
-  },
-
-  /** 整包下载（mock）：最小 zip 字节流，够让 UI/用例验"是 application/zip 且真的触发下载" */
-  async downloadBundle(runId: string): Promise<Blob> {
-    await delay(150)
-    findRun(runId)
-    return new Blob([`PK\u0003\u0004 testplane mock bundle for ${runId}`], { type: 'application/zip' })
-  },
-
-  /** 单文件下载（mock）：按后缀给合理 content-type；Deploy 日志只认真正落盘的路径 */
-  async downloadFile(runId: string, path: string): Promise<Blob> {
-    await delay(80)
-    const run = findRun(runId)
-    const rel = path.startsWith(`${runId}/`) ? path.slice(runId.length + 1) : path
-
-    if (rel.startsWith('deploy/logs/')) {
-      const file = rel.slice('deploy/logs/'.length)
-      const pods = state.deploys[runId]?.pods ?? []
-      // 单容器：<pod>.log；多容器/滚档：<pod>.<suffix>.log
-      const exists = pods.some((pod) => file === `${pod.name}.log` || file.startsWith(`${pod.name}.`))
-      if (!exists) {
-        throw new ApiClientError(404, {
-          code: 'NOT_FOUND',
-          message: `deploy/logs/${file} 还没落盘（Pod 可能刚创建）`,
-          detail: { path: rel },
-          retryable: false,
-        })
-      }
-      return new Blob([`mock deploy log of deploy/logs/${file}`], { type: 'text/plain' })
-    }
-
-    if (rel === 'deploy/pods.json') {
-      if (!run.deploy) {
-        throw new ApiClientError(404, { code: 'NOT_FOUND', message: '这次 Run 没有 Deploy', retryable: false })
-      }
-      return new Blob([JSON.stringify({ generated_at: nowIso(), pods: state.deploys[runId]?.pods ?? [] })], {
-        type: 'application/json',
-      })
-    }
-
-    const type = path.endsWith('.md')
-      ? 'text/markdown'
-      : path.endsWith('.jsonl')
-        ? 'application/x-ndjson'
-        : path.endsWith('.json')
-          ? 'application/json'
-          : 'text/plain'
-    return new Blob([`mock content of ${path}`], { type })
-  },
-
   /* ---------------------------------------------------------------- 报告（契约内） */
 
-  async getReport(runId: string): Promise<Report> {
+  async getTaskReport(taskId: string): Promise<Report> {
     await delay(120)
-    const run = findRun(runId)
-    // 契约：报告在 run.finished 之后异步生成；未终态时 404 + Retry-After（C-7.2）。
-    // 这里把秒数放进 detail，页面用它做倒计时重试（不另造错误通道）。
-    if (!isTerminal(run.status)) {
+    const task = findTask(taskId)
+    const attemptNo = task.current_attempt
+    // 契约：报告在 task_finished 之后异步生成；未终态时 404 + Retry-After（C-7.2）。
+    if (!isTerminalTask(task.status)) {
       throw new ApiClientError(404, {
         code: 'NOT_FOUND',
-        message: `报告尚未生成：Run 当前是 ${run.status}，终态后才会写出 report.json`,
+        message: `报告尚未生成：Task 当前是 ${task.status}，终态后才会写出 report.json`,
         detail: { retry_after_seconds: 5 },
         retryable: true,
       })
     }
-    const tasks = run.tasks ?? []
-    const rows: ReportTask[] = tasks.map((summary) => {
-      const detail = state.tasks[summary.id]
-      return {
-        task_id: summary.id,
-        name: summary.name,
-        status: summary.status,
-        attempts: detail?.current_attempt ?? 0,
-        result_ref: detail?.result_ref ?? null,
-        duration_ms: detail?.attempts?.[0]?.started_at && detail.attempts[0].finished_at
-          ? new Date(detail.attempts[0].finished_at as string).getTime() - new Date(detail.attempts[0].started_at as string).getTime()
+    const runners = state.attemptRunners[`${taskId}:${attemptNo}`] ?? []
+    const rows: ReportRunner[] = runners.map((runner) => ({
+      seq: runner.seq,
+      name: runner.name,
+      role: runner.role,
+      status: runner.status,
+      exports_ref: runner.exports_ref ?? null,
+      result_ref: runner.result_ref ?? null,
+      duration_ms:
+        runner.started_at && runner.finished_at
+          ? new Date(runner.finished_at).getTime() - new Date(runner.started_at).getTime()
           : null,
-      }
-    })
+    }))
     const counts: ReportCounts = {
       total: rows.length,
       succeeded: rows.filter((r) => r.status === 'succeeded').length,
@@ -2121,29 +2352,38 @@ export const mockApi: Api = {
       skipped: rows.filter((r) => r.status === 'skipped').length,
       canceled: rows.filter((r) => r.status === 'canceled').length,
     }
-    const failures: ReportFailure[] = tasks
-      .filter((task) => task.error || task.status === 'failed')
-      .map((task) => ({
-        task_id: task.id,
-        reason: task.error?.message ?? 'Task 失败',
-        error_code: task.error?.code ?? null,
+    const failures: ReportFailure[] = runners
+      .filter((runner) => runner.status === 'failed' && runner.error)
+      .map((runner) => ({
+        seq: runner.seq,
+        name: runner.name,
+        error_code: runner.error?.code ?? 'RUNNER_NONZERO_EXIT',
+        reason: runner.error?.message ?? 'runner 失败',
       }))
-    return { run_id: run.id, status: run.status, counts, tasks: rows, failures }
+    return {
+      task_id: task.id,
+      attempt_no: attemptNo,
+      status: task.status,
+      counts,
+      runners: rows,
+      failures,
+      cleanup_failed: false,
+      truncated: false,
+    }
   },
 
-  async getReportMd(runId: string): Promise<string> {
+  async getTaskReportMd(taskId: string): Promise<string> {
     await delay(100)
-    const run = findRun(runId)
-    const report = await mockApi.getReport(runId)
+    const task = findTask(taskId)
+    const report = await mockApi.getTaskReport(taskId)
     const lines = [
-      `# Run ${run.id} 报告`,
+      `# ${task.id} · ${task.name}`,
       '',
-      `- 名称：${run.name}`,
-      `- 状态：${run.status}`,
-      `- 提交人：${run.submitted_by}`,
-      `- 提交时间：${run.submitted_at}`,
+      `- 状态：${task.status}`,
+      `- 提交人：${task.submitted_by}`,
+      `- attempt：#${report.attempt_no}`,
       '',
-      '## Task 统计',
+      '## runner 统计',
       '',
       `| 总数 | 成功 | 失败 | 跳过 | 取消 |`,
       `| --- | --- | --- | --- | --- |`,
@@ -2153,7 +2393,7 @@ export const mockApi: Api = {
       '',
       ...(report.failures.length === 0
         ? ['无。']
-        : report.failures.map((f) => `- \`${f.task_id}\`：${f.reason}（${f.error_code ?? '—'}）`)),
+        : report.failures.map((f) => `- seq ${f.seq} ${f.name}：${f.reason}（${f.error_code}）`)),
     ]
     return lines.join('\n')
   },
@@ -2164,146 +2404,6 @@ export const mockApi: Api = {
     await delay(80)
     return clone(state.profiles)
   },
-
-  /* ---------------------------------------------------------------- 重试（P1） */
-
-  async getRetryPlan(runId: string): Promise<RetryPlan> {
-    await delay(140)
-    const run = findRun(runId)
-    const tasks = run.tasks ?? []
-    // 契约形状：reuse[] 只有 task_id/name/reason（**没有 status**）；
-    // rerun[] 带原状态 + `failure`（Failure：code/message/retryable）；
-    // blocked_items[] 是"想复用但不可复用"的说明（Task 同时仍在 rerun 里）。
-    const reuse: RetryReuseItem[] = tasks
-      .filter((task) => task.status === 'succeeded')
-      .map((task) => ({ task_id: task.id, name: task.name, reason: 'succeeded' }))
-    const rerun: RetryRerunItem[] = tasks
-      .filter((task) => task.status !== 'succeeded')
-      .map((task) => ({
-        task_id: task.id,
-        name: task.name,
-        status: task.status,
-        failure: task.error
-          ? { code: task.error.code, message: task.error.message, retryable: task.error.retryable ?? false }
-          : null,
-      }))
-    // 被跳过的 Task 即使有目录也没有可复用产物：blocked_items 逐条说清原因
-    // （同一 Task 仍会出现在 rerun 里，契约如此）
-    const blocked_items: RetryBlockedItem[] = tasks
-      .filter((task) => task.status === 'skipped')
-      .map((task) => ({
-        task_id: task.id,
-        name: task.name,
-        reason: '复用的 result.json 不存在（Task 被跳过，没有产物）',
-      }))
-    const retryableStatuses = ['failed', 'completed_with_errors', 'service_unavailable']
-    const retryable = retryableStatuses.includes(run.status) && rerun.length > 0
-    const reason: RetryPlanReason | null = retryable
-      ? null
-      : run.status === 'canceled'
-        ? 'run_canceled'
-        : run.status === 'succeeded' || rerun.length === 0
-          ? 'nothing_to_retry'
-          : 'run_not_terminal'
-    return {
-      run_id: run.id,
-      retryable,
-      reason,
-      reuse,
-      rerun,
-      blocked_items,
-      manifest_digest: `sha256:${run.id.replace(/[^a-z0-9]/gi, '').padEnd(16, '0').slice(0, 16)}`,
-    }
-  },
-
-  async retryRun(runId: string): Promise<RetryPlan> {
-    await delay(260)
-    const run = findRun(runId)
-    const plan = await mockApi.getRetryPlan(runId)
-    if (!plan.retryable) {
-      throw new ApiClientError(409, { code: 'CONFLICT', message: plan.reason ?? '当前 Run 不可重试', retryable: false })
-    }
-    const newRunId = nextRunId()
-    const reuse = (run.tasks ?? []).filter((task) => task.status === 'succeeded')
-    const rerun = (run.tasks ?? []).filter((task) => task.status !== 'succeeded')
-    const taskSeeds: TaskSeed[] = [
-      ...reuse.map((task) => ({
-        seq: task.attempts,
-        name: task.name,
-        tester: state.tasks[task.id]?.tester_name ?? 'endpoint-probe',
-        status: 'succeeded' as TaskStatus,
-        args: state.tasks[task.id]?.args_raw,
-        startedMinAgo: 3,
-        durationSec: 30,
-      })),
-      ...rerun.map((task, index) => ({
-        seq: index + 4,
-        name: task.name,
-        tester: state.tasks[task.id]?.tester_name ?? 'aisbench-acc',
-        status: 'queued' as TaskStatus,
-        args: state.tasks[task.id]?.args_raw,
-        waiting: 'slot_waiting' as WaitingReason,
-      })),
-    ]
-    const created = seedRun({
-      id: newRunId,
-      name: `${run.name} (retry)`,
-      status: 'queued',
-      submittedBy: getCurrentUser(),
-      submittedMinAgo: 0,
-      endpoint: run.endpoint ?? null,
-      deploy: run.deploy ?? undefined,
-      tasks: taskSeeds,
-    })
-    created.retry_of = run.id
-    auditLog('run.retry', 'run', newRunId, { retry_of: run.id })
-    // 契约：POST /runs/{id}/retry 的响应就是 RetryPlan + new_run_id / retry_of
-    return { ...plan, new_run_id: created.id, retry_of: run.id }
-  },
-
-  async retryTask(taskId: string): Promise<TaskRetryAccepted> {
-    await delay(200)
-    const task = findTask(taskId)
-    if (!['succeeded', 'failed', 'canceled', 'skipped'].includes(task.status)) {
-      throw new ApiClientError(409, { code: 'CONFLICT', message: 'Task 还没结束，不能重跑', retryable: false })
-    }
-    const run = findRun(task.run_id)
-    if (run.status === 'canceled') {
-      throw new ApiClientError(409, { code: 'CONFLICT', message: 'Run 已取消，不能重跑其中的 Task', retryable: false })
-    }
-    task.current_attempt += 1
-    task.status = 'queued'
-    task.waiting_reason = 'slot_waiting'
-    task.status_reason = null
-    task.error = null
-    task.updated_at = nowIso()
-    task.attempts = [
-      ...task.attempts,
-      {
-        id: `${task.id}-a${task.current_attempt}`,
-        task_id: task.id,
-        idx: task.current_attempt,
-        status: 'preparing',
-        phase: 'Pending',
-        exit_code: null,
-        image_digest: 'sha256:mock',
-        started_at: null,
-        finished_at: null,
-        log_ref: `tasks/${task.id}/attempts/${task.current_attempt}/stdout.log`,
-        error: null,
-        executor_ref: null,
-      },
-    ]
-    syncSummary(task)
-    pushEvent(task.run_id, 'attempt.started', null, 'preparing', {
-      task_id: task.id,
-      attempt_id: `${task.id}-a${task.current_attempt}`,
-    })
-    auditLog('task.retry', 'task', task.id, { attempt: task.current_attempt })
-    return { task_id: task.id, attempt_no: task.current_attempt, status: 'queued' }
-  },
-
-  /* ---------------------------------------------------------------- /admin/*（P1） */
 
   /* ---------------------------------------------------------------- 共享挂载（D-65） */
 
@@ -2367,6 +2467,7 @@ export const mockApi: Api = {
     if (index < 0) notFound(`共享挂载 ${name}`)
     state.sharedMounts.splice(index, 1)
   },
+
   async listAdminClusters(): Promise<AdminCluster[]> {
     await delay(90)
     return clone(state.adminClusters)
@@ -2472,26 +2573,27 @@ export const mockApi: Api = {
 
   async getDashboardStats(): Promise<DashboardStats> {
     await delay(120)
-    const runs = state.runs
-    const active = runs.filter((r) => !isTerminal(r.status))
-    const terminal = runs.filter((r) => isTerminal(r.status))
-    const succeeded = terminal.filter((r) => r.status === 'succeeded').length
-    const queuedTasks = runs
-      .filter((r) => !isTerminal(r.status))
-      .reduce((sum, r) => sum + (r.task_counts?.pending ?? 0), 0)
+    const tasks = Object.values(state.tasks)
+    const active = tasks.filter((t) => !isTerminalTask(t.status))
+    const terminal = tasks.filter((t) => isTerminalTask(t.status))
+    const succeeded = terminal.filter((t) => t.status === 'succeeded').length
+    const queuedRunners = active.reduce(
+      (sum, t) => sum + (t.runner_counts?.pending ?? 0) + (t.runner_counts?.running ?? 0),
+      0,
+    )
     const dayAgo = Date.now() - 24 * 3600 * 1000
-    const failed24h = runs.filter(
-      (r) =>
-        ['failed', 'service_unavailable', 'completed_with_errors'].includes(r.status) &&
-        new Date(r.submitted_at).getTime() >= dayAgo,
+    const failed24h = tasks.filter(
+      (t) =>
+        ['failed', 'service_unavailable'].includes(t.status) &&
+        new Date(t.submitted_at).getTime() >= dayAgo,
     ).length
     return {
-      active_runs: active.length,
-      queued_tasks: queuedTasks,
+      active_tasks: active.length,
+      queued_runners: queuedRunners,
       failed_24h: failed24h,
       success_rate: terminal.length === 0 ? null : succeeded / terminal.length,
-      total_runs: runs.length,
-      tester_count: state.testers.length,
+      total_tasks: tasks.length,
+      runner_count: state.runners.filter((r) => !r.retired).length,
     }
   },
 }

@@ -1,5 +1,5 @@
 /**
- * Run 事件流（SSE）。
+ * Task 事件流（SSE，`GET /api/v1/tasks/{id}/events`）。
  *
  * 为什么不用原生 `EventSource`（design/impl/web-and-delivery.md §3 规则 3）：
  *  - 要带 `Authorization` 与 `Last-Event-ID` 请求头，EventSource 不能设头；
@@ -7,18 +7,18 @@
  *  - 页面切到后台时要暂停。
  * 所以用 fetch + ReadableStream 自己按 `\n\n` 切帧（07 §7 的线上格式）。
  *
- * 断线策略：1s → 2s → 4s → 8s → 30s 指数退避（07 §7）；seq 去重由调用方（useRunEvents）做。
+ * 断线策略：1s → 2s → 4s → 8s → 30s 指数退避（07 §7）；seq 去重由调用方（useTaskEvents）做。
  */
 import { ApiClientError, USE_MOCK, authHeaders, normalizeErrorBody } from './client'
 import { subscribeMockEvents } from './mock'
-import type { RunEvent } from './types'
+import type { TaskEvent } from './types'
 
 export type SseStatus = 'connecting' | 'open' | 'reconnecting' | 'closed' | 'polling'
 
-export interface RunEventsOptions {
+export interface TaskEventsOptions {
   /** 已经消费到的最大 seq；重连时作为 Last-Event-ID */
   lastSeq?: number
-  onEvent: (event: RunEvent) => void
+  onEvent: (event: TaskEvent) => void
   onOpen?: () => void
   onError?: (error: unknown) => void
   /** 服务端判定回放窗口失效，前端应整页重建 */
@@ -33,8 +33,8 @@ function resolveUrl(path: string): string {
   return `${base}${path}`
 }
 
-/** 解析一帧 `id: 43\nevent: task.state_changed\ndata: {...}`。 */
-export function parseSseFrame(frame: string): RunEvent | null {
+/** 解析一帧 `id: 43\nevent: runner_finished\ndata: {...}`。 */
+export function parseSseFrame(frame: string): TaskEvent | null {
   let id: string | undefined
   let name: string | undefined
   const data: string[] = []
@@ -66,26 +66,27 @@ export function parseSseFrame(frame: string): RunEvent | null {
   const seq = typeof rec['seq'] === 'number' ? rec['seq'] : seqFromId
   if (!Number.isFinite(seq)) return null
 
-  const type = typeof rec['type'] === 'string' ? rec['type'] : (name ?? 'run.state_changed')
+  const type = typeof rec['type'] === 'string' ? rec['type'] : (name ?? 'state_changed')
   const str = (key: string) => (typeof rec[key] === 'string' ? (rec[key] as string) : null)
+  const num = (key: string) => (typeof rec[key] === 'number' ? (rec[key] as number) : null)
   return {
     seq,
-    type: type as RunEvent['type'],
-    run_id: String(rec['run_id'] ?? ''),
-    task_id: str('task_id'),
-    attempt_id: str('attempt_id'),
+    type: type as TaskEvent['type'],
+    task_id: String(rec['task_id'] ?? ''),
+    attempt_no: num('attempt_no'),
+    runner_seq: num('runner_seq'),
     at: typeof rec['at'] === 'string' ? rec['at'] : new Date().toISOString(),
     from: str('from'),
     to: str('to'),
     reason: str('reason'),
-    payload: (rec['payload'] ?? null) as RunEvent['payload'],
+    payload: (rec['payload'] ?? null) as TaskEvent['payload'],
   }
 }
 
-/** 订阅一个 Run 的事件流；返回取消函数。 */
-export function subscribeRunEvents(runId: string, options: RunEventsOptions): () => void {
+/** 订阅一个 Task 的事件流；返回取消函数。 */
+export function subscribeTaskEvents(taskId: string, options: TaskEventsOptions): () => void {
   if (USE_MOCK) {
-    return subscribeMockEvents(runId, {
+    return subscribeMockEvents(taskId, {
       sinceSeq: options.lastSeq ?? 0,
       onEvent: options.onEvent,
       onOpen: () => {
@@ -126,7 +127,7 @@ export function subscribeRunEvents(runId: string, options: RunEventsOptions): ()
     if (lastId > 0) headers.set('Last-Event-ID', String(lastId))
 
     try {
-      const res = await fetch(resolveUrl(`/runs/${encodeURIComponent(runId)}/events`), {
+      const res = await fetch(resolveUrl(`/tasks/${encodeURIComponent(taskId)}/events`), {
         headers,
         signal: controller.signal,
         credentials: 'same-origin',

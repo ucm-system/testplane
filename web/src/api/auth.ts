@@ -101,7 +101,7 @@ export function clearAuth(): void {
 
 /* ---------------------------------------------------------------- 401 跳登录 */
 
-const REDIRECT_FLAG = 'testplane:auth-redirect'
+const REDIRECT_FLAG = 'argus:auth-redirect'
 
 function clearRedirectGuard(): void {
   try {

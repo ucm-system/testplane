@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
  * 品牌字标（`design/prototype/index.html` 的 `<svg class="hg-wordmark">` 原样搬进 React）。
  *
  * 三条纪律：
- *  - 图形 + 字母是一体的身份标识，**不要**再在外面配 `<img favicon>` + `<span>TestPlane</span>`；
+ *  - 图形 + 字母是一体的身份标识，**不要**再在外面配 `<img favicon>` + `<span>Argus</span>`；
  *  - 原型里的 `linearGradient` id 是全局的，这里用 `useId()` 生成唯一 id，避免同页多实例串色；
  *  - 字色走 `currentColor`（`text-fg`），跟随主题，不写死 hex。
  */
@@ -15,7 +15,7 @@ export function Wordmark({ className, height = 26 }: { className?: string; heigh
     <svg
       viewBox="0 0 134 30"
       role="img"
-      aria-label="TestPlane"
+      aria-label="Argus"
       className={cn('w-auto shrink-0 overflow-visible', className)}
       style={{ height }}
     >
@@ -53,7 +53,7 @@ export function Wordmark({ className, height = 26 }: { className?: string; heigh
           letterSpacing: '-0.02em',
         }}
       >
-        TestPlane
+        Argus
       </text>
     </svg>
   )

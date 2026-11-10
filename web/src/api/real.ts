@@ -1,10 +1,10 @@
 /**
- * 真实接口实现 —— 端点与响应形状以 `server/api/openapi.yaml` 为准。
+ * 真实接口实现 —— 端点与响应形状以 `server/api/openapi.yaml`（schema 2.0）为准。
  * 基址由 api/client.ts 的 `API_BASE` 拼接（默认 `/api/v1`），这里只写资源路径。
  */
 import type { Api, LogOptions } from './contract'
 import { API_BASE, ApiClientError, authHeaders, normalizeErrorBody, qs, request, requestText } from './client'
-import { asArray, asPage, normalizeTester } from './normalize'
+import { asArray, asPage, normalizeRunner } from './normalize'
 import { applyIdentity, clearAuth } from './auth'
 import type {
   AdminCluster,
@@ -23,34 +23,36 @@ import type {
   DryRunResult,
   ExecutionProfile,
   Identity,
+  LogChunk,
   Meta,
   Page,
   ProfileWrite,
   QueueStatus,
   Report,
   Result,
-  RetryPlan,
-  Run,
-  RunEvent,
-  RunListQuery,
-  RunManifest,
-  RunFacets,
-  RunFacetsQuery,
-  RunSummary,
+  Runner,
+  RunnerExecution,
+  RunnerListQuery,
+  SecretWrite,
   SharedMount,
   SharedMountPatch,
   SharedMountWrite,
-  SecretWrite,
   SubmitResult,
   Task,
-  TaskCancelResult,
   TaskDetail,
+  TaskEvent,
+  TaskFacets,
+  TaskFacetsQuery,
   TaskListQuery,
+  TaskManifest,
   TaskRetryAccepted,
-  Tester,
-  TesterListQuery,
   WaitingReasonCounts,
 } from './types'
+
+/** 日志查询参数里的 attempt 透传（Task 级端点 `?attempt=` 缺省取最新 attempt）。 */
+function attemptQ(attempt?: number): Record<string, string | number | undefined> {
+  return { attempt }
+}
 
 /** `QueueStatus` 的防御性归一：契约保证 slots/waiting 必填，但别让页面因缺字段崩掉。 */
 function normalizeQueueStatus(raw: unknown): QueueStatus {
@@ -68,18 +70,17 @@ function normalizeQueueStatus(raw: unknown): QueueStatus {
     waiting: {
       total: Number(waiting['total'] ?? 0),
       by_reason: (waiting['by_reason'] ?? {
-        precheck_gate: 0,
         slot_waiting: 0,
-        global_limit: 0,
         queue_full: 0,
         insufficient_resources: 0,
         gang_pending: 0,
       }) as WaitingReasonCounts,
-      tasks: Array.isArray(waiting['tasks']) ? (waiting['tasks'] as QueueStatus['waiting']['tasks']) : [],
+      runners: Array.isArray(waiting['runners']) ? (waiting['runners'] as QueueStatus['waiting']['runners']) : [],
     },
     volcano: (rec['volcano'] ?? undefined) as QueueStatus['volcano'],
   }
 }
+
 export const realApi: Api = {
   async getIdentity(): Promise<Identity> {
     const identity = await request<Identity>('/me')
@@ -97,12 +98,11 @@ export const realApi: Api = {
     return request<Meta>('/meta')
   },
 
-  async listRuns(query: RunListQuery = {}): Promise<Page<RunSummary>> {
+  async listTasks(query: TaskListQuery = {}): Promise<Page<Task>> {
     const data = await request<unknown>(
-      `/runs${qs({
+      `/tasks${qs({
         status: query.status,
-        kind: query.kind,
-        tester: query.tester,
+        runner: query.runner,
         submitter: query.submitter,
         // offset 分页（UI）与游标分页（agent / CLI）互斥：给了 page 就不带 cursor
         page: query.page,
@@ -111,7 +111,184 @@ export const realApi: Api = {
         limit: query.page ? undefined : query.limit,
       })}`,
     )
-    return asPage<RunSummary>(data)
+    return asPage<Task>(data)
+  },
+
+  listTaskFacets(query: TaskFacetsQuery = {}): Promise<TaskFacets> {
+    return request<TaskFacets>(
+      `/tasks/facets${qs({
+        status: query.status,
+        runner: query.runner,
+        submitter: query.submitter,
+      })}`,
+    )
+  },
+
+  getTask(id: string): Promise<TaskDetail> {
+    return request<TaskDetail>(`/tasks/${encodeURIComponent(id)}`)
+  },
+
+  cancelTask(id: string): Promise<CancelResult> {
+    return request<CancelResult>(`/tasks/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
+  },
+
+  retryTask(id: string): Promise<TaskRetryAccepted> {
+    return request<TaskRetryAccepted>(`/tasks/${encodeURIComponent(id)}/retry`, { method: 'POST' })
+  },
+
+  async listTaskAttempts(taskId: string): Promise<Attempt[]> {
+    const data = await request<unknown>(`/tasks/${encodeURIComponent(taskId)}/attempts`)
+    return asArray<Attempt>(data).sort((a, b) => a.attempt_no - b.attempt_no)
+  },
+
+  async listTaskRunners(taskId: string, query: { attempt?: number } = {}): Promise<RunnerExecution[]> {
+    const data = await request<unknown>(
+      `/tasks/${encodeURIComponent(taskId)}/runners${qs(attemptQ(query.attempt))}`,
+    )
+    return asArray<RunnerExecution>(data).sort((a, b) => a.seq - b.seq)
+  },
+
+  getTaskRunner(taskId: string, seq: number, query: { attempt?: number } = {}): Promise<RunnerExecution> {
+    return request<RunnerExecution>(
+      `/tasks/${encodeURIComponent(taskId)}/runners/${seq}${qs(attemptQ(query.attempt))}`,
+    )
+  },
+
+  getRunnerResult(taskId: string, seq: number, query: { attempt?: number } = {}): Promise<Result> {
+    return request<Result>(
+      `/tasks/${encodeURIComponent(taskId)}/runners/${seq}/result${qs(attemptQ(query.attempt))}`,
+    )
+  },
+
+  async getRunnerLogs(taskId: string, seq: number, opts: LogOptions = {}): Promise<LogChunk> {
+    const text = await requestText(
+      `/tasks/${encodeURIComponent(taskId)}/runners/${seq}/logs${qs({
+        attempt: opts.attempt,
+        stream: opts.stream,
+        offset: opts.offset,
+        limit: opts.limit,
+        tail: opts.tail,
+        follow: opts.follow ? 1 : undefined,
+      })}`,
+      { headers: { Accept: 'text/plain' } },
+    )
+    return { text: text.text, offset: text.offset, coverage: text.coverage }
+  },
+
+  async listRunnerArtifacts(
+    taskId: string,
+    seq: number,
+    query: { attempt?: number } = {},
+  ): Promise<ArtifactList> {
+    const data = await request<unknown>(
+      `/tasks/${encodeURIComponent(taskId)}/runners/${seq}/artifacts${qs(attemptQ(query.attempt))}`,
+    )
+    return { items: asArray<ArtifactList['items'][number]>(data) }
+  },
+
+  getTaskDeploy(taskId: string): Promise<DeploySnapshot> {
+    return request<DeploySnapshot>(`/tasks/${encodeURIComponent(taskId)}/deploy`)
+  },
+
+  async getTaskDeployLogs(taskId: string, query: DeployLogQuery = {}): Promise<DeployLogs> {
+    const useTail = Boolean(query.tail_lines && query.tail_lines > 0)
+    return request<DeployLogs>(
+      `/tasks/${encodeURIComponent(taskId)}/deploy/logs${qs({
+        attempt: query.attempt,
+        pod: query.pod,
+        // `tail_lines` 与 `offset` 二选一 —— 同时传会 400，"要看最新"时干脆不带 offset
+        offset: useTail ? undefined : (query.offset ?? 0),
+        limit: query.limit,
+        tail_lines: useTail ? query.tail_lines : undefined,
+      })}`,
+    )
+  },
+
+  async getEventsHistory(taskId: string, sinceSeq?: number): Promise<TaskEvent[]> {
+    // `EventList`：`next_cursor` 是本页末条 seq，续取时作为 since_seq 传回（契约明确不接受 cursor）
+    const data = await request<unknown>(
+      `/tasks/${encodeURIComponent(taskId)}/events/history${qs({ since_seq: sinceSeq, limit: 1000 })}`,
+    )
+    return asArray<TaskEvent>(data).sort((a, b) => a.seq - b.seq)
+  },
+
+  async listRunners(query: RunnerListQuery = {}): Promise<Runner[]> {
+    const data = await request<unknown>(
+      `/runners${qs({
+        role: query.role,
+        orphaned: query.orphaned === undefined ? undefined : String(query.orphaned),
+        // 默认只回最新；只有显式要历史时后端才会带上 retired 版本（D-60）
+        include_retired: query.include_retired ? 'true' : undefined,
+      })}`,
+    )
+    return asArray<unknown>(data).map(normalizeRunner)
+  },
+
+  async getRunner(name: string): Promise<Runner> {
+    return normalizeRunner(await request<unknown>(`/runners/${encodeURIComponent(name)}`))
+  },
+
+  async listClusters(): Promise<Cluster[]> {
+    const data = await request<unknown>('/clusters')
+    return asArray<Cluster>(data)
+  },
+
+  async getQueueStatus(): Promise<QueueStatus> {
+    return normalizeQueueStatus(await request<unknown>('/queue-status'))
+  },
+
+  submitTask(manifest: TaskManifest): Promise<SubmitResult> {
+    return request<SubmitResult>('/tasks', { method: 'POST', body: JSON.stringify(manifest) })
+  },
+
+  dryRun(manifest: TaskManifest): Promise<DryRunResult> {
+    return request<DryRunResult>(`/tasks${qs({ dry_run: 'true' })}`, {
+      method: 'POST',
+      body: JSON.stringify(manifest),
+    })
+  },
+
+  async listTaskArtifacts(taskId: string): Promise<ArtifactList> {
+    const data = await request<unknown>(`/tasks/${encodeURIComponent(taskId)}/artifacts`)
+    return { items: asArray<ArtifactList['items'][number]>(data) }
+  },
+
+  /** 整包下载：必须走带鉴权的 fetch（`<a href>` 在 dev/OIDC 下会 401），拿到 Blob 再触发保存 */
+  async downloadBundle(taskId: string): Promise<Blob> {
+    const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/bundle`, {
+      headers: authHeaders(),
+      credentials: 'same-origin',
+    })
+    if (!res.ok) throw new ApiClientError(res.status, normalizeErrorBody(res.status, await res.json().catch(() => null)))
+    return res.blob()
+  },
+
+  /** 单文件下载：同上，`path` 用 artifacts 返回的 task 目录相对路径 */
+  async downloadFile(taskId: string, path: string): Promise<Blob> {
+    const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/files?path=${encodeURIComponent(path)}`, {
+      headers: authHeaders(),
+      credentials: 'same-origin',
+    })
+    if (!res.ok) throw new ApiClientError(res.status, normalizeErrorBody(res.status, await res.json().catch(() => null)))
+    return res.blob()
+  },
+
+  /* 报告（契约内） */
+  getTaskReport(taskId: string): Promise<Report> {
+    return request<Report>(`/tasks/${encodeURIComponent(taskId)}/report`)
+  },
+
+  async getTaskReportMd(taskId: string): Promise<string> {
+    const text = await requestText(`/tasks/${encodeURIComponent(taskId)}/report.md`, {
+      headers: { Accept: 'text/markdown' },
+    })
+    return text.text
+  },
+
+  /* Profile（契约内只读） */
+  async listProfiles(): Promise<ExecutionProfile[]> {
+    const data = await request<unknown>('/profiles')
+    return asArray<ExecutionProfile>(data)
   },
 
   /* ---------------------------------------------------------------- 共享挂载（D-65） */
@@ -144,191 +321,7 @@ export const realApi: Api = {
     await request<void>(`/admin/shared-mounts/${encodeURIComponent(name)}`, { method: 'DELETE' })
   },
 
-  /** 表头下拉的候选值：过滤参数与 listRuns 完全一致，计数不受当前页限制 */
-  listRunFacets(query: RunFacetsQuery = {}): Promise<RunFacets> {
-    return request<RunFacets>(
-      `/runs/facets${qs({
-        status: query.status,
-        kind: query.kind,
-        tester: query.tester,
-        submitter: query.submitter,
-      })}`,
-    )
-  },
-
-  getRun(id: string): Promise<Run> {
-    return request<Run>(`/runs/${encodeURIComponent(id)}`)
-  },
-
-  cancelRun(id: string): Promise<CancelResult> {
-    return request<CancelResult>(`/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
-  },
-
-  async listTasks(query: TaskListQuery = {}): Promise<Page<Task>> {
-    const data = await request<unknown>(
-      `/tasks${qs({
-        status: query.status,
-        tester: query.tester,
-        cursor: query.cursor ?? undefined,
-        limit: query.limit,
-      })}`,
-    )
-    return asPage<Task>(data)
-  },
-
-  getTask(id: string): Promise<TaskDetail> {
-    return request<TaskDetail>(`/tasks/${encodeURIComponent(id)}`)
-  },
-
-  cancelTask(id: string): Promise<TaskCancelResult> {
-    return request<TaskCancelResult>(`/tasks/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
-  },
-
-  async listAttempts(taskId: string): Promise<Attempt[]> {
-    const data = await request<unknown>(`/tasks/${encodeURIComponent(taskId)}/attempts`)
-    return asArray<Attempt>(data).sort((a, b) => a.idx - b.idx)
-  },
-
-  /** Attempt 的 result.json 原文（报告页指标表的数据来源；文件缺失时后端 404） */
-  getAttemptResult(taskId: string, idx: number): Promise<Result> {
-    return request<Result>(`/tasks/${encodeURIComponent(taskId)}/attempts/${idx}/result`)
-  },
-
-  async getAttemptLogs(taskId: string, idx: number, opts: LogOptions = {}) {
-    const text = await requestText(
-      `/tasks/${encodeURIComponent(taskId)}/attempts/${idx}/logs${qs({
-        stream: opts.stream,
-        offset: opts.offset,
-        limit: opts.limit,
-        tail: opts.tail,
-        follow: opts.follow ? 1 : undefined,
-      })}`,
-      { headers: { Accept: 'text/plain' } },
-    )
-    return { text: text.text, offset: text.offset, coverage: text.coverage }
-  },
-
-  getDeploy(runId: string): Promise<DeploySnapshot> {
-    return request<DeploySnapshot>(`/runs/${encodeURIComponent(runId)}/deploy`)
-  },
-
-  async getEventsHistory(runId: string, sinceSeq?: number): Promise<RunEvent[]> {
-    // `EventList`：`next_cursor` 是本页末条 seq，续取时作为 since_seq 传回（契约明确不接受 cursor）
-    const data = await request<unknown>(
-      `/runs/${encodeURIComponent(runId)}/events/history${qs({ since_seq: sinceSeq, limit: 1000 })}`,
-    )
-    return asArray<RunEvent>(data).sort((a, b) => a.seq - b.seq)
-  },
-
-  async listTesters(query: TesterListQuery = {}): Promise<Tester[]> {
-    const data = await request<unknown>(
-      `/testers${qs({
-        role: query.role,
-        orphaned: query.orphaned === undefined ? undefined : String(query.orphaned),
-        // 默认只回最新；只有显式要历史时后端才会带上 retired 版本
-        include_retired: query.include_retired ? 'true' : undefined,
-      })}`,
-    )
-    return asArray<unknown>(data).map(normalizeTester)
-  },
-
-  async getTester(name: string): Promise<Tester> {
-    return normalizeTester(await request<unknown>(`/testers/${encodeURIComponent(name)}`))
-  },
-
-  async listClusters(): Promise<Cluster[]> {
-    const data = await request<unknown>('/clusters')
-    return asArray<Cluster>(data)
-  },
-
-  async getQueueStatus(): Promise<QueueStatus> {
-    return normalizeQueueStatus(await request<unknown>('/queue-status'))
-  },
-
-  submitRun(manifest: RunManifest): Promise<SubmitResult> {
-    return request<SubmitResult>('/runs', { method: 'POST', body: JSON.stringify(manifest) })
-  },
-
-  dryRun(manifest: RunManifest): Promise<DryRunResult> {
-    return request<DryRunResult>(`/runs${qs({ dry_run: 'true' })}`, {
-      method: 'POST',
-      body: JSON.stringify(manifest),
-    })
-  },
-
-  /**
-   * Deploy 日志：**`?pod=` 必选**（缺了服务端 400，指定不存在的 pod 404）。
-   * `tail_lines` 与 `offset` 二选一 —— 同时传会 400，所以"要看最新"时干脆不带 offset。
-   */
-  getDeployLogs(runId: string, query: DeployLogQuery & { pod: string }): Promise<DeployLogs> {
-    const useTail = Boolean(query.tail_lines && query.tail_lines > 0)
-    return request<DeployLogs>(
-      `/runs/${encodeURIComponent(runId)}/deploy/logs${qs({
-        pod: query.pod,
-        offset: useTail ? undefined : (query.offset ?? 0),
-        limit: query.limit,
-        tail_lines: useTail ? query.tail_lines : undefined,
-      })}`,
-    )
-  },
-
-  /** 产物清单：与 `/files?path=` 配对使用（下载链接直接拼 API_BASE） */
-  listRunArtifacts(runId: string): Promise<ArtifactList> {
-    return request<ArtifactList>(`/runs/${encodeURIComponent(runId)}/artifacts`)
-  },
-
-  /** 整包下载：必须走带鉴权的 fetch（`<a href>` 在 dev/OIDC 下会 401），拿到 Blob 再触发保存 */
-  async downloadBundle(runId: string): Promise<Blob> {
-    const res = await fetch(`${API_BASE}/runs/${encodeURIComponent(runId)}/bundle`, {
-      headers: authHeaders(),
-      credentials: 'same-origin',
-    })
-    if (!res.ok) throw new ApiClientError(res.status, normalizeErrorBody(res.status, await res.json().catch(() => null)))
-    return res.blob()
-  },
-
-  /** 单文件下载：同上，`path` 用 artifacts 返回的 storage-root 相对路径 */
-  async downloadFile(runId: string, path: string): Promise<Blob> {
-    const res = await fetch(`${API_BASE}/runs/${encodeURIComponent(runId)}/files?path=${encodeURIComponent(path)}`, {
-      headers: authHeaders(),
-      credentials: 'same-origin',
-    })
-    if (!res.ok) throw new ApiClientError(res.status, normalizeErrorBody(res.status, await res.json().catch(() => null)))
-    return res.blob()
-  },
-
-  /* 报告（契约内） */
-  getReport(runId: string): Promise<Report> {
-    return request<Report>(`/runs/${encodeURIComponent(runId)}/report`)
-  },
-
-  async getReportMd(runId: string): Promise<string> {
-    const text = await requestText(`/runs/${encodeURIComponent(runId)}/report.md`, {
-      headers: { Accept: 'text/markdown' },
-    })
-    return text.text
-  },
-
-  /* Profile（契约内只读） */
-  async listProfiles(): Promise<ExecutionProfile[]> {
-    const data = await request<unknown>('/profiles')
-    return asArray<ExecutionProfile>(data)
-  },
-
-  /* 重试（P1：按 Lead 约定路径实现） */
-  getRetryPlan(runId: string): Promise<RetryPlan> {
-    return request<RetryPlan>(`/runs/${encodeURIComponent(runId)}/retry-plan`)
-  },
-
-  retryRun(runId: string): Promise<RetryPlan> {
-    return request<RetryPlan>(`/runs/${encodeURIComponent(runId)}/retry`, { method: 'POST' })
-  },
-
-  retryTask(taskId: string): Promise<TaskRetryAccepted> {
-    return request<TaskRetryAccepted>(`/tasks/${encodeURIComponent(taskId)}/retry`, { method: 'POST' })
-  },
-
-  /* 管理（P1：仅 admin） */
+  /* 管理（仅 admin） */
   async listAdminClusters(): Promise<AdminCluster[]> {
     const data = await request<unknown>('/admin/clusters')
     return asArray<AdminCluster>(data)
@@ -389,38 +382,34 @@ export const realApi: Api = {
 
   async getDashboardStats(): Promise<DashboardStats> {
     // P0 没有 /board：用列表页的同一份数据 + 队列状态现算
-    const [runs, testers, queue] = await Promise.all([
-      realApi.listRuns({ limit: 200 }),
-      realApi.listTesters(),
+    const [tasks, runners, queue] = await Promise.all([
+      realApi.listTasks({ limit: 200 }),
+      realApi.listRunners(),
       realApi.getQueueStatus().catch(() => null),
     ])
-    const items = runs.items
-    const active = items.filter((r) =>
-      ['submitted', 'queued', 'deploying', 'testing', 'cleanup', 'cancelling'].includes(r.status),
+    const items = tasks.items
+    const active = items.filter((t) => ['submitted', 'queued', 'running', 'cancelling'].includes(t.status))
+    const terminal = items.filter((t) =>
+      ['succeeded', 'failed', 'service_unavailable', 'canceled'].includes(t.status),
     )
-    const terminal = items.filter((r) =>
-      ['succeeded', 'completed_with_errors', 'service_unavailable', 'failed', 'canceled'].includes(r.status),
-    )
-    const succeeded = terminal.filter((r) => r.status === 'succeeded').length
+    const succeeded = terminal.filter((t) => t.status === 'succeeded').length
     const dayAgo = Date.now() - 24 * 3600 * 1000
     const failed24h = items.filter(
-      (r) =>
-        ['failed', 'service_unavailable', 'completed_with_errors'].includes(r.status) &&
-        new Date(r.submitted_at).getTime() >= dayAgo,
+      (t) =>
+        ['failed', 'service_unavailable'].includes(t.status) &&
+        new Date(t.submitted_at).getTime() >= dayAgo,
     ).length
-    const queuedTasks =
+    const queuedRunners =
       queue?.waiting?.total ??
-      items
-        .filter((r) => ['queued', 'deploying'].includes(r.status))
-        .reduce((sum, r) => sum + (r.task_counts?.pending ?? 0), 0)
+      items.reduce((sum, t) => sum + (t.runner_counts?.pending ?? 0), 0)
 
     return {
-      active_runs: active.length,
-      queued_tasks: queuedTasks,
+      active_tasks: active.length,
+      queued_runners: queuedRunners,
       failed_24h: failed24h,
       success_rate: terminal.length === 0 ? null : succeeded / terminal.length,
-      total_runs: items.length,
-      tester_count: testers.length,
+      total_tasks: items.length,
+      runner_count: runners.length,
     }
   },
 }

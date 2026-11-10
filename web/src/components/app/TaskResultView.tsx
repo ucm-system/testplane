@@ -3,24 +3,25 @@ import { Link } from 'react-router-dom'
 import { ArrowUpRight, Check, ChevronRight, Download, FileText } from 'lucide-react'
 import { API_BASE, api } from '@/api'
 import { toApiError } from '@/api/client'
-import type { ApiErrorBody, Artifact, Run } from '@/api/types'
+import type { ApiErrorBody, Artifact, Report, TaskDetail } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonClassName } from '@/components/ui/button'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
 import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
-import { RunStatusBadge } from '@/components/app/StatusBadge'
+import { TaskStatusBadge } from '@/components/app/StatusBadge'
 import { useAsync } from '@/hooks/useAsync'
 import { ARTIFACT_GROUPS, groupArtifacts, relativeArtifactPath } from '@/lib/artifact-groups'
+import { ArtifactViewerDialog, artifactViewKindOf } from '@/components/app/ArtifactViewer'
 import { formatBytes, saveBlob } from '@/lib/download'
-import { formatDateTime, formatDuration } from '@/lib/utils'
+import { cn, formatDateTime, formatDuration } from '@/lib/utils'
 
 /**
- * 终态 Run 的「结果」视图（用户原话：跑完了点进去，只想拿测试结果）。
+ * 终态 Task 的「结果」视图（用户原话：跑完了点进去，只想拿测试结果）。
  *
- * 只放 4 个块：**结论 / 失败项 / 产物 / 报告**；执行链路、Task、Attempt、日志全部在
- * 「执行细节」页签里（二级）。产物下载按契约走 `GET /runs/{id}/files?path=`，
- * 清单来自 `GET /runs/{id}/artifacts`（前端**显式列全**，不只给 report.md）。
+ * 只放 4 个块：**结论 / 失败项 / 产物 / 报告**；runner 管道时间线、attempt、日志全部在
+ * 「执行细节」页签里（二级）。产物下载按契约走 `GET /tasks/{id}/files?path=`，
+ * 清单来自 `GET /tasks/{id}/artifacts`（前端**显式列全**，不只给 report.md）。
  */
 
 const KIND_LABEL: Record<Artifact['kind'], string> = {
@@ -28,6 +29,7 @@ const KIND_LABEL: Record<Artifact['kind'], string> = {
   result: '结果',
   log: '日志',
   raw: '原始数据',
+  export: 'exports',
   other: '其它',
 }
 
@@ -36,51 +38,54 @@ const KIND_TONE: Record<Artifact['kind'], 'info' | 'ok' | 'muted' | 'warn'> = {
   result: 'ok',
   log: 'muted',
   raw: 'warn',
+  export: 'info',
   other: 'muted',
 }
 
-/** `/files?path=` 的下载地址（`path` 用 artifacts 返回的 storage-root 相对路径） */
-function fileUrl(runId: string, path: string): string {
-  return `${API_BASE}/runs/${encodeURIComponent(runId)}/files?path=${encodeURIComponent(path)}`
+/** `/files?path=` 的下载地址（`path` 用 artifacts 返回的 task 目录相对路径） */
+function fileUrl(taskId: string, path: string): string {
+  return `${API_BASE}/tasks/${encodeURIComponent(taskId)}/files?path=${encodeURIComponent(path)}`
 }
 
 /** 一句结论：成功就是成功，失败要说清"为什么" */
-function conclusion(run: Run): { tone: 'ok' | 'warn' | 'err' | 'muted'; text: string } {
-  const failed = (run.tasks ?? []).filter((task) => task.status === 'failed')
-  switch (run.status) {
+function conclusion(
+  task: TaskDetail,
+  report: Report | null,
+): { tone: 'ok' | 'warn' | 'err' | 'muted'; text: string } {
+  const counts = task.runner_counts
+  switch (task.status) {
     case 'succeeded':
       return {
         tone: 'ok',
-        text: `全部 ${run.task_counts?.total ?? run.tasks?.length ?? 0} 个 Task 通过，可以出报告。`,
-      }
-    case 'completed_with_errors':
-      return {
-        tone: 'warn',
-        text: `${failed.length} 个 Task 失败（其余通过）：${failed.map((task) => task.name).join('、') || '—'}`,
+        text: `全部 ${counts?.total ?? report?.counts.total ?? 0} 个 runner 通过（attempt #${task.current_attempt}），可以出报告。`,
       }
     case 'failed':
       return {
         tone: 'err',
-        text: run.error
-          ? `${run.error.code}：${run.error.message}`
-          : `${failed.length} 个 Task 失败：${failed.map((task) => task.name).join('、') || '—'}`,
+        text: task.error
+          ? `${task.error.code}：${task.error.message}`
+          : report && report.failures.length > 0
+            ? `${report.failures.length} 个 runner 失败：${report.failures.map((f) => f.name).join('、')}`
+            : 'runner 管道有失败（原「部分失败」语义已并入 failed，D-73）。',
       }
     case 'service_unavailable':
-      return { tone: 'err', text: '被测服务不可用，Test 未执行（Pre-Check 未通过）。' }
+      return { tone: 'err', text: '被测服务不可用（pre_check 未通过或部署被阻塞），测试未执行。' }
     case 'canceled':
-      return { tone: 'muted', text: 'Run 被取消，结果不完整。' }
+      return { tone: 'muted', text: 'Task 被取消（service-clean 已收口），结果不完整。' }
     default:
-      return { tone: 'muted', text: `当前状态 ${run.status}` }
+      return { tone: 'muted', text: `当前状态 ${task.status}` }
   }
 }
 
-export function RunResultView({ run }: { run: Run }) {
-  const runId = run.id
-  const artifacts = useAsync(() => api.listRunArtifacts(runId), [runId])
-  const report = useAsync(() => api.getReport(runId), [runId])
+export function TaskResultView({ task }: { task: TaskDetail }) {
+  const taskId = task.id
+  const artifacts = useAsync(() => api.listTaskArtifacts(taskId), [taskId])
+  const report = useAsync(() => api.getTaskReport(taskId), [taskId])
   const [downloading, setDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<ApiErrorBody | null>(null)
   const [downloadNotice, setDownloadNotice] = useState<string | null>(null)
+  /** 通用产物查看器（按扩展名分发；二进制仅下载） */
+  const [viewing, setViewing] = useState<Artifact | null>(null)
 
   /**
    * 打包下载：与报告页同一套逻辑（带鉴权 fetch → Blob → a[download]），
@@ -91,8 +96,8 @@ export function RunResultView({ run }: { run: Run }) {
     setDownloadError(null)
     setDownloadNotice(null)
     try {
-      const blob = await api.downloadBundle(runId)
-      const name = `${runId}.zip`
+      const blob = await api.downloadBundle(taskId)
+      const name = `${taskId}.zip`
       saveBlob(blob, name)
       setDownloadNotice(`${name} · ${formatBytes(blob.size)} 已开始下载`)
     } catch (e) {
@@ -102,35 +107,35 @@ export function RunResultView({ run }: { run: Run }) {
     }
   }
 
-  const counts = run.task_counts
-  const verdict = conclusion(run)
+  const counts = task.runner_counts
+  const verdict = conclusion(task, report.data ?? null)
   const items = artifacts.data?.items ?? []
-  // 分组只影响展示：部署日志 / 测试日志 / 报告与数据，三组都渲染，文件一个不少。
-  const groups = groupArtifacts(items, runId)
+  // 分组只影响展示：部署日志 / runner 日志 / 报告与数据，三组都渲染，文件一个不少。
+  const groups = groupArtifacts(items)
 
   return (
     <>
       {/* 1) 结论：成功 / 失败 / 为什么失败 + 计数 */}
-      <Card data-testid="run-result-verdict">
+      <Card data-testid="task-result-verdict">
         <CardHeader
           tone={verdict.tone === 'ok' ? 'ok' : verdict.tone === 'err' ? 'err' : 'warn'}
           title="结论"
-          sub={`${formatDuration(
-            run.started_at && run.finished_at
-              ? Math.round((new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) / 1000)
+          sub={`attempt #${report.data?.attempt_no ?? task.current_attempt} · ${formatDuration(
+            task.started_at && task.finished_at
+              ? Math.round((new Date(task.finished_at).getTime() - new Date(task.started_at).getTime()) / 1000)
               : null,
-          )} · ${formatDateTime(run.finished_at)}`}
-          actions={<RunStatusBadge status={run.status} />}
+          )} · ${formatDateTime(task.finished_at)}`}
+          actions={<TaskStatusBadge status={task.status} />}
         />
         <CardBody className="flex flex-col gap-4">
           <p className="text-sm leading-[16px] text-fg">{verdict.text}</p>
           <dl className="grid grid-cols-2 gap-3 sm:grid-cols-5">
             {[
-              ['Task 总数', counts?.total ?? 0, 'muted'],
+              ['runner 总数', counts?.total ?? 0, 'muted'],
               ['成功', counts?.succeeded ?? 0, 'ok'],
               ['失败', counts?.failed ?? 0, 'err'],
               ['跳过', counts?.skipped ?? 0, 'warn'],
-              ['进行中/排队', (counts?.pending ?? 0) + (counts?.running ?? 0), 'muted'],
+              ['等待/执行', (counts?.pending ?? 0) + (counts?.running ?? 0), 'muted'],
             ].map(([label, value, tone]) => (
               <div key={String(label)} className="rounded-md border border-line-soft bg-surface-2 px-3 py-2">
                 <dt className="text-2xs text-fg-3">{label}</dt>
@@ -144,13 +149,10 @@ export function RunResultView({ run }: { run: Run }) {
         </CardBody>
       </Card>
 
-      {/* 2) 失败项：只列失败的，给错误码与原因；0 失败时压成一行绿字，不再用红色大块占屏（C6） */}
-      {/* 2) 失败项：只列失败的，给错误码与原因；0 失败时压成一行中性提示（C6）。
-          原来是淡绿底 + 绿字，夹在两张白卡之间像一块"成功贴纸"，与整体的描边/近黑语言不搭；
-          现在改成描边 + 中性文字 + 绿点：语义靠点与勾号，不靠整条色块。 */}
+      {/* 2) 失败项：只列失败的，给错误码与原因；0 失败时压成一行中性提示（C6） */}
       {report.data && report.data.failures.length === 0 ? (
         <p
-          data-testid="run-result-no-failures"
+          data-testid="task-result-no-failures"
           role="status"
           className="flex items-center gap-2 rounded-xl border border-line bg-transparent px-4 py-2.5 text-xs font-medium text-fg-2"
         >
@@ -159,7 +161,7 @@ export function RunResultView({ run }: { run: Run }) {
           无失败项
         </p>
       ) : (
-        <Card data-testid="run-result-failures">
+        <Card data-testid="task-result-failures">
           <CardHeader tone="err" title="失败项" sub={report.data ? `${report.data.failures.length} 条` : undefined} />
           {report.error ? (
             <CardBody>
@@ -172,24 +174,22 @@ export function RunResultView({ run }: { run: Run }) {
               <Table>
                 <THead>
                   <TR className="hover:bg-transparent">
-                    <TH>Task</TH>
+                    <TH>seq</TH>
+                    <TH>runner</TH>
                     <TH>原因</TH>
                     <TH>错误码</TH>
                   </TR>
                 </THead>
                 <TBody>
                   {report.data!.failures.map((failure) => (
-                    <TR key={`${failure.task_id}-${failure.error_code ?? 'x'}`}>
-                      <TD className="font-mono text-2xs text-fg-3">{failure.task_id}</TD>
-                      <TD className="text-fg">{failure.reason}</TD>
+                    <TR key={`${failure.seq}-${failure.error_code}`}>
+                      <TD className="tabular-nums text-2xs text-fg-3">#{failure.seq}</TD>
+                      <TD className="text-fg">{failure.name}</TD>
+                      <TD className="text-fg-2">{failure.reason ?? '—'}</TD>
                       <TD>
-                        {failure.error_code ? (
-                          <Badge tone="err" className="font-mono">
-                            {failure.error_code}
-                          </Badge>
-                        ) : (
-                          <span className="text-fg-3">—</span>
-                        )}
+                        <Badge tone="err" className="font-mono">
+                          {failure.error_code}
+                        </Badge>
                       </TD>
                     </TR>
                   ))}
@@ -200,12 +200,12 @@ export function RunResultView({ run }: { run: Run }) {
         </Card>
       )}
 
-      {/* 3) 产物：显式列全（report.json / report.md / metadata.json / events.jsonl / 每个 Attempt 日志 / Deploy 日志） */}
-      <Card data-testid="run-result-artifacts">
+      {/* 3) 产物：显式列全（report.json / report.md / metadata.json / events.jsonl / 各 runner 的日志与 result.json / 部署 Pod 日志） */}
+      <Card data-testid="task-result-artifacts">
         <CardHeader
           tone="info"
           title="产物下载"
-          sub={artifacts.data ? `${items.length} 个文件 · 共 ${formatBytes(artifacts.data.total_size_bytes)}` : undefined}
+          sub={artifacts.data ? `${items.length} 个文件 · 共 ${formatBytes(artifacts.data.total_size_bytes ?? 0)}` : undefined}
           actions={
             <div className="flex flex-wrap items-center justify-end gap-2">
               <Button
@@ -220,7 +220,7 @@ export function RunResultView({ run }: { run: Run }) {
               </Button>
               <a
                 className={buttonClassName({ size: 'sm', variant: 'ghost' })}
-                href={`${API_BASE}/runs/${encodeURIComponent(runId)}/report.md`}
+                href={`${API_BASE}/tasks/${encodeURIComponent(taskId)}/report.md`}
                 target="_blank"
                 rel="noreferrer"
               >
@@ -247,7 +247,7 @@ export function RunResultView({ run }: { run: Run }) {
           <LoadingBlock label="加载产物清单…" />
         ) : items.length === 0 ? (
           <CardBody>
-            <EmptyState title="还没有产物" description="产物在 Run 结束后写出；存储未接线时这里会是空的。" />
+            <EmptyState title="还没有产物" description="产物在 Task 结束后写出；存储未接线时这里会是空的。" />
           </CardBody>
         ) : (
           <div className="flex flex-col gap-2 px-5 py-3" data-testid="artifact-groups">
@@ -284,17 +284,28 @@ export function RunResultView({ run }: { run: Run }) {
                           {rows.map((item) => (
                             <TR key={item.path}>
                               <TD className="break-all font-mono text-2xs text-fg">
-                                {relativeArtifactPath(item.path, runId)}
+                                {relativeArtifactPath(item.path)}
                               </TD>
                               <TD>
                                 <Badge tone={KIND_TONE[item.kind]}>{KIND_LABEL[item.kind]}</Badge>
                               </TD>
                               <TD className="tabular-nums text-2xs">{formatBytes(item.size_bytes)}</TD>
                               <TD className="text-right">
+                                {/* 通用查看：json 树 / csv 表 / html sandbox / 文本（≤2MB）；二进制不提供预览 */}
+                                {artifactViewKindOf(item.path) !== 'binary' ? (
+                                  <button
+                                    type="button"
+                                    data-testid="artifact-view"
+                                    className={cn(buttonClassName({ size: 'sm', variant: 'ghost' }), 'mr-1')}
+                                    onClick={() => setViewing(item)}
+                                  >
+                                    查看
+                                  </button>
+                                ) : null}
                                 <a
                                   data-testid="artifact-download"
                                   className={buttonClassName({ size: 'sm', variant: 'ghost' })}
-                                  href={fileUrl(runId, item.path)}
+                                  href={fileUrl(taskId, item.path)}
                                 >
                                   下载
                                 </a>
@@ -311,22 +322,25 @@ export function RunResultView({ run }: { run: Run }) {
           </div>
         )}
         <CardFooter>
-          <span>这些都是这次 Run 落下的文件；点一下就开始下载，不需要再回报告页翻。</span>
+          <span>这些都是这次 Task 落下的文件；点一下就开始下载，不需要再回报告页翻。</span>
         </CardFooter>
       </Card>
 
+      {/* 通用产物查看器弹窗（按扩展名分发；二进制仅下载） */}
+      <ArtifactViewerDialog taskId={taskId} artifact={viewing} onClose={() => setViewing(null)} />
+
       {/* 4) 报告入口 */}
-      <Card data-testid="run-result-report">
-        <CardHeader tone="muted" title="报告" sub="report.json 组织与索引（不做指标聚合）" />
+      <Card data-testid="task-result-report">
+        <CardHeader tone="muted" title="报告" sub="report.json 组织与索引（不做指标聚合，默认最后一个 attempt）" />
         <CardBody className="flex flex-wrap items-center gap-2">
-          <Link to={`/runs/${encodeURIComponent(runId)}/report`}>
+          <Link to={`/tasks/${encodeURIComponent(taskId)}/report`}>
             <Button size="sm" variant="primary" icon={<FileText className="size-3" aria-hidden />}>
               打开报告页
             </Button>
           </Link>
           <a
             className={buttonClassName({ size: 'sm' })}
-            href={fileUrl(runId, `${runId}/report.json`)}
+            href={fileUrl(taskId, 'report.json')}
             target="_blank"
             rel="noreferrer"
           >
@@ -334,7 +348,7 @@ export function RunResultView({ run }: { run: Run }) {
           </a>
           <a
             className={buttonClassName({ size: 'sm' })}
-            href={fileUrl(runId, `${runId}/report.md`)}
+            href={fileUrl(taskId, 'report.md')}
             target="_blank"
             rel="noreferrer"
           >

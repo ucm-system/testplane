@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '@/api'
-import { subscribeRunEvents, type SseStatus } from '@/api/sse'
-import type { RunEvent } from '@/api/types'
+import { subscribeTaskEvents, type SseStatus } from '@/api/sse'
+import type { TaskEvent } from '@/api/types'
 
 const MAX_EVENTS = 300
 const TICK_DEBOUNCE_MS = 350
 /** 连续失败后降级为 3s 轮询 events/history（web-and-delivery §3 规则 4） */
 const POLL_INTERVAL_MS = 3000
 
-const seqKey = (runId: string) => `testplane:sse:${runId}`
+const seqKey = (taskId: string) => `argus:sse:${taskId}`
 
-function readSeq(runId: string): number {
+function readSeq(taskId: string): number {
   try {
-    const raw = sessionStorage.getItem(seqKey(runId))
+    const raw = sessionStorage.getItem(seqKey(taskId))
     const parsed = raw ? Number(raw) : 0
     return Number.isFinite(parsed) ? parsed : 0
   } catch {
@@ -20,24 +20,24 @@ function readSeq(runId: string): number {
   }
 }
 
-function writeSeq(runId: string, seq: number): void {
+function writeSeq(taskId: string, seq: number): void {
   try {
-    sessionStorage.setItem(seqKey(runId), String(seq))
+    sessionStorage.setItem(seqKey(taskId), String(seq))
   } catch {
     /* 隐私模式忽略 */
   }
 }
 
-function clearSeq(runId: string): void {
+function clearSeq(taskId: string): void {
   try {
-    sessionStorage.removeItem(seqKey(runId))
+    sessionStorage.removeItem(seqKey(taskId))
   } catch {
     /* ignore */
   }
 }
 
-export interface RunEventsResult {
-  events: RunEvent[]
+export interface TaskEventsResult {
+  events: TaskEvent[]
   status: SseStatus
   /**
    * 每收到一批事件 +1（350ms 合并）。页面把它放进 useAsync 的 deps 就能
@@ -50,23 +50,23 @@ export interface RunEventsResult {
   reconnect: () => void
 }
 
-export interface RunEventsOptions {
-  /** 终态 Run 不订阅（设计 §3：run.finished 后关连接），只补历史 */
+export interface TaskEventsOptions {
+  /** 终态 Run 不订阅（设计 §3：task.finished 后关连接），只补历史 */
   live?: boolean
 }
 
 /**
- * `useRunEvents(runId)`：订阅 `/api/v1/runs/{id}/events`。
+ * `useTaskEvents(taskId)`：订阅 `/api/v1/tasks/{id}/events`（07 §7）。
  *
  * 顺序（design/impl/web-and-delivery.md §3）：
- *  1. 首屏先 `GET /runs/{id}/events/history` 补时间线；
+ *  1. 首屏先 `GET /tasks/{id}/events/history` 补时间线；
  *  2. 再带 `Last-Event-ID` 订阅增量，seq <= 已消费的最大值直接丢；
  *  3. 断线 1→2→4→8→30s 退避；连续失败 → status=`polling`，本 hook 自己 3s 轮询兜底；
  *  4. 页面切后台时断开，回来按 lastSeq 续上；`resync_required` → 丢断点重建。
  */
-export function useRunEvents(runId: string | undefined, options: RunEventsOptions = {}): RunEventsResult {
+export function useTaskEvents(taskId: string | undefined, options: TaskEventsOptions = {}): TaskEventsResult {
   const live = options.live ?? true
-  const [events, setEvents] = useState<RunEvent[]>([])
+  const [events, setEvents] = useState<TaskEvent[]>([])
   const [status, setStatus] = useState<SseStatus>('connecting')
   const [version, setVersion] = useState(0)
   const [resyncToken, setResyncToken] = useState(0)
@@ -91,26 +91,26 @@ export function useRunEvents(runId: string | undefined, options: RunEventsOption
    * 两边拿到同一批 seq；而 lastSeq 只用于 Last-Event-ID 续传。
    */
   const ingest = useCallback(
-    (event: RunEvent) => {
-      if (!runId) return
+    (event: TaskEvent) => {
+      if (!taskId) return
       if (seenRef.current.has(event.seq)) return
       seenRef.current.add(event.seq)
       if (event.seq > lastSeqRef.current) {
         lastSeqRef.current = event.seq
-        writeSeq(runId, event.seq)
+        writeSeq(taskId, event.seq)
       }
       setEvents((prev) => [...prev, event].sort((a, b) => a.seq - b.seq).slice(-MAX_EVENTS))
       bump()
     },
-    [runId, bump],
+    [taskId, bump],
   )
 
   useEffect(() => {
-    if (!runId) return
+    if (!taskId) return
     let alive = true
     let stopStream: (() => void) | null = null
 
-    lastSeqRef.current = readSeq(runId)
+    lastSeqRef.current = readSeq(taskId)
     seenRef.current = new Set()
     setEvents([])
     setStatus(live ? 'connecting' : 'closed')
@@ -119,7 +119,7 @@ export function useRunEvents(runId: string | undefined, options: RunEventsOption
       // ① 补历史：先拿到首屏时间线（用 0 取满窗口，重复的 seq 由 seen 集合丢掉），
       //    SSE 只负责之后的增量
       try {
-        const history = await api.getEventsHistory(runId, 0)
+        const history = await api.getEventsHistory(taskId, 0)
         if (!alive) return
         for (const event of history) ingest(event)
       } catch {
@@ -128,7 +128,7 @@ export function useRunEvents(runId: string | undefined, options: RunEventsOption
       if (!alive || !live) return
 
       // ② 订阅增量
-      stopStream = subscribeRunEvents(runId, {
+      stopStream = subscribeTaskEvents(taskId, {
         lastSeq: lastSeqRef.current,
         onEvent: (event) => {
           if (alive) ingest(event)
@@ -137,7 +137,7 @@ export function useRunEvents(runId: string | undefined, options: RunEventsOption
           if (!alive) return
           lastSeqRef.current = 0
           seenRef.current = new Set()
-          clearSeq(runId)
+          clearSeq(taskId)
           setEvents([])
           setResyncToken((t) => t + 1)
           bump()
@@ -164,16 +164,16 @@ export function useRunEvents(runId: string | undefined, options: RunEventsOption
       stopStream?.()
       document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [runId, live, epoch, bump, ingest])
+  }, [taskId, live, epoch, bump, ingest])
 
   // 降级：SSE 连不上时轮询事件历史（3s）
   useEffect(() => {
-    if (!runId || status !== 'polling') return
+    if (!taskId || status !== 'polling') return
     let alive = true
     const poll = async () => {
       if (!alive) return
       try {
-        const history = await api.getEventsHistory(runId, lastSeqRef.current)
+        const history = await api.getEventsHistory(taskId, lastSeqRef.current)
         if (!alive) return
         for (const event of history) ingest(event)
       } catch {
@@ -186,7 +186,7 @@ export function useRunEvents(runId: string | undefined, options: RunEventsOption
       alive = false
       clearInterval(timer)
     }
-  }, [runId, status, ingest])
+  }, [taskId, status, ingest])
 
   useEffect(() => {
     return () => {

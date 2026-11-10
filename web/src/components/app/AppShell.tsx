@@ -11,7 +11,7 @@ import { SidebarInset, SidebarProvider } from '@/components/ui/shadcn/sidebar'
  * <SidebarProvider>
  *   <AppSidebar variant="inset" />   ← 可折叠 256px ↔ icon rail，Ctrl/Cmd+B
  *   <SidebarInset>
- *     <SiteHeader />                 ← sticky h-14：面包屑 + 新建 Run + 用户菜单
+ *     <SiteHeader />                 ← sticky h-14：面包屑 + 新建 Task + 用户菜单
  *     <main id="main">…</main>
  *   </SidebarInset>
  * </SidebarProvider>
@@ -27,7 +27,7 @@ import { SidebarInset, SidebarProvider } from '@/components/ui/shadcn/sidebar'
  * `<main id="main">`（全页唯一 main；测试与读屏都按这个来）。
  */
 export function AppShell() {
-  // D-62：概览也要整幅宽度承载全量 Run 表 —— 现在没有页面需要右栏
+  // D-62：概览也要整幅宽度承载全量 Task 表 —— 现在没有页面需要右栏
   const hasRail = false
 
   return (

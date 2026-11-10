@@ -13,7 +13,7 @@ const rawBase = String(import.meta.env.VITE_API_BASE ?? '/api/v1')
 export const API_BASE = rawBase.replace(/\/+$/, '')
 export const USE_MOCK = String(import.meta.env.VITE_USE_MOCK ?? '0') === '1'
 
-const SUBJECT_KEY = 'testplane:subject'
+const SUBJECT_KEY = 'argus:subject'
 const DEFAULT_SUBJECT = String(import.meta.env.VITE_DEV_USER ?? 'dev') || 'dev'
 
 /* ---------------------------------------------------------------- 身份 */
@@ -33,14 +33,14 @@ export function setCurrentUser(user: string): void {
   } catch {
     /* 隐私模式下写不进去就算了，退回默认身份 */
   }
-  window.dispatchEvent(new CustomEvent('testplane:user-changed', { detail: next }))
+  window.dispatchEvent(new CustomEvent('argus:user-changed', { detail: next }))
 }
 
 /** 右上角改身份后，各页面重新拉数据（dev 模式没有真会话，只能这样通知）。 */
 export function onUserChanged(listener: (user: string) => void): () => void {
   const handler = (e: Event) => listener(String((e as CustomEvent<string>).detail ?? getCurrentUser()))
-  window.addEventListener('testplane:user-changed', handler)
-  return () => window.removeEventListener('testplane:user-changed', handler)
+  window.addEventListener('argus:user-changed', handler)
+  return () => window.removeEventListener('argus:user-changed', handler)
 }
 
 /**
@@ -115,7 +115,7 @@ function fallbackForStatus(status: number): ApiErrorBody {
     500: ['INTERNAL_ERROR', '服务端内部错误', false],
     502: ['ENDPOINT_UNREACHABLE', '下游服务不可达', true],
     503: ['EXECUTOR_UNAVAILABLE', '执行侧不可用', true],
-    504: ['TASK_TIMEOUT', '请求超时', true],
+    504: ['RUNNER_TIMEOUT', '请求超时', true],
     507: ['ARTIFACT_QUOTA_EXCEEDED', '产物额度已超', false],
   }
   const hit = map[status]

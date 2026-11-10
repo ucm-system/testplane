@@ -9,7 +9,7 @@ import { EmptyState, ErrorState } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
 import { useAsync } from '@/hooks/useAsync'
 import { waitingReasonLabel } from '@/lib/status'
-import { formatDateTime, formatDuration, formatRelative } from '@/lib/utils'
+import { formatDuration, formatRelative } from '@/lib/utils'
 
 function UsageBar({ used, total }: { used: number; total: number }) {
   const ratio = total > 0 ? Math.min(1, used / total) : 0
@@ -32,14 +32,6 @@ function clusterHealth(cluster: Cluster): 'ok' | 'err' | 'muted' {
   if (!result) return 'muted'
   if (['ok', 'ready', 'healthy', 'true'].includes(result)) return 'ok'
   return 'err'
-}
-
-/** 排队时长：由入队时间算（D-46 只禁「位次」，不禁「等了多久」） */
-function waitingSeconds(since: string | null | undefined): number | null {
-  if (!since) return null
-  const started = new Date(since).getTime()
-  if (Number.isNaN(started)) return null
-  return Math.max(0, Math.round((Date.now() - started) / 1000))
 }
 
 export function ClustersPage() {
@@ -148,7 +140,11 @@ export function ClustersPage() {
                     <TR key={slot.endpoint_key}>
                       <TD className="break-all font-mono text-2xs">{slot.endpoint_key}</TD>
                       <TD>{slot.exclusive ? <Badge tone="warn">独占</Badge> : <Badge tone="muted">共享</Badge>}</TD>
-                      <TD className="font-mono text-2xs text-fg-3">{slot.holders.join(', ') || '—'}</TD>
+                      <TD className="font-mono text-2xs text-fg-3">
+                        {(slot.holders ?? [])
+                          .map((holder) => `${holder.task_id}#${holder.seq}`)
+                          .join(', ') || '—'}
+                      </TD>
                     </TR>
                   ))}
                 </TBody>
@@ -228,8 +224,8 @@ export function ClustersPage() {
       <Card>
         <CardHeader
           tone="muted"
-          title="排队中的 Task"
-          sub={waiting ? `共 ${waiting.total} 个 · 按调度 FIFO 顺序` : undefined}
+          title="排队中的 runner"
+          sub={waiting ? `共 ${waiting.total} 个 · 按调度 FIFO 顺序（C-4.6）` : undefined}
         />
         <CardBody className="flex flex-col gap-3">
           {waiting ? (
@@ -246,41 +242,35 @@ export function ClustersPage() {
             </div>
           ) : null}
 
-          {(waiting?.tasks ?? []).length === 0 ? (
-            <p className="text-2xs text-fg-3">当前没有排队中的 Task。</p>
+          {(waiting?.runners ?? []).length === 0 ? (
+            <p className="text-2xs text-fg-3">当前没有排队中的 runner。</p>
           ) : (
             <TableWrap>
               <Table>
                 <THead>
                   <TR className="hover:bg-transparent">
+                    <TH>runner</TH>
                     <TH>Task</TH>
-                    <TH>Run</TH>
                     <TH>状态</TH>
                     <TH>排队原因</TH>
-                    <TH>等待时长</TH>
-                    <TH>入队时间</TH>
                   </TR>
                 </THead>
                 <TBody>
-                  {(waiting?.tasks ?? []).map((task) => (
-                    <TR key={task.task_id}>
+                  {(waiting?.runners ?? []).map((runner) => (
+                    <TR key={`${runner.task_id}:${runner.attempt_no}:${runner.seq}`}>
                       <TD className="text-fg">
-                        {task.name}
-                        <span className="ml-2 font-mono text-2xs text-fg-3">{task.task_id}</span>
+                        {runner.name}
+                        <span className="ml-2 font-mono text-2xs text-fg-3">seq {runner.seq}</span>
                       </TD>
                       <TD className="font-mono text-2xs">
-                        <Link to={`/runs/${task.run_id}`} className="text-primary-text hover:underline">
-                          {task.run_id}
+                        <Link to={`/tasks/${runner.task_id}`} className="text-primary-text hover:underline">
+                          {runner.task_id}
                         </Link>
                       </TD>
-                      <TD className="text-2xs">{task.status}</TD>
+                      <TD className="text-2xs">{runner.status}</TD>
                       <TD>
-                        <WaitingReasonTag reason={task.waiting_reason} />
+                        <WaitingReasonTag reason={runner.waiting_reason} />
                       </TD>
-                      <TD className="whitespace-nowrap tabular-nums">
-                        {formatDuration(waitingSeconds(task.since))}
-                      </TD>
-                      <TD className="whitespace-nowrap text-2xs text-fg-3">{formatDateTime(task.since)}</TD>
                     </TR>
                   ))}
                 </TBody>

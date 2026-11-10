@@ -1,0 +1,31 @@
+# Argus
+
+> LLM 服务评测流水线平台：把"部署或外接服务 → 严格串行的 runner 管道（service-deploy? → pre_check? → tests → service-clean?）→ 报告与产物归档"整条链路自动化；状态经 SSE 可订阅，产物按 attempt 落档可追溯，重试以 Task 为单位（新 attempt 全量重跑）。
+
+## Integrate
+
+- **REST**：base `/api/v1`。鉴权与控制台一致（OIDC 会话 Cookie + 写操作 `X-CSRF-Token` 双提交；服务间调用 `Authorization: Bearer <JWT>`，`aud` = OIDC clientId）。错误体是**扁平结构**：`{code, message, detail?, retryable, trace_id}`；提交校验失败 `HTTP 400` + `detail.issues[]`（`{path, code, message, line?}`，jsonl 带 `line`）。机器分页用 `cursor`/`limit`，UI 分页用 `page`/`page_size`（互斥）。
+- **MCP**：stdio 传输，13 个 `argus_*` 工具（`argus_submit_task` / `argus_get_task` / `argus_wait_task` / `argus_cancel_task` / `argus_retry_task` / `argus_clean_task` / `argus_list_runners` / `argus_get_report` / `argus_get_logs` / `argus_list_artifacts` / `argus_get_file` / `argus_queue_status` / `argus_list_profiles`）。`inputSchema` 均为 `type=object` + `additionalProperties=false`；工具层错误按 MCP `isError=true` 返回，不杀进程。
+- **CLI**：`argus`（与 MCP 同一套 REST 语义：`submit` / `status` / `wait` / `cancel` / `retry` / `clean --task` / `report` / `logs` / `artifacts` / `files` / `runners` / `queue` / `profiles`）。
+
+## Agent loop
+
+最小闭环（发现 → 组合 → 提交 → 等待 → 取报告）：
+
+1. **发现能力**：`GET /api/v1/runners`（只读目录）。每个条目给出 `role` / `input_format`（`jsonl` 默认做结构校验；`yaml`/`text` 只校语法）/ `parameters`（jsonl 的类型 + required 校验 schema）/ `placeholder`（与 input_format 同格式的输入示例）/ `consumes`（依赖的上游导出 key，如 `AG_SERVED_URL`）——**据此自查能不能组成一条管道**，不要靠记忆 Runner 名。
+2. **组合 Manifest**：顶层 `{"task": {...}}`；`deploy`（Genet YAML `spec`）与 `service`（外接 `url`/`model_name`/`model_path`）**二选一**；`runners[]` 1..200 条，每条只有 `name/runner/version/execution.profile/input/on_failure/timeout_seconds`——**没有 argv、没有 runner 级 retry、没有 cleanup.policy**。公共参数（`AG_SERVED_URL` 等）由平台注入，不要写进 input。
+3. **提交**：先 `POST /api/v1/tasks?dry_run=true` 只校验不落库；通过后去掉参数正式提交。提交**不做幂等**：每次 POST 都创建新 Task，超时重发就是两个 Task——收到 `400 VALIDATION_ERROR` 时按 `detail.issues[].path/line` 修复后**重试同一个请求体**，不要盲目重提。
+4. **等待**：轮询 `GET /api/v1/tasks/{id}`（看 `status` 与 `runner_counts`），或订阅 SSE `GET /api/v1/tasks/{id}/events`（`seq` 每 Task 单调、`Last-Event-ID` 续传、24h 回放窗口、越窗发 `resync_required` 需整页重建）。终态集合：`succeeded / failed / service_unavailable / canceled`（没有 `completed_with_errors`）。重试 = `POST /tasks/{id}/retry`（新 attempt 全量重跑含 fresh deploy；超限 `409 ATTEMPT_EXHAUSTED`）。
+5. **取报告**：`GET /tasks/{id}/report`（`report.json`，只做组织不聚合；未生成时 404 + `Retry-After`）、`/report.md`；产物清单 `GET /tasks/{id}/artifacts`，单文件 `GET /tasks/{id}/files?path=`，整包 `GET /tasks/{id}/bundle`。runner 级定位键是 `(task_id, attempt_no, seq)`。
+
+## Docs
+
+- [GLOSSARY](https://github.com/ucm-system/argus/blob/main/GLOSSARY.md) — 术语表（Task / runner / attempt / Endpoint …）
+- [Runner 接入规范](https://github.com/ucm-system/argus/blob/main/design/ARCHITECTURE.md) — ARCHITECTURE 附录 C（runner.yaml v2：entry exec 数组、input_format、parameters、exports/consumes）
+- [openapi.yaml](/openapi.yaml) — 机器可读契约（本站点静态提供；与 `server/api/openapi.yaml` 同源同步）
+- [argus-playbook](https://github.com/ucm-system/argus/blob/main/docs/runbook/argus-playbook.md) — Agent 操作手册（即将由后续提交提供，先占位）
+
+## Optional
+
+- [design/ARCHITECTURE.md](https://github.com/ucm-system/argus/blob/main/design/ARCHITECTURE.md) — 平台裁决全文（状态机、部署、并发与取消语义）
+- [部署指南](https://github.com/ucm-system/argus/blob/main/deploy/charts/argus/README.md) — Helm chart（argusd 单二进制 + 内嵌本前端；`/llms.txt` 与 `/openapi.yaml` 随静态资源一起服务）

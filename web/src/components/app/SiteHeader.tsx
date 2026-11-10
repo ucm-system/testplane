@@ -1,21 +1,22 @@
 import { Link, useLocation } from 'react-router-dom'
 import { ChevronRight, Plus } from 'lucide-react'
 import { UserMenu } from '@/components/app/UserMenu'
+import { Wordmark } from '@/components/app/Wordmark'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/shadcn/separator'
 import { SidebarTrigger } from '@/components/ui/shadcn/sidebar'
 
 /** 路由 → 页头标题（页面级信息在页头，操作也在页头）。 */
 const TITLES: Array<{ test: (path: string) => boolean; title: string; sub: string }> = [
-  // D-62：概览与运行列表合并 —— 副标题覆盖集群、排队与全部 Run
-  { test: (p) => p === '/', title: '概览', sub: '集群忙不忙、谁在排队、以及所有 Run（可筛可翻页）' },
-  // /runs 只做兼容重定向（D-62），落地页是概览
-  { test: (p) => p === '/runs', title: '概览', sub: '正在打开全部 Run…' },
-  // 报告页必须排在 `/runs/` 之前：否则 `/runs/:id/report` 会被「Run 详情」先命中（B1）
-  { test: (p) => /^\/runs\/[^/]+\/report$/.test(p), title: '报告', sub: 'report.json 与产物' },
-  { test: (p) => p.startsWith('/runs/'), title: 'Run 详情', sub: '状态由服务端推，UI 只读' },
-  { test: (p) => p === '/submit', title: '提交运行', sub: '参数是一段字符串，平台只做词法切分' },
-  { test: (p) => p === '/testers', title: 'Tester 目录', sub: '随镜像内置，平台启动时扫描目录自动发现' },
+  // D-62：概览与运行列表合并 —— 覆盖集群、排队与全部 Task
+  { test: (p) => p === '/', title: '概览', sub: '集群忙不忙、谁在排队、以及所有 Task（可筛可翻页）' },
+  // /tasks 与 /runs 只做兼容重定向（D-62/D-73），落地页是概览
+  { test: (p) => p === '/tasks' || p === '/runs', title: '概览', sub: '正在打开全部 Task…' },
+  // 报告页必须排在 `/tasks/` 之前：否则 `/tasks/:id/report` 会被「Task 详情」先命中（B1）
+  { test: (p) => /^\/tasks\/[^/]+\/report$/.test(p), title: '报告', sub: 'report.json 与产物' },
+  { test: (p) => p.startsWith('/tasks/'), title: 'Task 详情', sub: '状态由服务端推，UI 只读' },
+  { test: (p) => p === '/submit', title: '提交 Task', sub: '部署（Genet YAML）与外接（url / model_name / model_path）二选一' },
+  { test: (p) => p === '/runners' || p === '/testers', title: 'Runner 目录', sub: '随镜像内置，平台启动时扫描目录自动发现' },
   { test: (p) => p === '/clusters', title: '集群与队列', sub: '只回答「卡在队列还是卡在平台槽位」' },
   { test: (p) => p === '/admin', title: '管理台', sub: 'Profile / 集群 / Secret 引用 / 审计（仅 admin）' },
   { test: (p) => p === '/404', title: '页面不存在', sub: '这个地址没有对应的页面' },
@@ -27,7 +28,7 @@ const TITLES: Array<{ test: (path: string) => boolean; title: string; sub: strin
 function titleFor(pathname: string): { title: string; sub: string } {
   const hit = TITLES.find((item) => item.test(pathname))
   // 没命中任何已知路由 = 404：面包屑写「页面不存在」，不要退化成品牌名
-  // （否则页头会出现「TestPlane › TestPlane」，看起来像面包屑坏了）
+  // （否则页头会出现「Argus › Argus」，看起来像面包屑坏了）
   return hit ?? { title: '页面不存在', sub: '' }
 }
 
@@ -47,15 +48,8 @@ export function SiteHeader() {
     <header className="flex h-14 shrink-0 items-center gap-2.5 border-b border-border/60 bg-background px-4">
       <SidebarTrigger />
       {/* 移动端侧栏在 sheet 里，页头留一个品牌入口（≥md 时品牌在侧栏顶部，这里隐藏） */}
-      <Link to="/" aria-label="TestPlane 首页" className="flex shrink-0 items-center md:hidden">
-        <img
-          src="/brand.webp"
-          alt="TestPlane"
-          width={252}
-          height={64}
-          decoding="async"
-          className="h-6 w-auto select-none"
-        />
+      <Link to="/" aria-label="Argus 首页" className="flex shrink-0 items-center md:hidden">
+        <Wordmark height={20} />
       </Link>
       <Separator orientation="vertical" className="hidden h-4 md:block" />
 
@@ -63,7 +57,7 @@ export function SiteHeader() {
         <ol className="flex min-w-0 items-center gap-1.5 text-sm">
           <li className="hidden shrink-0 sm:block">
             <Link to="/" className="text-fg-3 transition-colors hover:text-fg">
-              TestPlane
+              Argus
             </Link>
           </li>
           <li aria-hidden className="hidden shrink-0 items-center sm:flex">
@@ -79,12 +73,12 @@ export function SiteHeader() {
       </nav>
 
       <div className="ml-auto flex shrink-0 items-center gap-2">
-        {/* 概览页的动作行里已经有「新建 Run」（本轮不改页面结构），这里不重复放一颗；
+        {/* 概览页的动作行里已经有「新建 Task」（本轮不改页面结构），这里不重复放一颗；
             其余页面由页头统一提供入口。 */}
         {pathname !== '/' ? (
-          <Link to="/submit" aria-label="新建 Run">
-            <Button variant="primary" size="sm" icon={<Plus className="size-3.5" aria-hidden />} data-testid="header-new-run">
-              新建 Run
+          <Link to="/submit" aria-label="新建 Task">
+            <Button variant="primary" size="sm" icon={<Plus className="size-3.5" aria-hidden />} data-testid="header-new-task">
+              新建 Task
             </Button>
           </Link>
         ) : null}
