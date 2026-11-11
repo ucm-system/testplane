@@ -878,16 +878,6 @@ export function SubmitPage() {
                 Genet（默认）/ Mock / 已有服务三选一；都填或都不填会被拒（D-27）。「已有服务」不部署、
                 直接填三元组；deploy runner 的 clean 是否注入由它的 clean_runner 声明决定
               </span>
-              {deployRunnerObj ? (
-                <span className="ml-auto flex items-center gap-1">
-                  <Tag mono>{deployRunnerObj.input_format}</Tag>
-                  {deployRunnerObj.clean_runner ? (
-                    <Tag data-testid="deploy-clean-tag">clean: {deployRunnerObj.clean_runner}</Tag>
-                  ) : (
-                    <Tag data-testid="deploy-clean-tag">无 clean 阶段</Tag>
-                  )}
-                </span>
-              ) : null}
             </div>
 
             {/* 服务来源下拉（用户 2026-11-11：与 runner 行同一形态）：Genet（默认）/ Mock / 已有服务。
