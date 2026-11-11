@@ -60,8 +60,21 @@ func itTask(t *testing.T, now time.Time) (*Task, []*RunnerRun) {
 			InputRef: "attempts/1/input/3", OnFailure: domain.OnFailureContinue,
 			TimeoutSeconds: 14400, EndpointExclusive: true,
 			EndpointKey: ptrStr("http://10.0.0.10:8000")},
+		{Seq: 4, Name: "service-clean", RunnerName: "service-clean", RunnerVersion: "1.0.0",
+			Role: domain.RoleClean, ImageRef: "img:1", Profile: "k8s-npu",
+			InputRef: "attempts/1/input/4", OnFailure: domain.OnFailureAbortTask,
+			TimeoutSeconds: 600, EndpointExclusive: false},
 	}
 	return task, runners
+}
+
+func (s *Store) mustTaskFin(t *testing.T, taskID string) domain.TaskStatus {
+	t.Helper()
+	tk, err := s.Tasks.Get(context.Background(), nil, taskID)
+	if err != nil {
+		t.Fatalf("Tasks.Get: %v", err)
+	}
+	return domain.TaskStatus(tk.Status)
 }
 
 func ptrStr(s string) *string                     { return &s }
@@ -116,8 +129,26 @@ func TestIT_SubmitPipelineFinish(t *testing.T) {
 	if !fin.AbortTriggered || len(fin.Skipped) != 2 {
 		t.Fatalf("abort 传播: triggered=%v skipped=%v（应为 precheck+test，clean 除外）", fin.AbortTriggered, fin.Skipped)
 	}
-	if !fin.TaskTerminal || fin.TaskStatus != domain.TaskServiceUnavailable {
-		t.Fatalf("Task 终态 = %v（DEPLOY_BLOCKED → service_unavailable），terminal=%v", fin.TaskStatus, fin.TaskTerminal)
+	// deploy 失败后 Task 不立即终态：clean（finally）仍 pending，需由编排层排程并执行。
+	if fin.TaskTerminal {
+		t.Fatalf("clean pending 时 Task 不应终态（finally 语义）")
+	}
+	k4 := domain.RunnerKey{TaskID: task.ID, AttemptNo: 1, Seq: 4}
+	if _, err := m.Runners.Queue(ctx, k4); err != nil {
+		t.Fatalf("Queue clean: %v", err)
+	}
+	if _, err := m.Runners.Prepare(ctx, k4, PrepareParams{}); err != nil {
+		t.Fatalf("Prepare clean: %v", err)
+	}
+	if _, err := m.Runners.Start(ctx, k4); err != nil {
+		t.Fatalf("Start clean: %v", err)
+	}
+	if _, err := s.FinishRunnerRun(ctx, RunnerFinish{Key: k4, Succeeded: true, ExitCode: ptrInt(0), Phase: "succeeded"}); err != nil {
+		t.Fatalf("Finish clean: %v", err)
+	}
+	// clean 完成后 Task 落 service_unavailable（DEPLOY_BLOCKED，D-47）。
+	if fin2 := s.mustTaskFin(t, task.ID); fin2 != domain.TaskServiceUnavailable {
+		t.Fatalf("Task 终态 = %s（DEPLOY_BLOCKED → service_unavailable）", fin2)
 	}
 
 	// 库内断言：runner 状态 + attempt 聚合 + 事件数。
@@ -125,14 +156,17 @@ func TestIT_SubmitPipelineFinish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListByAttempt: %v", err)
 	}
-	if len(runs) != 3 {
+	if len(runs) != 4 {
 		t.Fatalf("runs = %d", len(runs))
 	}
 	if runs[0].Status != string(domain.RunnerFailed) || runs[0].ErrorCode == nil || *runs[0].ErrorCode != domain.CodeDeployBlocked {
 		t.Fatalf("deploy runner = %+v", runs[0])
 	}
-	if runs[2].Status != string(domain.RunnerPending) { // service-clean 不被 SKIPPED（finally）
-		t.Fatalf("clean 应保持 pending（finally 语义），得到 %s", runs[2].Status)
+	if runs[1].Status != string(domain.RunnerSkipped) || runs[2].Status != string(domain.RunnerSkipped) {
+		t.Fatalf("precheck/acc 应 SKIPPED（abort 传播）: %s / %s", runs[1].Status, runs[2].Status)
+	}
+	if runs[3].Status != string(domain.RunnerSucceeded) { // clean 已被本测试驱动到成功（finally 已执行）
+		t.Fatalf("clean 应 succeeded（finally 已执行），得到 %s", runs[3].Status)
 	}
 	att, err := s.Attempts.Get(ctx, nil, task.ID, 1)
 	if err != nil {
@@ -194,7 +228,7 @@ func TestIT_ContinuePipelineAndRetry(t *testing.T) {
 	}
 
 	// 把剩余 runner 全部终结 → Task succeeded → 重试产生 attempt#2。
-	for seq := 2; seq <= 3; seq++ {
+	for seq := 2; seq <= 4; seq++ {
 		k := domain.RunnerKey{TaskID: task.ID, AttemptNo: 1, Seq: seq}
 		if _, err := m.Runners.Queue(ctx, k); err != nil {
 			t.Fatalf("Queue seq%d: %v", seq, err)
@@ -239,7 +273,7 @@ func TestIT_ContinuePipelineAndRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListByAttempt(2): %v", err)
 	}
-	if len(runs2) != 3 || runs2[0].Status != string(domain.RunnerPending) {
+	if len(runs2) != 4 || runs2[0].Status != string(domain.RunnerPending) {
 		t.Fatalf("attempt#2 runs = %+v", runs2)
 	}
 	if runs2[0].JobID == "" || runs2[0].JobID == JobName(k1) {
@@ -393,7 +427,7 @@ func TestIT_DeployStateArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if tk.Deploy == nil || !containsStr(string(tk.Deploy), `"position":null`) {
+	if tk.Deploy == nil || !containsStr(string(tk.Deploy), `"position": null`) {
 		t.Fatalf("deploy 合并缺 position:null（D-46）: %s", tk.Deploy)
 	}
 	att, err := s.Attempts.Get(ctx, nil, task.ID, 1)

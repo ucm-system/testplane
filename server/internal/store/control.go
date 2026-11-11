@@ -598,20 +598,22 @@ func (s *Store) RetryTask(ctx context.Context, taskID, actor, role string, attem
 		if err != nil {
 			return err
 		}
-		status := domain.TaskStatus(t.Status)
-		switch status {
-		case domain.TaskSucceeded, domain.TaskFailed, domain.TaskServiceUnavailable:
-			// 可重试。
-		case domain.TaskCanceled:
-			return fmt.Errorf("store: retry task %s: %w: canceled", taskID, ErrRetryConflict)
-		default:
-			return fmt.Errorf("store: retry task %s: 尚未结束（%s），不能重试: %w", taskID, status, ErrRetryConflict)
-		}
+		// attempt 上限检查先于状态检查：已达上限时无论 Task 处于什么状态
+		// 都返回 ATTEMPT_EXHAUSTED（含"上一次 retry 已把 Task 置回 queued"的并发窗口）。
 		next := t.CurrentAttempt + 1
 		if attemptMax > 0 && next > attemptMax {
 			return domain.NewFailureError(domain.CodeAttemptExhausted,
 				fmt.Sprintf("Task %s 的 attempt 数已达上限 %d", taskID, attemptMax),
 				map[string]any{"task_id": taskID, "attempt_no": t.CurrentAttempt, "attempt_max": attemptMax})
+		}
+		status := domain.TaskStatus(t.Status)
+		switch status {
+		case domain.TaskSucceeded, domain.TaskFailed, domain.TaskServiceUnavailable:
+			// 可重试。
+		case domain.TaskCanceled:
+			return domain.NewFailureError(domain.CodeConflict, "Task 已取消，不能重试", map[string]any{"task_id": taskID})
+		default:
+			return domain.NewFailureError(domain.CodeConflict, fmt.Sprintf("Task 尚未结束（%s），不能重试", status), map[string]any{"task_id": taskID, "status": string(status)})
 		}
 
 		// 冻结快照：取最后一个 attempt 的执行记录全量重建（fresh，D-69）。

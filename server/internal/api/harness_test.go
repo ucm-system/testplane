@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http/httptest"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/ucm-system/testplane/server/internal/config"
 	"github.com/ucm-system/testplane/server/internal/dbtest"
+	"github.com/ucm-system/testplane/server/internal/orchestrator"
+	"github.com/ucm-system/testplane/server/internal/ports"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
 
@@ -140,4 +143,40 @@ func (e *adminTestEnv) auditRows(filter store.AuditFilter) []store.AuditRecord {
 		e.t.Fatalf("读审计失败: %v", err)
 	}
 	return rows
+}
+
+// stubExecutor 是 IT harness 的最小执行器：Submit 返回句柄，Watch 挂起到 ctx 取消
+// （harness 不推进 Job 终态；需要终态语义的测试自己调 FinishRunnerRun）。
+type stubExecutor struct{}
+
+func (stubExecutor) Submit(ctx context.Context, spec ports.JobSpec) (ports.JobHandle, error) {
+	return ports.JobHandle{Namespace: spec.Namespace, JobName: spec.JobID}, nil
+}
+func (stubExecutor) Watch(ctx context.Context, h ports.JobHandle, obs ports.JobObserver) error {
+	<-ctx.Done()
+	return nil
+}
+func (stubExecutor) Cancel(ctx context.Context, h ports.JobHandle) error { return nil }
+func (stubExecutor) Logs(ctx context.Context, h ports.JobHandle) (io.ReadCloser, error) {
+	return nil, errors.New("stub: logs 不可用")
+}
+func (stubExecutor) Delete(ctx context.Context, h ports.JobHandle, p ports.DeletePolicy) error {
+	return nil
+}
+
+// integrationServerWithReplay 在标准 harness 之上接一个真编排层（stub 执行器），
+// 供 clean 泄漏重放的冲突断言使用（task_running / no_deploy 等 409 由编排层判定）。
+func integrationServerWithReplay(t *testing.T) (*Server, *store.Store, func()) {
+	t.Helper()
+	srv, st, cleanup := integrationServer(t)
+	mach := store.NewMachines(st, nil)
+	orch, err := orchestrator.New(orchestrator.Options{
+		Store: st, Machines: mach, Executor: stubExecutor{},
+		Config: orchestrator.Config{Namespace: "argus", StorageRoot: t.TempDir()},
+	})
+	if err != nil {
+		t.Fatalf("orchestrator.New: %v", err)
+	}
+	srv.replay = orch
+	return srv, st, cleanup
 }

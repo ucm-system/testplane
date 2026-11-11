@@ -242,7 +242,7 @@ func TestIT_SubmitValidationsAndAccept(t *testing.T) {
 	}
 
 	// dry_run 校验：jsonl 语法错误 → 400 且 issues 带行号。
-	badInput := strings.Replace(manifestJSON, `{"dataset":"/data/a"}\n`, `{not json}\n`, 1)
+	badInput := strings.Replace(manifestJSON, `{\"dataset\":\"/data/a\"}\n`, `{bad json}\n`, 1)
 	rec = srv.do(t, http.MethodPost, "/api/v1/tasks?dry_run=true", badInput)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("坏输入应 400: %d %s", rec.Code, rec.Body.String())
@@ -303,7 +303,7 @@ func TestIT_DeploySnapshotExternalMode(t *testing.T) {
 }
 
 func TestIT_CleanReplayConflicts(t *testing.T) {
-	srv, st, cleanup := integrationServer(t)
+	srv, st, cleanup := integrationServerWithReplay(t)
 	defer cleanup()
 	if err := st.SeedDefaults(context.Background()); err != nil {
 		t.Fatalf("seed: %v", err)
