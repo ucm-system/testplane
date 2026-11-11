@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -277,7 +278,9 @@ func NewJobID() string { return "j-" + randomID(8) }
 // JobName 按 (task_id, attempt_no, seq) 派生 K8s Job 名的**默认**前缀形态
 // （附录 B：幂等键 = 三元组的派生；执行层波次负责最终命名，这里只提供一致的派生）。
 func JobName(k domain.RunnerKey) string {
-	return fmt.Sprintf("ag-%s-%d-%d", k.TaskID, k.AttemptNo, k.Seq)
+	// 与 executor/render.go 的派生保持逐字一致（argus- 前缀 + TaskID 小写）：
+	// DB 的 job_id/executor_ref、GC 的按名反查、watch 的 Get 必须指向同一个对象。
+	return fmt.Sprintf("argus-%s-%d-%d", strings.ToLower(k.TaskID), k.AttemptNo, k.Seq)
 }
 
 func actorOf(actor string) string {

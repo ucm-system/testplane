@@ -52,15 +52,20 @@ func (a *App) builtinManifest() string {
       runner: %s
       version: %q
 %s      input: |
-        {"sla":["ttft.avg:999999"],"work_path":"/tmp/aisbench-ws","aisbench_cmd":"/runner/tool/tests/stub_aisbench.py","input_len":64,"output_len":8,"data_num":4,"start":1,"max":2,"max_probes":2}
+        {"sla":["ttft.avg:100000"],"input_len":128,"output_len":8,"data_num":8,"dataset":"/runner/fixtures/smoke_dataset.jsonl","work_path":"/tmp/aisbench-ws","aisbench_cmd":"/runner/tool/tests/stub_aisbench.py"}
 `, a.opts.RunnerName, a.opts.RunnerVersion, profileLine)
 
+	// precheck 块字段缩进是 4 空格（runners[] 内是 6），profile 行不能复用 profileLine。
+	precheckProfileLine := ""
+	if a.opts.Profile != "" {
+		precheckProfileLine = fmt.Sprintf("    execution: { profile: %s }\n", a.opts.Profile)
+	}
 	precheck := fmt.Sprintf(`  precheck:
     runner: endpoint-probe
     version: %q
 %s    input: |
       {"wait_timeout_seconds":10,"retry_interval_seconds":1}
-`, a.opts.PrecheckVersion, profileLine)
+`, a.opts.PrecheckVersion, precheckProfileLine)
 
 	header := fmt.Sprintf("# 由 tools/e2e 生成（mode=%s，%s）\n", a.opts.Mode, time.Now().Format(time.RFC3339))
 
@@ -70,6 +75,7 @@ func (a *App) builtinManifest() string {
   service:
     url: %s
     model_name: %s
+    model_path: /models/mock
 %s  runners:
 %s`, name, a.opts.MockURL, a.opts.Model, precheck, runners)
 	}

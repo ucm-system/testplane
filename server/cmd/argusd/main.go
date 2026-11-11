@@ -281,6 +281,7 @@ func buildScheduler(ctx context.Context, cfg *config.Config, st *store.Store,
 		Config: orchestrator.Config{
 			Namespace:                    namespace,
 			StorageRoot:                  cfg.StorageRoot,
+			GenetBaseURL:                 cfg.GenetBaseURL,
 			StoragePVC:                   cfg.StoragePVC,
 			ClusterName:                  cfg.ClusterName,
 			SharedMounts:                 cfg.SharedMounts,

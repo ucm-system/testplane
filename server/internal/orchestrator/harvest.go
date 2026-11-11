@@ -140,12 +140,20 @@ func (s *Scheduler) backfillDeployEndpoint(ctx context.Context, k domain.RunnerK
 	if url == "" {
 		return
 	}
+	source := "genet"
+	if t, err := s.st.Tasks.Get(ctx, nil, k.TaskID); err == nil && t != nil && len(t.Deploy) > 0 {
+		var dd domain.DeployDoc
+		if json.Unmarshal(t.Deploy, &dd) == nil && dd.Provider != "" {
+			source = dd.Provider
+		}
+	}
 	ep := domain.Endpoint{
 		Key:       domain.NormalizeEndpointKey(url),
 		BaseURL:   url,
 		ModelName: get(EnvServedModelName),
 		ModelPath: get(EnvModelPath),
 		DeployRef: get(EnvDeployRef),
+		Source:    source,
 	}
 	raw, err := json.Marshal(ep)
 	if err != nil {

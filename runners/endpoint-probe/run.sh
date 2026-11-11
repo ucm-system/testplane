@@ -44,6 +44,16 @@ ATTEMPT_NO="${AG_ATTEMPT:-1}"
 RUNNER_SEQ="${AG_RUNNER_SEQ:-1}"
 IMAGE_REF="${AG_RUNNER_IMAGE:-unknown}"
 
+# 结果变量先于 write_result 定义初始化（早退路径也会写 result.json，set -u 安全）
+MAX_TOKENS="1"
+STREAM="true"
+ATTEMPTS=0
+LAST_HTTP=""
+MODEL_SOURCE=""
+MODEL_NAME=""
+URL=""
+PARAMS_FILE=""
+
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 START="$(date +%s)"
 
@@ -58,7 +68,7 @@ write_result() {   # $1=status  $2=error.code  $3=message  $4=retryable(true/fal
      --argjson attempt "$(num "${ATTEMPT_NO}")" --argjson seq "$(num "${RUNNER_SEQ}")" \
      --arg ver "${VERSION}" --arg img "${IMAGE_REF}" --arg status "$1" \
      --arg started "${STARTED}" --arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-     --arg url "${URL}" --arg model "${MODEL_NAME}" --arg msrc "${MODEL_SOURCE}" \
+     --arg url "${URL}" --arg model "${MODEL_NAME}" --arg msrc "${MODEL_SOURCE:-}" \
      --argjson mt "$(num "${MAX_TOKENS}")" \
      --argjson stream "$([ "${STREAM}" = "true" ] && printf true || printf false)" \
      --argjson attempts "${ATTEMPTS}" --argjson wait "${waited}" \
@@ -88,6 +98,7 @@ finish() {         # $1=exit  $2=status  $3=code  $4=message  $5=retryable
 PARAMS_FILE=""
 URL=""
 MODEL_NAME=""
+MODEL_SOURCE=""
 UNKNOWN_ARGS=()
 
 while [ $# -gt 0 ]; do
@@ -138,8 +149,6 @@ parse_params_file() {
 
 WAIT="600"
 INTERVAL="15"
-MAX_TOKENS="1"
-STREAM="true"
 
 if [ -n "${PARAMS_FILE}" ]; then
   parse_params_file "${PARAMS_FILE}"           # 显式指定：必须存在且合法
@@ -171,8 +180,6 @@ fi
 CHAT_URL="${URL}/chat/completions"
 MODELS_URL="${URL}/models"
 
-ATTEMPTS=0
-LAST_HTTP=""
 LAST_MSG=""
 MODEL_SOURCE=""
 

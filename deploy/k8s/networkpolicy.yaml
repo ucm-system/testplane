@@ -122,3 +122,7 @@ spec:
           protocol: TCP
         - port: 443
           protocol: TCP
+        - port: 18080  # dev：被测 mock 服务（run-local / deploy-check）
+          protocol: TCP
+        - port: 18091  # dev：fake-genet（host.docker.internal）
+          protocol: TCP

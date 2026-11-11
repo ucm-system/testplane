@@ -199,33 +199,38 @@ func TestRenderMatchesDesignSection22(t *testing.T) {
 	}
 
 	// 挂载：input 只读 + output 读写，都带 subPath（attempts/<n>/...）；/tmp 是 emptyDir。
+	// 同 claim 复用一条卷目（output 名），因此**按 MountPath** 断言而非按卷名。
 	m := map[string]*corev1.VolumeMount{}
 	for i := range c.VolumeMounts {
-		m[c.VolumeMounts[i].Name] = &c.VolumeMounts[i]
+		m[c.VolumeMounts[i].MountPath] = &c.VolumeMounts[i]
 	}
-	if v := m["output"]; v == nil || v.MountPath != OutputMountPath ||
+	if v := m[OutputMountPath]; v == nil ||
 		v.SubPath != "t-0001/attempts/1/runners/2" || v.ReadOnly {
 		t.Fatalf("output mount = %+v", v)
 	}
-	if v := m["input"]; v == nil || v.MountPath != InputMountPath ||
-		v.SubPath != "t-0001/attempts/1/input/2" || !v.ReadOnly {
-		t.Fatalf("input mount = %+v", v)
+	if v := m[InputMountPath]; v == nil ||
+		v.SubPath != "t-0001/attempts/1/input/2" || !v.ReadOnly || v.Name != "output" {
+		t.Fatalf("input mount = %+v（应复用 output 卷名）", v)
 	}
-	if v := m["tmp"]; v == nil || v.MountPath != "/tmp" {
+	if v := m["/tmp"]; v == nil || v.MountPath != "/tmp" {
 		t.Fatalf("tmp mount = %+v", v)
 	}
 	vols := map[string]*corev1.Volume{}
 	for i := range pod.Volumes {
 		vols[pod.Volumes[i].Name] = &pod.Volumes[i]
 	}
+	// 同 claim 只有一条 volume 声明（output 复用给 input 挂载）：两条同 claim 卷目
+	// 会让 kubelet 对同一 hostPath 目录二次 bind，在 Docker Desktop drvfs 上悬挂（实测）。
 	if v := vols["output"]; v == nil || v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != "argus-storage" {
 		t.Errorf("output volume = %+v (PVC 统一 argus-storage，D-41)", v)
 	}
-	// execution §2.2：input 卷 claim 级不带 ReadOnly（RWX PVC），只读由 volumeMount 强制。
-	if v := vols["input"]; v == nil || v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != "argus-storage" {
-		t.Errorf("input volume = %+v", v)
+	if v, ok := vols["input"]; ok {
+		t.Errorf("input 不应再有独立 volume 声明（同 claim 复用 output 卷目）: %+v", v)
 	}
-	// StorageRO=true 时 claim 级才置只读（Profile 的只读存储开关）。
+	if n := len(pod.Volumes); n != 2 { // output(PVC) + tmp(emptyDir)
+		t.Errorf("volumes 数量 = %d，期望 2（同 claim 去重后）", n)
+	}
+	// StorageRO=true 时 claim 级置只读（Profile 的只读存储开关；input 的只读由 mount 级强制）。
 	specRO := sampleSpec()
 	specRO.StorageRO = true
 	jobRO, err := Render(specRO)
@@ -233,8 +238,8 @@ func TestRenderMatchesDesignSection22(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, v := range jobRO.Spec.Template.Spec.Volumes {
-		if v.Name == "input" && (v.PersistentVolumeClaim == nil || !v.PersistentVolumeClaim.ReadOnly) {
-			t.Errorf("StorageRO=true must set claim-level read-only on input: %+v", v)
+		if v.Name == "output" && (v.PersistentVolumeClaim == nil || !v.PersistentVolumeClaim.ReadOnly) {
+			t.Errorf("StorageRO=true must set claim-level read-only on the storage volume: %+v", v)
 		}
 	}
 

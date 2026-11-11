@@ -84,8 +84,8 @@ spec:
                 name: argus-config
           env:
             # DSN 含口令 → Secret；sslmode=disable 仅限 dev 容器 PG
-            # 键名对齐 server/internal/config/config.go（AG_DATABASE_URL 优先，DB_DSN 是别名）
-            - name: AG_DATABASE_URL
+            # 键名对齐 server/internal/config/config.go（AG_DB_DSN 优先，DB_DSN 是别名）
+            - name: AG_DB_DSN
               valueFrom:
                 secretKeyRef:
                   name: argus-db

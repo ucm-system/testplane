@@ -1,5 +1,5 @@
 name: endpoint-probe
-version: 1.0.0
+version: 1.0.2
 display_name: 服务就绪探测
 description: |
   对已部署的 LLM 服务执行生成型探活：POST <url>/chat/completions，max_tokens=1、stream=true，
@@ -23,7 +23,7 @@ post_run: /runner/post_run.sh
 
 # 镜像由 CI 构建产出（见 build/Dockerfile 与 README 的构建节）。平台与任何运行环境都不 build（§6.2）。
 # 镜像引用形态不限（tag / digest 都行）：平台原样交给 K8s，不做解析也不强制钉版本（§5.6）。
-image: registry.dev.huawei.com/argus/endpoint-probe:1.0.0
+image: registry.dev.huawei.com/argus/endpoint-probe:1.0.2
 
 resources:
   cpu: "1"

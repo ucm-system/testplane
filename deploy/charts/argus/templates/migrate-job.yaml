@@ -45,7 +45,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["migrate", "up"]
           env:
-            - name: AG_DATABASE_URL
+            - name: AG_DB_DSN
               valueFrom:
                 secretKeyRef:
                   {{- if .Values.database.existingSecret }}

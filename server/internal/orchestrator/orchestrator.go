@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -43,6 +44,9 @@ const (
 	// DefaultGCInterval 是维护 tick（Job/Pod GC + clean 兜底对账）的默认周期
 	//（execution §6.3：GC 每 10 分钟一轮的量级；本实现默认 5m）。
 	DefaultGCInterval = 5 * time.Minute
+	// DefaultDeploySampleInterval 是 deploy-state.json 的采样周期（C-5.3.2/D-31）：
+	// 部署排队/部署中的状态轨迹要可见，30s 对账 tick 对短部署整段错过，用 5s 专采样。
+	DefaultDeploySampleInterval = 5 * time.Second
 	// DefaultMaxCandidates 是单轮候选上限（C-4.2 LIMIT 50）。
 	DefaultMaxCandidates = 50
 	// cleanupScanLimit 是单轮 clean 兜底对账扫描的行数上限。
@@ -61,6 +65,9 @@ type Config struct {
 	Namespace string
 	// StorageRoot 是 controller 侧看到的 NFS 挂载点（<storage-root>）。
 	StorageRoot string
+	// GenetBaseURL 是 Genet OpenAPI 接入点（AG_GENET_BASE_URL），仅注入
+	// role=deploy/clean 的 runner Job（§9.1、§12.4；D-70 平台不直连）。
+	GenetBaseURL string
 	// StoragePVC 是产物 RWX PVC 名（Job 渲染挂 /workspace/output）。
 	StoragePVC string
 	// ServiceAccount 为空则不渲染（runner 不调 K8s API）。
@@ -82,6 +89,9 @@ type Config struct {
 	GCEnabled bool
 	// GCInterval 是维护 tick（GC + clean 兜底对账）的周期（默认 5m，DefaultGCInterval）。
 	GCInterval time.Duration
+	// DeploySampleInterval 是 deploy-state.json 采样周期（默认 5s，DefaultDeploySampleInterval；
+	// 仅在有 RUNNING 的 service-deploy 时才产生实际归档动作，§9.2）。
+	DeploySampleInterval time.Duration
 	// GCTick 是一轮 Job/Pod 回收。cmd 装配时绑到 executor.CollectGarbage（GCOptions 由
 	// 装配层构造：RunnerRunStates 查 store、OnStaleRunning 回 MarkStaleRunnerTimeout）；
 	// 编排层不 import executor，保持依赖方向。nil = 不跑 GC。
@@ -119,6 +129,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.GCInterval <= 0 {
 		c.GCInterval = DefaultGCInterval
+	}
+	if c.DeploySampleInterval <= 0 {
+		c.DeploySampleInterval = DefaultDeploySampleInterval
 	}
 	if c.MaxCandidates <= 0 {
 		c.MaxCandidates = DefaultMaxCandidates
@@ -207,6 +220,8 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	defer reconcile.Stop()
 	maintenance := time.NewTicker(s.cfg.GCInterval)
 	defer maintenance.Stop()
+	deploySample := time.NewTicker(s.cfg.DeploySampleInterval)
+	defer deploySample.Stop()
 
 	s.logf("orchestrator: scheduler started (ns=%s, concurrency=%d, attempt_max=%d, gc=%v interval=%s)",
 		s.cfg.Namespace, s.cfg.MaxGlobalConcurrency, s.cfg.AttemptMax, s.cfg.GCEnabled && s.cfg.GCTick != nil, s.cfg.GCInterval)
@@ -232,6 +247,8 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			if err := s.WatchdogOnce(ctx); err != nil {
 				s.logf("orchestrator: watchdog: %v", err)
 			}
+		case <-deploySample.C:
+			s.archiveDeployStates(ctx)
 		case <-reconcile.C:
 			if err := s.ReconcileOnce(ctx); err != nil {
 				s.logf("orchestrator: reconcile: %v", err)
@@ -414,6 +431,18 @@ func (s *Scheduler) launchClaimed(ctx context.Context, k domain.RunnerKey, rr *s
 		return s.finishFailed(ctx, k, domain.NewFailure(domain.CodeInternalError,
 			fmt.Sprintf("渲染 Job 失败: %v", err), map[string]any{"runner_seq": k.Seq}), nil)
 	}
+	// 目录预创建（§6.8 约束 3）：output/input 的 subPath 目录必须**先于 Job 存在**——
+	// kubelet 在 hostPath(drvfs) PV 上现建 subPath 会悬挂（实测 kind/Windows），
+	// input 侧由 persistInputs 连带创建，output 侧没有天然写者，必须这里建。
+	for _, dir := range []string{spec.OutputDir, spec.InputDir} {
+		if dir == "" {
+			continue
+		}
+		if merr := os.MkdirAll(dir, 0o770); merr != nil {
+			return s.finishFailed(ctx, k, domain.NewFailure(domain.CodeInternalError,
+				fmt.Sprintf("预创建 runner 目录失败: %v", merr), map[string]any{"runner_seq": k.Seq}), nil)
+		}
+	}
 	handle, err := s.exec.Submit(ctx, spec)
 	if err != nil {
 		return s.finishFailed(ctx, k, domain.NewFailure(domain.CodeExecutorUnavailable,
@@ -426,6 +455,20 @@ func (s *Scheduler) launchClaimed(ctx context.Context, k domain.RunnerKey, rr *s
 		}
 	}
 	s.startWatch(ctx, k, handle)
+	// deploy runner 启动即补采早期状态（queued 窗口只有一次轮询周期，5s 采样可能错过）：
+	// 启动后 1.5s / 3.5s 各归档一次（文件未写出时为 no-op）。
+	if rr.Role == domain.RoleDeploy {
+		go func() {
+			for _, d := range []time.Duration{1500 * time.Millisecond, 3500 * time.Millisecond} {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(d):
+				}
+				s.archiveOneDeployState(ctx, rr)
+			}
+		}()
+	}
 	s.logf("orchestrator: task %s attempt %d runner seq=%d (%s) submitted as job %s",
 		k.TaskID, k.AttemptNo, k.Seq, rr.Name, handle.JobName)
 	return nil
@@ -588,6 +631,12 @@ func (s *Scheduler) finishFailed(ctx context.Context, k domain.RunnerKey, f doma
 func (s *Scheduler) postFinish(ctx context.Context, k domain.RunnerKey, out *store.RunnerFinishResult, rr *store.RunnerRun) {
 	if out == nil {
 		return
+	}
+	// deploy runner 终态时补一次 deploy-state.json 归档（终态快照）：
+	// 周期对账（30s tick）只采样 RUNNING 状态，短部署（数十秒）会整段错过，
+	// 不补归档则 /deploy 的状态轨迹与 Pod 快照为空（deploy-check 断言依赖）。
+	if rr != nil && rr.RunnerName == "service-deploy" {
+		s.archiveOneDeployState(ctx, rr)
 	}
 	if out.AbortTriggered {
 		if err := s.scheduleClean(ctx, k.TaskID, k.AttemptNo); err != nil {

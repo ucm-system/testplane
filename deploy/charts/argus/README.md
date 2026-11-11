@@ -144,7 +144,7 @@ helm template argus deploy/charts/argus -n argus -f values-prod.yaml  # 渲染�
 | 现象 | 原因 |
 |---|---|
 | `helm install` 卡在 pre-install | 迁移 Job 失败：看 `kubectl logs job/<release>-argus-migrate`；多半是 DB DSN/网络 |
-| Pod `CrashLoopBackOff` + `缺少 AG_DATABASE_URL` | Secret 名字/键名不对（默认键 `dsn`） |
+| Pod `CrashLoopBackOff` + `缺少 AG_DB_DSN` | Secret 名字/键名不对（默认键 `dsn`） |
 | `readyz` 持续 503 | 迁移版本不匹配（`jobs` 没跑成）或 DB 不可达 |
 | 登录跳转 500 | `oidc.redirectURL` 与 IdP 登记的 callback 不一致（必须逐字节相同） |
 | 页面上没有静态资源 | 镜像没打前端（`server.Dockerfile` 的 web 阶段被关掉）；重新 `build-push.ps1` |

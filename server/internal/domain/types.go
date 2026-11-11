@@ -226,6 +226,7 @@ type Endpoint struct {
 	ModelName string `json:"model_name,omitempty"` // 服务端模型名
 	ModelPath string `json:"model_path,omitempty"` // 本地权重路径，可为空
 	DeployRef string `json:"deploy_ref,omitempty"` // AG_DEPLOY_REF（deploy 导出，仅 clean 消费）
+	Source    string `json:"source,omitempty"`    // 端点来源：genet（deploy 导出）| service（静态）
 }
 
 // ---- Runner 规格（runner.yaml 的领域表示，附录 C v2）----------------------

@@ -63,7 +63,7 @@ spec:
             {{- end }}
           env:
             # DB DSN 含口令 → 只走 Secret（database.existingSecret 已在 values 校验里强制）
-            - name: AG_DATABASE_URL
+            - name: AG_DB_DSN
               valueFrom:
                 secretKeyRef:
                   {{- if .Values.database.existingSecret }}

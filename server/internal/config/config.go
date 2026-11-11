@@ -87,6 +87,9 @@ type Config struct {
 	// DeployTimeout 是部署总窗口（AG_DEPLOY_TIMEOUT，默认 72h；= service-deploy
 	// runner 的执行时限，排队计入，K-6）。
 	DeployTimeout time.Duration
+	// GenetBaseURL 是 Genet OpenAPI 接入点（AG_GENET_BASE_URL），仅注入
+	// role=deploy/clean 的 runner Job（§9.1、§12.4）；平台自身不直连 Genet（D-70）。
+	GenetBaseURL string
 	// RetentionDays 是产物保留期（AG_RETENTION_DAYS，默认 30；v2 cleanup.policy
 	// 取消，保留期只由本配置决定，D-70/D-33）。
 	RetentionDays int
@@ -176,6 +179,7 @@ func Load() (*Config, error) {
 		RunnerTimeoutDefault: 4 * time.Hour,
 		RunnerTimeoutMax:     24 * time.Hour,
 		DeployTimeout:        72 * time.Hour,
+		GenetBaseURL:         env("AG_GENET_BASE_URL", ""),
 		RetentionDays:        30,
 		ResultMaxBytes:       100 << 20,
 		ArtifactMaxBytes:     10 << 30,

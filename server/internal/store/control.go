@@ -660,7 +660,7 @@ func (s *Store) RetryTask(ctx context.Context, taskID, actor, role string, attem
 			fresh.UpdatedAt = at
 			fresh.JobID = JobName(domain.RunnerKey{TaskID: taskID, AttemptNo: next, Seq: rr.Seq})
 			fresh.JobNamespace = nil
-			fresh.InputRef = fmt.Sprintf("attempts/%d/input/", next)
+			fresh.InputRef = fmt.Sprintf("attempts/%d/input/%d/", next, rr.Seq)
 			if err := s.RunnerRuns.Insert(ctx, tx, &fresh); err != nil {
 				return err
 			}

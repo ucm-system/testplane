@@ -45,7 +45,7 @@ function Invoke-Api {
 function New-Manifest {
     param([string]$Stamp)
     return @"
-{"task":{"name":"deploy-check-$Stamp","deploy":{"provider":"genet","spec":"model_name: mock-llm"},"precheck":"auto","runners":[{"name":"probe","runner":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"input":"{\"wait_timeout_seconds\":60}","on_failure":"continue"}]}}
+{"task":{"name":"deploy-check-$Stamp","deploy":{"provider":"genet","spec":"model_name: mock-llm"},"secrets":{"GENET_API_KEY":"argus-genet/api-key"},"precheck":"auto","runners":[{"name":"probe","runner":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"input":"{\"wait_timeout_seconds\":60}","on_failure":"abort_task"}]}}
 "@
 }
 
@@ -101,7 +101,7 @@ $states = @()
 $run = $null
 while ($sw.Elapsed.TotalSeconds -lt $TerminalTimeoutSeconds) {
     $run = Invoke-Api -Method GET -Path "/api/v1/tasks/$runId"
-    $ds = $run.deploy.state
+    $ds = $run.deploy.phase
     if ($ds) { if ($states.Count -eq 0 -or $states[-1] -ne $ds) { $states += $ds } }
     $line = "t+{0:N1}s status={1} deploy={2}" -f $sw.Elapsed.TotalSeconds, $run.status, $ds
     if ($trace.Count -eq 0 -or $trace[-1] -ne $line) { $trace += $line; Write-Host "  $line" }

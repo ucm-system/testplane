@@ -587,7 +587,10 @@ func buildMounts(spec ports.JobSpec, inputSub, outputSub string) ([]corev1.Volum
 		{
 			Name: "output",
 			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc},
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvc,
+					ReadOnly:  spec.StorageRO,
+				},
 			},
 		},
 		{
@@ -599,17 +602,12 @@ func buildMounts(spec ports.JobSpec, inputSub, outputSub string) ([]corev1.Volum
 	}
 
 	if inputSub != "" {
+		// 同一 claim **复用 output 的 volume 声明**（一条卷目、多个挂载，§6.8）：
+		// 两条同 claim 卷目会让 kubelet 对同一 hostPath 目录做第二次 bind，
+		// 在 Docker Desktop 的 drvfs 上实测悬挂（kind/Windows），Pod 永远
+		// ContainerCreating。只读差异在 mount 级（ReadOnly: true）表达。
 		mounts = append(mounts, corev1.VolumeMount{
-			Name: "input", MountPath: InputMountPath, SubPath: inputSub, ReadOnly: true,
-		})
-		volumes = append(volumes, corev1.Volume{
-			Name: "input",
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: pvc,
-					ReadOnly:  spec.StorageRO,
-				},
-			},
+			Name: "output", MountPath: InputMountPath, SubPath: inputSub, ReadOnly: true,
 		})
 	}
 

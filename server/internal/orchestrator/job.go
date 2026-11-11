@@ -273,9 +273,21 @@ func (s *Scheduler) renderRunnerEnv(ctx context.Context, t *store.Task, rr *stor
 	put(EnvAttempt, fmt.Sprintf("%d", k.AttemptNo))
 	put(EnvRunnerSeq, fmt.Sprintf("%d", k.Seq))
 	if inputFile != "" {
-		put(EnvParamsFile, inputFile)
+		// AG_PARAMS_FILE 必须是**容器内**路径（附录 B：/workspace/input/params.<ext>），
+		// inputFile 是 controller 侧 <storage-root>/...（挂载源），不能透传给 runner。
+		def := runnerDefOf(t, k.Seq)
+		format := firstNonEmpty(def.InputFormat, domain.InputFormatJSONL)
+		put(EnvParamsFile, "/workspace/input/"+domain.InputFileName(format))
 	}
-	put(EnvOutputDir, s.runnerDir(k.TaskID, k.AttemptNo, k.Seq))
+	put(EnvOutputDir, "/workspace/output")
+
+	// 6. Genet 接入点：仅 deploy / clean 角色注入（§9.1、§12.4）。平台自身不直连
+	//    Genet（D-70），这里只是把平台配置的接入点透传给内置 runner。
+	if rr.Role == domain.RoleDeploy || rr.Role == domain.RoleClean {
+		if s.cfg.GenetBaseURL != "" {
+			put("AG_GENET_BASE_URL", s.cfg.GenetBaseURL)
+		}
+	}
 
 	return env, secretEnv, nil
 }

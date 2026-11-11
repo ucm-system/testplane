@@ -323,6 +323,9 @@ func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
 		s.failErr(w, r, err)
 		return
 	}
+	// 输入文件随 attempt 落档（§6.8）：新 attempt 的 input/<seq>/ 从上一 attempt 复制，
+	// 否则重跑的 runner 拿不到 params 文件（E-Q8 布局，attempts/<n>/input/<seq>/）。
+	s.copyAttemptInputs(taskID, attemptNo-1, attemptNo)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"task_id": taskID, "attempt_no": attemptNo, "status": string(domain.TaskQueued),
 	})
@@ -602,4 +605,38 @@ func (s *Server) handleGetAttemptRunner(w http.ResponseWriter, r *http.Request) 
 func (s *Server) runnerDirFor(taskID string, attemptNo, seq int) string {
 	return filepath.Join(s.cfg.StorageRoot, taskID, "attempts", strconv.Itoa(attemptNo),
 		"runners", strconv.Itoa(seq))
+}
+
+// copyAttemptInputs 把上一 attempt 的 input/<seq>/params.* 复制到新 attempt
+// （E-Q8 布局；源缺失时跳过——runner 会以"输入文件不存在"干净失败而非静默造空文件）。
+func (s *Server) copyAttemptInputs(taskID string, fromAttempt, toAttempt int) {
+	if s.cfg.StorageRoot == "" || fromAttempt < 1 {
+		return
+	}
+	runs, err := s.st.RunnerRuns.ListByAttempt(context.Background(), nil, taskID, fromAttempt)
+	if err != nil {
+		return
+	}
+	for _, rr := range runs {
+		if rr.InputRef == "" {
+			continue
+		}
+		srcDir := filepath.Join(s.cfg.StorageRoot, taskID, filepath.FromSlash(rr.InputRef))
+		srcs, gerr := filepath.Glob(filepath.Join(srcDir, "params.*"))
+		if gerr != nil || len(srcs) == 0 {
+			continue
+		}
+		for _, src := range srcs {
+			raw, rerr := os.ReadFile(src)
+			if rerr != nil {
+				continue
+			}
+			dst := filepath.Join(s.cfg.StorageRoot, taskID, "attempts", strconv.Itoa(toAttempt),
+				"input", strconv.Itoa(rr.Seq), filepath.Base(src))
+			if derr := os.MkdirAll(filepath.Dir(dst), 0o770); derr != nil {
+				continue
+			}
+			_ = os.WriteFile(dst, raw, 0o644)
+		}
+	}
 }

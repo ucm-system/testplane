@@ -57,7 +57,7 @@ spec:
           command: ["/argusd"]
           args: ["migrate", "up"]
           env:
-            - name: AG_DATABASE_URL
+            - name: AG_DB_DSN
               valueFrom:
                 secretKeyRef:
                   name: argus-db
