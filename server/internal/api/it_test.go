@@ -228,8 +228,15 @@ func TestIT_SubmitValidationsAndAccept(t *testing.T) {
 		t.Fatalf("列表应 200: %d", rec.Code)
 	}
 	list := decodeBody(t, rec)
-	if items, _ := list["items"].([]any); len(items) != 1 {
-		t.Fatalf("列表应含 1 条: %v", list)
+	// 共享测试库下其他 IT 的 Task 也会在列表里；断言"包含本 Task"而非精确条数。
+	found := false
+	for _, it := range list["items"].([]any) {
+		if m, _ := it.(map[string]any); m != nil && m["id"] == taskID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("列表应含本 Task %s: %v", taskID, list)
 	}
 
 	rec = srv.do(t, http.MethodGet, "/api/v1/tasks/"+taskID, "")
