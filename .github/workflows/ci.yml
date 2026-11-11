@@ -95,7 +95,7 @@ jobs:
           go test ./...
 
   contract:
-    name: 契约（spec 侧：openapi ↔ design 端点基线）
+    name: 契约（spec 侧：openapi ↔ design 50 端点）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
