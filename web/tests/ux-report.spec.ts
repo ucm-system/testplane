@@ -41,8 +41,9 @@ test('② 结果视图：结论 + runner 明细 + 测试结果（三选一渲染
   // 测试结果：失败 runner 默认展开（内联渲染），成功 runner 折叠
   const render = page.getByTestId('task-result-render')
   await expect(render).toBeVisible()
-  // 展开一个折叠着的 runner 看内联结果（不是只有下载；失败的可能已经默认展开）
+  // 产物清单是异步加载的：等第一批 runner-result 面板渲染出来再数/点（CI 慢机竞态）
   const first = render.locator('[data-testid^="runner-result-"]').first()
+  await expect(first).toBeVisible({ timeout: 20_000 })
   const expandedState = await first.locator('button[aria-expanded]').getAttribute('aria-expanded')
   if (expandedState === 'false') await first.locator('button[aria-expanded]').click()
   await expect(first.locator('button[aria-expanded="true"]')).toBeVisible()
@@ -71,6 +72,9 @@ test('③ 测试结果内联渲染 result.json 指标（不编数据；deploy/cl
 
   // 成功 runner 默认折叠：全部展开（第一个可能是 pre_check 探针，指标为空属正常），断言任一指标表有 accuracy
   const panels = render.locator('[data-testid^="runner-result-"]')
+  // 先等产物清单就位（第一批面板渲染完），否则 count 会读到 0（CI 慢机竞态）
+  await expect(panels.first()).toBeVisible({ timeout: 20_000 })
+  await page.waitForTimeout(300)
   const count = await panels.count()
   for (let i = 0; i < count; i += 1) {
     const panel = panels.nth(i)
@@ -79,7 +83,8 @@ test('③ 测试结果内联渲染 result.json 指标（不编数据；deploy/cl
     }
   }
   const metrics = render.getByTestId('metrics-table').first()
-  await expect(metrics).toBeVisible({ timeout: 10_000 })
+  // CI 机器慢：5 个面板逐个展开 + 每个 result 一次 mock fetch（120ms/个），10s 偶发不够
+  await expect(metrics).toBeVisible({ timeout: 30_000 })
   await expect(metrics).toContainText('accuracy')
 
   // deploy/clean 角色不进测试结果卡（它们没有 result.json，§9.1）
