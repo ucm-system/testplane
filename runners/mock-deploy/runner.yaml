@@ -1,6 +1,6 @@
 name: mock-deploy
-version: 1.1.0
-display_name: Mock 服务接入（内置）
+version: 1.1.1
+display_name: Mock 服务部署（内置）
 description: |
   内置 deploy Runner（mock 变体，D-75）：**与 Genet 完全解耦**——不做任何部署动作，
   只「接入」一个已存在的 OpenAI 兼容 mock 服务并等它就绪。联调环境缺省接入 chart

@@ -101,29 +101,32 @@ export function FileViewerPage() {
         </span>
       </div>
 
-      <Card>
-        <CardHeader
-          tone={kind === 'binary' ? 'muted' : 'info'}
-          title={
-            <span className="flex flex-wrap items-center gap-2">
-              文件查看
-              <Badge tone="muted">{VIEW_LABEL[kind]}</Badge>
-              {artifact.size_bytes > 0 ? <Badge tone="muted">{formatBytes(artifact.size_bytes)}</Badge> : null}
-              {artifact.attempt_no != null ? <Badge tone="muted">attempt #{artifact.attempt_no}</Badge> : null}
-              {artifact.runner_seq != null ? <Badge tone="muted">seq {artifact.runner_seq}</Badge> : null}
-            </span>
-          }
-          sub={
-            kind !== 'binary'
-              ? `通用预览（按扩展名分发）· 上限 ${formatPreviewLimit()}，超出请下载`
-              : '二进制文件不提供预览，请下载后用本地工具打开'
-          }
-          actions={<ArtifactDownloadButton taskId={taskId} artifact={artifact} />}
-        />
-        <CardBody className={cn('flex flex-col gap-3', kind === 'text' ? 'pt-3' : undefined)}>
-          <ArtifactPreviewBody taskId={taskId} artifact={artifact} />
-        </CardBody>
-      </Card>
+      {/* 整页查看器吃满视口：卡片 + 预览体 flex 拉伸（弹窗形态的固定高度在这里不适用） */}
+      <div className="flex min-h-[calc(100vh-9.5rem)] flex-col">
+        <Card className="flex flex-1 flex-col">
+          <CardHeader
+            tone={kind === 'binary' ? 'muted' : 'info'}
+            title={
+              <span className="flex flex-wrap items-center gap-2">
+                文件查看
+                <Badge tone="muted">{VIEW_LABEL[kind]}</Badge>
+                {artifact.size_bytes > 0 ? <Badge tone="muted">{formatBytes(artifact.size_bytes)}</Badge> : null}
+                {artifact.attempt_no != null ? <Badge tone="muted">attempt #{artifact.attempt_no}</Badge> : null}
+                {artifact.runner_seq != null ? <Badge tone="muted">seq {artifact.runner_seq}</Badge> : null}
+              </span>
+            }
+            sub={
+              kind !== 'binary'
+                ? `通用预览（按扩展名分发）· 上限 ${formatPreviewLimit()}，超出请下载`
+                : '二进制文件不提供预览，请下载后用本地工具打开'
+            }
+            actions={<ArtifactDownloadButton taskId={taskId} artifact={artifact} />}
+          />
+          <CardBody className={cn('flex min-h-0 flex-1 flex-col gap-3', kind === 'text' ? 'pt-3' : undefined)}>
+            <ArtifactPreviewBody taskId={taskId} artifact={artifact} stretch />
+          </CardBody>
+        </Card>
+      </div>
 
       {artifacts.error ? (
         <p className="text-2xs text-fg-3" role="status">

@@ -99,51 +99,6 @@ function parseDeployInput(text: string): { error: string | null; pos: YamlEditor
   }
 }
 
-/* ---------------------------------------------------------------- 服务来源卡片 */
-
-/**
- * 服务来源的一张选择卡：deploy runner（目录即真相）或 外接（静态三元组）。
- * role=radiogroup 里的 radio（键盘可达；选中态 border-primary）。
- */
-function SourceCard({
-  selected,
-  onClick,
-  title,
-  subtitle,
-  tags,
-  description,
-  testId,
-}: {
-  selected: boolean
-  onClick: () => void
-  title: string
-  subtitle: string
-  tags: React.ReactNode
-  description?: string
-  testId: string
-}) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      data-testid={testId}
-      onClick={onClick}
-      className={cn(
-        'flex flex-col gap-1.5 rounded-lg border px-3 py-2.5 text-left transition-all duration-150',
-        selected ? 'border-primary bg-primary-weak/40' : 'border-line-strong bg-surface hover:border-primary/40 hover:bg-surface-2',
-      )}
-    >
-      <span className="flex items-center gap-2">
-        <span className="text-sm font-medium text-fg">{title}</span>
-        <span className="ml-auto">{tags}</span>
-      </span>
-      <span className="font-mono text-2xs text-fg-3">{subtitle}</span>
-      {description ? <span className="line-clamp-2 text-2xs leading-[16px] text-fg-2">{description}</span> : null}
-    </button>
-  )
-}
-
 export function SubmitPage() {
   const navigate = useNavigate()
   const toast = useToast()
@@ -334,8 +289,12 @@ export function SubmitPage() {
 
   const runnerOptions = runnerList.filter((r) => r.role === 'test')
   const precheckRunner = runnerList.find((r) => r.role === 'pre_check')
-  /** deploy 角色的 runner 目录（服务来源卡的选项；平台不感知具体名字，列表即真相） */
+  /** deploy 角色的 runner 目录（服务来源下拉的选项；平台不感知具体名字，列表即真相） */
   const deployRunners = runnerList.filter((r) => r.role === 'deploy')
+  /** 默认服务来源：genet-deploy（用户裁决 Genet 默认）；目录没有时取第一个 deploy runner */
+  const defaultDeployRunnerName = deployRunners.some((r) => r.name === 'genet-deploy')
+    ? 'genet-deploy'
+    : (deployRunners[0]?.name ?? '')
   const deployRunnerObj = deployRunners.find((r) => r.name === deployRunnerName)
   /** yaml 输入（genet-deploy）→ YAML 编辑器；jsonl（existing-deploy / mock-deploy）→ 普通输入框 */
   const deployIsYaml = deployRunnerObj?.input_format !== 'jsonl'
@@ -361,12 +320,11 @@ export function SubmitPage() {
   /** deploy 输入示例：placeholder 的首行才是纯 jsonl（后几行是人话注释，textarea 灰字只给一行） */
   const deployPlaceholderFirstLine = (deployRunnerObj?.placeholder ?? '').split('\n')[0] ?? ''
 
-  // 列表到达后的默认选择：第一个 yaml 格式的 deploy runner（genet-deploy 在前）；没有 deploy runner 时回外接。
+  // 列表到达后的默认选择：Genet（用户裁决默认服务来源）；没有 deploy runner 时回外接。
   useEffect(() => {
     if (deployRunnerName !== null) return
     if (runners.loading) return
-    const firstYaml = deployRunners.find((r) => r.input_format === 'yaml')
-    setDeployRunnerName(firstYaml?.name ?? '')
+    setDeployRunnerName(defaultDeployRunnerName)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runners.loading, runnerList])
 
@@ -917,7 +875,8 @@ export function SubmitPage() {
               <span className="grid size-5 shrink-0 place-items-center rounded-full bg-surface-3 text-2xs text-fg-2">0</span>
               <span className="text-sm font-semibold text-fg">服务来源</span>
               <span className="text-2xs text-fg-3">
-                选一个 deploy runner（部署 / mock / 已有），或直接给外接服务三元组；都填或都不填会被拒（D-27）
+                Genet（默认）/ Mock / 已有服务三选一；都填或都不填会被拒（D-27）。「已有服务」不部署、
+                直接填三元组；deploy runner 的 clean 是否注入由它的 clean_runner 声明决定
               </span>
               {deployRunnerObj ? (
                 <span className="ml-auto flex items-center gap-1">
@@ -931,37 +890,44 @@ export function SubmitPage() {
               ) : null}
             </div>
 
-            {/* provider 卡片：role=deploy 的目录项 + 外接（列表即真相，平台不感知名字） */}
-            <div role="radiogroup" aria-label="服务来源" className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-              {runners.loading && deployRunners.length === 0 ? (
-                <p className="text-2xs text-fg-3 sm:col-span-2 xl:col-span-4">Runner 目录加载中…</p>
-              ) : null}
-              {deployRunners.map((runner: Runner) => (
-                <SourceCard
-                  key={runner.name}
-                  testId={`provider-card-${runner.name}`}
-                  selected={deployRunnerName === runner.name}
-                  onClick={() => setDeployRunnerName(runner.name)}
-                  title={runner.display_name || runner.name}
-                  subtitle={`${runner.name} v${runner.version}`}
-                  tags={
-                    <>
-                      <Tag mono>{runner.input_format}</Tag>
-                      {runner.clean_runner ? <Tag>clean</Tag> : <Tag>无 clean</Tag>}
-                    </>
-                  }
-                  description={runner.description}
-                />
-              ))}
-              <SourceCard
-                testId="provider-card-service"
-                selected={!deployRunnerName}
-                onClick={() => setDeployRunnerName('')}
-                title="外接（已有服务）"
-                subtitle="service 三元组"
-                tags={<Tag mono>url</Tag>}
-                description="不部署、不拉服务：直接给 base URL / 模型名 / 模型路径，平台静态注入 AG_SERVED_URL 等。"
-              />
+            {/* 服务来源下拉（用户 2026-11-11：与 runner 行同一形态）：Genet（默认）/ Mock / 已有服务。
+                列表仍是目录真相（role=deploy 全量），「已有服务」= 外接三元组（不部署，无 deploy 阶段）。 */}
+            <div className="flex flex-wrap items-center gap-2">
+              <Field label="服务来源" required htmlFor="deploy-runner-select" className="mb-0"
+                error={issueFor('task.deploy.runner')}>
+                <Select
+                  id="deploy-runner-select"
+                  aria-label="服务来源"
+                  data-testid="deploy-runner"
+                  value={deployRunnerName ?? ''}
+                  onChange={(e) => setDeployRunnerName(e.target.value)}
+                  className="h-8 w-72 text-xs"
+                >
+                  {runners.loading && deployRunners.length === 0 ? (
+                    <option value="">（Runner 目录加载中…）</option>
+                  ) : null}
+                  {deployRunners.map((runner: Runner) => (
+                    <option key={runner.name} value={runner.name}>
+                      {runner.display_name || runner.name}
+                      {runner.name === defaultDeployRunnerName ? '（默认）' : ''} · {runner.name} v{runner.version}
+                      {runner.clean_runner ? ` · clean: ${runner.clean_runner}` : ' · 无 clean'}
+                    </option>
+                  ))}
+                  <option value="">已有服务（不部署 · 直接填三元组）</option>
+                </Select>
+              </Field>
+              {deployRunnerObj ? (
+                <span className="flex items-center gap-1 pb-0.5">
+                  <Tag mono>{deployRunnerObj.input_format}</Tag>
+                  {deployRunnerObj.clean_runner ? (
+                    <Tag data-testid="deploy-clean-tag">clean: {deployRunnerObj.clean_runner}</Tag>
+                  ) : (
+                    <Tag data-testid="deploy-clean-tag">无 clean 阶段</Tag>
+                  )}
+                </span>
+              ) : (
+                <span className="pb-0.5 text-2xs text-fg-3">不部署：base URL / 模型名静态注入 AG_SERVED_URL 等</span>
+              )}
             </div>
 
             {deployRunnerName ? (

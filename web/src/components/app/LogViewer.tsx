@@ -57,6 +57,8 @@ export function LogViewer({
   onRetry,
   hint,
   className,
+  /** 整页查看器用：滚动区吃满可用高度（44rem 上限只在嵌入形态保留） */
+  stretch = false,
   testIdPrefix = 'log',
 }: {
   text: string
@@ -72,6 +74,7 @@ export function LogViewer({
   onRetry?: () => void
   hint?: string
   className?: string
+  stretch?: boolean
   /** 同页可能有多个日志面板（Deploy / Attempt），测试钩子用前缀区分 */
   testIdPrefix?: string
 }) {
@@ -165,7 +168,10 @@ export function LogViewer({
               ref={follow.ref}
               onScroll={follow.onScroll}
               data-testid={`${testIdPrefix}-scroller`}
-              className="max-h-[44rem] overflow-auto px-4 py-3 font-mono text-2xs leading-[22px]"
+              className={cn(
+                'overflow-auto px-4 py-3 font-mono text-2xs leading-[22px]',
+                stretch ? 'min-h-0 flex-1' : 'max-h-[44rem]',
+              )}
               role="log"
               aria-live="off"
             >

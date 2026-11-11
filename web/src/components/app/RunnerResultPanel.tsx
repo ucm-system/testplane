@@ -214,8 +214,9 @@ export function RunnerResultPanel({
   const [downloading, setDownloading] = useState(false)
 
   const found = useMemo(() => resultArtifactsOf(artifacts, runner.seq), [artifacts, runner.seq])
-  // 三选一优先级：json > html > csv（json 结构化信息最多；html 是完整报告；csv 是明细）
-  const picked = found.json ?? found.html ?? found.csv
+  // 三选一渲染优先级（用户 2026-11-11 裁决）：html > csv > json ——
+  // html 是 runner 自述的完整报告（最直观），csv 是明细表，json 是结构化指标（最后兜底）
+  const picked = found.html ?? found.csv ?? found.json
 
   const download = async () => {
     if (!picked) return
@@ -251,12 +252,12 @@ export function RunnerResultPanel({
           {runner.runner_name}@{runner.runner_version}
         </Tag>
         <span className="text-2xs text-fg-3">{runnerDuration(runner)}</span>
-        {runner.result_ref ? (
-          <Badge tone="ok">result.json</Badge>
-        ) : found.html ? (
+        {found.html ? (
           <Badge tone="info">result.html</Badge>
         ) : found.csv ? (
           <Badge tone="info">result.csv</Badge>
+        ) : runner.result_ref ? (
+          <Badge tone="ok">result.json</Badge>
         ) : (
           <Badge tone="muted">无结果文件</Badge>
         )}
@@ -278,16 +279,16 @@ export function RunnerResultPanel({
             </div>
           ) : null}
 
-          {runner.result_ref ? (
-            <JsonResultBody taskId={taskId} runner={runner} attemptNo={attemptNo} />
-          ) : found.html ? (
+          {found.html ? (
             <HtmlResultBody taskId={taskId} artifact={found.html} />
           ) : found.csv ? (
             <CsvResultBody taskId={taskId} artifact={found.csv} />
+          ) : runner.result_ref ? (
+            <JsonResultBody taskId={taskId} runner={runner} attemptNo={attemptNo} />
           ) : (
             <p className="text-2xs leading-[16px] text-fg-3">
               {isTestRole
-                ? '该 runner 没有产出 result.json / html / csv 三选一中的任何一份（D-74）；以日志与产物清单为准。'
+                ? '该 runner 没有产出 result.html / csv / json 三选一中的任何一份（D-74）；以日志与产物清单为准。'
                 : 'deploy / clean 角色没有 result.json（产物只看日志与 exports，§9.1）。'}
             </p>
           )}

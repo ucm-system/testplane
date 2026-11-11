@@ -1,13 +1,13 @@
-# Deploy（service-deploy runner）日志验收（v2）
+# Deploy（deploy runner）日志验收（v2）
 #
-# v2 语义（D-70）：平台 Deploy 阶段取消，部署由内置 service-deploy runner 承载——
+# v2 语义（D-70）：平台 Deploy 阶段取消，部署由内置 deploy runner（genet-deploy 等）承载——
 # 它是 Task 里 seq=1 的 runner（§7.2：seq 从 1 递增，含注入的 deploy/precheck/clean）。
 # 日志走统一的 runner 日志端点：GET /api/v1/tasks/{id}/attempts/{n}/runners/{seq}/logs，
 # 不再有 v1 的 /runs/{id}/deploy/logs（?pod= 多 Pod 409 语义随平台 Deploy 阶段一并取消）。
 #
 # 验证点：
 #   1. 提交 deploy 形态 Task（deploy.provider=genet + spec 文本）→ 202；
-#   2. service-deploy runner（seq=1）出现并走到终态（succeeded 或 failed/blocked 归类）；
+#   2. deploy runner（seq=1）出现并走到终态（succeeded 或 failed/blocked 归类）；
 #   3. 该 runner 的日志端点 200 且 entries 非空；tail_lines 窗口生效（≤ tail_lines 行）。
 param(
     [string]$BaseUrl = 'http://127.0.0.1:8170',
@@ -26,7 +26,7 @@ $headers=@{Authorization="Bearer $User";Accept='application/json'}
 function Call{param([string]$Method,[string]$Path,$Body=$null);$uri="$BaseUrl$Path";if($null -ne $Body){$json=$Body|ConvertTo-Json -Depth 8 -Compress;return Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method $Method -Uri $uri -Headers $headers -ContentType 'application/json' -Body $json};return Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method $Method -Uri $uri -Headers $headers}
 function JsonOf($r){try{return $r.Content|ConvertFrom-Json}catch{return $null}}
 $null=Invoke-WebRequest -UseBasicParsing "$BaseUrl/healthz" -TimeoutSec 5
-Write-Host "service-deploy runner 日志验收：$BaseUrl" -ForegroundColor Cyan
+Write-Host "deploy runner 日志验收：$BaseUrl" -ForegroundColor Cyan
 
 # v2 提交体（固定形态）：deploy.provider=genet + spec（yaml 文本）；deploy runner 由平台自动注入。
 $manifest=@{task=@{name="deploy-logs-$stamp";deploy=@{provider='genet';spec='model_name: mock-llm'};precheck='off';runners=@(@{name='probe';runner='endpoint-probe';version='1.0.0';execution=@{profile='k8s-npu'};input='{"wait_timeout_seconds":60}';on_failure='continue'})}}|ConvertTo-Json -Depth 8 -Compress
@@ -34,7 +34,7 @@ $r=Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Method POST -Uri "$Ba
 $taskID=(JsonOf $r).task.id
 Add-Check 'submit.202' ($r.StatusCode -eq 202 -and $taskID) ("task="+$taskID)
 
-# 等 service-deploy runner（seq=1）出现并终态
+# 等 deploy runner（seq=1）出现并终态
 $deploySeq=1
 $deadline=(Get-Date).AddSeconds(150); $deployRunner=$null
 do {

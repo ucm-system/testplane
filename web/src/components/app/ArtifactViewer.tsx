@@ -228,7 +228,16 @@ interface LoadedContent {
  * 产物查看内容区（**弹窗与整页查看器共用**）：带鉴权拉取 + 按扩展名分发渲染。
  * 二进制一律仅下载；文本超 2MB 只给下载入口。
  */
-export function ArtifactPreviewBody({ taskId, artifact }: { taskId: string; artifact: Artifact }) {
+export function ArtifactPreviewBody({
+  taskId,
+  artifact,
+  /** 整页查看器用：预览区吃满可用高度（弹窗里保持固定高度的紧凑形态） */
+  stretch = false,
+}: {
+  taskId: string
+  artifact: Artifact
+  stretch?: boolean
+}) {
   const kind = artifactViewKindOf(artifact.path)
   const overLimit = artifact.size_bytes > ARTIFACT_PREVIEW_LIMIT
   const previewable = kind !== 'binary' && !overLimit
@@ -310,7 +319,13 @@ export function ArtifactPreviewBody({ taskId, artifact }: { taskId: string; arti
         )
       }
       return (
-        <div data-testid="artifact-json-tree" className="max-h-[26rem] overflow-auto rounded-md border border-line-soft bg-surface-2 px-3 py-2">
+        <div
+          data-testid="artifact-json-tree"
+          className={cn(
+            'overflow-auto rounded-md border border-line-soft bg-surface-2 px-3 py-2',
+            stretch ? 'h-full' : 'max-h-[26rem]',
+          )}
+        >
           <JsonNode value={parsed} depth={0} />
         </div>
       )
@@ -327,7 +342,7 @@ export function ArtifactPreviewBody({ taskId, artifact }: { taskId: string; arti
       }
       return (
         <div data-testid="artifact-csv-table">
-          <TableWrap className="max-h-[26rem] overflow-auto rounded-md border border-line-soft">
+          <TableWrap className={cn('overflow-auto rounded-md border border-line-soft', stretch ? 'h-full' : 'max-h-[26rem]')}>
             <Table>
               <THead>
                 <TR className="hover:bg-transparent">
@@ -371,7 +386,7 @@ export function ArtifactPreviewBody({ taskId, artifact }: { taskId: string; arti
             sandbox=""
             srcDoc={content.text ?? ''}
             title={artifact.path}
-            className="h-[26rem] w-full rounded-md border border-line bg-white"
+            className={cn('w-full rounded-md border border-line bg-white', stretch ? 'h-[calc(100vh-14rem)]' : 'h-[26rem]')}
           />
         </div>
       )
@@ -381,6 +396,7 @@ export function ArtifactPreviewBody({ taskId, artifact }: { taskId: string; arti
     return (
       <LogViewer
         text={content.text ?? ''}
+        stretch={stretch}
         ended
         hint={`${artifact.path} · ${humanSize(artifact.size_bytes)}`}
         testIdPrefix="artifact-preview"

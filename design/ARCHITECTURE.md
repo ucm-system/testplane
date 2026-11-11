@@ -70,6 +70,7 @@ Argus 是**对内工具**，以下事项已由团队裁决，本文按结论描�
 | 0.1–0.11 | 2026-11-03 ~ 11-05 | v1 全部历史变更见附录 E（D-01～D-65），术语为 v1（Run/Task/Tester） |
 | **2.0** | 2026-11-10 | **Argus 更名与 Runner 化改造**：① 平台更名 Argus，术语对调（§0.2）；② 业务输入从 argv 改为输入文件（`AG_PARAMS_FILE`），entry 由 yaml 声明，推翻 D-20/D-21 的 argv-only 契约；③ 平台对 jsonl 输入做结构级校验（类型 + required）；④ 新增 `input_format: jsonl/yaml/text`；⑤ deploy/clean 以内置 runner 承载，取消平台 Deploy/Cleanup 阶段与 `cleanup.policy`，clean 为 finally 语义；⑥ **runner 级重试取消**，attempt 上移为 Task 级计数，重试 = 全量重跑含 fresh deploy；⑦ Task 内 runner **严格串行**，取代 D-32 的门控+并发模型；⑧ 新增 exports 机制（§5.12）与 `exports`/`consumes` 组合期校验；⑨ `endpoint_exclusive` 收窄为仅外接模式有效；⑩ 契约附录 A/B/C 升 schema 2.0，API 路径 `/runs→/tasks`、`/testers→/runners`；⑪ **产物契约改为三选一**（`result.json`/`result.html`/`result.csv` 至少其一，不强求 `result.json`；D-74），`RESULT_MISSING` 语义重定义为"三选一全部缺失" |
 | **2.0.1** | 2026-11-11 | **UX 收口与 mock 解耦（D-75/D-76）**：① mock-deploy 独立化——探测内置 mock-llm（chart 组件）导出四件套，不再复用 genet-deploy/fake-genet；② `runners.clean_runner` 落库并经 `GET /runners` 回显；③ 详情页「报告」页签取消，终态默认「结果」视图（结论 / runner 明细 / result.json·html·csv 三选一内联渲染 / 产物下载），事件并入「执行细节」；④ UI 重试 = 带参重新提交（`/submit?retry=`），attempt 重放保留在 API；⑤ 提交页服务来源并入 runner 管道卡（第 0 步），provider 卡片化，每行示例可查看/复制/填入；⑥ 管理台 NFS 说明收为按钮+弹窗 |
+| **2.0.2** | 2026-11-11 | **提交页三选一下拉与退役清理**：① 服务来源改为与 runner 行同形态的下拉——Genet（默认）/ Mock / 已有服务（外接三元组），provider 卡片取消（用户裁决：一张卡片一个 deploy runner 太怪）；② `existing-deploy`（与外接语义重复）与改名期并存别名 `service-deploy`/`service-clean` 从目录退役——「已有服务」统一走 service 块，历史 Task 仍按 name@version 解析；③ 整页文件查看器吃满视口高度（预览区 stretch）；④ 结果视图删「runner 明细」卡（与结论重复）；三选一渲染优先度改 **html > csv > json**（用户裁决：完整报告最直观） |
 
 ---
 
@@ -996,7 +997,7 @@ Manifest 只描述评测意图、输入和执行环境。**不允许在 Manifest
 | 字段 | 说明 |
 |---|---|
 | `task.name` | Task 名称，用于展示，不参与复用判定；上限 200 字符（D-58） |
-| `deploy` | 与 `service` 二选一；**runner 引用**（`runner`/`version`/`input`，与 `runners[]` 同构）：role=deploy 的内置 Runner 任选（genet-deploy / mock-deploy / existing-deploy…，平台不感知具体名字）；`input` 为该 Runner 的输入原文（YAML / JSONL 按 `input_format`，平台不解析）；clean 是否注入由该 Runner 的 `clean_runner` 声明决定（D-70/D-75） |
+| `deploy` | 与 `service` 二选一；**runner 引用**（`runner`/`version`/`input`，与 `runners[]` 同构）：role=deploy 的内置 Runner 任选（genet-deploy / mock-deploy…，平台不感知具体名字）；`input` 为该 Runner 的输入原文（YAML / JSONL 按 `input_format`，平台不解析）；clean 是否注入由该 Runner 的 `clean_runner` 声明决定（D-70/D-75）。UI 的「已有服务」走 `service` 三元组（2.0.2 起 existing-deploy 退役） |
 | `service` | 与 `deploy` 二选一；外接模式直接给出 `url` / `model_name` / `model_path`，平台作为静态导出注入全部 runner |
 | `precheck` | `auto`（默认）/ `off` / 显式对象。`auto`：平台取注册表里**唯一**一个 `role: pre_check` 的 Runner（0 个或多个都拒绝提交），插入测试类 runner 最前面；execution profile 复用首个 test runner 的 profile |
 | `env` | Task 级环境变量，明文，注入该 Task 全部 runner（§12.4） |

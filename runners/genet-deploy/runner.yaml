@@ -1,6 +1,6 @@
 name: genet-deploy
-version: 1.0.0
-display_name: 服务部署（内置）
+version: 1.0.1
+display_name: Genet 服务部署（内置）
 description: |
   内置 deploy Runner：读取 Genet 部署描述（params.yaml，语义原样透传，平台不解析），
   经 Genet OpenAPI 以确定性 releaseName 幂等拉起 Helm release（noWait=true），

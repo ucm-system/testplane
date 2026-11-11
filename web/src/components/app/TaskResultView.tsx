@@ -5,7 +5,6 @@ import { API_BASE, api } from '@/api'
 import { toApiError } from '@/api/client'
 import type { ApiErrorBody, Artifact, TaskDetail } from '@/api/types'
 import { RunnerResultPanel } from '@/components/app/RunnerResultPanel'
-import { RunnerStatusBadge } from '@/components/app/StatusBadge'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonClassName } from '@/components/ui/button'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
@@ -161,75 +160,6 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
             ))}
           </dl>
         </CardBody>
-      </Card>
-
-      {/* 1b) 谁成功、谁失败：runner 明细（含注入的 deploy / precheck / clean；错误码就地给） */}
-      <Card data-testid="task-result-runners">
-        <CardHeader tone="muted" title="runner 明细" sub={`attempt #${task.current_attempt} · 每个 runner 的状态与耗时`} />
-        {runners.length === 0 ? (
-          <CardBody>
-            <p className="text-xs text-fg-3">还没有 runner 执行记录。</p>
-          </CardBody>
-        ) : (
-          <TableWrap>
-            <Table>
-              <THead>
-                <TR className="hover:bg-transparent">
-                  <TH>seq</TH>
-                  <TH>名称</TH>
-                  <TH>角色</TH>
-                  <TH>状态</TH>
-                  <TH>耗时</TH>
-                  <TH>错误码</TH>
-                </TR>
-              </THead>
-              <TBody>
-                {runners.map((runner) => (
-                  <TR key={runner.seq}>
-                    <TD className="tabular-nums text-2xs text-fg-3">#{runner.seq}</TD>
-                    <TD className="max-w-[18rem] truncate text-fg" title={runner.name}>
-                      {runner.name}
-                    </TD>
-                    <TD>
-                      <Badge tone="muted">{runner.role}</Badge>
-                    </TD>
-                    <TD>
-                      <RunnerStatusBadge status={runner.status} />
-                    </TD>
-                    <TD className="tabular-nums">
-                      {runner.started_at
-                        ? formatDuration(
-                            Math.max(
-                              0,
-                              Math.round(
-                                ((runner.finished_at ? new Date(runner.finished_at).getTime() : Date.now()) -
-                                  new Date(runner.started_at).getTime()) /
-                                  1000,
-                              ),
-                            ),
-                          )
-                        : '—'}
-                    </TD>
-                    <TD>
-                      {runner.error ? (
-                        <Badge tone="err" className="font-mono">
-                          {runner.error.code}
-                        </Badge>
-                      ) : runner.status_reason ? (
-                        <span className="text-2xs text-fg-3">{runner.status_reason}</span>
-                      ) : (
-                        <span className="text-fg-3">—</span>
-                      )}
-                    </TD>
-                  </TR>
-                ))}
-              </TBody>
-            </Table>
-          </TableWrap>
-        )}
-        <CardFooter>
-          <span>失败原因与可重试标记在「执行细节」里对应 runner 的详情面板（含日志）。</span>
-        </CardFooter>
       </Card>
 
       {/* 2) 测试结果（三选一内联渲染）：只列 role=test 的 runner；0 个测试 runner 时压成一行 */}

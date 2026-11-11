@@ -253,8 +253,8 @@ const RUNNERS: RunnerWire[] = [
   // deploy 角色的内置 runner（服务来源卡的选项；clean 配对由 clean_runner 声明，解耦裁决）：
   runnerWire({
     name: 'genet-deploy',
-    version: '1.0.0',
-    display_name: '服务部署（内置）',
+    version: '1.0.1',
+    display_name: 'Genet 服务部署（内置）',
     description: '读取 Genet 部署描述（语义原样透传），经 Genet OpenAPI 幂等拉起并轮询到就绪，导出四件套。',
     role: 'deploy',
     on_failure: 'abort_task',
@@ -268,8 +268,8 @@ const RUNNERS: RunnerWire[] = [
   }),
   runnerWire({
     name: 'mock-deploy',
-    version: '1.1.0',
-    display_name: 'Mock 服务接入（内置）',
+    version: '1.1.1',
+    display_name: 'Mock 服务部署（内置）',
     description:
       '与 Genet 完全解耦（D-75）：不做部署动作，只接入一个 OpenAI 兼容 mock 服务并等它就绪；缺省接 chart 内置 mock-llm。不声明 clean_runner → 无 clean 阶段。',
     role: 'deploy',
@@ -299,24 +299,6 @@ const RUNNERS: RunnerWire[] = [
     parameters: [],
     exports: [],
     consumes: ['AG_DEPLOY_REF'],
-  }),
-  runnerWire({
-    name: 'existing-deploy',
-    version: '1.0.0',
-    display_name: '已有服务登记（内置）',
-    description: '被测服务已存在：读取三元组原样导出四件套，0 秒完成；不声明 clean_runner → 无 clean 阶段。',
-    role: 'deploy',
-    on_failure: 'abort_task',
-    exclusive: false,
-    input_format: 'jsonl',
-    placeholder: '{"url":"http://10.0.0.10:8000/v1","model_name":"Qwen3-32B","model_path":"/models/Qwen3-32B"}',
-    parameters: [
-      { name: 'url', type: 'string', required: true, description: '被测服务 OpenAI 兼容 base URL（scheme://host:port/v1）' },
-      { name: 'model_name', type: 'string', required: true, description: '服务端模型名（OpenAI 兼容接口 model 字段取值）' },
-      { name: 'model_path', type: 'string', required: false, description: '容器内模型权重路径；不存在时省略导出' },
-    ],
-    exports: ['AG_SERVED_URL', 'AG_SERVED_MODEL_NAME', 'AG_MODEL_PATH', 'AG_DEPLOY_REF'],
-    consumes: [],
   }),
   runnerWire({
     name: 'aisbench-acc',

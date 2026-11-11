@@ -25,15 +25,13 @@ test('终态 Task：默认结果页签（结论/runner 明细/测试结果/产�
   // v2：默认落在「结果」页签（结论 + 三选一渲染 + 产物，用户只要这三样）
   await expect(page.getByTestId('task-result-panel')).toBeVisible({ timeout: 20_000 })
 
-  // 结果视图的四个块：结论 / runner 明细（谁成功谁失败）/ 测试结果（三选一）/ 产物下载
+  // 结果视图的三个块：结论 / 测试结果（三选一内联渲染）/ 产物下载（明细卡已删，用户裁决）
   await expect(page.getByTestId('task-result-verdict')).toBeVisible({ timeout: 20_000 })
-  await expect(page.getByTestId('task-result-runners')).toBeVisible()
   await expect(page.getByTestId('task-result-render')).toBeVisible()
   await expect(page.getByTestId('task-result-artifacts')).toBeVisible()
 
-  // 结论里要看得到"为什么失败"；runner 明细里给错误码
+  // 结论里要看得到"为什么失败"（失败 runner 名单进结论一句话）
   await expect(page.getByTestId('task-result-verdict')).toContainText('失败')
-  await expect(page.getByTestId('task-result-runners')).toContainText('RUNNER_NONZERO_EXIT')
 
   // 产物分组默认折叠（用户 2026-11-09）：先断言收起，再点开断言文件显式列全
   for (const key of ['deploy', 'tests', 'reports']) {
