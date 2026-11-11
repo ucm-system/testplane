@@ -892,16 +892,17 @@ export function SubmitPage() {
 
             {/* 服务来源下拉（用户 2026-11-11：与 runner 行同一形态）：Genet（默认）/ Mock / 已有服务。
                 列表仍是目录真相（role=deploy 全量），「已有服务」= 外接三元组（不部署，无 deploy 阶段）。 */}
-            <div className="flex flex-wrap items-center gap-2">
-              <Field label="服务来源" required htmlFor="deploy-runner-select" className="mb-0"
-                error={issueFor('task.deploy.runner')}>
+            <Field label="服务来源" required htmlFor="deploy-runner-select"
+              error={issueFor('task.deploy.runner')}>
+              {/* 标签贴着输入框同一行：Field 的 label 在上方，标签放 select 右侧并对齐 */}
+              <div className="flex items-center gap-2">
                 <Select
                   id="deploy-runner-select"
                   aria-label="服务来源"
                   data-testid="deploy-runner"
                   value={deployRunnerName ?? ''}
                   onChange={(e) => setDeployRunnerName(e.target.value)}
-                  className="h-8 w-72 text-xs"
+                  className="h-8 w-80 text-xs"
                 >
                   {runners.loading && deployRunners.length === 0 ? (
                     <option value="">（Runner 目录加载中…）</option>
@@ -910,25 +911,24 @@ export function SubmitPage() {
                     <option key={runner.name} value={runner.name}>
                       {runner.display_name || runner.name}
                       {runner.name === defaultDeployRunnerName ? '（默认）' : ''} · {runner.name} v{runner.version}
-                      {runner.clean_runner ? ` · clean: ${runner.clean_runner}` : ' · 无 clean'}
                     </option>
                   ))}
                   <option value="">已有服务（不部署 · 直接填三元组）</option>
                 </Select>
-              </Field>
-              {deployRunnerObj ? (
-                <span className="flex items-center gap-1 pb-0.5">
-                  <Tag mono>{deployRunnerObj.input_format}</Tag>
-                  {deployRunnerObj.clean_runner ? (
-                    <Tag data-testid="deploy-clean-tag">clean: {deployRunnerObj.clean_runner}</Tag>
-                  ) : (
-                    <Tag data-testid="deploy-clean-tag">无 clean 阶段</Tag>
-                  )}
-                </span>
-              ) : (
-                <span className="pb-0.5 text-2xs text-fg-3">不部署：base URL / 模型名静态注入 AG_SERVED_URL 等</span>
-              )}
-            </div>
+                {deployRunnerObj ? (
+                  <span className="flex shrink-0 items-center gap-1">
+                    <Tag mono>{deployRunnerObj.input_format}</Tag>
+                    {deployRunnerObj.clean_runner ? (
+                      <Tag data-testid="deploy-clean-tag">clean: {deployRunnerObj.clean_runner}</Tag>
+                    ) : (
+                      <Tag data-testid="deploy-clean-tag">无 clean 阶段</Tag>
+                    )}
+                  </span>
+                ) : (
+                  <span className="text-2xs text-fg-3">base URL / 模型名静态注入 AG_SERVED_URL 等</span>
+                )}
+              </div>
+            </Field>
 
             {deployRunnerName ? (
               <div className="flex flex-col gap-2">
