@@ -417,7 +417,7 @@ func TestIT_DeployStateArchive(t *testing.T) {
 	waited := int64(42)
 	pods := int64(1)
 	if err := s.RecordDeployState(ctx, task.ID, 1, "attempts/1/deploy-state.json", domain.DeployDoc{
-		Provider: "genet", ReleaseName: "arg-abc", Phase: "deploying",
+		Runner: "genet-deploy", Version: "1.0.0", ReleaseName: "arg-abc", Phase: "deploying",
 		WaitedSeconds: &waited, PodCount: &pods,
 		Queue: &domain.DeployQueue{Phase: "Inqueue", Pending: 3, Inqueue: 2, Running: 12},
 	}); err != nil {

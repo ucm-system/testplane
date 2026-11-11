@@ -98,9 +98,11 @@ test('B Run 详情：事件流在「事件」页签里，切页签不重连（SS
   await expect(page.getByTestId('task-events-panel').locator('li')).toHaveCount(firstCount)
 })
 
-test('B 运行中的 Run 也有「事件」页签（默认停在执行细节）', async ({ page }) => {
+test('B 运行中的 Run 也有「事件」页签（v2 默认停在报告，时间线在执行细节）', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/tasks/t-20261105-0005') // deploying
+  // v2：默认「报告」页签；管道时间线折进「执行细节」
+  await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByText('runner 管道时间线')).toBeVisible({ timeout: 20_000 })
   await expect(page.getByRole('tab', { name: '事件' })).toBeVisible()
   await expect(page.getByRole('tab', { name: '结果' })).toHaveCount(0)

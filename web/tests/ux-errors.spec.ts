@@ -55,7 +55,9 @@ test('① 非法提交：摘要滚进视口 + issues 逐条 + trace_id 可复制
   expect(invalid, '错误态边框必须与正常态不同').not.toBe(normal)
 
   // 6) 摘要里的「定位」能把焦点送回字段
-  await page.getByTestId('jump-to-field').first().click()
+  //    v2：页面按「外接」形态起手（runner 目录异步到达），先点提交的话摘要第一行可能是
+  //    task.service.url —— 所以按 issue 行选「定位」，而不是拿页面里第一个按钮
+  await summary.locator('li', { hasText: 'task.name' }).getByTestId('jump-to-field').click()
   await expect(nameInput).toBeFocused()
 })
 

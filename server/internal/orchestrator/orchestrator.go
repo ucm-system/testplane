@@ -67,10 +67,9 @@ type Config struct {
 	StorageRoot string
 	// GenetBaseURL 是 Genet OpenAPI 接入点（AG_GENET_BASE_URL），仅注入
 	// role=deploy/clean 的 runner Job（§9.1、§12.4；D-70 平台不直连）。
+	// deploy/clean 解耦后它只是**兜底**：接入点优先由 runner.yaml env 声明（default）
+	// 与 Task env 决定（见 job.go renderRunnerEnv 的取值链），平台不按 runner 名特判。
 	GenetBaseURL string
-	// MockGenetBaseURL 是 fake-genet 联调接入点（AG_MOCK_GENET_BASE_URL）：deploy.provider=mock
-	// 的 Task 渲染 deploy/clean Job 时注入本值（与 genet 同一 OpenAPI 契约，见 job.go）。
-	MockGenetBaseURL string
 	// StoragePVC 是产物 RWX PVC 名（Job 渲染挂 /workspace/output）。
 	StoragePVC string
 	// ServiceAccount 为空则不渲染（runner 不调 K8s API）。
@@ -1005,9 +1004,9 @@ const (
 	ReplayReasonCleanAlreadyVerified = "clean_already_verified"
 	ReplayReasonTaskRunning          = "task_running"
 	ReplayReasonReplayInProgress     = "clean_replay_in_progress"
-	// ReplayReasonNothingToClean 是 deploy.provider=existing 的拒绝原因：existing-deploy
-	// 只做已有服务登记（读三元组、原样导出），没有任何平台可拆除对象，clean 不注入，
-	// 重放也无从谈起（§9.1）。
+	// ReplayReasonNothingToClean 的拒绝原因：该 attempt 没有 clean 角色的执行记录
+	// ——即 deploy runner 未声明 clean_runner（如 existing-deploy 只做已有服务登记，
+	// 没有任何平台可拆除对象），clean 不注入，重放也无从谈起（§9.1）。
 	ReplayReasonNothingToClean = "nothing_to_clean"
 )
 
@@ -1015,7 +1014,7 @@ const (
 type ReplayCleanResult struct {
 	Key        domain.RunnerKey
 	Name       string // 恒 service-clean-replay
-	RunnerName string // 恒 service-clean（内置 Runner）
+	RunnerName string // 原 clean 执行记录的 runner 名（内置 clean Runner，如 genet-clean）
 	Status     domain.RunnerStatus
 	Accepted   bool
 }
@@ -1030,18 +1029,14 @@ func (e *ErrCleanReplayConflict) Error() string {
 	return "orchestrator: clean replay conflict: " + e.Reason
 }
 
-// ReplayClean 重放 service-clean（泄漏兜底）：用冻结快照在该 attempt 内追加一条
+// ReplayClean 重放 clean（泄漏兜底）：用冻结快照在该 attempt 内追加一条
 // `service-clean-replay` 执行记录并立即调度执行。重放失败不改 Task 终态。
+// clean 配对由 deploy runner 的 clean_runner 声明决定（deploy/clean 解耦）：
+// 该 attempt 没有 clean 角色行 = 没有可拆除对象，409 nothing_to_clean。
 func (s *Scheduler) ReplayClean(ctx context.Context, taskID string, attemptNo int, force bool, actor, role string) (*ReplayCleanResult, error) {
 	t, err := s.st.Tasks.Get(ctx, nil, taskID)
 	if err != nil {
 		return nil, err
-	}
-	// existing 变体入口即拒绝：无可拆除对象（existing-deploy 原样导出三元组，无 clean 阶段）。
-	if deployProviderOf(t) == "existing" {
-		return nil, &ErrCleanReplayConflict{Reason: ReplayReasonNothingToClean,
-			Detail: map[string]any{"reason": ReplayReasonNothingToClean, "task_id": taskID,
-				"provider": "existing", "detail": "provider=existing 只做已有服务登记，没有任何可拆除对象"}}
 	}
 	if !domain.TaskStatus(t.Status).IsTerminal() {
 		return nil, &ErrCleanReplayConflict{Reason: ReplayReasonTaskRunning,
@@ -1066,30 +1061,32 @@ func (s *Scheduler) ReplayClean(ctx context.Context, taskID string, attemptNo in
 			maxSeq = rr.Seq
 		}
 		switch {
+		case rr.Name == "service-clean-replay":
+			// 重放行：Name ≠ RunnerName、Role 也是 clean——必须在 clean 判定前截获。
+			replayRow = rr
 		case rr.Role == domain.RoleDeploy:
 			deployRow = rr
 		case rr.Role == domain.RoleClean:
 			cleanRow = rr
-		case rr.Name == "service-clean-replay":
-			replayRow = rr
 		}
 	}
 	if deployRow == nil {
 		return nil, &ErrCleanReplayConflict{Reason: ReplayReasonNoDeploy,
 			Detail: map[string]any{"reason": ReplayReasonNoDeploy, "task_id": taskID, "attempt_no": attemptNo}}
 	}
-	if cleanRow != nil && cleanRow.Status == string(domain.RunnerSucceeded) && !force {
+	// 该 attempt 无 clean 角色行 = deploy runner 未声明 clean_runner（无可拆除对象）。
+	if cleanRow == nil {
+		return nil, &ErrCleanReplayConflict{Reason: ReplayReasonNothingToClean,
+			Detail: map[string]any{"reason": ReplayReasonNothingToClean, "task_id": taskID,
+				"attempt_no": attemptNo, "detail": "该 attempt 没有 clean 角色的执行记录（deploy runner 未声明 clean_runner，没有可拆除对象）"}}
+	}
+	if cleanRow.Status == string(domain.RunnerSucceeded) && !force {
 		return nil, &ErrCleanReplayConflict{Reason: ReplayReasonCleanAlreadyVerified,
 			Detail: map[string]any{"reason": ReplayReasonCleanAlreadyVerified, "task_id": taskID, "attempt_no": attemptNo}}
 	}
 	if replayRow != nil && !domain.RunnerStatus(replayRow.Status).IsTerminal() {
 		return nil, &ErrCleanReplayConflict{Reason: ReplayReasonReplayInProgress,
 			Detail: map[string]any{"reason": ReplayReasonReplayInProgress, "task_id": taskID, "attempt_no": attemptNo}}
-	}
-	if cleanRow == nil {
-		return nil, &ErrCleanReplayConflict{Reason: ReplayReasonNoDeploy,
-			Detail: map[string]any{"reason": ReplayReasonNoDeploy, "task_id": taskID, "attempt_no": attemptNo,
-				"detail": "该 attempt 没有 service-clean 执行记录（无法复用冻结快照）"}}
 	}
 
 	// 追加执行记录：复用原 clean 的冻结快照（runner/镜像/profile/输入/超时/on_failure）。

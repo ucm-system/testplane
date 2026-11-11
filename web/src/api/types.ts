@@ -168,13 +168,15 @@ export interface DeployQueue {
   position?: number | null
 }
 
-/** `Deploy` schema：`tasks.deploy` —— 提交冻结的部署描述 + deploy-state.json 副本摘要的合成（D-70）。 */
+/** `Deploy` schema：`tasks.deploy` —— 提交冻结的 runner 引用 + deploy-state.json 副本摘要的合成（deploy/clean 解耦）。 */
 export interface Deploy {
-  provider: string
-  /** 提交冻结的 Genet 部署描述原文（`deploy.spec`，平台不解析语义） */
-  spec?: string | null
+  /** 提交冻结的 deploy runner 名（如 `genet-deploy` / `existing-deploy`） */
+  runner?: string
+  /** 解析后的 runner 版本 */
+  version?: string
+  /** 该 runner 的输入原文（`deploy.input`，平台不解析语义） */
+  input?: string | null
   spec_digest?: string | null
-  package_type?: 'stack' | 'pd'
   namespace?: string | null
   /** Helm release 名：平台派生 `arg-` + sha256(task_id:attempt_no)[:12]（D-44） */
   release_name?: string | null
@@ -487,6 +489,8 @@ export interface RunnerDefinition {
   env?: Record<string, EnvVarDecl>
   /** 与 `input_format` 同格式的合法片段，UI 输入框占位；平台不解析 */
   placeholder?: string
+  /** deploy 角色声明的配对 clean runner 名（runner.yaml `clean_runner`）；未声明 = 无 clean 阶段 */
+  clean_runner?: string
 }
 
 /**
@@ -523,6 +527,8 @@ export interface Runner {
   image: string
   /** 来自 `concurrency.endpoint_exclusive`；仅外接模式有效 */
   exclusive: boolean
+  /** deploy 角色声明的配对 clean runner 名（runner.yaml `clean_runner`）；未声明 = 无 clean 阶段 */
+  clean_runner?: string
   placeholder?: string
   parameters: RunnerParameter[]
   env: Array<EnvVarDecl & { name: string }>
@@ -702,14 +708,18 @@ export interface Meta {
 
 /* ================================================================ Manifest（提交体：07 §4.1 + §10.1） */
 
-/** `DeployManifest` schema：交给内置 service-deploy runner 的参数（D-70）。 */
+/**
+ * `DeployManifest` schema：部署模式提交 = **runner 引用**（与 `runners[]` 同构；deploy/clean
+ * 解耦裁决）。平台按 runner+version 从注册表解析 role=deploy 的 Runner 注入为 seq=1；
+ * clean 是否注入由该 runner 的 runner.yaml（clean_runner 声明）决定，提交体不出现 clean。
+ */
 export interface DeployManifest {
-  /** 部署提供方：`genet`（真 Genet）| `mock`（fake-genet 联调）| `existing`（已有服务登记） */
-  provider: string
-  /** Genet 部署描述原文（YAML 语义，平台不解析，§10.1）；genet / mock 形态用 */
-  spec?: string
-  /** existing 变体的已有服务三元组（provider=existing 必填，url / model_name 必填） */
-  service?: ServiceManifest
+  /** deploy 角色的 runner 名（如 `genet-deploy` / `mock-deploy` / `existing-deploy`） */
+  runner: string
+  /** 语义化版本（runner.yaml 声明） */
+  version: string
+  /** 该 runner 的输入原文（格式按其 input_format：genet-deploy 为 YAML、existing-deploy 为 JSONL） */
+  input?: string
 }
 
 /** `ServiceManifest` schema：外接模式，直接给已有服务（`AG_SERVED_URL` 等的来源）。 */

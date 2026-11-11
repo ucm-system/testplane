@@ -22,17 +22,15 @@ import { validateJsonlInput, validateYamlInput, formatJsonl, minifyJsonl, type I
 import { cn } from '@/lib/utils'
 
 /**
- * 服务来源 provider 四选（v2 provider 组合化）：
- *  - genet    真 Genet 部署（Genet YAML 文本框）；
- *  - mock     fake-genet 联调（同一 Genet YAML 文本框，平台把接入点切到 fake-genet）；
- *  - existing 已有服务登记（url / model_name / model_path 三元组，经 existing-deploy 原样导出）；
- *  - none     不部署·直接注入（同三元组 = 原"外接"模式，作为静态导出注入全部 runner）。
+ * 服务来源两形态（deploy/clean 解耦裁决，XOR 由提交校验把关）：
+ *  - deploy：**runner 引用**（与 runners[] 同构）——从 GET /runners?role=deploy 拉取列表选择
+ *    （genet-deploy / mock-deploy / existing-deploy / 未来新增的 deploy runner，平台不感知具体
+ *    名字），输入框按该 runner 的 input_format 给对应编辑器；clean 是否注入由该 runner 的
+ *    runner.yaml（clean_runner 声明）决定，提交体不出现 clean。
+ *  - service：不部署·直接注入（service 块静态三元组 = 原"外接"模式，作为静态导出注入全部 runner）。
  */
-type DeployProvider = 'genet' | 'mock' | 'existing' | 'none'
+type SourceMode = 'deploy' | 'service'
 type PrecheckMode = 'auto' | 'off'
-
-/** 提交体形态：genet/mock 走 deploy.spec，existing 走 deploy.service，none 走顶层 service。 */
-const DEPLOY_SPEC_PROVIDERS: DeployProvider[] = ['genet', 'mock']
 
 /** runner 列表的一项草稿：**只有一个输入框**（placeholder 来自 runner.input_format 对应片段，D-67）。 */
 interface RunnerDraft {
@@ -47,8 +45,8 @@ interface KeyValueRow {
   value: string
 }
 
-/** `deploy.spec` 是 Genet 部署描述原文（YAML 语义，平台不解析，§10.1）—— 只给示例，不预填语义。 */
-const DEFAULT_DEPLOY_SPEC = `model: Qwen3-32B
+/** `deploy.input` 是 deploy runner 的输入原文（genet-deploy 为 Genet 部署描述，平台不解析，§10.1）—— 只给示例，不预填语义。 */
+const DEFAULT_DEPLOY_INPUT = `model: Qwen3-32B
 replicas: 1
 resources:
   gpu: 8`
@@ -74,11 +72,11 @@ function insertAt<T>(list: readonly T[], index: number, item: T): T[] {
 }
 
 /**
- * 把 YAML 文本解析成 deploy.spec —— **只做语法层**校验：
- * 平台不解析 deploy.spec 的语义（§10.1），前端也只保证"它是一段合法 YAML 映射"。
+ * 把 YAML 文本解析成 deploy runner 的输入 —— **只做语法层**校验：
+ * 平台不解析部署描述的语义（§10.1），前端也只保证"它是一段合法 YAML 映射"。
  */
-function parseDeploySpec(text: string): { error: string | null; pos: YamlEditorError | null } {
-  if (!text.trim()) return { error: null, pos: null } // 空规格交给后端必填校验（400）
+function parseDeployInput(text: string): { error: string | null; pos: YamlEditorError | null } {
+  if (!text.trim()) return { error: null, pos: null } // 空输入交给后端按 runner 契约校验（400）
   try {
     const parsed = parseYaml(text)
     if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -111,8 +109,13 @@ export function SubmitPage() {
    * 空表单点提交会被**前端**拦下并给字段级错误。
    */
   const [name, setName] = useState('')
-  const [provider, setProvider] = useState<DeployProvider>('genet')
-  const [deploySpec, setDeploySpec] = useState(DEFAULT_DEPLOY_SPEC)
+  /**
+   * deploy runner 选择：null = runner 列表未到（未初始化）；'' = 用户显式选「外接」；
+   * 非空 = deploy 模式，提交体是 deploy:{runner, version, input}（runner 引用，与 runners[] 同构）。
+   * 列表到达后默认选第一个 input_format=yaml 的 deploy runner（保持"默认部署"入口）。
+   */
+  const [deployRunnerName, setDeployRunnerName] = useState<string | null>(null)
+  const [deployInput, setDeployInput] = useState(DEFAULT_DEPLOY_INPUT)
   const [serviceUrl, setServiceUrl] = useState('')
   const [modelName, setModelName] = useState('')
   const [modelPath, setModelPath] = useState('')
@@ -186,7 +189,7 @@ export function SubmitPage() {
     if (issues.length === 0) {
       toast({
         title: '输入校验通过',
-        description: '与服务端 D-67 同规则（类型 + required + enum 提示）；最终以提交时校验为准',
+        description: '与服务端 D-67 同规则（类型 + required + enum 提示）；最终以提交时服务端校验为准',
         tone: 'ok',
       })
       return
@@ -223,7 +226,50 @@ export function SubmitPage() {
     })
   }
 
-  const deployParse = useMemo(() => parseDeploySpec(deploySpec), [deploySpec])
+  const runnerOptions = runnerList.filter((r) => r.role === 'test')
+  const precheckRunner = runnerList.find((r) => r.role === 'pre_check')
+  /** deploy 角色的 runner 目录（服务来源卡的选项；平台不感知具体名字，列表即真相） */
+  const deployRunners = runnerList.filter((r) => r.role === 'deploy')
+  const deployRunnerObj = deployRunners.find((r) => r.name === deployRunnerName)
+  /** yaml 输入（genet-deploy / mock-deploy）→ YAML 编辑器；jsonl（existing-deploy）→ 普通输入框 */
+  const deployIsYaml = deployRunnerObj?.input_format !== 'jsonl'
+
+  /** deploy 输入的语法校验只在 yaml 格式的 runner 上做（jsonl 走逐行 schema 校验，D-67） */
+  const deployParse = useMemo(
+    () => (deployIsYaml ? parseDeployInput(deployInput) : { error: null as string | null, pos: null as YamlEditorError | null }),
+    [deployIsYaml, deployInput],
+  )
+  /** jsonl 格式的 deploy runner（existing-deploy）逐行校验（与 runner 输入框同规则，D-67） */
+  const deployJsonlIssues = useMemo(
+    () => (deployIsYaml ? [] : validateJsonlInput(deployInput, deployRunnerObj?.parameters ?? [])),
+    [deployIsYaml, deployInput, deployRunnerObj],
+  )
+
+  /** 卡片形态：deployRunnerName 非空 = 部署；''/null = 外接（列表未到或用户显式选外接） */
+  const mode: SourceMode = deployRunnerName ? 'deploy' : 'service'
+  /** 记住最近一次选中的 deploy runner：切去外接再切回来时恢复 */
+  const lastDeployPick = useRef('')
+  const setMode = (next: SourceMode) => {
+    if (next === 'deploy') {
+      const candidate =
+        deployRunners.find((r) => r.name === lastDeployPick.current) ??
+        deployRunners.find((r) => r.input_format === 'yaml') ??
+        deployRunners[0]
+      setDeployRunnerName(candidate?.name ?? '')
+    } else {
+      if (deployRunnerName) lastDeployPick.current = deployRunnerName
+      setDeployRunnerName('')
+    }
+  }
+
+  // 列表到达后的默认选择：第一个 yaml 格式的 deploy runner（genet-deploy 在前）；没有 deploy runner 时回外接。
+  useEffect(() => {
+    if (deployRunnerName !== null) return
+    if (runners.loading) return
+    const firstYaml = deployRunners.find((r) => r.input_format === 'yaml')
+    setDeployRunnerName(firstYaml?.name ?? '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runners.loading, runnerList])
 
   /**
    * 编辑器标红/滚行用**防抖后**的位置：边打字边滚会把光标甩走。
@@ -235,15 +281,12 @@ export function SubmitPage() {
     return () => window.clearTimeout(timer)
   }, [deployParse])
 
-  const runnerOptions = runnerList.filter((r) => r.role === 'test')
-  const precheckRunner = runnerList.find((r) => r.role === 'pre_check')
-
   const issueFor = (path: string): string | undefined => issues.find((issue) => issue.path === path)?.message
 
   /**
    * A4 / B10：两种「点下去也一定失败」的情况，直接在本页拦住（不靠后端 400）：
-   *  - 0 个 runner（D-57：至少 1 条；注入的 service-deploy / precheck / service-clean 不计入）；
-   *  - 目录里没有 role=test 的 Runner（deploy / clean 仅内置不可引用，D-70）。
+   *  - 0 个 runner（D-57：至少 1 条；注入的 deploy / precheck / clean 不计入）；
+   *  - 目录里没有 role=test 的 Runner（deploy / clean 角色不可在 runners[] 引用，D-70）。
    * 目录还在加载时**不算**「没有」：`loading` 期间不置灰，避免把加载中误判成空目录。
    */
   const noRunners = runnerDrafts.length === 0
@@ -262,8 +305,8 @@ export function SubmitPage() {
 
   const submitBlockers: string[] = []
   if (blocked) submitBlockers.push(blocked)
-  if (noRunners) submitBlockers.push('至少需要 1 个 runner（service-deploy / precheck / service-clean 由平台注入，不计入）')
-  if (noRunnersRegistered) submitBlockers.push('当前没有可用的 Runner；deploy / clean 角色仅内置，不能引用')
+  if (noRunners) submitBlockers.push('至少需要 1 个 runner（deploy / precheck / clean 由平台注入，不计入）')
+  if (noRunnersRegistered) submitBlockers.push('当前没有可用的 Runner；deploy / clean 角色不能在 runner 列表里引用')
   if (nameTooLong) submitBlockers.push(`Task 名称超过 ${NAME_MAX_RUNES} 字符（当前 ${nameRunes}）`)
   const submitDisabled = submitBlockers.length > 0
   const submitTitle = submitDisabled ? submitBlockers.join('；') : undefined
@@ -355,7 +398,7 @@ export function SubmitPage() {
   }
 
   const buildManifest = (): TaskManifest | null => {
-    if (DEPLOY_SPEC_PROVIDERS.includes(provider) && deployParse.error) return null
+    if (deployIsYaml && deployParse.error) return null
     const env: Record<string, string> = {}
     for (const row of envRows) {
       if (row.key.trim()) env[row.key.trim()] = row.value
@@ -364,7 +407,7 @@ export function SubmitPage() {
     for (const row of secretRows) {
       if (row.key.trim() && row.value.trim()) secrets[row.key.trim()] = row.value.trim()
     }
-    // 三元组：existing / none 两种形态共用（url 必填，model_name / model_path 给了才带）
+    // 三元组：外接（service 静态注入）用（url 必填，model_name / model_path 给了才带）
     const serviceTriple = () => ({
       url: serviceUrl.trim(),
       ...(modelName.trim() ? { model_name: modelName.trim() } : {}),
@@ -374,15 +417,20 @@ export function SubmitPage() {
     return {
       task: {
         name: name.trim(),
-        // provider 四选的提交体映射（deploy XOR service 由 assemble 校验，§10.1）：
-        //   genet/mock → deploy:{provider,spec}；existing → deploy:{provider:"existing",service}；
-        //   none → service:{...}（原"外接"模式，顶层 service = "序号 0 的导出"）。
-        // 切 provider 时各自草稿保留，只提交当前形态。
-        ...(DEPLOY_SPEC_PROVIDERS.includes(provider)
-          ? { deploy: { provider, spec: deploySpec } }
-          : provider === 'existing'
-            ? { deploy: { provider: 'existing', service: serviceTriple() } }
-            : { service: serviceTriple() }),
+        // 服务来源的提交体映射（deploy XOR service 由 assemble 校验，§10.1）：
+        //   选了 deploy runner → deploy:{runner, version, input}（runner 引用，与 runners[] 同构；
+        //     clean 是否注入由该 runner 的 clean_runner 声明决定，提交体不出现 clean）；
+        //   外接 → service:{...}（顶层 service = "序号 0 的导出"，静态注入）。
+        // 切换形态时各自草稿保留，只提交当前形态。
+        ...(deployRunnerName
+          ? {
+              deploy: {
+                runner: deployRunnerName,
+                version: deployRunnerObj?.version ?? '',
+                ...(deployInput.trim() ? { input: deployInput } : {}),
+              },
+            }
+          : { service: serviceTriple() }),
         precheck,
         env,
         secrets,
@@ -413,8 +461,30 @@ export function SubmitPage() {
   /** 前端校验：同样产出 path 化的 issues，与后端 400 共用一套渲染 */
   const frontendIssues = (): ValidationIssue[] => {
     const found: ValidationIssue[] = []
-    if (DEPLOY_SPEC_PROVIDERS.includes(provider) && deployParse.error) {
-      found.push({ path: 'task.deploy.spec', code: 'INVALID_YAML', message: deployParse.error })
+    if (deployRunnerName) {
+      // deploy 模式：runner 引用 + 输入校验（issue.path 与后端一致：task.deploy.runner / task.deploy.input）
+      if (!deployRunnerObj) {
+        found.push({
+          path: 'task.deploy.runner',
+          code: 'REQUIRED',
+          message: '必须选择 deploy runner',
+        })
+      } else {
+        if (deployIsYaml && deployParse.error) {
+          found.push({ path: 'task.deploy.input', code: 'INVALID_YAML', message: deployParse.error })
+        }
+        const firstJsonlIssue = deployJsonlIssues[0]
+        if (firstJsonlIssue) {
+          found.push({
+            path: 'task.deploy.input',
+            code: 'INPUT_INVALID',
+            message: `第 ${firstJsonlIssue.line} 行${firstJsonlIssue.field ? ` · ${firstJsonlIssue.field}` : ''}：${firstJsonlIssue.message}`,
+          })
+        }
+      }
+    } else if (!serviceUrl.trim()) {
+      // 外接模式：service 三元组（后端按同 path 回错）
+      found.push({ path: 'task.service.url', code: 'REQUIRED', message: '服务 base URL 必填' })
     }
     if (!name.trim()) found.push({ path: 'task.name', code: 'REQUIRED', message: 'name 必填' })
     // D-58：上限 200 rune（不是字节、不是 UTF-16 单元）
@@ -423,14 +493,6 @@ export function SubmitPage() {
         path: 'task.name',
         code: 'TOO_LONG',
         message: `name 超过 ${NAME_MAX_RUNES} 字符（当前 ${runeLength(name.trim())}）`,
-      })
-    }
-    // existing / none 共用三元组；issue.path 跟提交体形态走（后端按同 path 回错）
-    if ((provider === 'existing' || provider === 'none') && !serviceUrl.trim()) {
-      found.push({
-        path: provider === 'existing' ? 'task.deploy.service.url' : 'task.service.url',
-        code: 'REQUIRED',
-        message: '服务 base URL 必填',
       })
     }
     if (!profile.trim()) {
@@ -445,7 +507,7 @@ export function SubmitPage() {
       found.push({
         path: 'task.runners',
         code: 'REQUIRED',
-        message: '至少需要 1 个 runner（service-deploy / precheck / service-clean 由平台注入，不计入）',
+        message: '至少需要 1 个 runner（deploy / precheck / clean 由平台注入，不计入）',
       })
     }
     runnerDrafts.forEach((draft, index) => {
@@ -590,82 +652,145 @@ export function SubmitPage() {
         </CardBody>
       </Card>
 
-      {/* 服务来源：provider 四选下拉（v2 组合化收尾）。genet/mock 用 Genet YAML；
-          existing/none 用同一个三元组表单，只差提交体落点（deploy.service XOR service）。 */}
+      {/* 服务来源：一张卡两形态 XOR（D-27）：都填或都不填提交被拒；切换时保留各自草稿不清空 */}
       <Card>
         <CardHeader
           tone="muted"
           title="服务来源"
-          sub="provider 四选：genet / mock（Genet YAML 部署）· existing（已有服务登记）· none（不部署直接注入）；deploy XOR service 由提交校验把关"
+          sub="一张卡两形态：部署（选一个 deploy runner 并给输入）XOR 外接（直接给已有服务）；clean 是否注入由 deploy runner 的 clean_runner 声明决定"
           actions={
-            <Select
-              aria-label="部署提供方 provider"
-              data-testid="deploy-provider"
-              value={provider}
-              onChange={(e) => setProvider(e.target.value as DeployProvider)}
-              className="h-8 w-52 text-xs"
-            >
-              <option value="genet">genet · 真 Genet 部署</option>
-              <option value="mock">mock · fake-genet 联调</option>
-              <option value="existing">existing · 已有服务登记</option>
-              <option value="none">none · 不部署·直接注入</option>
-            </Select>
+            <Segmented<SourceMode>
+              ariaLabel="服务来源"
+              value={mode}
+              onChange={setMode}
+              options={[
+                { value: 'deploy', label: '部署' },
+                { value: 'service', label: '外接' },
+              ]}
+            />
           }
         />
         <CardBody className="flex flex-col gap-2">
-          {DEPLOY_SPEC_PROVIDERS.includes(provider) ? (
+          {mode === 'deploy' ? (
             <>
-              {/* CodeMirror 6：真语法高亮 + 行号 + 横向滚动；语法错误按行列标行 */}
-              <YamlEditor
-                value={deploySpec}
-                onChange={setDeploySpec}
-                rows={7}
-                aria-label="Genet 部署描述 YAML"
-                title="deploy.spec（Genet 部署描述原文）"
-                hint="2 空格缩进 · 平台不解析语义"
-                error={lintPos}
-              />
-              <p
-                data-testid="deploy-yaml-error"
-                data-state={deployParse.error ? 'error' : 'ok'}
-                role="status"
-                aria-live="polite"
-                className={cn('text-2xs', deployParse.error ? 'text-danger-text' : 'text-success-text')}
+              {/* deploy runner 选择器：列表来自 GET /runners?role=deploy（平台不感知具体名字） */}
+              <Field
+                label="deploy runner"
+                required
+                htmlFor="deploy-runner-select"
+                hint="role=deploy 的 Runner 引用（与 runner 列表同构）；版本自动取目录里的当前版"
+                error={issueFor('task.deploy.runner')}
               >
-                {deployParse.error
-                  ? `${deployParse.pos ? `第 ${deployParse.pos.line} 行第 ${deployParse.pos.col} 列：` : ''}${deployParse.error}`
-                  : '✓ YAML 语法有效（语义归 service-deploy runner，平台不解析）'}
-              </p>
-              {provider === 'mock' ? (
+                <div className="flex items-center gap-2">
+                  <Select
+                    id="deploy-runner-select"
+                    aria-label="deploy runner"
+                    data-testid="deploy-runner"
+                    value={deployRunnerName ?? ''}
+                    onChange={(e) => {
+                      lastDeployPick.current = e.target.value
+                      setDeployRunnerName(e.target.value)
+                    }}
+                    className="h-8 w-64 text-xs"
+                  >
+                    {deployRunners.length === 0 ? <option value="">（目录里没有 role=deploy 的 Runner）</option> : null}
+                    {deployRunners.map((runner) => (
+                      <option key={runner.name} value={runner.name}>
+                        {runner.name} v{runner.version}
+                      </option>
+                    ))}
+                  </Select>
+                  {deployRunnerObj ? (
+                    <span className="flex items-center gap-1">
+                      <Tag mono>{deployRunnerObj.input_format}</Tag>
+                      {deployRunnerObj.clean_runner ? <Tag>clean: {deployRunnerObj.clean_runner}</Tag> : <Tag>无 clean 阶段</Tag>}
+                    </span>
+                  ) : null}
+                </div>
+              </Field>
+              {deployIsYaml ? (
+                <>
+                  {/* CodeMirror 6：真语法高亮 + 行号 + 横向滚动；语法错误按行列标行 */}
+                  <YamlEditor
+                    value={deployInput}
+                    onChange={setDeployInput}
+                    rows={7}
+                    aria-label="Genet 部署描述 YAML"
+                    title="deploy.input（该 runner 的输入原文，genet-deploy 为部署描述）"
+                    hint="2 空格缩进 · 平台不解析语义"
+                    error={lintPos}
+                  />
+                  <p
+                    data-testid="deploy-yaml-error"
+                    data-state={deployParse.error ? 'error' : 'ok'}
+                    role="status"
+                    aria-live="polite"
+                    className={cn('text-2xs', deployParse.error ? 'text-danger-text' : 'text-success-text')}
+                  >
+                    {deployParse.error
+                      ? `${deployParse.pos ? `第 ${deployParse.pos.line} 行第 ${deployParse.pos.col} 列：` : ''}${deployParse.error}`
+                      : '✓ YAML 语法有效（语义归 deploy runner，平台不解析）'}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <Field
+                    label="deploy 输入（JSONL）"
+                    hint={inputHint(deployRunnerObj?.input_format ?? 'jsonl')}
+                    error={issueFor('task.deploy.input')}
+                  >
+                    <Textarea
+                      value={deployInput}
+                      rows={3}
+                      spellCheck={false}
+                      aria-label="deploy runner 输入"
+                      aria-invalid={(deployJsonlIssues.length ?? 0) > 0}
+                      placeholder={deployRunnerObj?.placeholder ?? '{"url":"http://10.0.0.10:8000/v1","model_name":"Qwen3-32B"}'}
+                      className="font-mono text-xs"
+                      onChange={(e) => setDeployInput(e.target.value)}
+                    />
+                  </Field>
+                  {deployJsonlIssues.length > 0 ? (
+                    <ul
+                      data-testid="deploy-input-issues"
+                      role="alert"
+                      className="flex flex-col gap-0.5 rounded-md border border-danger/25 bg-danger-weak px-2.5 py-1.5"
+                    >
+                      {deployJsonlIssues.slice(0, 8).map((issue, issueIndex) => (
+                        <li key={`${issue.line}-${issue.field ?? issue.kind}-${issueIndex}`}>
+                          <span className="text-2xs leading-[16px] text-danger-text">
+                            第 {issue.line} 行
+                            {issue.field ? <code className="mx-1 font-mono">{issue.field}</code> : null}· {issue.message}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </>
+              )}
+              {deployRunnerObj?.name === 'mock-deploy' ? (
                 <p
                   data-testid="deploy-mock-hint"
                   className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-[16px] text-warn-text"
                 >
-                  联调环境：provider=mock 走同一份 genet-deploy runner，接入点由平台切到 fake-genet
-                  （AG_MOCK_GENET_BASE_URL）；OpenAPI 契约与真 Genet 一致，不占用真 Genet 配额。
+                  联调环境：mock-deploy 与 genet-deploy 是同一份脚本，接入点由它的 runner.yaml env default 指向
+                  fake-genet；需要别的接入点时在下方「环境变量」里给 AG_GENET_BASE_URL。
                 </p>
               ) : null}
               <p className="text-2xs leading-[16px] text-fg-3">
-                这段原文会作为内置 service-deploy runner 的输入（AG_PARAMS_FILE）；namespace 由 Genet API Key 绑定，
+                这段原文会作为 {deployRunnerObj?.name ?? 'deploy runner'} 的输入（AG_PARAMS_FILE）；namespace 由 Genet API Key 绑定，
                 请求体不能指定（D-44/D-52）。部署被阻塞会收口为 service_unavailable（D-47）。
               </p>
             </>
           ) : (
             <div className="grid gap-3 sm:grid-cols-3">
-              <Field
-                label="服务 base URL"
-                required
-                error={issueFor(provider === 'existing' ? 'task.deploy.service.url' : 'task.service.url')}
-                className="sm:col-span-2"
-              >
+              <Field label="服务 base URL" required error={issueFor('task.service.url')} className="sm:col-span-2">
                 <Input
-                  ref={registerField(provider === 'existing' ? 'task.deploy.service.url' : 'task.service.url')}
+                  ref={registerField('task.service.url')}
                   value={serviceUrl}
                   onChange={(e) => setServiceUrl(e.target.value)}
                   placeholder="http://10.0.0.10:8000/v1"
-                  aria-invalid={Boolean(
-                    issueFor(provider === 'existing' ? 'task.deploy.service.url' : 'task.service.url'),
-                  )}
+                  aria-invalid={Boolean(issueFor('task.service.url'))}
                 />
               </Field>
               <Field label="模型名">
@@ -674,17 +799,10 @@ export function SubmitPage() {
               <Field label="模型路径（可选）" className="sm:col-span-3">
                 <Input value={modelPath} onChange={(e) => setModelPath(e.target.value)} placeholder="/models/Qwen3-32B" />
               </Field>
-              {provider === 'existing' ? (
-                <p className="text-2xs leading-[16px] text-fg-3 sm:col-span-3">
-                  已有服务登记：三元组会交给内置 existing-deploy runner 原样导出（0 秒完成、无 clean 阶段），
-                  与 Genet 部署共用同一条管道形状；仍会先跑 pre_check 探活。
-                </p>
-              ) : (
-                <p className="text-2xs leading-[16px] text-fg-3 sm:col-span-3">
-                  这三个字段就是平台要注入的公共参数来源（AG_SERVED_URL / AG_SERVED_MODEL_NAME / AG_MODEL_PATH）：
-                  不部署、不拉服务，由你来填。
-                </p>
-              )}
+              <p className="text-2xs leading-[16px] text-fg-3 sm:col-span-3">
+                这三个字段就是平台要注入的公共参数来源（AG_SERVED_URL / AG_SERVED_MODEL_NAME / AG_MODEL_PATH）：
+                不部署、不拉服务，由你来填。
+              </p>
             </div>
           )}
         </CardBody>
@@ -816,7 +934,7 @@ export function SubmitPage() {
               data-testid="runner-empty-hint"
               className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-[16px] text-warn-text"
             >
-              至少需要 1 个 runner（service-deploy / precheck / service-clean 由平台注入，不计入）
+              至少需要 1 个 runner（deploy / precheck / clean 由平台注入，不计入）
             </p>
           ) : null}
 
@@ -1033,7 +1151,7 @@ export function SubmitPage() {
                           </button>
                         </li>
                       ))}
-                      {(draftIssues[draft.key] ?? []).length > 8 ? (
+                      {(draftIssues[draft.key]?.length ?? 0) > 8 ? (
                         <li className="text-2xs text-danger-text">还有 {(draftIssues[draft.key] ?? []).length - 8} 条…</li>
                       ) : null}
                     </ul>

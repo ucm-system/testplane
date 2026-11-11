@@ -4,21 +4,23 @@ import "time"
 
 // DeployDoc 是 `tasks.deploy` 列的 jsonb 形状（03-data-view §4.4）。
 //
-// v2 裁决（D-70）：平台**不再直连 Genet**——部署动作由内置 service-deploy runner 执行，
-// 它周期改写 `deploy-state.json`（`attempts/<n>/deploy-state.json`），平台归档副本并把
-// 摘要合并进本列。因此本列是两部分的合成：**提交时冻结的部署描述**（service-deploy 的
-// 输入，平台不解析语义）+ **最新归档的部署状态副本摘要**。
+// v2 裁决（deploy/clean 解耦）：提交体的 deploy 块是**runner 引用**（与 tests[] 同构），
+// 平台不感知 genet/mock/existing 之类的 provider 名——deploy: {runner, version, input}
+// 按 name+version 从注册表解析后注入为 seq=1 的 deploy 行；clean 是否注入由 deploy
+// runner 的 runner.yaml（clean_runner 声明）决定。部署动作由该 runner 执行，它周期改写
+// `deploy-state.json`（`attempts/<n>/deploy-state.json`），平台归档副本并把摘要合并进本列。
+// 因此本列是两部分的合成：**提交时冻结的 runner 引用**（平台不解析 input 语义）+
+// **最新归档的部署状态副本摘要**。
 //
-// 合并由 store 用 jsonb `||` 增量完成：冻结键（release_name/provider/…）只在提交时写一次，
+// 合并由 store 用 jsonb `||` 增量完成：冻结键（runner/version/…）只在提交时写一次，
 // 之后每次归档只带"本次变化的键"，整段覆盖会把冻结信息冲掉。
 type DeployDoc struct {
-	// ---- 提交冻结（service-deploy 的输入，平台不解析语义）----
-	Provider string `json:"provider,omitempty"` // genet | mock | existing
-	Spec     string `json:"spec,omitempty"`     // 部署描述原文（落档 attempts/<n>/input/；existing 时为空）
-	// Service 是 existing 变体的输入：已有服务的三元组（不落 deploy.spec）。
-	Service     *ExistingService `json:"service,omitempty"`
-	SpecDigest  string           `json:"spec_digest,omitempty"`
-	PackageType string           `json:"package_type,omitempty"` // stack | pd
+	// ---- 提交冻结（deploy runner 引用，与 tests[] 同构；平台不解析 input 语义）----
+	Runner  string `json:"runner,omitempty"`  // deploy 角色的 runner 名（如 genet-deploy / existing-deploy）
+	Version string `json:"version,omitempty"` // 解析后的 runner 版本
+	Input   string `json:"input,omitempty"`   // 该 runner 的输入原文（落档 attempts/<n>/input/1/）
+
+	SpecDigest string `json:"spec_digest,omitempty"` // Input 的 sha256（审计用）
 
 	// ---- 定位（平台派生，D-44）----
 	Namespace   string `json:"namespace,omitempty"`    // Genet API Key 绑定，调用方不能指定
@@ -62,10 +64,3 @@ var DeployStatePhase = []string{"queued", "accepted", "deploying", "ready", "blo
 
 // EventDeployStateChanged 是部署状态归档的事件类型（state_events.type）。
 const EventDeployStateChanged = "deploy.state_changed"
-
-// ExistingService 是 existing-deploy 变体的输入三元组（provider=existing 时必填）。
-type ExistingService struct {
-	URL       string `json:"url"`
-	ModelName string `json:"model_name"`
-	ModelPath string `json:"model_path,omitempty"`
-}

@@ -75,24 +75,35 @@ func (e *ValidationError) Unwrap() error { return ErrInvalid }
 const (
 	// RunnerFileName 是注册表唯一识别的文件名（§5.5：只认 Runner 根目录下的 runner.yaml）。
 	RunnerFileName = "runner.yaml"
-	// BuiltinDeployName / BuiltinCleanName 是平台内置 service runner 的注册名（§9.1）。
+	// BuiltinDeployName 是内置 deploy runner（Genet/fake-genet 接入点）。
 	BuiltinDeployName = "genet-deploy"
-	// BuiltinExistingDeployName 是 existing 变体（已有服务登记，无外部调用）。
+	// BuiltinMockDeployName 是 mock 薄壳（同 genet-deploy 脚本；AG_GENET_BASE_URL 的
+	// runner.yaml env default 指向 fake-genet，Task env 可覆盖——平台不再按 provider 特判）。
+	BuiltinMockDeployName = "mock-deploy"
+	// BuiltinCleanName 是内置 clean runner（genet-deploy 的 clean_runner 配对）。
 	BuiltinCleanName = "genet-clean"
-	// existing-deploy 同为内置 deploy 变体（无可拆除对象）。
+	// BuiltinServiceDeployName / BuiltinServiceCleanName 是改名期的内置 deploy/clean runner
+	//（runners/service-*；与 genet-* 同一契约，迁移期两套名字并存）。
+	BuiltinServiceDeployName = "service-deploy"
+	BuiltinServiceCleanName  = "service-clean"
+	// existing-deploy 同为内置 deploy 变体（已有服务登记，不声明 clean_runner → 无 clean 阶段）。
 	// BuiltinPreCheckName 是内置探活 Runner（§5.1）。
 	BuiltinPreCheckName = "endpoint-probe"
 )
 
 // BuiltinRunnerNames 返回内置 Runner 名集合（随平台发版，§12.1）。
-// deploy 变体：genet-deploy（Genet/fake-genet）与 existing-deploy（已有服务登记）；
-// clean 变体：genet-clean（existing 变体无可拆除对象，不注入 clean）。
+// deploy 变体：genet-deploy、mock-deploy（薄壳）、service-deploy（改名期并存）与
+// existing-deploy（已有服务登记）；clean 变体：genet-clean、service-clean（由 deploy
+// runner 的 clean_runner 声明配对）。
 func BuiltinRunnerNames() map[string]bool {
 	return map[string]bool{
-		BuiltinDeployName:   true, // genet-deploy
-		BuiltinCleanName:    true, // genet-clean
-		BuiltinPreCheckName: true,
-		"existing-deploy":   true,
+		BuiltinDeployName:        true, // genet-deploy
+		BuiltinMockDeployName:    true, // mock-deploy
+		BuiltinCleanName:         true, // genet-clean
+		BuiltinServiceDeployName: true, // service-deploy
+		BuiltinServiceCleanName:  true, // service-clean
+		BuiltinPreCheckName:      true,
+		"existing-deploy":        true,
 	}
 }
 
@@ -252,6 +263,12 @@ func (r *Registry) Scan(ctx context.Context, dir string) (SyncDiff, error) {
 	}
 	sort.Strings(keys)
 
+	// clean_runner 配对校验（deploy/clean 解耦裁决）：声明了 clean_runner 的 runner，
+	// 其指向必须是本批扫描（或已在注册表中）的 role=clean runner，否则整批拒绝启动。
+	if err := r.checkCleanRunnerPairs(found); err != nil {
+		return diff, err
+	}
+
 	for _, k := range keys {
 		rec := found[k]
 		if err := r.apply(ctx, rec, &diff); err != nil {
@@ -297,6 +314,59 @@ func (r *Registry) Scan(ctx context.Context, dir string) (SyncDiff, error) {
 	}
 	sort.Strings(diff.Removed)
 	return diff, nil
+}
+
+// checkCleanRunnerPairs 校验 clean_runner 声明闭合：每个非空 CleanRunner 必须命中一个
+// role=clean 的 runner（先看本批扫描结果，再看注册表内存快照——后者覆盖"clean runner
+// 已在库、本次目录没有"的场景）。命中但角色不对 / 找不到 → ValidationError（注册拒绝）。
+func (r *Registry) checkCleanRunnerPairs(found map[string]Record) error {
+	isCleanRunner := func(name string) (bool, bool) { // (found, roleOK)
+		for _, rec := range found {
+			if rec.Spec.Name == name {
+				return true, rec.Spec.Role == domain.RoleClean
+			}
+		}
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		for _, rec := range r.records {
+			if rec.Spec.Name == name {
+				return true, rec.Spec.Role == domain.RoleClean
+			}
+		}
+		return false, false
+	}
+	names := make([]string, 0, len(found))
+	for _, rec := range found {
+		names = append(names, rec.Spec.Name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		for _, rec := range found {
+			if rec.Spec.Name != name || rec.Spec.CleanRunner == "" {
+				continue
+			}
+			ok, roleOK := isCleanRunner(rec.Spec.CleanRunner)
+			if !ok {
+				return &ValidationError{
+					Name: rec.Spec.Key(),
+					Errors: []FieldError{{
+						Path:    "clean_runner",
+						Message: fmt.Sprintf("clean_runner %q is not a registered runner (clean pairing must resolve to a role=clean runner)", rec.Spec.CleanRunner),
+					}},
+				}
+			}
+			if !roleOK {
+				return &ValidationError{
+					Name: rec.Spec.Key(),
+					Errors: []FieldError{{
+						Path:    "clean_runner",
+						Message: fmt.Sprintf("clean_runner %q has role != clean (must pair with a role=clean runner)", rec.Spec.CleanRunner),
+					}},
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // apply 把一条扫描结果合并进内存与存储。
@@ -505,6 +575,7 @@ type runnerYAML struct {
 	DisplayName string             `yaml:"display_name"`
 	Description string             `yaml:"description"`
 	Role        string             `yaml:"role"`
+	CleanRunner string             `yaml:"clean_runner"`
 	OnFailure   string             `yaml:"on_failure"`
 	Entry       []string           `yaml:"entry"`
 	InputFormat string             `yaml:"input_format"`
@@ -555,6 +626,7 @@ type paramYAML struct {
 type envYAML struct {
 	Required    bool   `yaml:"required"`
 	Secret      bool   `yaml:"secret"`
+	Default     string `yaml:"default"`
 	Description string `yaml:"description"`
 }
 
@@ -589,6 +661,7 @@ func parseWithBuiltin(raw []byte, builtin bool) (domain.RunnerSpec, error) {
 		DisplayName: strings.TrimSpace(doc.DisplayName),
 		Description: doc.Description,
 		Role:        strings.TrimSpace(doc.Role),
+		CleanRunner: strings.TrimSpace(doc.CleanRunner),
 		OnFailure:   strings.TrimSpace(doc.OnFailure),
 		Entry:       doc.Entry,
 		InputFormat: strings.TrimSpace(doc.InputFormat),
@@ -624,7 +697,7 @@ func parseWithBuiltin(raw []byte, builtin bool) (domain.RunnerSpec, error) {
 		})
 	}
 	for name, e := range doc.Env {
-		spec.Env[name] = domain.EnvVar{Required: e.Required, Secret: e.Secret, Description: e.Description}
+		spec.Env[name] = domain.EnvVar{Required: e.Required, Secret: e.Secret, Default: e.Default, Description: e.Description}
 	}
 	for _, m := range doc.Mounts {
 		mountPath := m.MountPath
@@ -698,6 +771,12 @@ func ValidateSpec(spec domain.RunnerSpec, raw runnerYAML, builtin bool) []FieldE
 	if (spec.Role == domain.RoleDeploy || spec.Role == domain.RoleClean) && !builtin {
 		add("role", "role deploy/clean is built-in only (service-deploy / service-clean); user registration is rejected")
 	}
+	// clean_runner：clean 配对由 deploy runner 自己声明（deploy/clean 解耦裁决）。
+	// 仅 role=deploy 可声明；指向的 runner 必须是 role=clean（跨 runner 校验在 Scan /
+	// registerRaw 做，这里只做角色合法性）。clean 角色声明 clean_runner 无意义，拒绝。
+	if spec.CleanRunner != "" && spec.Role != domain.RoleDeploy {
+		add("clean_runner", fmt.Sprintf("clean_runner is only valid on role=deploy runners (got role=%s)", spec.Role))
+	}
 	switch spec.OnFailure {
 	case domain.OnFailureContinue, domain.OnFailureAbortTask:
 	default:
@@ -758,6 +837,9 @@ func ValidateSpec(spec domain.RunnerSpec, raw runnerYAML, builtin bool) []FieldE
 	for name, e := range spec.Env {
 		if strings.TrimSpace(e.Description) == "" {
 			add("env."+name+".description", "is required")
+		}
+		if e.Secret && e.Default != "" {
+			add("env."+name+".default", "secret env must not carry a default value (§12.4: 敏感值只走 secrets)")
 		}
 	}
 

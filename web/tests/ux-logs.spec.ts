@@ -20,6 +20,8 @@ const LIVE_RUN = 't-20261105-0007'
 async function openStreamingAttempt(page: import('@playwright/test').Page): Promise<void> {
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto(`/tasks/${LIVE_RUN}`)
+  // v2：详情页默认「报告」页签，管道时间线在「执行细节」里
+  await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByText('runner 管道时间线')).toBeVisible({ timeout: 20_000 })
   // v2：执行视图直接给当前 runner 的日志（默认选中 running/preparing 的节点）
   await page.locator('[data-chain-node] button').nth(1).click()
@@ -76,6 +78,8 @@ test('② 手动上滚暂停跟随：出现「已暂停跟随 · 回到底部」
 test('③ 结果视图：打包下载 .zip 存在且点击触发下载，按文件下载保留', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/tasks/t-20261105-0006')
+  // v2：结果块在「结果」页签（默认停在「报告」）
+  await page.getByRole('tab', { name: '结果' }).click()
   await expect(page.getByTestId('task-result-verdict')).toBeVisible({ timeout: 20_000 })
 
   const bundle = page.getByTestId('download-bundle')
@@ -95,6 +99,8 @@ test('③ 结果视图：打包下载 .zip 存在且点击触发下载，按文�
 test('④ 运行中 Task：Deploy 日志面板也按游标追加', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto(`/tasks/${LIVE_RUN}`)
+  // v2：Deploy 日志面板在「执行细节」页签里
+  await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByText('部署 Pod 日志', { exact: false })).toBeVisible({ timeout: 20_000 })
 
   const lines = page.getByTestId('deploy-log-line')

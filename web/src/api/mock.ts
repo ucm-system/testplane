@@ -195,6 +195,8 @@ function runnerWire(input: {
   parameters: RunnerWire['parameters']
   exports?: string[]
   consumes?: string[]
+  /** deploy 角色的配对 clean runner 名（runner.yaml clean_runner）；未声明 = 无 clean 阶段 */
+  clean_runner?: string
 }): RunnerWire {
   return {
     name: input.name,
@@ -216,6 +218,7 @@ function runnerWire(input: {
     env: {
       ENDPOINT_API_KEY: { secret: true, description: 'Bearer token；不提供时按无鉴权探测' },
     },
+    clean_runner: input.clean_runner,
     placeholder: input.placeholder,
     content_sha: 'sha256:mock',
     source_file: `runners/${input.name}/runner.yaml`,
@@ -245,6 +248,69 @@ const RUNNERS: RunnerWire[] = [
       { name: 'stream', type: 'boolean', required: false, default: true, description: '流式探活；true 时首 token 到达即通过' },
     ],
     exports: ['AG_PRECHECK_OK'],
+  }),
+  // deploy 角色的内置 runner（服务来源卡的选项；clean 配对由 clean_runner 声明，解耦裁决）：
+  runnerWire({
+    name: 'genet-deploy',
+    version: '1.0.0',
+    display_name: '服务部署（内置）',
+    description: '读取 Genet 部署描述（语义原样透传），经 Genet OpenAPI 幂等拉起并轮询到就绪，导出四件套。',
+    role: 'deploy',
+    on_failure: 'abort_task',
+    exclusive: false,
+    input_format: 'yaml',
+    placeholder: 'model: Qwen3-32B\nreplicas: 1\nresources:\n  gpu: 8',
+    parameters: [],
+    exports: ['AG_SERVED_URL', 'AG_SERVED_MODEL_NAME', 'AG_MODEL_PATH', 'AG_DEPLOY_REF'],
+    consumes: [],
+    clean_runner: 'genet-clean',
+  }),
+  runnerWire({
+    name: 'mock-deploy',
+    version: '1.0.0',
+    display_name: '服务部署·mock 薄壳（内置）',
+    description: '与 genet-deploy 同一脚本的薄壳；接入点 env default 指向 fake-genet（Task env 可覆盖）。',
+    role: 'deploy',
+    on_failure: 'abort_task',
+    exclusive: false,
+    input_format: 'yaml',
+    placeholder: 'model: Qwen3-32B\nreplicas: 1\nresources:\n  gpu: 8',
+    parameters: [],
+    exports: ['AG_SERVED_URL', 'AG_SERVED_MODEL_NAME', 'AG_MODEL_PATH', 'AG_DEPLOY_REF'],
+    consumes: [],
+    clean_runner: 'genet-clean',
+  }),
+  runnerWire({
+    name: 'genet-clean',
+    version: '1.0.0',
+    display_name: '服务拆除（内置）',
+    description: '消费 AG_DEPLOY_REF 调 Genet 卸载 release 并判干净；finally 语义执行。仅由 deploy runner 的 clean_runner 声明注入。',
+    role: 'clean',
+    on_failure: 'abort_task',
+    exclusive: false,
+    input_format: 'jsonl',
+    placeholder: '{}',
+    parameters: [],
+    exports: [],
+    consumes: ['AG_DEPLOY_REF'],
+  }),
+  runnerWire({
+    name: 'existing-deploy',
+    version: '1.0.0',
+    display_name: '已有服务登记（内置）',
+    description: '被测服务已存在：读取三元组原样导出四件套，0 秒完成；不声明 clean_runner → 无 clean 阶段。',
+    role: 'deploy',
+    on_failure: 'abort_task',
+    exclusive: false,
+    input_format: 'jsonl',
+    placeholder: '{"url":"http://10.0.0.10:8000/v1","model_name":"Qwen3-32B","model_path":"/models/Qwen3-32B"}',
+    parameters: [
+      { name: 'url', type: 'string', required: true, description: '被测服务 OpenAI 兼容 base URL（scheme://host:port/v1）' },
+      { name: 'model_name', type: 'string', required: true, description: '服务端模型名（OpenAI 兼容接口 model 字段取值）' },
+      { name: 'model_path', type: 'string', required: false, description: '容器内模型权重路径；不存在时省略导出' },
+    ],
+    exports: ['AG_SERVED_URL', 'AG_SERVED_MODEL_NAME', 'AG_MODEL_PATH', 'AG_DEPLOY_REF'],
+    consumes: [],
   }),
   runnerWire({
     name: 'aisbench-acc',
@@ -419,12 +485,10 @@ interface TaskSeed {
   extraAttempts?: number
 }
 
-/** 注入的内置 runner 名（D-70：用户不可手动添加）。 */
-const INJECTED = { deploy: 'service-deploy', precheck: 'precheck', clean: 'service-clean' } as const
+/** 注入的内置 runner 行名（D-70：用户不可手动添加）。deploy/clean 行名 = 引用的 runner 名（种子自带）。 */
+const INJECTED = { precheck: 'precheck' } as const
 
 function runnerNameOf(seed: RunnerSeed): string {
-  if (seed.role === 'deploy') return INJECTED.deploy
-  if (seed.role === 'clean') return INJECTED.clean
   if (seed.runner === 'endpoint-probe') return INJECTED.precheck
   return seed.name
 }
@@ -584,10 +648,10 @@ function seedTask(seed: TaskSeed): TaskDetail {
     task_id: taskId,
     deploy: seed.deploySpec
       ? {
-          provider: 'genet',
-          spec: seed.deploySpec,
+          runner: 'genet-deploy',
+          version: '1.0.0',
+          input: seed.deploySpec,
           spec_digest: 'sha256:9f2a',
-          package_type: 'stack',
           namespace: 'argus',
           release_name: 'arg-mock0001',
           deploy_state_ref: `attempts/1/deploy-state.json`,
@@ -1393,8 +1457,30 @@ function validateManifest(manifest: TaskManifest): ValidationIssue[] {
   if (!body.deploy && !body.service) {
     issues.push({ path: 'task', code: 'VALIDATION_ERROR', message: 'deploy 与 service 必须给其一（D-27）' })
   }
-  if (body.deploy && body.deploy.provider !== 'genet') {
-    issues.push({ path: 'task.deploy.provider', code: 'VALIDATION_ERROR', message: 'deploy.provider 恒为 genet' })
+  if (body.deploy) {
+    // deploy 块 = runner 引用（与 runners[] 同构；clean 配对由 runner.yaml clean_runner 声明）
+    if (!body.deploy.runner?.trim()) {
+      issues.push({ path: 'task.deploy.runner', code: 'VALIDATION_ERROR', message: 'deploy.runner 必填（runner 引用与 runners[] 同构）' })
+    }
+    if (!body.deploy.version?.trim()) {
+      issues.push({ path: 'task.deploy.version', code: 'VALIDATION_ERROR', message: 'deploy.version 必填' })
+    }
+    const deployRunner = body.deploy.runner
+      ? state.runners.find((r) => r.name === body.deploy!.runner && !r.retired)
+      : undefined
+    if (body.deploy.runner?.trim() && (!deployRunner || deployRunner.role !== 'deploy')) {
+      issues.push({
+        path: 'task.deploy.runner',
+        code: 'RUNNER_NOT_FOUND',
+        message: `目录里没有 role=deploy 的 Runner「${body.deploy.runner}」`,
+      })
+    } else if (deployRunner && body.deploy.version?.trim() && body.deploy.version !== deployRunner.version) {
+      issues.push({
+        path: 'task.deploy.version',
+        code: 'RUNNER_VERSION_PINNED',
+        message: `Runner ${deployRunner.name} 只有版本 ${deployRunner.version}`,
+      })
+    }
   }
   if (body.service && !body.service.url?.trim()) {
     issues.push({ path: 'task.service.url', code: 'VALIDATION_ERROR', message: 'service.url 必填' })
@@ -1438,8 +1524,18 @@ function validateManifest(manifest: TaskManifest): ValidationIssue[] {
 function resolveRunnerSeeds(manifest: TaskManifest): RunnerSeed[] {
   const body = manifest.task
   const seeds: RunnerSeed[] = []
+  const deployRunner = body.deploy?.runner
+    ? state.runners.find((r) => r.name === body.deploy!.runner && !r.retired)
+    : undefined
   if (body.deploy) {
-    seeds.push({ name: INJECTED.deploy, runner: 'genet-internal', role: 'deploy', status: 'pending' })
+    // deploy 行 = 提交体引用的 runner 本尊；clean 行按该 runner 的 clean_runner 声明注入
+    seeds.push({
+      name: body.deploy.runner,
+      runner: body.deploy.runner,
+      role: 'deploy',
+      status: 'pending',
+      input: body.deploy.input,
+    })
   }
   const precheck = body.precheck ?? 'auto'
   if (precheck !== 'off') {
@@ -1455,8 +1551,8 @@ function resolveRunnerSeeds(manifest: TaskManifest): RunnerSeed[] {
   for (const spec of body.runners ?? []) {
     seeds.push({ name: spec.name, runner: spec.runner, status: 'pending', input: spec.input })
   }
-  if (body.deploy) {
-    seeds.push({ name: INJECTED.clean, runner: 'genet-internal', role: 'clean', status: 'pending' })
+  if (body.deploy && deployRunner?.clean_runner) {
+    seeds.push({ name: deployRunner.clean_runner, runner: deployRunner.clean_runner, role: 'clean', status: 'pending' })
   }
   return seeds
 }
@@ -2206,10 +2302,10 @@ export const mockApi: Api = {
       endpoint,
       deploy: body.deploy
         ? {
-            provider: 'genet',
-            spec: body.deploy.spec ?? '',
+            runner: body.deploy.runner,
+            version: body.deploy.version,
+            input: body.deploy.input ?? '',
             spec_digest: 'sha256:mock',
-            package_type: 'stack',
             namespace: null,
             release_name: null,
             deploy_state_ref: `attempts/1/deploy-state.json`,

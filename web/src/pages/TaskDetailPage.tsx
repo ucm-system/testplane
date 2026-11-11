@@ -165,7 +165,7 @@ function DeploySection({
             {deploy.genet_status ? <Tag mono title="Helm status 原值（两根轴之一，D-45）">{deploy.genet_status}</Tag> : null}
           </span>
         }
-        sub={`provider: ${deploy.provider}${deploy.release_name ? ` · release: ${deploy.release_name}` : ''}`}
+        sub={`deploy runner: ${deploy.runner ?? '—'}${deploy.release_name ? ` · release: ${deploy.release_name}` : ''}`}
         actions={!isTerminalTask(task.status) ? <Badge tone="primary">状态由后端推</Badge> : null}
       />
 
@@ -204,19 +204,19 @@ function DeploySection({
           <KV label="部署窗口">
             {snapshot.data?.deploy_timeout_seconds ? formatDuration(snapshot.data.deploy_timeout_seconds) : '—'}
           </KV>
-          {deploy.spec ? (
+          {deploy.input ? (
             <KV label="部署描述摘要">
               <span className="font-mono text-2xs">{deploy.spec_digest ?? '—'}</span>
             </KV>
           ) : null}
         </dl>
 
-        {deploy.spec ? (
+        {deploy.input ? (
           <details className="rounded-md border border-line-soft bg-surface-2 px-3 py-2" open>
             <summary className="flex h-6 cursor-pointer items-center text-2xs text-fg-2">
               Genet 部署描述原文（提交冻结，平台不解析语义）
             </summary>
-            <pre className="mt-2 overflow-x-auto font-mono text-2xs leading-[16px] text-fg-2">{deploy.spec}</pre>
+            <pre className="mt-2 overflow-x-auto font-mono text-2xs leading-[16px] text-fg-2">{deploy.input}</pre>
           </details>
         ) : null}
       </CardBody>

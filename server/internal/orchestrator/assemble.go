@@ -22,7 +22,8 @@ import (
 //	 2. 结构校验（顶层 task:、必填、类型）
 //	 3. deploy XOR service（两者都缺/都给 → 拒绝，§10.1）
 //	 4. runners[] 数量 ∈ [1, 200]（0 条 D-57；超限 TASK_TOO_LARGE）
-//	 5. runner+version 命中注册表；deploy/clean 角色不可引用（平台自动注入）
+//	 5. runner+version 命中注册表；deploy/clean 角色不可手动引用（deploy 由提交体的
+//	    deploy.runner 引用注入、clean 由该 runner 的 clean_runner 声明注入）
 //	 6. execution.profile 已登记
 //	 7. input 按 input_format 校验（jsonl 逐行带行号 + 字段名，D-67）
 //	 8. exports/consumes 闭合；任何两个 runner 的 exports 不允许同名 key（§5.12）
@@ -31,14 +32,15 @@ import (
 //	11. precheck: auto 时注册表恰好一个 role=pre_check
 //	12. timeout_seconds ≤ 24h；task.name ≤ 200（D-58）
 //
-// 通过后生成 resolved 快照（管道序列：注入的 service-deploy / precheck / service-clean、
-// 冻结渲染输入、输入落档路径）与 task_runners 行。
+// 通过后生成 resolved 快照（管道序列：注入的 deploy / precheck / clean、冻结渲染输入、
+// 输入落档路径）与 task_runners 行。
 
-// 平台注入的 runner 名（与 03 §3.1 一致；泄漏重放为 service-clean-replay）。
+// 平台注入的 runner 行名（与 03 §3.1 一致；泄漏重放为 service-clean-replay）。
+//
+// deploy/clean 解耦裁决：平台不感知 "genet"/"mock"/"existing" 这些名字——deploy 行按
+// 提交体的 deploy.runner 引用注入（行名 = 解析出的 runner 名），clean 行按该 runner
+// runner.yaml 的 clean_runner 声明注入；唯一固定的注入行名是 precheck。
 const (
-	InjectedDeployName   = "genet-deploy"    // genet | mock 共用（mock = 接入点指向 fake-genet）
-	InjectedCleanName    = "genet-clean"     // genet | mock 共用
-	InjectedExistingName = "existing-deploy" // existing 变体（已有服务登记，无 clean 阶段）
 	InjectedPrecheckName = "precheck"
 )
 
@@ -58,11 +60,13 @@ type TaskBody struct {
 	Runners  []RunnerInput     `json:"runners"`
 }
 
-// DeployManifest 是部署模式的提交（交给内置 service-deploy 的参数，D-70）。
+// DeployManifest 是部署模式的提交：**runner 引用**（与 tests[] 同构，deploy/clean 解耦
+// 裁决）。平台按 runner+version 从注册表解析出 role=deploy 的 Runner 注入为 seq=1；
+// clean 是否注入由该 runner runner.yaml 的 clean_runner 声明决定，提交体不出现 clean。
 type DeployManifest struct {
-	Provider string                  `json:"provider"`
-	Spec     string                  `json:"spec,omitempty"`
-	Service  *domain.ExistingService `json:"service,omitempty"` // existing 变体：三元组
+	Runner  string `json:"runner"`           // deploy 角色的 runner 名（如 genet-deploy / mock-deploy / existing-deploy）
+	Version string `json:"version"`          // 语义化版本（与 tests[] 同构，必填）
+	Input   string `json:"input,omitempty"`  // 该 runner 的输入原文（yaml/jsonl 按 runner.yaml input_format）
 }
 
 // ServiceManifest 是外接模式（"序号 0 的导出"，§10.3）。
@@ -189,6 +193,9 @@ type ResolvedRunner struct {
 	Exports        []string               `json:"exports,omitempty"`
 	Consumes       []string               `json:"consumes,omitempty"`
 	InputRef       string                 `json:"input_ref,omitempty"`
+	// EnvDefaults 是 runner.yaml env 声明的非敏感缺省值（key→default；§12.4）。
+	// Job 渲染时在 Task env / 上游 exports 之后注入（先到者胜，不覆盖显式来源）。
+	EnvDefaults map[string]string `json:"env_defaults,omitempty"`
 }
 
 // InputFile 是输入落盘清单的一项（内容原样落盘为只读挂载源，§5.7）。
@@ -236,7 +243,46 @@ func (a *Assembler) Assemble(ctx context.Context, m *Manifest, taskID, actor str
 		return nil, ve
 	}
 
+	if !ve.Empty() {
+		return nil, ve
+	}
+
+	// deploy 块校验与解析（runner 引用：必须命中注册表中 role=deploy 的 Runner）。
+	// 放在用户 runner 名校验之前：注入行保留名校验需要 deploy/clean runner 的名字。
+	var deploySpec *domain.RunnerSpec
+	if m.Task.Deploy != nil {
+		if m.Task.Deploy.Runner == "" || m.Task.Deploy.Version == "" {
+			ve.Add("task.deploy", domain.IssueCodeRequired, "deploy.runner 与 deploy.version 必填（runner 引用与 tests[] 同构）")
+		} else {
+			spec, err := a.Catalog.Resolve(ctx, m.Task.Deploy.Runner, m.Task.Deploy.Version)
+			if err != nil {
+				return nil, domain.NewFailureError(domain.CodeRunnerNotFound,
+					fmt.Sprintf("deploy.runner %q@%q 不在注册表中（或不是 role=deploy 的 Runner）",
+						m.Task.Deploy.Runner, m.Task.Deploy.Version),
+					map[string]any{"path": "task.deploy.runner", "runner": m.Task.Deploy.Runner, "version": m.Task.Deploy.Version})
+			}
+			if spec.Role != domain.RoleDeploy {
+				return nil, domain.NewFailureError(domain.CodeValidationError,
+					fmt.Sprintf("deploy.runner %q 的角色是 %s，必须是 role=deploy 的 Runner", spec.Name, spec.Role),
+					map[string]any{"path": "task.deploy.runner", "runner": spec.Name, "role": spec.Role})
+			}
+			deploySpec = &spec
+		}
+	}
+	if !ve.Empty() {
+		return nil, ve
+	}
+
 	// runner 名/字段级结构校验。
+	// 保留名 = 平台注入行的行名：precheck（固定）+ deploy 引用的 runner 名 +
+	// 其 clean_runner 声明（上面 deploy 解析后已补进集合）。
+	reservedNames := map[string]bool{InjectedPrecheckName: true}
+	if deploySpec != nil {
+		reservedNames[deploySpec.Name] = true
+		if deploySpec.CleanRunner != "" {
+			reservedNames[deploySpec.CleanRunner] = true
+		}
+	}
 	usedNames := map[string]bool{}
 	for i := range m.Task.Runners {
 		r := &m.Task.Runners[i]
@@ -248,8 +294,7 @@ func (a *Assembler) Assemble(ctx context.Context, m *Manifest, taskID, actor str
 			ve.Add(fmt.Sprintf("runners[%d].name", i), domain.IssueCodeNameConflict, "name 与前面的 runner 重复")
 		}
 		usedNames[r.Name] = true
-		switch r.Name {
-		case InjectedDeployName, InjectedCleanName, InjectedPrecheckName:
+		if reservedNames[r.Name] {
 			ve.Add(fmt.Sprintf("runners[%d].name", i), domain.IssueCodeNameConflict,
 				"name %q 是平台注入行保留名，不可占用", r.Name)
 		}
@@ -259,6 +304,9 @@ func (a *Assembler) Assemble(ctx context.Context, m *Manifest, taskID, actor str
 		if r.Execution.Profile == "" {
 			ve.Add(fmt.Sprintf("runners[%d].execution.profile", i), domain.IssueCodeRequired, "execution.profile 必填")
 		}
+	}
+	if !ve.Empty() {
+		return nil, ve
 	}
 
 	// ---- 3. 注入判定（C-5.2：deploy XOR service 决定 service-deploy / service-clean）----
@@ -443,7 +491,7 @@ func (a *Assembler) Assemble(ctx context.Context, m *Manifest, taskID, actor str
 	}
 
 	// ---- 组装管道 ----
-	return a.buildPipeline(ctx, m, users, precheck, taskID, actor, now)
+	return a.buildPipeline(ctx, m, users, precheck, deploySpec, taskID, actor, now)
 }
 
 // indexRunners 找 in 在 runners[] 里的下标（issue 定位用）。
@@ -526,12 +574,12 @@ func (a *Assembler) resolvePrecheck(ctx context.Context, raw json.RawMessage, ve
 
 // buildPipeline 生成 Task / RunnerRun 行与 resolved 快照（C-5.2 的管道序列）：
 //
-//	[有 deploy] seq=1 service-deploy（input = deploy 描述原文，yaml）
+//	[有 deploy] seq=1 <deploy.runner 解析出的 runner>（input = deploy.input 原文，格式按 runner.yaml）
 //	[precheck≠off] seq=+1 <pre_check runner>（name=precheck，input 空、公共参数走 env）
 //	seq=+1… 用户 runners[]（仅 test / 显式 pre_check）
-//	[有 deploy] seq=+n service-clean（finally，C-5.7）
+//	[deploy runner 声明了 clean_runner] seq=+n <clean runner>（finally，C-5.7）
 func (a *Assembler) buildPipeline(ctx context.Context, m *Manifest, users []resolvedUser, precheck precheckDecision,
-	taskID, actor string, now domain.Clock) (*Pipeline, error) {
+	deploySpec *domain.RunnerSpec, taskID, actor string, now domain.Clock) (*Pipeline, error) {
 
 	t := &store.Task{
 		ID:          taskID,
@@ -564,12 +612,13 @@ func (a *Assembler) buildPipeline(ctx context.Context, m *Manifest, users []reso
 		}
 	}
 
-	// 部署模式：冻结部署描述（service-deploy 的输入；release_name 由平台派生，D-44）。
-	if m.Task.Deploy != nil {
-		sum := sha256.Sum256([]byte(m.Task.Deploy.Spec))
+	// 部署模式：冻结 runner 引用（deploy 块与 tests[] 同构；release_name 由平台派生，D-44）。
+	if m.Task.Deploy != nil && deploySpec != nil {
+		sum := sha256.Sum256([]byte(m.Task.Deploy.Input))
 		p.DeployDoc = &domain.DeployDoc{
-			Provider:    firstNonEmpty(m.Task.Deploy.Provider, "genet"),
-			Spec:        m.Task.Deploy.Spec,
+			Runner:      deploySpec.Name,
+			Version:     deploySpec.Version,
+			Input:       m.Task.Deploy.Input,
 			SpecDigest:  hex.EncodeToString(sum[:]),
 			ReleaseName: domain.ReleaseName(taskID, 1),
 		}
@@ -590,6 +639,15 @@ func (a *Assembler) buildPipeline(ctx context.Context, m *Manifest, users []reso
 		seq++
 		format := firstNonEmpty(spec.InputFormat, domain.InputFormatJSONL)
 		inputRef := fmt.Sprintf("attempts/1/input/%d/", seq)
+		var envDefaults map[string]string
+		for key, decl := range spec.Env {
+			if decl.Default != "" {
+				if envDefaults == nil {
+					envDefaults = map[string]string{}
+				}
+				envDefaults[key] = decl.Default
+			}
+		}
 		rows = append(rows, ResolvedRunner{
 			Seq: seq, Name: name, Runner: spec.Name, Version: spec.Version,
 			Role: spec.Role, Injected: injected, Profile: profile,
@@ -597,6 +655,7 @@ func (a *Assembler) buildPipeline(ctx context.Context, m *Manifest, users []reso
 			InputFile: domain.InputFileName(format), InputFormat: format,
 			Entry: spec.Entry, Resources: spec.Resources, Mounts: spec.Mounts,
 			Exports: spec.Exports, Consumes: spec.Consumes, InputRef: inputRef,
+			EnvDefaults: envDefaults,
 		})
 		runners = append(runners, &store.RunnerRun{
 			TaskID:            taskID,
@@ -617,51 +676,22 @@ func (a *Assembler) buildPipeline(ctx context.Context, m *Manifest, users []reso
 		})
 	}
 
-	deployCleanable := true // existing 变体无可拆除对象 → false（clean 不注入）
+	// clean 注入判据：deploy runner 的 runner.yaml 声明了 clean_runner（deploy/clean
+	// 解耦裁决——clean 配对由 runner 自己声明，平台不按名字特判；existing-deploy 等不
+	// 声明的 deploy runner 无 clean 阶段）。
+	cleanRunnerName := ""
+	if deploySpec != nil {
+		cleanRunnerName = deploySpec.CleanRunner
+	}
 
-	// 1. 有部署 → 按 provider 注入 deploy runner（C-5.3.1）。
-	//    genet/mock → genet-deploy（mock = 接入点指向 fake-genet，同一 OpenAPI 契约）；
-	//    existing   → existing-deploy（已有服务登记：读三元组、原样导出、0 秒完成，无 clean 阶段）。
-	if m.Task.Deploy != nil {
-		provider := firstNonEmpty(m.Task.Deploy.Provider, "genet")
-		deployName := InjectedDeployName
-		switch provider {
-		case "genet", "mock":
-			deployName = InjectedDeployName
-		case "existing":
-			deployName = InjectedExistingName
-		default:
-			return nil, domain.NewFailureError(domain.CodeValidationError,
-				fmt.Sprintf("deploy.provider 不支持: %s（可选 genet | mock | existing）", provider),
-				map[string]any{"path": "deploy.provider"})
-		}
-		spec, err := a.Catalog.Resolve(ctx, deployName, "")
-		if err != nil {
-			return nil, domain.NewFailureError(domain.CodeRunnerInvalid,
-				fmt.Sprintf("内置 %s 不在注册表中（检查 AG_RUNNERS_DIR 扫描）", deployName), nil)
-		}
-		inputFormat := domain.InputFormatYAML
-		if provider == "existing" {
-			// existing 变体：service 三元组以 JSONL 传入（runner.yaml parameters 校验）。
-			svc := m.Task.Deploy.Service
-			if svc == nil || svc.URL == "" || svc.ModelName == "" {
-				return nil, domain.NewFailureError(domain.CodeValidationError,
-					"provider=existing 需要 deploy.service 三元组（url/model_name 必填）",
-					map[string]any{"path": "deploy.service"})
-			}
-			inputFormat = domain.InputFormatJSONL
-			addRow(deployName, spec, firstUserProfile(m), true, injectedTimeout, domain.OnFailureAbortTask)
-			inputs = append(inputs, InputFile{Seq: len(rows), Name: deployName,
-				Format: inputFormat, Content: fmt.Sprintf(
-					`{"url":%q,"model_name":%q,"model_path":%q}`+"\n",
-					svc.URL, svc.ModelName, svc.ModelPath)})
-			// existing 无可拆除对象：跳过 clean 注入（第 4 步按 DeployCleanable 跳过）。
-			deployCleanable = false
-		} else {
-			addRow(deployName, spec, firstUserProfile(m), true, injectedTimeout, domain.OnFailureAbortTask)
-			inputs = append(inputs, InputFile{Seq: len(rows), Name: deployName,
-				Format: inputFormat, Content: m.Task.Deploy.Spec})
-		}
+	// 1. 有部署 → 按提交体的 runner 引用注入 deploy 行（C-5.3.1；seq=1）。
+	//    行名 = 解析出的 runner 名（平台不感知具体名字）；输入 = deploy.input 原文，
+	//    格式 = 该 runner 的 input_format（genet-deploy: yaml、existing-deploy: jsonl）。
+	if m.Task.Deploy != nil && deploySpec != nil {
+		addRow(deploySpec.Name, *deploySpec, firstUserProfile(m), true, injectedTimeout, domain.OnFailureAbortTask)
+		inputs = append(inputs, InputFile{Seq: len(rows), Name: deploySpec.Name,
+			Format:  firstNonEmpty(deploySpec.InputFormat, domain.InputFormatJSONL),
+			Content: m.Task.Deploy.Input})
 	}
 
 	// 2. precheck 注入（auto：注册表唯一 pre_check；显式对象；off 不注入）。
@@ -696,14 +726,20 @@ func (a *Assembler) buildPipeline(ctx context.Context, m *Manifest, users []reso
 			Format: firstNonEmpty(u.spec.InputFormat, domain.InputFormatJSONL), Content: u.in.Input})
 	}
 
-	// 4. 有可拆除部署 → 追加 genet-clean（finally，C-5.7；existing 变体跳过）。
-	if m.Task.Deploy != nil && deployCleanable {
-		spec, err := a.Catalog.Resolve(ctx, InjectedCleanName, "")
+	// 4. deploy runner 声明了 clean_runner → 按 seq=last+1 注入 clean 行（finally，C-5.7）。
+	//    未声明（如 existing-deploy）不注入：无可拆除对象。
+	if cleanRunnerName != "" {
+		spec, err := a.Catalog.Resolve(ctx, cleanRunnerName, "")
 		if err != nil {
 			return nil, domain.NewFailureError(domain.CodeRunnerInvalid,
-				"内置 service-clean 不在注册表中（检查 AG_RUNNERS_DIR 扫描）", nil)
+				fmt.Sprintf("clean_runner %q 不在注册表中（检查 %s 的 runner.yaml 声明与 AG_RUNNERS_DIR 扫描）",
+					cleanRunnerName, deploySpec.Name), nil)
 		}
-		addRow(InjectedCleanName, spec, firstUserProfile(m), true, injectedTimeout, domain.OnFailureAbortTask)
+		if spec.Role != domain.RoleClean {
+			return nil, domain.NewFailureError(domain.CodeRunnerInvalid,
+				fmt.Sprintf("clean_runner %q 的角色是 %s，必须是 role=clean 的 Runner", spec.Name, spec.Role), nil)
+		}
+		addRow(spec.Name, spec, firstUserProfile(m), true, injectedTimeout, domain.OnFailureAbortTask)
 	}
 
 	p.Inputs = inputs

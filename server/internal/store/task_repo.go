@@ -373,9 +373,10 @@ type CleanupRequiredTask struct {
 // ListCleanupRequired 扫描「Task 已终态 + tasks.deploy 非空 + 当前 attempt 没有
 // succeeded 的 clean 记录」的行（§9.3：deploy 泄漏候选）。
 //
-// provider=existing 不进清单：existing-deploy 只做"已有服务登记"（读三元组、原样导出、
-// 0 秒完成），没有任何平台可拆除对象，clean 也不会注入（assemble deployCleanable=false）——
-// 它出现在重放清单里只会是误报。
+// 判据是**结构性的**（deploy/clean 解耦裁决，平台不按 runner 名/provider 特判）：
+// 该 attempt 存在 role=clean 的执行记录 = deploy runner 声明了 clean_runner =
+// 存在可拆除对象。没有 clean 行的 attempt（如 existing-deploy，未声明 clean_runner）
+// 不进清单——它出现在重放清单里只会是误报。
 //
 // 排除已写过 cleanup_required 事件（task 级 state_changed + payload.reason）的
 // (task, attempt)，扫描可周期重跑而不重复告警。**只读出口**：不自动重放 clean
@@ -386,7 +387,16 @@ func (r *TaskRepo) ListCleanupRequired(ctx context.Context, tx pgx.Tx, limit int
 		  FROM tasks t
 		 WHERE t.status = ANY($1)
 		   AND t.deploy IS NOT NULL
-		   AND t.deploy->>'provider' NOT IN ('existing')
+		   AND EXISTS (
+		        SELECT 1 FROM task_runners cr
+		         WHERE cr.task_id = t.id
+		           AND cr.attempt_no = t.current_attempt
+		           AND cr.role = 'deploy')
+		   AND EXISTS (
+		        SELECT 1 FROM task_runners cr
+		         WHERE cr.task_id = t.id
+		           AND cr.attempt_no = t.current_attempt
+		           AND cr.role = 'clean')
 		   AND NOT EXISTS (
 		        SELECT 1 FROM task_runners rr
 		         WHERE rr.task_id = t.id

@@ -3,17 +3,18 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
- * Run 详情的信息架构（用户两条反馈）：
- *  - 终态 Run 默认进「结果」视图：结论 / counts / 失败项 / 产物下载 / 报告入口；
+ * Run 详情的信息架构（v2：报告成为主体）：
+ *  - 终态 Task 默认进「报告」页签；页签顺序 报告 → 执行细节 → 事件 → 结果（产物清单留在结果）；
+ *  - 「结果」页签里是 结论 / counts / 失败项 / 产物下载 / 报告入口；
  *  - 执行链路、Task、Attempt、日志折到「执行细节」（**折叠不是隐藏**，一键展开）。
- * 运行中的 Run 仍默认执行视图。
+ * 运行中的 Task 没有结果页签。
  */
 
 const OUT_DIR = join(process.cwd(), '.data', 'layout')
 
 test.describe.configure({ mode: 'serial' })
 
-test('终态 Task：默认结果视图（结论/失败项/产物/报告），执行细节一键展开', async ({ page }) => {
+test('终态 Task：默认报告页签；结果页签有结论/失败项/产物/报告，执行细节一键展开', async ({ page }) => {
   test.setTimeout(120_000)
   mkdirSync(OUT_DIR, { recursive: true })
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
@@ -21,6 +22,12 @@ test('终态 Task：默认结果视图（结论/失败项/产物/报告），执
   await page.setViewportSize({ width: 1440, height: 1000 })
   // mock 里这条是 completed_with_errors（部分失败），有失败项也有各 Attempt 日志
   await page.goto('/tasks/t-20261105-0003')
+
+  // v2：默认落在「报告」页签（报告内容与 /tasks/:id/report 共用同一个视图）
+  await expect(page.getByTestId('task-report-panel')).toBeVisible({ timeout: 20_000 })
+
+  // 结果块在「结果」页签里（终态才有这个页签），切过去
+  await page.getByRole('tab', { name: '结果' }).click()
 
   // 结果视图的四个块
   await expect(page.getByTestId('task-result-verdict')).toBeVisible({ timeout: 20_000 })
@@ -63,12 +70,17 @@ test('终态 Task：默认结果视图（结论/失败项/产物/报告），执
   await expect(page.getByTestId('task-result-verdict')).toBeVisible()
 })
 
-test('运行中的 Task：默认就是执行视图（没有结果页签）', async ({ page }) => {
+test('运行中的 Task：默认报告页签，没有结果页签；时间线在执行细节里', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
   await page.goto('/tasks/t-20261105-0005') // deploying，非终态
-  await expect(page.getByText('runner 管道时间线')).toBeVisible({ timeout: 20_000 })
+  // v2：默认「报告」（运行中先看"报告尚未生成"的空态）；结果页签只有终态才有
+  await expect(page.getByTestId('task-report-panel')).toBeVisible({ timeout: 20_000 })
   await expect(page.getByTestId('task-result-verdict')).toHaveCount(0)
   await expect(page.getByRole('tab', { name: '结果' })).toHaveCount(0)
+
+  // 管道时间线折叠进「执行细节」（折叠不是隐藏）
+  await page.getByRole('tab', { name: '执行细节' }).click()
+  await expect(page.getByText('runner 管道时间线')).toBeVisible({ timeout: 20_000 })
 })
 
 /**

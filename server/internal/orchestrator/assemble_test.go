@@ -47,13 +47,27 @@ func testSpec(name, version, role string) domain.RunnerSpec {
 	}
 }
 
+// 内置 deploy/clean runner 的注册名（与 runners/*/runner.yaml 一致；平台不按
+// provider 路由——deploy 行按提交体引用注入、clean 行按 CleanRunner 声明注入）。
+const (
+	builtinDeployName = "genet-deploy"
+	builtinCleanName  = "genet-clean"
+	// existingDeployName 不声明 clean_runner → 无 clean 阶段（解耦裁决的对照样）。
+	existingDeployName = "existing-deploy"
+)
+
 func builtin(name string) domain.RunnerSpec {
 	s := testSpec(name, "1.0.0", "test")
 	switch name {
-	case InjectedDeployName:
+	case builtinDeployName:
 		s.Role = domain.RoleDeploy
 		s.InputFormat = domain.InputFormatYAML
-	case InjectedCleanName:
+		s.CleanRunner = builtinCleanName
+	case existingDeployName:
+		s.Role = domain.RoleDeploy
+		s.InputFormat = domain.InputFormatJSONL
+		// 不声明 CleanRunner：无可拆除对象，clean 不注入。
+	case builtinCleanName:
 		s.Role = domain.RoleClean
 	}
 	return s
@@ -87,8 +101,9 @@ func baseManifest() *Manifest {
 
 func catalogWithBuiltin() *fakeCatalog {
 	c := &fakeCatalog{specs: map[string]domain.RunnerSpec{}, listed: map[string][]domain.RunnerSpec{}}
-	c.specs[InjectedDeployName+"@1.0.0"] = builtin(InjectedDeployName)
-	c.specs[InjectedCleanName+"@1.0.0"] = builtin(InjectedCleanName)
+	c.specs[builtinDeployName+"@1.0.0"] = builtin(builtinDeployName)
+	c.specs[builtinCleanName+"@1.0.0"] = builtin(builtinCleanName)
+	c.specs[existingDeployName+"@1.0.0"] = builtin(existingDeployName)
 	c.specs["aisbench-acc@1.0.0"] = testSpec("aisbench-acc", "1.0.0", "test")
 	// precheck: auto 要求注册表恰好一个 role=pre_check（C-5.1 第 11 条）。
 	pc := testSpec("endpoint-probe", "1.0.0", domain.RolePreCheck)
@@ -123,7 +138,7 @@ func TestAssembleDeployModeInjectsDeployAndClean(t *testing.T) {
 	c := catalogWithBuiltin()
 	m := &Manifest{Task: TaskBody{
 		Name:   "deployed",
-		Deploy: &DeployManifest{Provider: "genet", Spec: "model: Qwen3-32B\n"},
+		Deploy: &DeployManifest{Runner: builtinDeployName, Version: "1.0.0", Input: "model: Qwen3-32B\n"},
 		Runners: []RunnerInput{
 			{Name: "acc", Runner: "aisbench-acc", Version: "1.0.0", Execution: ExecutionSpec{Profile: "k8s-npu"}},
 		},
@@ -132,15 +147,18 @@ func TestAssembleDeployModeInjectsDeployAndClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("assemble: %v", err)
 	}
-	if p.Runners[0].Name != InjectedDeployName || p.Runners[0].Role != domain.RoleDeploy {
-		t.Fatalf("seq=1 应为 service-deploy: %+v", p.Runners[0])
+	if p.Runners[0].Name != builtinDeployName || p.Runners[0].Role != domain.RoleDeploy {
+		t.Fatalf("seq=1 应为 deploy 引用行: %+v", p.Runners[0])
 	}
 	last := p.Runners[len(p.Runners)-1]
-	if last.Name != InjectedCleanName || last.Role != domain.RoleClean {
-		t.Fatalf("最后一行应为 service-clean: %+v", last)
+	if last.Name != builtinCleanName || last.Role != domain.RoleClean {
+		t.Fatalf("最后一行应为 clean 注入行（按 clean_runner 声明）: %+v", last)
 	}
 	if p.DeployDoc == nil || p.DeployDoc.ReleaseName == "" {
 		t.Fatalf("部署模式应冻结 DeployDoc: %+v", p.DeployDoc)
+	}
+	if p.DeployDoc.Runner != builtinDeployName || p.DeployDoc.Input != "model: Qwen3-32B\n" {
+		t.Fatalf("DeployDoc 应冻结 runner 引用: %+v", p.DeployDoc)
 	}
 	for i, rr := range p.Runners {
 		if rr.Seq != i+1 {
@@ -149,6 +167,49 @@ func TestAssembleDeployModeInjectsDeployAndClean(t *testing.T) {
 		if rr.EndpointKey != nil {
 			t.Fatalf("部署模式不应有 endpoint_key: %s", rr.Name)
 		}
+	}
+}
+
+// TestAssembleDeployWithoutCleanDeclaration 是解耦裁决的对照样：deploy runner 未声明
+// clean_runner（如 existing-deploy）→ 只注入 deploy 行，不注入 clean。
+func TestAssembleDeployWithoutCleanDeclaration(t *testing.T) {
+	c := catalogWithBuiltin()
+	m := &Manifest{Task: TaskBody{
+		Name:   "existing",
+		Deploy: &DeployManifest{Runner: existingDeployName, Version: "1.0.0",
+			Input: `{"url":"http://10.0.0.10:8000/v1","model_name":"Qwen3-32B"}`},
+		Runners: []RunnerInput{
+			{Name: "acc", Runner: "aisbench-acc", Version: "1.0.0", Execution: ExecutionSpec{Profile: "k8s-npu"}},
+		},
+	}}
+	p, err := testAssembler(c).Assemble(context.Background(), m, "t-20261110-HHHH", "dev", nil)
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	if p.Runners[0].Name != existingDeployName || p.Runners[0].Role != domain.RoleDeploy {
+		t.Fatalf("seq=1 应为 existing-deploy: %+v", p.Runners[0])
+	}
+	for _, rr := range p.Runners {
+		if rr.Role == domain.RoleClean {
+			t.Fatalf("未声明 clean_runner 不应注入 clean 行: %+v", p.Runners)
+		}
+	}
+}
+
+// TestAssembleDeployRunnerRoleEnforced：deploy.runner 必须引用 role=deploy 的 Runner。
+func TestAssembleDeployRunnerRoleEnforced(t *testing.T) {
+	c := catalogWithBuiltin()
+	m := &Manifest{Task: TaskBody{
+		Name:   "bad-role",
+		Deploy: &DeployManifest{Runner: "aisbench-acc", Version: "1.0.0"},
+		Runners: []RunnerInput{
+			{Name: "acc", Runner: "aisbench-acc", Version: "1.0.0", Execution: ExecutionSpec{Profile: "k8s-npu"}},
+		},
+	}}
+	_, err := testAssembler(c).Assemble(context.Background(), m, "t-20261110-IIII", "dev", nil)
+	var fe *domain.FailureError
+	if !errAs(err, &fe) || fe.Failure.Code != domain.CodeValidationError {
+		t.Fatalf("非 deploy 角色应拒绝（VALIDATION_ERROR）: %v", err)
 	}
 }
 
@@ -195,7 +256,7 @@ func TestAssembleValidationErrors(t *testing.T) {
 		path string
 	}{
 		{"deploy_xor_service_both", func(m *Manifest) {
-			m.Task.Deploy = &DeployManifest{Provider: "genet"}
+			m.Task.Deploy = &DeployManifest{Runner: builtinDeployName, Version: "1.0.0"}
 		}, domain.IssueCodeDeployService, "task"},
 		{"deploy_xor_service_neither", func(m *Manifest) {
 			m.Task.Service = nil
@@ -204,7 +265,17 @@ func TestAssembleValidationErrors(t *testing.T) {
 			m.Task.Runners = nil
 		}, domain.IssueCodeRequired, "task.runners"},
 		{"injected_name_conflict", func(m *Manifest) {
-			m.Task.Runners[0].Name = InjectedCleanName
+			m.Task.Runners[0].Name = InjectedPrecheckName
+		}, domain.IssueCodeNameConflict, "runners[0].name"},
+		{"deploy_runner_name_conflict", func(m *Manifest) {
+			m.Task.Service = nil
+			m.Task.Deploy = &DeployManifest{Runner: builtinDeployName, Version: "1.0.0"}
+			m.Task.Runners[0].Name = builtinDeployName
+		}, domain.IssueCodeNameConflict, "runners[0].name"},
+		{"clean_runner_name_conflict", func(m *Manifest) {
+			m.Task.Service = nil
+			m.Task.Deploy = &DeployManifest{Runner: builtinDeployName, Version: "1.0.0"}
+			m.Task.Runners[0].Name = builtinCleanName
 		}, domain.IssueCodeNameConflict, "runners[0].name"},
 		{"profile_missing", func(m *Manifest) {
 			m.Task.Runners[0].Execution.Profile = "missing"

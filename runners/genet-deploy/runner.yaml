@@ -11,6 +11,7 @@ description: |
   平台只读 deploy-state.json 与 exports，不直连 Genet（D-70）。
 
 role: deploy                    # 仅内置：用户目录声明 role: deploy 一律拒绝注册（§5.1）
+clean_runner: genet-clean       # clean 配对由本 Runner 自己声明（deploy/clean 解耦）：平台按它注入 clean 行
 on_failure: abort_task          # 内置 deploy 必须声明（§7.3 / 注册校验强制）
 
 entry: ["/runner/run.sh"]       # exec form 数组；平台 exec 该数组、不经 shell、不追加 argv（§5.2）
