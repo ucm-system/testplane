@@ -54,8 +54,11 @@ func (r *RunnerRegistry) UpsertRunner(ctx context.Context, n *Runner) (created b
 					"registered_sha": existingSHA, "incoming_sha": n.ContentSHA,
 				})
 		default:
-			// 内容一致：幂等，不写库（保留首次的 registered_at/registered_by）。
-			return nil
+			// 内容一致：幂等，但**仍要刷新行**（upsert 的 UPDATE 列表不含 registered_at/by，
+			// 首次登记信息保留）：目录里重新出现的 runner（曾被标 orphaned）要复活；
+			// placeholder / clean_runner 这类列也要补齐（历史上 recordToRunner 漏映射
+			// 导致 API 查不到输入示例，D-76 批次修复）。
+			return r.s.Runners.Upsert(ctx, tx, n)
 		}
 	})
 	if err != nil {

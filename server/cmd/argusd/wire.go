@@ -76,6 +76,10 @@ func recordToRunner(rec registry.Record) *store.Runner {
 		clean := rec.Spec.CleanRunner
 		n.CleanRunner = &clean
 	}
+	if rec.Spec.Placeholder != "" {
+		ph := rec.Spec.Placeholder
+		n.Placeholder = &ph
+	}
 	n.Entry = mustMarshal(rec.Spec.Entry)
 	n.Resources = mustMarshal(rec.Spec.Resources)
 	n.Concurrency = mustMarshal(rec.Spec.Concurrency)
