@@ -51,8 +51,11 @@ test('⑤ 结果 / 执行细节：role=tabpanel 且 id 与页签互相指向', a
 
   const resultTab = page.getByRole('tab', { name: '结果' })
   await expect(resultTab).toBeVisible({ timeout: 20_000 })
+  // v2 默认停在「报告」页签：也只有一个按需挂载的面板
   await expect(page.getByRole('tabpanel')).toHaveCount(1)
 
+  // 配对断言针对活动页签：先切到「结果」
+  await resultTab.click()
   const panel = page.getByRole('tabpanel')
   const tabId = await resultTab.getAttribute('id')
   const panelId = await panel.getAttribute('id')

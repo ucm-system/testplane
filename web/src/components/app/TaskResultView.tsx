@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { ArrowUpRight, Check, ChevronRight, Download, FileText } from 'lucide-react'
 import { API_BASE, api } from '@/api'
 import { toApiError } from '@/api/client'
@@ -12,7 +12,7 @@ import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/tabl
 import { TaskStatusBadge } from '@/components/app/StatusBadge'
 import { useAsync } from '@/hooks/useAsync'
 import { ARTIFACT_GROUPS, groupArtifacts, relativeArtifactPath } from '@/lib/artifact-groups'
-import { ArtifactViewerDialog, artifactViewKindOf } from '@/components/app/ArtifactViewer'
+import { artifactViewKindOf } from '@/components/app/ArtifactViewer'
 import { formatBytes, saveBlob } from '@/lib/download'
 import { cn, formatDateTime, formatDuration } from '@/lib/utils'
 
@@ -22,6 +22,7 @@ import { cn, formatDateTime, formatDuration } from '@/lib/utils'
  * 只放 4 个块：**结论 / 失败项 / 产物 / 报告**；runner 管道时间线、attempt、日志全部在
  * 「执行细节」页签里（二级）。产物下载按契约走 `GET /tasks/{id}/files?path=`，
  * 清单来自 `GET /tasks/{id}/artifacts`（前端**显式列全**，不只给 report.md）。
+ * 「查看」不再弹窗：导航到整页查看器 `/tasks/{id}/file?path=…`（v2，URL 可收藏可分享）。
  */
 
 const KIND_LABEL: Record<Artifact['kind'], string> = {
@@ -79,13 +80,21 @@ function conclusion(
 
 export function TaskResultView({ task }: { task: TaskDetail }) {
   const taskId = task.id
+  const navigate = useNavigate()
   const artifacts = useAsync(() => api.listTaskArtifacts(taskId), [taskId])
   const report = useAsync(() => api.getTaskReport(taskId), [taskId])
   const [downloading, setDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<ApiErrorBody | null>(null)
   const [downloadNotice, setDownloadNotice] = useState<string | null>(null)
-  /** 通用产物查看器（按扩展名分发；二进制仅下载） */
-  const [viewing, setViewing] = useState<Artifact | null>(null)
+
+  /** 「查看」= 整页查看器（v2 不再弹窗）：path 必带，attempt / seq 用于定位与展示。 */
+  const openViewer = (item: Artifact) => {
+    const params = new URLSearchParams()
+    params.set('path', item.path)
+    if (item.attempt_no != null) params.set('attempt', String(item.attempt_no))
+    if (item.runner_seq != null) params.set('seq', String(item.runner_seq))
+    void navigate(`/tasks/${encodeURIComponent(taskId)}/file?${params.toString()}`)
+  }
 
   /**
    * 打包下载：与报告页同一套逻辑（带鉴权 fetch → Blob → a[download]），
@@ -291,13 +300,13 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
                               </TD>
                               <TD className="tabular-nums text-2xs">{formatBytes(item.size_bytes)}</TD>
                               <TD className="text-right">
-                                {/* 通用查看：json 树 / csv 表 / html sandbox / 文本（≤2MB）；二进制不提供预览 */}
+                                {/* 整页查看（v2 不再弹窗）：json 树 / csv 表 / html sandbox / 文本（≤2MB）；二进制不提供预览 */}
                                 {artifactViewKindOf(item.path) !== 'binary' ? (
                                   <button
                                     type="button"
                                     data-testid="artifact-view"
                                     className={cn(buttonClassName({ size: 'sm', variant: 'ghost' }), 'mr-1')}
-                                    onClick={() => setViewing(item)}
+                                    onClick={() => openViewer(item)}
                                   >
                                     查看
                                   </button>
@@ -322,12 +331,9 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
           </div>
         )}
         <CardFooter>
-          <span>这些都是这次 Task 落下的文件；点一下就开始下载，不需要再回报告页翻。</span>
+          <span>这些都是这次 Task 落下的文件；「查看」进整页查看器（URL 可收藏），下载直接开始。</span>
         </CardFooter>
       </Card>
-
-      {/* 通用产物查看器弹窗（按扩展名分发；二进制仅下载） */}
-      <ArtifactViewerDialog taskId={taskId} artifact={viewing} onClose={() => setViewing(null)} />
 
       {/* 4) 报告入口 */}
       <Card data-testid="task-result-report">

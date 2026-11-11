@@ -10,6 +10,8 @@ const SubmitPage = lazy(() => import('@/pages/SubmitPage').then((m) => ({ defaul
 const RunnersPage = lazy(() => import('@/pages/RunnersPage').then((m) => ({ default: m.RunnersPage })))
 const ClustersPage = lazy(() => import('@/pages/ClustersPage').then((m) => ({ default: m.ClustersPage })))
 const ReportPage = lazy(() => import('@/pages/ReportPage').then((m) => ({ default: m.ReportPage })))
+/** v2：整页文件查看器（产物清单「查看」从弹窗改为导航，URL 可收藏可分享） */
+const FileViewerPage = lazy(() => import('@/pages/FileViewerPage').then((m) => ({ default: m.FileViewerPage })))
 const AdminPage = lazy(() => import('@/pages/AdminPage').then((m) => ({ default: m.AdminPage })))
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage').then((m) => ({ default: m.NotFoundPage })))
 const DocsPage = lazy(() => import('@/pages/DocsPage').then((m) => ({ default: m.DocsPage })))
@@ -59,6 +61,7 @@ export function App() {
             <Route path="tasks" element={<RunsIndexRedirect />} />
             <Route path="tasks/:taskId" element={<TaskDetailRoute />} />
             <Route path="tasks/:taskId/report" element={<ReportPage />} />
+            <Route path="tasks/:taskId/file" element={<FileViewerPage />} />
             {/*
               D-62：概览与运行列表合并 —— `/runs` 保留成兼容重定向，**query 原样带过去**：
               /runs?status=failed&page=2 → /?status=failed&page=2；/runs/:id → /tasks/:id。

@@ -312,7 +312,7 @@ func (s *Server) appendDeployLogs(ctx context.Context, task *store.Task, files *
 	}
 	var deploySeq int
 	for _, rr := range runs {
-		if rr.Role == domain.RoleDeploy && rr.RunnerName == "service-deploy" {
+		if rr.Role == domain.RoleDeploy {
 			deploySeq = rr.Seq
 			break
 		}

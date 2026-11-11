@@ -54,7 +54,7 @@ func (s *Server) handleTaskDeployLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	var deployRow *store.RunnerRun
 	for i := range runs {
-		if runs[i].Role == domain.RoleDeploy && runs[i].RunnerName == "service-deploy" {
+		if runs[i].Role == domain.RoleDeploy {
 			deployRow = &runs[i]
 			break
 		}

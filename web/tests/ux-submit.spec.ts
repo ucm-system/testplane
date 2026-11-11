@@ -37,7 +37,7 @@ test('① 0 个测试 Task：提交/校验置灰（disabled + aria-disabled + ti
   // 说明就出现在 Task 卡片区
   const hint = page.getByTestId('runner-empty-hint')
   await expect(hint).toBeVisible()
-  await expect(hint).toHaveText('至少需要 1 个 runner（service-deploy / precheck / service-clean 由平台注入，不计入）')
+  await expect(hint).toHaveText('至少需要 1 个 runner（deploy / precheck / clean 由平台注入，不计入）')
 
   // 两个按钮：真 disabled + aria-disabled + title 说清原因
   for (const button of [submit, validate]) {

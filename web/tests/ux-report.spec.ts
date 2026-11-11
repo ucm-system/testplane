@@ -91,6 +91,8 @@ test('③ 指标表懒加载 + 按 labels 分组 + 无结果时的空态文案',
 test('C6 结果视图 0 失败：压成一行绿字「无失败项」，产物下载照常', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/tasks/t-20261105-0006')
+  // v2：默认「报告」页签，结果块在「结果」页签里
+  await page.getByRole('tab', { name: '结果' }).click()
 
   await expect(page.getByTestId('task-result-verdict')).toBeVisible({ timeout: 20_000 })
   const none = page.getByTestId('task-result-no-failures')

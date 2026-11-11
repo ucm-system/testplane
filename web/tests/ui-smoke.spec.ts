@@ -7,9 +7,13 @@ import { expect, test } from '@playwright/test'
  *   /submit -> 故意把 Task 名称清空 -> dry-run 报错可见
  */
 
-/** 终态 Run 默认落在「结果」视图：有页签就先切到「执行细节」 */
+/**
+ * v2：详情页默认停在「报告」页签，管道时间线在「执行细节」里 —— 有页签就切过去
+ * （页签随 detail 数据异步渲染，先等它出现再点）。
+ */
 async function ensureExecutionView(page: import('@playwright/test').Page): Promise<void> {
   const detailTab = page.getByRole('tab', { name: '执行细节' })
+  await detailTab.waitFor({ state: 'visible', timeout: 15_000 }).catch(() => {})
   if ((await detailTab.count()) > 0) await detailTab.click()
 }
 
@@ -54,7 +58,9 @@ test('viewer：Task 取消按钮不可点', async ({ page }) => {
   })
 
   // mock 里这条 Run 处于 deploying、Task 全是 pending —— 都是可取消状态
+  // v2 默认停在「报告」页签：管道时间线在「执行细节」里，先切过去
   await page.goto('/tasks/t-20261105-0005')
+  await ensureExecutionView(page)
   await expect(page.getByText('runner 管道时间线')).toBeVisible()
 
   const cancel = page.locator('[data-testid="cancel-task"]').first()
@@ -84,6 +90,7 @@ test('operator：Task 取消按钮可点并走二次确认', async ({ page }) =>
   })
 
   await page.goto('/tasks/t-20261105-0005')
+  await ensureExecutionView(page)
   await expect(page.getByText('runner 管道时间线')).toBeVisible()
 
   const cancel = page.locator('[data-testid="cancel-task"]').first()

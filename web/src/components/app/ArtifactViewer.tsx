@@ -216,7 +216,7 @@ function indexReachedEnd(text: string, rows: number): boolean {
   return false
 }
 
-/* ---------------------------------------------------------------- 查看器弹窗 */
+/* ---------------------------------------------------------------- 查看器（弹窗与整页共用） */
 
 interface LoadedContent {
   kind: 'loaded'
@@ -225,19 +225,12 @@ interface LoadedContent {
 }
 
 /**
- * 产物查看弹窗：按扩展名分发渲染；**二进制一律仅下载**，文本超 2MB 只给下载入口。
+ * 产物查看内容区（**弹窗与整页查看器共用**）：带鉴权拉取 + 按扩展名分发渲染。
+ * 二进制一律仅下载；文本超 2MB 只给下载入口。
  */
-export function ArtifactViewerDialog({
-  taskId,
-  artifact,
-  onClose,
-}: {
-  taskId: string
-  artifact: Artifact | null
-  onClose: () => void
-}) {
-  const kind = artifact ? artifactViewKindOf(artifact.path) : 'binary'
-  const overLimit = artifact != null && artifact.size_bytes > ARTIFACT_PREVIEW_LIMIT
+export function ArtifactPreviewBody({ taskId, artifact }: { taskId: string; artifact: Artifact }) {
+  const kind = artifactViewKindOf(artifact.path)
+  const overLimit = artifact.size_bytes > ARTIFACT_PREVIEW_LIMIT
   const previewable = kind !== 'binary' && !overLimit
 
   const [content, setContent] = useState<LoadedContent | null>(null)
@@ -247,7 +240,7 @@ export function ArtifactViewerDialog({
   useEffect(() => {
     setContent(null)
     setError(null)
-    if (!artifact || !previewable) return
+    if (!previewable) return
     let alive = true
     setLoading(true)
     api
@@ -277,10 +270,9 @@ export function ArtifactViewerDialog({
     return () => {
       alive = false
     }
-  }, [artifact?.path, previewable, taskId])
+  }, [artifact.path, previewable, taskId])
 
   const body = useMemo(() => {
-    if (!artifact) return null
     if (kind === 'binary' || overLimit || error || !content) {
       return (
         <div className="flex flex-col items-center gap-3 py-6 text-center">
@@ -396,6 +388,25 @@ export function ArtifactViewerDialog({
     )
   }, [artifact, kind, overLimit, error, content, taskId])
 
+  if (loading) return <LoadingBlock label="加载产物…" />
+  return body
+}
+
+/**
+ * 产物查看弹窗：按扩展名分发渲染；**二进制一律仅下载**，文本超 2MB 只给下载入口。
+ */
+export function ArtifactViewerDialog({
+  taskId,
+  artifact,
+  onClose,
+}: {
+  taskId: string
+  artifact: Artifact | null
+  onClose: () => void
+}) {
+  const kind = artifact ? artifactViewKindOf(artifact.path) : 'binary'
+  const overLimit = artifact != null && artifact.size_bytes > ARTIFACT_PREVIEW_LIMIT
+
   return (
     <Dialog
       open={artifact !== null}
@@ -422,7 +433,7 @@ export function ArtifactViewerDialog({
         ) : null
       }
     >
-      {loading ? <LoadingBlock label="加载产物…" /> : body}
+      {artifact ? <ArtifactPreviewBody taskId={taskId} artifact={artifact} /> : null}
     </Dialog>
   )
 }

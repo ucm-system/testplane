@@ -75,7 +75,7 @@ func toolList() []Tool {
 		},
 		{
 			Name:        "argus_clean_task",
-			Description: "泄漏重放（POST /api/v1/tasks/{task_id}/clean，§9.3）：用落档导出重拉一次 service-clean Job。attempt=0（默认）取最后一个 attempt；幂等；409 带 detail.reason ∈ {no_deploy, clean_already_verified, task_running, clean_replay_in_progress}。",
+			Description: "泄漏重放（POST /api/v1/tasks/{task_id}/clean，§9.3）：用落档导出重拉一次 service-clean Job。attempt=0（默认）取最后一个 attempt；幂等；409 带 detail.reason ∈ {no_deploy, nothing_to_clean, clean_already_verified, task_running, clean_replay_in_progress}（nothing_to_clean = provider=existing 的登记型 Task，无可拆除对象）。",
 			InputSchema: schemaObject(map[string]any{
 				"task_id": schemaString("Task ID"),
 				"attempt": schemaInteger("要重放 clean 的 attempt 序号；0 = 最后一个 attempt", 0, 0, 1000),

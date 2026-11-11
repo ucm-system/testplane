@@ -1,0 +1,46 @@
+name: existing-deploy
+version: 1.0.0
+display_name: 已有服务登记（内置）
+description: |
+  内置 deploy Runner（existing 变体）：被测服务已存在，无需部署。读取 service 三元组
+  （url / model_name / model_path），原样写入 exports 四件套后立即退出（0 秒完成）。
+  无外部调用、无集群资源、无可拆除对象——对应 clean 阶段不注入。
+  让"外接已有服务"与"Genet 部署"共用同一条管道形状（deploy → precheck → tests）。
+
+role: deploy                    # 仅内置：用户目录声明 role: deploy 一律拒绝注册（§5.1）
+on_failure: abort_task
+
+entry: ["/runner/run.sh"]
+input_format: jsonl             # service 三元组以 JSON 行传入
+
+image: registry.dev.huawei.com/argus/existing-deploy:1.0.0
+
+resources:
+  cpu: "100m"
+  memory: "64Mi"
+  gpu: { resource: nvidia.com/gpu, count: 0 }
+
+concurrency:
+  endpoint_exclusive: false
+
+exports: [AG_SERVED_URL, AG_SERVED_MODEL_NAME, AG_MODEL_PATH, AG_DEPLOY_REF]
+consumes: []
+
+parameters:
+  - name: url
+    type: string
+    required: true
+    description: "被测服务 OpenAI 兼容 base URL（scheme://host:port/v1）"
+  - name: model_name
+    type: string
+    required: true
+    description: "服务端模型名（OpenAI 兼容接口 model 字段取值）"
+  - name: model_path
+    type: string
+    required: false
+    description: "容器内模型权重路径；不存在时省略导出"
+
+placeholder: |
+  {"url":"http://10.0.0.10:8000/v1","model_name":"Qwen3-32B","model_path":"/models/Qwen3-32B"}
+
+env: {}

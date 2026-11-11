@@ -88,6 +88,7 @@ export function normalizeRunner(raw: unknown): Runner {
     input_format: rec['input_format'] === 'yaml' || rec['input_format'] === 'text' ? rec['input_format'] : 'jsonl',
     image: String(rec['image'] ?? ''),
     exclusive: concurrency['endpoint_exclusive'] === true || rec['exclusive'] === true,
+    clean_runner: typeof rec['clean_runner'] === 'string' && rec['clean_runner'] ? rec['clean_runner'] : undefined,
     placeholder: typeof rec['placeholder'] === 'string' ? rec['placeholder'].trim() : undefined,
     parameters,
     env,

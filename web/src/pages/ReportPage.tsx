@@ -16,7 +16,10 @@ import { formatBytes, saveBlob } from '@/lib/download'
 import { formatDuration } from '@/lib/utils'
 
 /**
- * Task 报告页（`GET /tasks/{id}/report` + `/report.md`，默认最后一个 attempt，§7.2）。
+ * Task 报告内容区（`GET /tasks/{id}/report` + `/report.md`，默认最后一个 attempt，§7.2）。
+ *
+ * 两个消费方：`/tasks/:taskId/report` 整页路由（ReportPage，带返回键），以及
+ * Task 详情页的「报告」Tab（默认页签，v2：报告即主体）。内容与动作完全一致。
  *
  * 契约要点（§8.4）：report.json **只做组织与索引、不做指标聚合**（不求和、不求平均），
  * 所以指标表是 UI 侧按 `runners[].result_ref` 逐个拉
@@ -136,8 +139,7 @@ function MetricsTable({ result }: { result: Result }) {
   )
 }
 
-export function ReportPage() {
-  const { taskId = '' } = useParams<{ taskId: string }>()
+export function TaskReportView({ taskId }: { taskId: string }) {
   const report = useAsync(() => api.getTaskReport(taskId), [taskId])
   const markdown = useAsync(() => api.getTaskReportMd(taskId), [taskId])
   const [downloading, setDownloading] = useState<string | null>(null)
@@ -290,12 +292,6 @@ export function ReportPage() {
   return (
     <>
       <div className="flex flex-wrap items-center gap-2">
-        <Link to={`/tasks/${taskId}`}>
-          <Button size="sm" icon={<ArrowLeft className="size-3" aria-hidden />}>
-            返回 Task 详情
-          </Button>
-        </Link>
-
         {!reportMissing ? (
           <>
             {/* 打包下载：走 api.downloadBundle（带鉴权 fetch → Blob → a[download]），不是裸 href */}
@@ -582,6 +578,26 @@ export function ReportPage() {
           </Card>
         </>
       ) : null}
+    </>
+  )
+}
+
+/**
+ * 报告整页路由（`/tasks/:taskId/report`）：面包屑返回键 + 报告内容区。
+ * 内容区与 Task 详情页「报告」Tab 共用同一个 `TaskReportView`（渲染只有一份实现）。
+ */
+export function ReportPage() {
+  const { taskId = '' } = useParams<{ taskId: string }>()
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        <Link to={`/tasks/${taskId}`}>
+          <Button size="sm" icon={<ArrowLeft className="size-3" aria-hidden />}>
+            返回 Task 详情
+          </Button>
+        </Link>
+      </div>
+      <TaskReportView taskId={taskId} />
     </>
   )
 }

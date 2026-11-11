@@ -238,7 +238,7 @@ func TestProject(t *testing.T) {
 }
 
 // TestProjectDoesNotTouchFrozenKeys 是防御性断言：投影结果只含 deploy-state
-// 承载的键——冻结键（release_name/provider/spec/…）由 store 侧 jsonb `||` 保护，
+// 承载的键——冻结键（release_name/runner/version/input/…）由 store 侧 jsonb `||` 保护，
 // 这里保证 Project 不输出它们（否则会误导调用方做整段覆盖）。
 func TestProjectDoesNotTouchFrozenKeys(t *testing.T) {
 	s, err := Parse(fixtures.Ready())
@@ -246,7 +246,7 @@ func TestProjectDoesNotTouchFrozenKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := s.Project("attempts/1/deploy-state.json")
-	if doc.ReleaseName != "" || doc.Provider != "" || doc.Spec != "" || doc.SpecDigest != "" {
+	if doc.ReleaseName != "" || doc.Runner != "" || doc.Version != "" || doc.Input != "" || doc.SpecDigest != "" {
 		t.Errorf("projection must not carry frozen keys: %+v", doc)
 	}
 }

@@ -26,6 +26,8 @@ async function asOperator(page: import('@playwright/test').Page, runId: string):
 
 test('① Deploy 日志面板：Pod 页签旁有「下载 .log」，点击真的下载 <pod>.log', async ({ page }) => {
   await asOperator(page, LIVE_RUN)
+  // v2：详情页默认「报告」页签，Deploy 日志面板在「执行细节」里
+  await page.getByRole('tab', { name: '执行细节' }).click()
 
   const button = page.getByTestId('download-deploy-log')
   await expect(button).toBeVisible({ timeout: 20_000 })
@@ -45,6 +47,8 @@ test('① Deploy 日志面板：Pod 页签旁有「下载 .log」，点击真的
 
 test('② 日志标记行：渲染为 log-marker 分隔样式；restarted=warn、gap=danger，内容不改', async ({ page }) => {
   await asOperator(page, LIVE_RUN)
+  // v2：管道时间线在「执行细节」页签里
+  await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByText('runner 管道时间线')).toBeVisible({ timeout: 20_000 })
   await page.locator('[data-chain-node] button').nth(1).click()
 
@@ -96,11 +100,15 @@ test('③ Pod 拓扑：pods[] 非空渲染表格（Pod 名可点、重启标 war
 
   // 排队中 / 已回收：pods=[] 时给一行明确提示，而不是空表格
   await asOperator(page, QUEUED_RUN)
+  // v2：Pod 拓扑在「执行细节」页签里（默认停在「报告」）
+  await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByTestId('deploy-pods')).toContainText('暂无 Pod（排队中或已回收）', { timeout: 5_000 })
 })
 
 test('④ 产物分组：三个组都在，文件一个不少（数量 = /artifacts 返回条数）', async ({ page }) => {
   await asOperator(page, DONE_RUN)
+  // v2：产物清单在「结果」页签（默认停在「报告」）
+  await page.getByRole('tab', { name: '结果' }).click()
   await expect(page.getByTestId('task-result-artifacts')).toBeVisible({ timeout: 20_000 })
 
   // v2：与 UI 用同一份分组规则（web/src/lib/artifact-groups.ts）计算期望
@@ -143,6 +151,8 @@ test('④ 产物分组：三个组都在，文件一个不少（数量 = /artifa
 
 test('⑤ 落盘缺失：下载 404 显示「还没落盘」，不弹红色错误', async ({ page }) => {
   await asOperator(page, LIVE_RUN)
+  // v2：Deploy 日志面板在「执行细节」页签里
+  await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByTestId('download-deploy-log')).toBeVisible({ timeout: 20_000 })
 
   // 模拟后端 404（盘上还没有该 Pod 的日志文件）

@@ -21,6 +21,7 @@ import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
 import { DeployLogsPanel } from '@/components/app/DeployLogsPanel'
 import { NotFoundPage } from '@/pages/NotFoundPage'
+import { TaskReportView } from '@/pages/ReportPage'
 import { useIdentity } from '@/hooks/useIdentity'
 import { useLogTail } from '@/hooks/useLogTail'
 import { useTaskEvents } from '@/hooks/useTaskEvents'
@@ -164,7 +165,7 @@ function DeploySection({
             {deploy.genet_status ? <Tag mono title="Helm status 原值（两根轴之一，D-45）">{deploy.genet_status}</Tag> : null}
           </span>
         }
-        sub={`provider: ${deploy.provider}${deploy.release_name ? ` · release: ${deploy.release_name}` : ''}`}
+        sub={`deploy runner: ${deploy.runner ?? '—'}${deploy.release_name ? ` · release: ${deploy.release_name}` : ''}`}
         actions={!isTerminalTask(task.status) ? <Badge tone="primary">状态由后端推</Badge> : null}
       />
 
@@ -203,19 +204,19 @@ function DeploySection({
           <KV label="部署窗口">
             {snapshot.data?.deploy_timeout_seconds ? formatDuration(snapshot.data.deploy_timeout_seconds) : '—'}
           </KV>
-          {deploy.spec ? (
+          {deploy.input ? (
             <KV label="部署描述摘要">
               <span className="font-mono text-2xs">{deploy.spec_digest ?? '—'}</span>
             </KV>
           ) : null}
         </dl>
 
-        {deploy.spec ? (
+        {deploy.input ? (
           <details className="rounded-md border border-line-soft bg-surface-2 px-3 py-2" open>
             <summary className="flex h-6 cursor-pointer items-center text-2xs text-fg-2">
               Genet 部署描述原文（提交冻结，平台不解析语义）
             </summary>
-            <pre className="mt-2 overflow-x-auto font-mono text-2xs leading-[16px] text-fg-2">{deploy.spec}</pre>
+            <pre className="mt-2 overflow-x-auto font-mono text-2xs leading-[16px] text-fg-2">{deploy.input}</pre>
           </details>
         ) : null}
       </CardBody>
@@ -427,8 +428,9 @@ export function TaskDetailPage() {
   // 连接态唯一来源：事件区小字、页内横幅都从这一个值派生（B5）
   const connection = connectionStateOf(status)
   const toast = useToast()
-  // 终态默认看「结果」（用户：跑完了只想拿结果），运行中只有「执行细节」
-  const [view, setView] = useState<'result' | 'detail' | 'events'>('detail')
+  // v2：报告为主体 —— Tab 顺序 报告 → 执行细节 → 事件 → 结果（产物清单留在结果 Tab），
+  // 报告内容与 /tasks/:id/report 整页共用同一个 TaskReportView；运行中先看"报告尚未生成"的空态。
+  const [view, setView] = useState<'report' | 'detail' | 'events' | 'result'>('report')
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [actionError, setActionError] = useState<ApiErrorBody | null>(null)
@@ -456,7 +458,7 @@ export function TaskDetailPage() {
     const prev = lastStatusRef.current
     const firstLoad = prev === null
     const justFinished = prev !== null && !isTerminalTask(prev) && done
-    if (firstLoad || justFinished) setView(done ? 'result' : 'detail')
+    if (firstLoad || justFinished) setView('report')
     lastStatusRef.current = status
   }, [task.data])
 
@@ -651,14 +653,22 @@ export function TaskDetailPage() {
           ariaLabel="Task 详情视图"
           idBase="task-view"
           value={view}
-          onChange={(next: string) => setView(next as 'result' | 'detail' | 'events')}
+          onChange={(next: string) => setView(next as 'report' | 'detail' | 'events' | 'result')}
           items={[
-            ...(terminal ? [{ value: 'result', label: '结果' }] : []),
+            { value: 'report', label: '报告' },
             { value: 'detail', label: '执行细节' },
             { value: 'events', label: '事件' },
+            ...(terminal ? [{ value: 'result', label: '结果' }] : []),
           ]}
           className="rounded-xl border border-line bg-surface px-3 pt-1 shadow-xs"
         />
+      ) : null}
+
+      {/* 报告页签（默认）：与 /tasks/:id/report 整页共用同一个内容区；产物清单留在「结果」Tab */}
+      {detail && view === 'report' ? (
+        <section {...tabPanelProps('task-view', 'report')} data-testid="task-report-panel" className="flex flex-col gap-4">
+          <TaskReportView taskId={taskId} />
+        </section>
       ) : null}
 
       {/* 事件页签：右栏取消后搬进主内容的第三个页签（折叠 ≠ 隐藏） */}

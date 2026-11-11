@@ -140,11 +140,13 @@ func (s *Scheduler) backfillDeployEndpoint(ctx context.Context, k domain.RunnerK
 	if url == "" {
 		return
 	}
-	source := "genet"
+	// 端点来源 = deploy 角色执行记录的 runner 名（冻结在 tasks.deploy 的 runner 引用；
+	// deploy/clean 解耦后平台不按 provider 命名——历史行没有 runner 键时退 "deploy"）。
+	source := "deploy"
 	if t, err := s.st.Tasks.Get(ctx, nil, k.TaskID); err == nil && t != nil && len(t.Deploy) > 0 {
 		var dd domain.DeployDoc
-		if json.Unmarshal(t.Deploy, &dd) == nil && dd.Provider != "" {
-			source = dd.Provider
+		if json.Unmarshal(t.Deploy, &dd) == nil && dd.Runner != "" {
+			source = dd.Runner
 		}
 	}
 	ep := domain.Endpoint{

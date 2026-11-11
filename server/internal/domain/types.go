@@ -233,11 +233,16 @@ type Endpoint struct {
 
 // RunnerSpec 是 runner.yaml 解析后的不可变元数据。镜像内自带，平台只读不写（K-3）。
 type RunnerSpec struct {
-	Name        string            `json:"name" yaml:"name"`
-	Version     string            `json:"version" yaml:"version"`
-	DisplayName string            `json:"display_name,omitempty" yaml:"display_name"`
-	Description string            `json:"description,omitempty" yaml:"description"`
-	Role        string            `json:"role" yaml:"role"` // test | pre_check | deploy | clean
+	Name        string `json:"name" yaml:"name"`
+	Version     string `json:"version" yaml:"version"`
+	DisplayName string `json:"display_name,omitempty" yaml:"display_name"`
+	Description string `json:"description,omitempty" yaml:"description"`
+	Role        string `json:"role" yaml:"role"` // test | pre_check | deploy | clean
+	// CleanRunner 是 deploy 角色对配对 clean runner 的声明（可选；仅 role=deploy 有效）。
+	// 非空时必须是注册表中 role=clean 的 runner 名——提交时按它注入 clean 行
+	//（无声明 = 无 clean 阶段，如 existing-deploy）；clean 配对由 runner 自己声明，
+	// 平台不感知具体 runner 名（deploy/clean 解耦裁决）。
+	CleanRunner string            `json:"clean_runner,omitempty" yaml:"clean_runner"`
 	OnFailure   string            `json:"on_failure" yaml:"on_failure"`
 	Entry       []string          `json:"entry" yaml:"entry"`               // exec form 数组（§5.2）
 	InputFormat string            `json:"input_format" yaml:"input_format"` // jsonl | yaml | text
@@ -308,9 +313,12 @@ type Param struct {
 }
 
 // EnvVar 是运行期环境变量的声明（§12.4：值由 Task 级 env/secrets 注入，平台只声明不保存明文）。
+// Default 是 runner 维护者声明的**非敏感**缺省值（可选）：Task env / 上游 exports 都没提供
+// 该键时平台注入它（渲染顺序先到者胜）；敏感值禁止用 Default（走 secrets）。
 type EnvVar struct {
 	Required    bool   `json:"required,omitempty" yaml:"required"`
 	Secret      bool   `json:"secret,omitempty" yaml:"secret"`
+	Default     string `json:"default,omitempty" yaml:"default"`
 	Description string `json:"description,omitempty" yaml:"description"`
 }
 

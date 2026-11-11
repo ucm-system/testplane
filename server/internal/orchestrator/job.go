@@ -82,6 +82,9 @@ type runnerDef struct {
 	InputFormat string                 `json:"input_format"`
 	Resources   domain.ResourceRequest `json:"resources"`
 	Mounts      []domain.MountSpec     `json:"mounts"`
+	// EnvDefaults 是 runner.yaml env 声明的非敏感缺省值（key→default；§12.4）。
+	// 渲染时在 Task env / 上游 exports 之后注入（先到者胜，不覆盖显式来源）。
+	EnvDefaults map[string]string `json:"env_defaults"`
 }
 
 // runnerDefOf 从 Task 的 resolved 快照按 seq 取冻结渲染输入；缺失时回退空值
@@ -98,6 +101,7 @@ func runnerDefOf(t *store.Task, seq int) runnerDef {
 				InputFormat: r.InputFormat,
 				Resources:   r.Resources,
 				Mounts:      r.Mounts,
+				EnvDefaults: r.EnvDefaults,
 			}
 		}
 	}
@@ -110,6 +114,7 @@ type runnerDefRow struct {
 	InputFormat string                 `json:"input_format,omitempty"`
 	Resources   domain.ResourceRequest `json:"resources,omitempty"`
 	Mounts      []domain.MountSpec     `json:"mounts,omitempty"`
+	EnvDefaults map[string]string      `json:"env_defaults,omitempty"`
 }
 
 // buildJobSpec 把执行记录渲染成 ports.JobSpec（附录 B spec 2.0；args 恒空数组，D-66）。
@@ -281,9 +286,16 @@ func (s *Scheduler) renderRunnerEnv(ctx context.Context, t *store.Task, rr *stor
 	}
 	put(EnvOutputDir, "/workspace/output")
 
-	// 6. Genet 接入点：仅 deploy / clean 角色注入（§9.1、§12.4）。平台自身不直连
-	//    Genet（D-70），这里只是把平台配置的接入点透传给内置 runner。
+	// 6. Genet 接入点（§9.1、§12.4）：deploy/clean 解耦后的取值链（先到者胜）——
+	//    Task env > 上游 exports > runner.yaml env default（本 runnerDef.EnvDefaults，
+	//    如 mock-deploy 的 fake-genet 接入点）> 平台配置（AG_GENET_BASE_URL，兜底）。
+	//    平台自身不直连 Genet（D-70），这里只是把接入点透传给 deploy/clean 角色；
+	//    平台不感知 "genet"/"mock" 名字——接哪个端点完全由 env 声明与 Task env 决定。
 	if rr.Role == domain.RoleDeploy || rr.Role == domain.RoleClean {
+		def := runnerDefOf(t, k.Seq)
+		for key, val := range def.EnvDefaults {
+			put(key, val)
+		}
 		if s.cfg.GenetBaseURL != "" {
 			put("AG_GENET_BASE_URL", s.cfg.GenetBaseURL)
 		}
