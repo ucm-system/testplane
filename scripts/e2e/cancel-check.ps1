@@ -7,10 +7,10 @@
 param(
     [string]$BaseUrl = 'http://127.0.0.1:8093',
     [string]$User = 'dev',
-    [string]$Namespace = 'testplane',
-    [string]$PgContainer = 'testplane-pg',
-    [string]$PgUser = 'testplane',
-    [string]$PgDb = 'testplane',
+    [string]$Namespace = 'argus',
+    [string]$PgContainer = 'argus-pg',
+    [string]$PgUser = 'argus',
+    [string]$PgDb = 'argus',
     [int]$AssertCancelSeconds = 60,
     [int]$LoopLimitSeconds = 180,
     [string]$OutDir = '',
@@ -59,7 +59,7 @@ function Get-K8sObjectNames {
 function New-Manifest {
     param([string]$Stamp)
     return @"
-{"run":{"name":"qa-cancel-$Stamp","service":{"url":"http://mock-llm.default.svc:18080/v1","model_name":"mock-llm"},"precheck":"auto","tests":[{"name":"probe","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"args":"--wait_timeout_seconds=20"}]}}
+{"task":{"name":"qa-cancel-$Stamp","service":{"url":"http://mock-llm.default.svc:18080/v1","model_name":"mock-llm"},"precheck":"auto","runners":[{"name":"probe","runner":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"input":"{\"wait_timeout_seconds\":20}","on_failure":"continue"}]}}
 "@
 }
 
@@ -67,7 +67,7 @@ if ($DryRun) {
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     Write-Host "cancel-check dry-run（不连后端）" -ForegroundColor Cyan
     Write-Host "  base_url=$BaseUrl namespace=$Namespace"
-    Write-Host "  断言：Run canceled ≤ ${AssertCancelSeconds}s；循环上界 ${LoopLimitSeconds}s；Task 全 skipped；租约/Pod 0"
+    Write-Host "  断言：Task canceled ≤ ${AssertCancelSeconds}s；循环上界 ${LoopLimitSeconds}s；其余 runner 全 skipped；租约/Pod 0"
     Write-Host "  manifest:"
     Write-Host (New-Manifest -Stamp $stamp)
     Write-Host "dry-run OK" -ForegroundColor Green
@@ -85,21 +85,21 @@ $null = Invoke-WebRequest -UseBasicParsing "$BaseUrl/healthz" -TimeoutSec 5
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $manifest = New-Manifest -Stamp $stamp
-$submitted = Invoke-Api -Method POST -Path '/api/v1/runs' -Body $manifest
-$runId = [string]$submitted.run.id
+$submitted = Invoke-Api -Method POST -Path '/api/v1/tasks' -Body $manifest
+$runId = [string]$submitted.task.id
 Write-Host "已提交 Run $runId，立即取消…"
-$null = Invoke-Api -Method POST -Path "/api/v1/runs/$runId/cancel"
+$null = Invoke-Api -Method POST -Path "/api/v1/tasks/$runId/cancel"
 
 # 轮询上界与断言阈值分离：LoopLimitSeconds ≥ AssertCancelSeconds + 余量（票 #16）。
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $trace = @()
 $run = $null
 while ($sw.Elapsed.TotalSeconds -lt $LoopLimitSeconds) {
-    $run = Invoke-Api -Method GET -Path "/api/v1/runs/$runId"
-    $taskBrief = ($run.tasks | ForEach-Object { "$($_.name)=$($_.status)" }) -join ', '
+    $run = Invoke-Api -Method GET -Path "/api/v1/tasks/$runId"
+    $taskBrief = ($run.runners | ForEach-Object { "$($_.name)=$($_.status)" }) -join ', '
     $line = "t+{0:N1}s status={1} tasks: {2}" -f $sw.Elapsed.TotalSeconds, $run.status, $taskBrief
     if ($trace.Count -eq 0 -or $trace[-1] -ne $line) { $trace += $line; Write-Host "  $line" }
-    if ($run.status -in @('canceled', 'failed', 'service_unavailable', 'succeeded', 'completed_with_errors')) { break }
+    if ($run.status -in @('canceled', 'failed', 'service_unavailable', 'succeeded')) { break }
     Start-Sleep -Seconds 1
 }
 $sw.Stop()
@@ -110,7 +110,7 @@ Write-Host "断言：" -ForegroundColor Cyan
 Add-Check 'run.terminal_canceled' ($run.status -eq 'canceled') ("status=" + $run.status + "，实际耗时 " + $elapsed + "s（循环上界 " + $LoopLimitSeconds + "s）")
 Add-Check 'run.cancel_within_assert' ($elapsed -le $AssertCancelSeconds) ($elapsed.ToString() + "s <= " + $AssertCancelSeconds + "s（独立阈值，不复用循环上界）")
 
-$taskList = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/tasks?limit=200").items
+$taskList = (Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/runners?limit=200").items
 Add-Check 'run.tasks_present' ($taskList.Count -gt 0) ("tasks=" + $taskList.Count)
 
 $badTask = @()
@@ -121,17 +121,17 @@ foreach ($t in $taskList) {
     if ($t.status -eq 'skipped' -and $t.status_reason -notin @('canceled', 'upstream_abort')) {
         $reasonBad += ("$($t.name)=$($t.status_reason)")
     }
-    if ($t.attempts -gt 0) {
-        $atts = (Invoke-Api -Method GET -Path "/api/v1/tasks/$($t.id)/attempts").items
-        foreach ($a in $atts) { if ($a.status -ne 'canceled') { $badAttempt += ("$($t.name)/a$($a.idx)=$($a.status)") } }
-    }
 }
+# v2：attempt 是 Task 级（D-68），一次查询而不是逐 runner。
+$atts = (Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/attempts").items
+foreach ($a in $atts) { if ($a.status -ne 'canceled') { $badAttempt += ("a$($a.attempt_no)=$($a.status)") } }
+
 Add-Check 'run.tasks_all_skipped' ($badTask.Count -eq 0) $(if ($badTask.Count -eq 0) { 'all skipped' } else { $badTask -join ', ' })
 Add-Check 'run.skip_reasons' ($reasonBad.Count -eq 0) $(if ($reasonBad.Count -eq 0) { 'canceled|upstream_abort' } else { $reasonBad -join ', ' })
 Add-Check 'run.attempts_canceled' ($badAttempt.Count -eq 0) $(if ($badAttempt.Count -eq 0) { '无残留 running/failed Attempt' } else { $badAttempt -join ', ' })
 
 # 租约：查询失败与“查询成功但非空”分开断言。
-$ids = @($taskList | ForEach-Object { "'" + $_.id + "'" }) -join ','
+$ids = "'$runId'"   # v2：租约按 Task id（attempt/租约都是 Task 级）
 try {
     $leaseCount = Invoke-PsqlCount "select count(*) from endpoint_leases where task_id in ($ids);"
     Add-Check 'endpoint_leases.query' $true ("查询成功，task 数=" + $taskList.Count)
@@ -143,25 +143,21 @@ try {
 # Pod：逐个 Task 的 Job 查；查询失败 fail-fast，不做“空结果”推断。
 $podQueryFailed = $false
 $podLeft = @()
-foreach ($t in $taskList) {
-    $job = "tp-t-" + $t.id.ToLower() + "-a1"
-    try {
-        $pods = Get-K8sObjectNames -Kind 'pods' -Selector "job-name=$job"
-        if ($pods.Count -gt 0) { $podLeft += ($pods -join ',') }
-    } catch {
-        $podQueryFailed = $true
-        Add-Check 'k8s.pods_query' $false ($_.Exception.Message)
-        break
-    }
+# v2：Job 打 argus.io/task=<task_id> 标签（附录 B），按标签查一次，不拼 Job 名。
+try {
+    $podLeft = Get-K8sObjectNames -Kind 'pods' -Selector "argus.io/task=$runId"
+} catch {
+    $podQueryFailed = $true
+    Add-Check 'k8s.pods_query' $false ($_.Exception.Message)
 }
 if (-not $podQueryFailed) {
-    Add-Check 'k8s.pods_query' $true ("查询成功，Task 数=" + $taskList.Count)
+    Add-Check 'k8s.pods_query' $true '查询成功'
     Add-Check 'k8s.pods_empty' ($podLeft.Count -eq 0) $(if ($podLeft.Count -eq 0) { '无 Pod 残留' } else { $podLeft -join ', ' })
 }
 
 $statusRows = @()
 try {
-    $out = & docker exec $PgContainer psql -U $PgUser -d $PgDb -t -A -F '|' -c "select status,count(*) from runs group by status order by 2 desc,1;" 2>&1
+    $out = & docker exec $PgContainer psql -U $PgUser -d $PgDb -t -A -F '|' -c "select status,count(*) from tasks group by status order by 2 desc,1;" 2>&1
     if ($LASTEXITCODE -ne 0) { throw "docker exec psql 失败（exit $LASTEXITCODE）：$($out -join ' ')" }
     $statusRows = @($out | Where-Object { $_ -ne '' })
 } catch {

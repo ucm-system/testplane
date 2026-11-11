@@ -1,9 +1,14 @@
 package api
 
-// 管理面集成测试（真 PG；没设 TESTPLANE_TEST_DATABASE_URL 就 skip）。
+// 管理面集成测试（真 PG + dev 鉴权；没设 AG_TEST_DATABASE_URL 就 skip）。
 //
-// 覆盖：Profile / Cluster / Audit / 人工清理产物的 happy path 与错误路径，
-// 以及 RBAC（非 admin → 403）。Secret 相关用例在 secrets_it_test.go。
+// 从 v1 harness 的 admin_it_test.go 平移（控制面波次删除），断言改到 v2 路径/错误码/表名：
+//   - Profile / Cluster CRUD 的 happy path 与错误路径（v2：POST /admin/profiles 必填
+//     namespace；mounts 项必填 name+pvc）；
+//   - 审计查询（GET /admin/audit 过滤 + 游标分页）；
+//   - 人工清理产物（v2 路径 DELETE /admin/tasks/{task_id}/artifacts，造数用 store.SubmitTask）；
+//   - RBAC（非 admin → 403；登录流复用 oidc_it_test.go 的 fakeIdP/browserLogin）。
+// Secret 相关用例在 secrets_it_test.go（已随 v2 harness 保留）。
 
 import (
 	"context"
@@ -16,131 +21,45 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/ucm-system/testplane/server/internal/config"
-	"github.com/ucm-system/testplane/server/internal/dbtest"
 	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
 
-// adminTestEnv 是管理面测试的最小环境：真 PG + dev 鉴权（Bearer <subject> = admin）。
-type adminTestEnv struct {
-	t   *testing.T
-	srv *Server
-	st  *store.Store
-	cfg *config.Config
-}
-
-var adminNameSeq atomic.Int64
-
-// uniqueAdminName 生成每次测试唯一的对象名（同一测试库跨用例复用，避免撞主键）。
-func uniqueAdminName(prefix string) string {
-	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano()%1e9, adminNameSeq.Add(1))
-}
-
-func newAdminTestEnv(t *testing.T) *adminTestEnv {
+// itSubmitTask 用 store 直插一个最小 Task（runners 1 条，挂指定 Profile），供
+// Profile 引用计数 / 产物清理用例造数。
+func itSubmitTask(t *testing.T, env *adminTestEnv, name, profile string) *store.Task {
 	t.Helper()
-	return newAdminTestEnvFor(t, "api")
-}
-
-// newAdminTestEnvFor 建在独立测试库上（purpose 派生库名）。
-// 需要做 DDL 破坏注入的用例用独立库（如 "api_audit"），避免影响同包其它用例。
-func newAdminTestEnvFor(t *testing.T, purpose string) *adminTestEnv {
-	t.Helper()
-	dsn, err := dbtest.URL(purpose)
+	ctx := context.Background()
+	task := &store.Task{
+		ID:          store.NewTaskID(time.Now()),
+		Name:        name,
+		Manifest:    []byte(fmt.Sprintf(`{"task":{"name":%q}}`, name)),
+		Resolved:    []byte(`{"tasks":[]}`),
+		SubmittedBy: "it",
+	}
+	rr := &store.RunnerRun{
+		Seq:            1,
+		Name:           "acc",
+		RunnerName:     "aisbench-acc",
+		RunnerVersion:  "1.0.0",
+		Role:           string(domain.RoleTest),
+		ImageRef:       "registry/argus/aisbench-acc:1.0.0",
+		Profile:        profile,
+		InputRef:       "attempts/1/input/runners/1",
+		OnFailure:      domain.OnFailureContinue,
+		TimeoutSeconds: 3600,
+	}
+	created, _, err := env.st.SubmitTask(ctx, store.SubmitParams{
+		Task: task, Runners: []*store.RunnerRun{rr},
+		Actor: "user:it", Role: "admin", At: time.Now().UTC(),
+	})
 	if err != nil {
-		t.Fatalf("准备测试库: %v", err)
+		t.Fatalf("造 Task: %v", err)
 	}
-	if dsn == "" {
-		t.Skip("未设置 TESTPLANE_TEST_DATABASE_URL")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	st, err := store.New(ctx, dsn, 4)
-	if err != nil {
-		t.Fatalf("连接测试库: %v", err)
-	}
-	if err := st.SeedDefaults(ctx); err != nil {
-		st.Close()
-		t.Fatalf("seed: %v", err)
-	}
-	cfg := &config.Config{
-		APIPrefix: "/api/v1", StorageRoot: t.TempDir(),
-		RunMaxTasks: 200, TaskTimeoutDefault: time.Hour, TaskTimeoutMax: 24 * time.Hour,
-		MaxGlobalConcurrency: 4, DeployTimeout: 72 * time.Hour,
-	}
-	srv := New(Deps{Config: cfg, Store: st, Machines: store.NewMachines(st, nil),
-		Resolver: &fakeResolver{specs: map[string]domain.TesterSpec{}}})
-	t.Cleanup(func() { st.Close() })
-	return &adminTestEnv{t: t, srv: srv, st: st, cfg: cfg}
-}
-
-// do 发一个请求：Bearer <subject> 在 dev 鉴权下即身份（角色 admin）。
-func (e *adminTestEnv) do(method, path, body, subject string) *httptest.ResponseRecorder {
-	e.t.Helper()
-	var rdr io.Reader
-	if body != "" {
-		rdr = strings.NewReader(body)
-	}
-	req := httptest.NewRequest(method, path, rdr)
-	if body != "" {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if subject == "" {
-		subject = "dev"
-	}
-	req.Header.Set("Authorization", "Bearer "+subject)
-	rec := httptest.NewRecorder()
-	e.srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-func decodeJSONBody(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
-	t.Helper()
-	var out map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("响应不是 JSON 对象（status=%d）: %v\nbody=%s", rec.Code, err, rec.Body.String())
-	}
-	return out
-}
-
-func requireStatus(t *testing.T, rec *httptest.ResponseRecorder, want int) map[string]any {
-	t.Helper()
-	if rec.Code != want {
-		t.Fatalf("status = %d，期望 %d\nbody=%s", rec.Code, want, rec.Body.String())
-	}
-	return decodeJSONBody(t, rec)
-}
-
-func requireError(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int, wantCode string) map[string]any {
-	t.Helper()
-	body := requireStatus(t, rec, wantStatus)
-	if got, _ := body["code"].(string); got != wantCode {
-		t.Fatalf("code = %q，期望 %q\nbody=%s", got, wantCode, rec.Body.String())
-	}
-	return body
-}
-
-func detailOf(t *testing.T, body map[string]any) map[string]any {
-	t.Helper()
-	d, ok := body["detail"].(map[string]any)
-	if !ok {
-		t.Fatalf("响应缺少 detail 对象: %v", body)
-	}
-	return d
-}
-
-// auditRows 读审计行（直接走 store，避免依赖被其它用例污染的列表分页）。
-func (e *adminTestEnv) auditRows(filter store.AuditFilter) []store.AuditRecord {
-	e.t.Helper()
-	rows, _, err := e.st.Audits.List(context.Background(), nil, filter)
-	if err != nil {
-		e.t.Fatalf("读审计: %v", err)
-	}
-	return rows
+	return created
 }
 
 // ============================================================================
@@ -153,9 +72,9 @@ func TestAdminProfiles_CRUD(t *testing.T) {
 	actor := "user:" + subject
 	name := uniqueAdminName("it-prof")
 
-	// 1) 创建一个挂在种子集群上的 Profile。
+	// 1) 创建一个挂在种子集群上的 Profile（v2：namespace 必填）。
 	rec := env.do(http.MethodPost, "/api/v1/admin/profiles",
-		fmt.Sprintf(`{"name":%q,"cluster":"cluster-01","namespace":"testplane",
+		fmt.Sprintf(`{"name":%q,"cluster":"cluster-01","namespace":"argus",
 			"mounts":[{"name":"data","pvc":"pvc-data","sub_path":"/data","kind":"dataset"}]}`, name), subject)
 	created := requireStatus(t, rec, http.StatusCreated)
 	if created["name"] != name || created["cluster"] != "cluster-01" {
@@ -177,7 +96,7 @@ func TestAdminProfiles_CRUD(t *testing.T) {
 
 	// 2) 名字冲突 → 409 CONFLICT。
 	rec = env.do(http.MethodPost, "/api/v1/admin/profiles",
-		fmt.Sprintf(`{"name":%q,"cluster":"cluster-01","namespace":"testplane"}`, name), subject)
+		fmt.Sprintf(`{"name":%q,"cluster":"cluster-01","namespace":"argus"}`, name), subject)
 	body := requireError(t, rec, http.StatusConflict, domain.CodeConflict)
 	if detailOf(t, body)["name"] != name {
 		t.Fatalf("409 detail 应带 name: %v", body["detail"])
@@ -185,7 +104,7 @@ func TestAdminProfiles_CRUD(t *testing.T) {
 
 	// 3) cluster 未登记 → 400 VALIDATION_ERROR + detail.field=cluster。
 	rec = env.do(http.MethodPost, "/api/v1/admin/profiles",
-		fmt.Sprintf(`{"name":%q,"cluster":"no-such-cluster","namespace":"testplane"}`, uniqueAdminName("it-bad")), subject)
+		fmt.Sprintf(`{"name":%q,"cluster":"no-such-cluster","namespace":"argus"}`, uniqueAdminName("it-bad")), subject)
 	body = requireError(t, rec, http.StatusBadRequest, domain.CodeValidationError)
 	if detailOf(t, body)["field"] != "cluster" {
 		t.Fatalf("400 detail.field 应为 cluster: %v", body["detail"])
@@ -193,7 +112,7 @@ func TestAdminProfiles_CRUD(t *testing.T) {
 
 	// 4) mounts 缺 pvc → 400。
 	rec = env.do(http.MethodPost, "/api/v1/admin/profiles",
-		fmt.Sprintf(`{"name":%q,"cluster":"cluster-01","namespace":"testplane","mounts":[{"name":"x"}]}`,
+		fmt.Sprintf(`{"name":%q,"cluster":"cluster-01","namespace":"argus","mounts":[{"name":"x"}]}`,
 			uniqueAdminName("it-bad-mount")), subject)
 	body = requireError(t, rec, http.StatusBadRequest, domain.CodeValidationError)
 	if !strings.Contains(fmt.Sprint(detailOf(t, body)["field"]), "mounts[0]") {
@@ -202,17 +121,16 @@ func TestAdminProfiles_CRUD(t *testing.T) {
 
 	// 5) 只读端点能看到它（GET /profiles 是既有契约）。
 	rec = env.do(http.MethodGet, "/api/v1/profiles", "", subject)
-	list := requireStatus(t, rec, http.StatusOK)
+	requireStatus(t, rec, http.StatusOK)
 	if !strings.Contains(rec.Body.String(), name) {
 		t.Fatalf("GET /profiles 里找不到新建的 profile %s", name)
 	}
-	_ = list
 
 	// 6) PUT：namespace/scheduler 更新，created_by 不变。
 	rec = env.do(http.MethodPut, "/api/v1/admin/profiles",
-		fmt.Sprintf(`{"name":%q,"namespace":"testplane-2","scheduler":"volcano","queue":"default"}`, name), subject)
+		fmt.Sprintf(`{"name":%q,"namespace":"argus-2","scheduler":"volcano","queue":"default"}`, name), subject)
 	updated := requireStatus(t, rec, http.StatusOK)
-	if updated["namespace"] != "testplane-2" || updated["scheduler"] != "volcano" {
+	if updated["namespace"] != "argus-2" || updated["scheduler"] != "volcano" {
 		t.Fatalf("更新未生效: %v", updated)
 	}
 	if updated["queue"] != "default" {
@@ -241,7 +159,7 @@ func TestAdminProfiles_CRUD(t *testing.T) {
 	rec = env.do(http.MethodDelete, "/api/v1/admin/profiles", "", subject)
 	requireError(t, rec, http.StatusBadRequest, domain.CodeValidationError)
 
-	// 9) 审计：register / update / delete 三条都在。
+	// 9) 审计：register / update / delete_profile 三条都在（v2 action 名不变）。
 	rows := env.auditRows(store.AuditFilter{Actor: actor, ObjectType: "execution_profile", Limit: 50})
 	actions := map[string]bool{}
 	for _, row := range rows {
@@ -256,42 +174,29 @@ func TestAdminProfiles_CRUD(t *testing.T) {
 	}
 }
 
-// TestAdminProfiles_DeleteReferencedAllowed 验证"被引用也允许删，但 detail 报引用数"。
+// TestAdminProfiles_DeleteReferencedAllowed 验证"被引用也允许删，但 detail 报引用数"
+// （v2：引用列在 task_runners.profile，按 Task 去重计数）。
 func TestAdminProfiles_DeleteReferencedAllowed(t *testing.T) {
 	env := newAdminTestEnv(t)
 	subject := uniqueAdminName("it-admin-ref")
-	ctx := context.Background()
 
 	name := uniqueAdminName("it-prof-ref")
 	rec := env.do(http.MethodPost, "/api/v1/admin/profiles",
-		fmt.Sprintf(`{"name":%q,"cluster":"cluster-01","namespace":"testplane"}`, name), subject)
+		fmt.Sprintf(`{"name":%q,"cluster":"cluster-01","namespace":"argus"}`, name), subject)
 	requireStatus(t, rec, http.StatusCreated)
 
-	// 造一个引用该 Profile 的 Run + Task（历史 Task 冻结 profile 名）。
-	runID := store.NewRunID(time.Now())
-	_, _, err := env.st.CreateRun(ctx, store.SubmitParams{
-		Run: &store.Run{
-			ID: runID, Name: "ref-run", Kind: "run",
-			Manifest: []byte(`{"run":{"name":"ref-run"}}`), Resolved: []byte(`{"tasks":[]}`),
-			CleanupPolicy: "always", SubmittedBy: "it",
-		},
-		Tasks: []*store.Task{{
-			ID: store.NewTaskID(), Seq: 0, Name: "t1",
-			TesterName: "probe", TesterVersion: "1.0.0", ImageRef: "probe:1",
-			Profile: name, ArgsRaw: "", OnFailure: domain.OnFailureContinue,
-			TimeoutSeconds: 60, Status: string(domain.TaskPending),
-		}},
-		Actor: "user:it", Role: "admin", At: time.Now().UTC(),
-	})
-	if err != nil {
-		t.Fatalf("造引用 Run: %v", err)
-	}
+	// 造一个引用该 Profile 的 Task（runner 执行记录冻结 profile 名）。
+	task := itSubmitTask(t, env, "ref-task", name)
 
 	rec = env.do(http.MethodDelete, "/api/v1/admin/profiles?name="+name, "", subject)
 	deleted := requireStatus(t, rec, http.StatusOK)
 	if deleted["referencing_tasks"] != float64(1) {
 		t.Fatalf("referencing_tasks 应为 1，得到 %v", deleted["referencing_tasks"])
 	}
+	if got, _ := deleted["name"].(string); got != name {
+		t.Fatalf("delete 响应 name 异常: %v", deleted)
+	}
+	_ = task
 }
 
 // ============================================================================
@@ -391,7 +296,7 @@ func TestAdminClusters_CRUD(t *testing.T) {
 	// 9) 仍有 Profile 引用 → 409 + detail.profiles[]。
 	prof := uniqueAdminName("it-prof-on-cluster")
 	rec = env.do(http.MethodPost, "/api/v1/admin/profiles",
-		fmt.Sprintf(`{"name":%q,"cluster":%q,"namespace":"testplane"}`, prof, name), subject)
+		fmt.Sprintf(`{"name":%q,"cluster":%q,"namespace":"argus"}`, prof, name), subject)
 	requireStatus(t, rec, http.StatusCreated)
 
 	rec = env.do(http.MethodDelete, "/api/v1/admin/clusters?name="+name, "", subject)
@@ -427,7 +332,7 @@ func TestAdminAudit_FiltersAndPaging(t *testing.T) {
 	// 造成两条可区分的写：两条 Profile 注册。
 	for i := 0; i < 2; i++ {
 		rec := env.do(http.MethodPost, "/api/v1/admin/profiles",
-			fmt.Sprintf(`{"name":%q,"cluster":"cluster-01","namespace":"testplane"}`,
+			fmt.Sprintf(`{"name":%q,"cluster":"cluster-01","namespace":"argus"}`,
 				uniqueAdminName(fmt.Sprintf("it-audit-prof-%d", i))), subject)
 		requireStatus(t, rec, http.StatusCreated)
 	}
@@ -490,7 +395,7 @@ func TestAdminAudit_FiltersAndPaging(t *testing.T) {
 }
 
 // ============================================================================
-// 人工清理产物
+// 人工清理产物（v2：DELETE /admin/tasks/{task_id}/artifacts）
 // ============================================================================
 
 func TestAdminCleanupArtifacts(t *testing.T) {
@@ -499,53 +404,43 @@ func TestAdminCleanupArtifacts(t *testing.T) {
 	actor := "user:" + subject
 	ctx := context.Background()
 
-	runID := store.NewRunID(time.Now())
-	_, _, err := env.st.CreateRun(ctx, store.SubmitParams{
-		Run: &store.Run{
-			ID: runID, Name: "cleanup-run", Kind: "run",
-			Manifest: []byte(`{"run":{"name":"cleanup-run"}}`), Resolved: []byte(`{"tasks":[]}`),
-			CleanupPolicy: "always", SubmittedBy: "it",
-		},
-		Actor: "user:it", Role: "admin", At: time.Now().UTC(),
-	})
-	if err != nil {
-		t.Fatalf("造 Run: %v", err)
-	}
+	task := itSubmitTask(t, env, "cleanup-task", "k8s-npu")
+	taskID := task.ID
 
-	// 1) 非终态 → 409 CONFLICT。
-	rec := env.do(http.MethodDelete, "/api/v1/admin/runs/"+runID+"/artifacts", "", subject)
+	// 1) 非终态 → 409 CONFLICT（不让人工清理正在写入的目录）。
+	rec := env.do(http.MethodDelete, "/api/v1/admin/tasks/"+taskID+"/artifacts", "", subject)
 	body := requireError(t, rec, http.StatusConflict, domain.CodeConflict)
-	if detailOf(t, body)["status"] != string(domain.RunSubmitted) {
+	if detailOf(t, body)["status"] != string(domain.TaskSubmitted) {
 		t.Fatalf("409 detail.status 应为 submitted: %v", body["detail"])
 	}
 
-	// 2) 不存在的 Run → 404。
-	rec = env.do(http.MethodDelete, "/api/v1/admin/runs/r-19700101-0000/artifacts", "", subject)
+	// 2) 不存在的 Task → 404。
+	rec = env.do(http.MethodDelete, "/api/v1/admin/tasks/t-19700101-0000/artifacts", "", subject)
 	requireError(t, rec, http.StatusNotFound, domain.CodeNotFound)
 
-	// 3) 终态 Run：造目录 + 索引行 → 清理。
+	// 3) 终态 Task：造目录 + 索引行 → 清理。
 	if _, err := env.st.Pool().Exec(ctx,
-		`UPDATE runs SET status = 'succeeded', finished_at = GREATEST(now(), submitted_at) WHERE id = $1`, runID); err != nil {
+		`UPDATE tasks SET status = 'failed', finished_at = GREATEST(now(), submitted_at) WHERE id = $1`, taskID); err != nil {
 		t.Fatalf("置终态: %v", err)
 	}
-	dir := filepath.Join(env.cfg.StorageRoot, runID)
-	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {
+	dir := filepath.Join(env.cfg.StorageRoot, taskID)
+	if err := os.MkdirAll(filepath.Join(dir, "attempts", "1"), 0o750); err != nil {
 		t.Fatalf("建产物目录: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "tasks", "a.json"), []byte(`{}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "attempts", "1", "result.json"), []byte(`{}`), 0o640); err != nil {
 		t.Fatalf("写产物文件: %v", err)
 	}
-	if err := env.st.Artifacts.UpsertBatch(ctx, nil, runID, []store.Artifact{
-		{RunID: runID, Path: runID + "/tasks/a.json", SizeBytes: 10, Kind: "result"},
-		{RunID: runID, Path: runID + "/report.json", SizeBytes: 32, Kind: "report"},
+	if err := env.st.Artifacts.UpsertBatch(ctx, nil, taskID, []store.Artifact{
+		{TaskID: taskID, Path: taskID + "/attempts/1/result.json", SizeBytes: 10, Kind: "result"},
+		{TaskID: taskID, Path: taskID + "/report.json", SizeBytes: 32, Kind: "report"},
 	}); err != nil {
 		t.Fatalf("写产物索引: %v", err)
 	}
 
-	rec = env.do(http.MethodDelete, "/api/v1/admin/runs/"+runID+"/artifacts", "", subject)
+	rec = env.do(http.MethodDelete, "/api/v1/admin/tasks/"+taskID+"/artifacts", "", subject)
 	cleaned := requireStatus(t, rec, http.StatusOK)
-	if cleaned["run_id"] != runID {
-		t.Fatalf("响应 run_id 异常: %v", cleaned)
+	if cleaned["task_id"] != taskID {
+		t.Fatalf("响应 task_id 异常: %v", cleaned)
 	}
 	if cleaned["deleted_entries"] != float64(2) || cleaned["freed_bytes"] != float64(42) {
 		t.Fatalf("删除计数异常: %v", cleaned)
@@ -556,16 +451,16 @@ func TestAdminCleanupArtifacts(t *testing.T) {
 	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("产物目录仍存在: %v", err)
 	}
-	if rows, err := env.st.Artifacts.ListByRun(ctx, nil, runID); err != nil || len(rows) != 0 {
+	if rows, err := env.st.Artifacts.ListByTask(ctx, nil, taskID); err != nil || len(rows) != 0 {
 		t.Fatalf("artifacts 索引未清空: rows=%d err=%v", len(rows), err)
 	}
-	if _, err := env.st.Runs.Get(ctx, nil, runID); err != nil {
-		t.Fatalf("清理产物不应删除 Run 本身: %v", err)
+	if _, err := env.st.Tasks.Get(ctx, nil, taskID); err != nil {
+		t.Fatalf("清理产物不应删除 Task 本身: %v", err)
 	}
 
 	// 4) 审计：成败都留痕（C-10），这里断言成功那条（result=ok）。
 	rows := env.auditRows(store.AuditFilter{
-		Actor: actor, Action: "cleanup_artifacts", ObjectType: "run", ObjectID: runID, Limit: 10,
+		Actor: actor, Action: "cleanup_artifacts", ObjectType: "task", ObjectID: taskID, Limit: 10,
 	})
 	okRows := 0
 	for _, row := range rows {
@@ -617,7 +512,7 @@ func TestAdminRBAC_NonAdminForbidden(t *testing.T) {
 		method, path, body string
 		bearer             string
 	}{
-		{http.MethodPost, "/api/v1/admin/profiles", `{"name":"x","cluster":"cluster-01","namespace":"testplane"}`, operator},
+		{http.MethodPost, "/api/v1/admin/profiles", `{"name":"x","cluster":"cluster-01","namespace":"argus"}`, operator},
 		{http.MethodPut, "/api/v1/admin/profiles", `{"name":"x"}`, operator},
 		{http.MethodDelete, "/api/v1/admin/profiles?name=x", "", operator},
 		{http.MethodPost, "/api/v1/admin/clusters", `{"name":"x","api_server":"https://a:6443","kubeconfig_key":"a"}`, viewer},
@@ -625,7 +520,8 @@ func TestAdminRBAC_NonAdminForbidden(t *testing.T) {
 		{http.MethodPost, "/api/v1/admin/secrets", `{"name":"x","namespace":"n","secret_name":"s","key":"k"}`, operator},
 		{http.MethodPost, "/api/v1/admin/secrets/x/rotate", "", operator},
 		{http.MethodGet, "/api/v1/admin/audit", "", operator},
-		{http.MethodDelete, "/api/v1/admin/runs/r-x/artifacts", "", operator},
+		// v2：产物清理按 Task 定位。
+		{http.MethodDelete, "/api/v1/admin/tasks/t-19700101-0000/artifacts", "", operator},
 		// D-65：共享挂载管理面同样要求 admin。
 		{http.MethodGet, "/api/v1/admin/shared-mounts", "", operator},
 		{http.MethodPost, "/api/v1/admin/shared-mounts",
@@ -649,7 +545,7 @@ func TestAdminRBAC_NonAdminForbidden(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer GET /secrets 应 403（07 §2.3），得到 %d\nbody=%s", rec.Code, rec.Body.String())
 	}
-	// D-65：只读视图 viewer 可读（"这次 Run 会挂什么"不该要 admin）。
+	// D-65：只读视图 viewer 可读（"这次 Task 会挂什么"不该要 admin）。
 	rec = do(http.MethodGet, "/api/v1/shared-mounts", "", viewer)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("viewer GET /shared-mounts 应 200，得到 %d\nbody=%s", rec.Code, rec.Body.String())

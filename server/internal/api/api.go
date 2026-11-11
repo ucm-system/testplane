@@ -1,3 +1,9 @@
+// Package api 是 HTTP 边界：路由、中间件、鉴权、错误映射、SSE（v2：/api/v1 全表对齐
+// server/api/openapi.yaml 的 51 路径 / 59 operations）。
+//
+// 规则（05 §3.1）：api 只做鉴权、校验、读写投影；不直接调 executor、不写 SQL，
+// 状态推进一律通过 store 门面 / 编排层出口。所有业务端点在 /api/v1 下（07 §1），
+// /healthz、/readyz、/metrics 不带版本。
 package api
 
 import (
@@ -16,16 +22,21 @@ import (
 	"github.com/ucm-system/testplane/server/internal/auth"
 	"github.com/ucm-system/testplane/server/internal/config"
 	"github.com/ucm-system/testplane/server/internal/domain"
+	"github.com/ucm-system/testplane/server/internal/orchestrator"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
 
-// TesterResolver 是"Tester 目录"的消费方接口（Go 惯例：接口由消费方声明）。
-// 实现由 registry 包提供（扫描 TESTERS_DIR 并入库），Lead 负责接线。
-//
-// 约定：找不到时返回包装了 domain.ErrNotFound 的错误（api 用 errors.Is 判 404/400）。
-type TesterResolver interface {
-	Resolve(ctx context.Context, name, version string) (domain.TesterSpec, error)
-	List(ctx context.Context, role string, includeOrphaned bool) ([]domain.TesterSpec, error)
+// RunnerCatalog 是 Runner 注册表的只读消费面（实现：registry.Registry）。
+// 提交组装（orchestrator.Assembler）与 dry-run 预览用。
+type RunnerCatalog interface {
+	Resolve(ctx context.Context, name, version string) (domain.RunnerSpec, error)
+	List(ctx context.Context, role string, includeOrphaned bool) ([]domain.RunnerSpec, error)
+}
+
+// CleanReplayer 是编排层的泄漏重放出口（实现：*orchestrator.Scheduler）。
+// 未接线（单 API 副本 / 测试）时 POST /tasks/{id}/clean 降级为 503 EXECUTOR_UNAVAILABLE。
+type CleanReplayer interface {
+	ReplayClean(ctx context.Context, taskID string, attemptNo int, force bool, actor, role string) (*orchestrator.ReplayCleanResult, error)
 }
 
 // Deps 是 API 的装配输入。
@@ -33,8 +44,11 @@ type Deps struct {
 	Config   *config.Config
 	Store    *store.Store
 	Machines *store.Machines
-	Resolver TesterResolver
-	Logger   *slog.Logger
+	// Catalog 是 Runner 注册表（registry.Registry）；提交校验与 dry-run 必需。
+	Catalog RunnerCatalog
+	// CleanReplayer 是编排层的泄漏重放出口（可选；未接线时 clean 端点降级）。
+	CleanReplayer CleanReplayer
+	Logger        *slog.Logger
 	// WebUI 是前端产物（webui.FS()）；nil 表示不挂静态站点。
 	WebUI fs.FS
 	// Version 是二进制版本（/meta 用）。
@@ -42,10 +56,8 @@ type Deps struct {
 	// Volcano 可选：不设时 /queue-status 的 volcano 块降级为 scheduler_unavailable。
 	Volcano VolcanoProvider
 	// Clock 是业务时间来源（05 §6.5）；nil 时用 domain.SystemClock。
-	// 提交时间戳、run_id 日期段、resolved 快照时间都走它（票 #31）。
 	Clock domain.Clock
 	// SharedMountsFn 是平台级统一共享挂载的**运行时来源**（D-65，读 shared_mounts 表）。
-	// nil 时退回 Config.SharedMounts（启动种子）——测试与未接线场景。
 	SharedMountsFn func(ctx context.Context) ([]domain.SharedMountSpec, error)
 }
 
@@ -54,18 +66,17 @@ type Server struct {
 	cfg      *config.Config
 	st       *store.Store
 	machines *store.Machines
-	resolver TesterResolver
+	catalog  RunnerCatalog
+	replay   CleanReplayer
 	logger   *slog.Logger
-	submit   *Submitter
+	assemble *orchestrator.Assembler
 	webui    fs.FS
 	volcano  VolcanoProvider
 	metrics  *metricsRegistry
-	// deployLogsKube 是 Deploy 日志端点的 K8s 客户端（懒加载；测试可直接注入 fake）。
-	deployLogsKube deployLogClient
-	clock          domain.Clock
-	authn          *auth.Authenticator
-	version        string
-	now            func() time.Time
+	clock    domain.Clock
+	authn    *auth.Authenticator
+	version  string
+	now      func() time.Time
 	// sharedMounts 是 D-65 的运行时挂载来源（nil → 用 cfg.SharedMounts）。
 	sharedMounts func(ctx context.Context) ([]domain.SharedMountSpec, error)
 }
@@ -80,7 +91,8 @@ func New(d Deps) *Server {
 		cfg:      d.Config,
 		st:       d.Store,
 		machines: d.Machines,
-		resolver: d.Resolver,
+		catalog:  d.Catalog,
+		replay:   d.CleanReplayer,
 		logger:   lg,
 		webui:    d.WebUI,
 		volcano:  d.Volcano,
@@ -92,26 +104,27 @@ func New(d Deps) *Server {
 	if s.clock == nil {
 		s.clock = domain.SystemClock
 	}
-	// 业务时间统一取注入时钟（票 #31）：提交时间戳、/meta.generated_at、SSE 回放窗口
-	// 都走它；runtime 机制（Ticker/Timeout）仍用 time.Now()。
+	// 业务时间统一取注入时钟（票 #31）。
 	s.now = s.clock.Now
 	s.authn = s.buildAuthenticator()
 	s.sharedMounts = d.SharedMountsFn
-	s.submit = &Submitter{
-		resolver:       d.Resolver,
-		profiles:       d.Store.Profiles,
-		logger:         lg,
-		clock:          s.clock,
-		SharedMounts:   d.Config.SharedMounts,
-		SharedMountsFn: d.SharedMountsFn,
-		MaxTasks:       d.Config.RunMaxTasks,
-		DefaultTimeout: d.Config.TaskTimeoutDefault,
-		MaxTimeout:     d.Config.TaskTimeoutMax,
+	if d.Catalog != nil {
+		s.assemble = &orchestrator.Assembler{
+			Catalog:       d.Catalog,
+			ProfileExists: func(ctx context.Context, name string) (bool, error) { return s.st.Profiles.Exists(ctx, nil, name) },
+			SecretExists: func(ctx context.Context, name string) (bool, error) {
+				_, err := s.st.GetSecretRef(ctx, name)
+				return err == nil, nil
+			},
+			DefaultTimeoutSeconds: int(s.cfg.RunnerTimeoutDefault / time.Second),
+			MaxTimeoutSeconds:     int(s.cfg.RunnerTimeoutMax / time.Second),
+			MaxRunners:            s.cfg.TaskMaxRunners,
+		}
 	}
 	return s
 }
 
-// Handler 组装路由（07 §5 的端点表；MVP 子集由 Lead 定稿）。
+// Handler 组装路由（server/api/openapi.yaml 的 59 operations）。
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(s.middlewareRequestID)
@@ -119,11 +132,7 @@ func (s *Server) Handler() http.Handler {
 	r.Use(s.middlewareAccessLog)
 	r.Use(s.middlewareMetrics)
 
-	// 运维端点不带版本（07 §1）；/metrics 只读，且不参与静态 fallback。
-	//
-	// **免鉴权是有意的**：这三个端点注册在根路由上，而 middlewareAuth 只挂在
-	// `Route(APIPrefix)` 组内（见下方），所以切到 OIDC 模式后 /metrics 依然公开，
-	// 供 Prometheus 无需令牌抓取。改动路由结构时注意别把它挪进鉴权组。
+	// 运维端点不带版本（07 §1）；免鉴权是有意的（Prometheus 无需令牌抓取）。
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
 	r.Get("/metrics", s.handleMetrics)
@@ -142,12 +151,11 @@ func (s *Server) Handler() http.Handler {
 		// 写操作：operator 及以上（07 §2.3）。
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireRole(authRoleOperator))
-			r.Post("/runs", s.handleSubmitRun)
-			r.Post("/runs/{id}/cancel", s.handleCancelRun)
-			r.Post("/tasks/{id}/cancel", s.handleCancelTask)
-			// 重试（07 §5.1/§8）：retry 创建新 Run（retry_of=原 Run），task retry 重开 Attempt。
-			r.Post("/runs/{id}/retry", s.handleRetryRun)
-			r.Post("/tasks/{id}/retry", s.handleRetryTask)
+			r.Post("/tasks", s.handleSubmitTask)
+			r.Post("/tasks/{task_id}/cancel", s.handleCancelTask)
+			r.Post("/tasks/{task_id}/retry", s.handleRetryTask)
+			r.Post("/tasks/{task_id}/clean", s.handleReplayClean)
+			r.Get("/secrets", s.handleListSecretRefs)
 		})
 
 		// 管理面（07 §5.4）：全部要求 admin。写操作同事务/事后写 audit_log（C-10）。
@@ -167,54 +175,44 @@ func (s *Server) Handler() http.Handler {
 			r.Put("/admin/shared-mounts/{name}", s.handleAdminUpdateSharedMount)
 			r.Delete("/admin/shared-mounts/{name}", s.handleAdminDeleteSharedMount)
 			r.Get("/admin/audit", s.handleAdminListAudit)
-			r.Delete("/admin/runs/{run_id}/artifacts", s.handleAdminCleanupArtifacts)
+			r.Delete("/admin/tasks/{task_id}/artifacts", s.handleAdminCleanupArtifacts)
 		})
 
-		// Secret 引用只读列表（07 §5.3）：**operator 及以上**（07 §2.3 / C-8.2：
-		// "有哪些 Secret 被平台引用"本身是运维信息）；只回名称与说明，不回显值。
-		r.Group(func(r chi.Router) {
-			r.Use(s.requireRole(authRoleOperator))
-			r.Get("/secrets", s.handleListSecretRefs)
-		})
-
-		// Run（只读：viewer）
-		r.Get("/runs", s.handleListRuns)
-		// 列筛选候选值（Excel 式表头下拉，D-61）。必须注册在 /runs/{id} 之前更直观
-		// （chi 本身静态段优先，不依赖顺序）。
-		r.Get("/runs/facets", s.handleRunFacets)
-		r.Get("/runs/{id}", s.handleGetRun)
-		r.Get("/runs/{id}/tasks", s.handleListRunTasks)
-		r.Get("/runs/{id}/events", s.handleRunEvents)
-		r.Get("/runs/{id}/events/history", s.handleRunEventsHistory)
-		r.Get("/runs/{id}/report", s.handleRunReport)
-		r.Get("/runs/{id}/report.md", s.handleRunReportMarkdown)
-		r.Get("/runs/{id}/manifest", s.handleRunManifest)
-		r.Get("/runs/{id}/deploy", s.handleRunDeploy)
-		r.Get("/runs/{id}/deploy/logs", s.handleRunDeployLogs)
-		r.Get("/runs/{id}/retry-plan", s.handleRetryPlan)
-		r.Get("/runs/{id}/artifacts", s.handleRunArtifacts)
-		// 打包下载（issue #41 / D-56）：一次拿全 report/events/artifacts/logs。
-		r.Get("/runs/{id}/bundle", s.handleRunBundle)
-		r.Get("/runs/{id}/files", s.handleRunFile)
-
-		// Task / Attempt
+		// Task（只读 + 事件）：viewer。
 		r.Get("/tasks", s.handleListTasks)
-		r.Get("/tasks/{id}", s.handleGetTask)
-		r.Get("/tasks/{id}/attempts", s.handleListAttempts)
-		r.Get("/tasks/{id}/attempts/{idx}/result", s.handleAttemptResult)
-		r.Get("/tasks/{id}/attempts/{idx}/logs", s.handleAttemptLogs)
-		r.Get("/tasks/{id}/attempts/{idx}/artifacts", s.handleAttemptArtifacts)
+		r.Get("/tasks/facets", s.handleTaskFacets)
+		r.Get("/tasks/{task_id}", s.handleGetTask)
+		r.Get("/tasks/{task_id}/report", s.handleTaskReport)
+		r.Get("/tasks/{task_id}/report.md", s.handleTaskReportMarkdown)
+		r.Get("/tasks/{task_id}/events", s.handleTaskEvents)
+		r.Get("/tasks/{task_id}/events/history", s.handleTaskEventsHistory)
+		r.Get("/tasks/{task_id}/manifest", s.handleTaskManifest)
+		r.Get("/tasks/{task_id}/deploy", s.handleTaskDeploy)
+		r.Get("/tasks/{task_id}/deploy/logs", s.handleTaskDeployLogs)
+		r.Get("/tasks/{task_id}/runners", s.handleListTaskRunners)
+		r.Get("/tasks/{task_id}/runners/{seq}", s.handleGetTaskRunner)
+		r.Get("/tasks/{task_id}/runners/{seq}/result", s.handleTaskRunnerResult)
+		r.Get("/tasks/{task_id}/runners/{seq}/logs", s.handleTaskRunnerLogs)
+		r.Get("/tasks/{task_id}/runners/{seq}/artifacts", s.handleTaskRunnerArtifacts)
+		r.Get("/tasks/{task_id}/attempts", s.handleListTaskAttempts)
+		r.Get("/tasks/{task_id}/attempts/{attempt_no}/runners", s.handleListAttemptRunners)
+		r.Get("/tasks/{task_id}/attempts/{attempt_no}/runners/{seq}", s.handleGetAttemptRunner)
+		r.Get("/tasks/{task_id}/attempts/{attempt_no}/runners/{seq}/result", s.handleAttemptRunnerResult)
+		r.Get("/tasks/{task_id}/attempts/{attempt_no}/runners/{seq}/logs", s.handleAttemptRunnerLogs)
+		r.Get("/tasks/{task_id}/attempts/{attempt_no}/runners/{seq}/artifacts", s.handleAttemptRunnerArtifacts)
+		r.Get("/tasks/{task_id}/artifacts", s.handleTaskArtifacts)
+		r.Get("/tasks/{task_id}/bundle", s.handleTaskBundle)
+		r.Get("/tasks/{task_id}/files", s.handleTaskFile)
 
-		// Tester 目录（只读；Tester 随镜像发布，不做运行时注册，K-3）
-		r.Get("/testers", s.handleListTesters)
-		r.Get("/testers/{name}", s.handleGetTester)
-		r.Get("/testers/{name}/versions/{version}", s.handleGetTesterVersion)
+		// Runner 目录（只读；随镜像发布，无运行时注册，K-3）。
+		r.Get("/runners", s.handleListRunners)
+		r.Get("/runners/{name}", s.handleGetRunner)
+		r.Get("/runners/{name}/versions/{version}", s.handleGetRunnerVersion)
 
-		// 平台级统一共享挂载的只读视图（D-65）：viewer+ 可见，"这次 Run 会挂什么"。
-		r.Get("/shared-mounts", s.handleListSharedMounts)
 		r.Get("/profiles", s.handleListProfiles)
 		r.Get("/clusters", s.handleListClusters)
 		r.Get("/queue-status", s.handleQueueStatus)
+		r.Get("/shared-mounts", s.handleListSharedMounts)
 	})
 
 	// 静态前端：只挂根路径，API 前缀不 fallback（05 §5.3、W-7）。
@@ -224,7 +222,7 @@ func (s *Server) Handler() http.Handler {
 	return r
 }
 
-// ---- 中间件 --------------------------------------------------------------
+// ---- 中间件 ---------------------------------------------------------------
 
 func newRequestID() string {
 	buf := make([]byte, 8)
@@ -280,14 +278,15 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// Flush 让 SSE 能用 ResponseWriter.
+// Flush 让 SSE 能用 ResponseWriter。
 func (r *statusRecorder) Flush() {
 	if f, ok := r.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
 }
 
-// middlewareAccessLog 按 05 §6.4 的字段记访问日志。
+// middlewareAccessLog 按 05 §6.4 的字段记访问日志（task_id/attempt_no/runner_seq 语境字段
+// 由各 handler 自行打业务日志）。
 func (s *Server) middlewareAccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -311,13 +310,6 @@ func (s *Server) middlewareAccessLog(next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r)
 	})
 }
-
-// middlewareAuth 是 MVP 的 dev 鉴权（07 §2 的生产 OIDC 本轮不实现）：
-//   - TESTPLANE_AUTH_MODE=dev（默认）：
-//   - Authorization: Bearer <subject> → 用户名取 subject；不带则用户名 dev；
-//   - 角色固定 admin（MVP 不做 RBAC 拒绝）。
-//
-// 生产 OIDC 留配置位：AuthMode=oidc 时启动打印未实现告警，仍按 dev 处理。
 
 // staticHandler 提供前端产物；未知路径 fallback 到 index.html（SPA 路由）。
 func (s *Server) staticHandler() http.Handler {

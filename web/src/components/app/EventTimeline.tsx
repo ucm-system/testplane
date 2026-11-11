@@ -1,20 +1,19 @@
 import { useEffect, useRef } from 'react'
 import type { SseStatus } from '@/api/sse'
-import type { RunEvent } from '@/api/types'
+import type { TaskEvent } from '@/api/types'
 import {
   EVENT_TYPE_CN,
-  attemptStatusMeta,
   deployStateMeta,
-  runStatusMeta,
+  runnerStatusMeta,
   taskStatusMeta,
 } from '@/lib/status'
 import { cn, formatClock } from '@/lib/utils'
 
 /**
  * 连接态**唯一口径**（B5）：右栏副标题、事件区小字、页内横幅都从这里取，
- * 不再各自读 `SseStatus` 后各写一套文案（之前右栏恒为「SSE 实时推送」、事件区却写「未连接」）。
+ * 不再各自读 `SseStatus` 后各写一套文案。
  *
- * 只保留三态；「Run 已结束」不是连接态，是页面事实（`ended`），单独表达。
+ * 只保留三态；「Task 已结束」不是连接态，是页面事实（`ended`），单独表达。
  */
 export type ConnectionState = 'connecting' | 'live' | 'reconnecting'
 
@@ -32,46 +31,55 @@ export const CONNECTION_LABEL: Record<ConnectionState, string> = {
 }
 
 const DOT: Record<string, string> = {
-  'run.submitted': 'bg-line-strong',
-  'run.state_changed': 'bg-primary',
-  'task.state_changed': 'bg-primary',
-  'attempt.started': 'bg-primary',
-  'attempt.finished': 'bg-success',
-  'deploy.state_changed': 'bg-warn',
-  'cleanup.started': 'bg-line-strong',
-  'run.finished': 'bg-success',
+  submitted: 'bg-line-strong',
+  state_changed: 'bg-primary',
+  runner_started: 'bg-primary',
+  runner_finished: 'bg-success',
+  exports_harvested: 'bg-line-strong',
+  clean_finished: 'bg-success',
+  cleanup_failed: 'bg-warn',
+  task_finished: 'bg-success',
   'report.written': 'bg-success',
   resync_required: 'bg-danger',
 }
 
 /** 状态 token → 人话（按事件类别取对应词典；未知值原样保留） */
-function tokenLabel(event: RunEvent, token: string | null | undefined): string {
+function tokenLabel(event: TaskEvent, token: string | null | undefined): string {
   if (!token) return '开始'
-  if (event.type === 'run.state_changed' || event.type === 'run.finished') return runStatusMeta(token).label
-  if (event.type === 'task.state_changed') return taskStatusMeta(token).label
-  if (event.type === 'attempt.started' || event.type === 'attempt.finished') return attemptStatusMeta(token).label
-  if (event.type === 'deploy.state_changed') return deployStateMeta(token).label
+  if (event.type === 'task_finished') return taskStatusMeta(token).label
+  if (event.type === 'runner_finished' || event.type === 'runner_started') return runnerStatusMeta(token).label
+  if (event.type === 'clean_finished') return deployStateMeta(token).label
   return token
 }
 
 /**
  * 事件文案：契约里状态转移在 `from` / `to`，说明性文字在 `payload.text`。
  *
- * B4：这里是右栏，写给用户做判断 —— 不出现 `∅ → submitted` 这种协议写法，
- * 状态 token 一律翻成中文（`排队中 → 运行中`）。
+ * B4：写给用户做判断 —— 不出现 `∅ → submitted` 这种协议写法，
+ * 状态 token 一律翻成中文（`排队中 → 执行中`）。
  */
-function eventText(event: RunEvent): string {
+function eventText(event: TaskEvent): string {
   const payload = event.payload ?? {}
   const text = typeof payload['text'] === 'string' ? payload['text'] : null
   if (text) return text
 
-  if (event.type === 'run.submitted') {
-    const total = typeof payload['task_count'] === 'number' ? payload['task_count'] : null
-    return total == null ? '已提交，等待执行' : `已提交 · 共 ${total} 个 Task`
+  if (event.type === 'submitted') {
+    const trigger = typeof payload['trigger'] === 'string' ? payload['trigger'] : null
+    if (trigger === 'retry') return `attempt #${event.attempt_no ?? ''} 已创建（重试：重新部署并全量重跑）`
+    const total = typeof payload['runner_count'] === 'number' ? payload['runner_count'] : null
+    return total == null ? '已提交，等待执行' : `已提交 · 管道共 ${total} 个 runner`
   }
-  if (event.type === 'run.finished') return `Run 已结束 · ${tokenLabel(event, event.to)}`
+  if (event.type === 'runner_finished') {
+    const code = typeof payload['error_code'] === 'string' ? payload['error_code'] : null
+    const base = `seq ${event.runner_seq ?? '—'}：${tokenLabel(event, event.to)}`
+    return code ? `${base} · ${code}` : base
+  }
+  if (event.type === 'runner_started') return `seq ${event.runner_seq ?? '—'} 开始执行`
+  if (event.type === 'exports_harvested') return `seq ${event.runner_seq ?? '—'} 的 exports 已收割落档`
+  if (event.type === 'task_finished') return `Task 已结束 · ${tokenLabel(event, event.to)}`
   if (event.type === 'report.written') return '报告已生成'
-  if (event.type === 'cleanup.started') return '开始清理环境'
+  if (event.type === 'clean_finished') return 'service-clean 完成（拆除收口）'
+  if (event.type === 'cleanup_failed') return 'service-clean 失败（不影响 Task 终态，进重放清单）'
 
   const base = EVENT_TYPE_CN[event.type] ?? event.type
   if (event.from || event.to) {
@@ -86,9 +94,9 @@ export function EventTimeline({
   connection,
   ended = false,
 }: {
-  events: RunEvent[]
+  events: TaskEvent[]
   connection: ConnectionState
-  /** Run 已终态：事件是历史回放，不再推送 */
+  /** Task 已终态：事件是历史回放，不再推送 */
   ended?: boolean
 }) {
   const bottomRef = useRef<HTMLDivElement>(null)

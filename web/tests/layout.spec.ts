@@ -18,12 +18,12 @@ test.describe.configure({ mode: 'serial' })
 test('两列布局：侧栏 256 + inset 内容区（1280 / 900 / 480）', async ({ page }) => {
   test.setTimeout(120_000)
   mkdirSync(OUT_DIR, { recursive: true })
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
 
   /* ---------- 1280：两列（左侧导航 + 主内容；D-62 之后不再有右栏） ---------- */
   await page.setViewportSize({ width: 1280, height: 900 })
   await page.goto('/')
-  await expect(page.getByText('进行中 Run')).toBeVisible()
+  await expect(page.getByText('进行中 Task')).toBeVisible()
   await page.waitForTimeout(600)
 
   const boxes = await page.evaluate(() => {
@@ -101,13 +101,13 @@ test('两列布局：侧栏 256 + inset 内容区（1280 / 900 / 480）', async 
 test('Deploy 日志面板：Pod 分页签 + gap 显式标记', async ({ page }) => {
   test.setTimeout(120_000)
   mkdirSync(OUT_DIR, { recursive: true })
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
 
   await page.setViewportSize({ width: 1440, height: 1000 })
   // 这条 seeded Run 有 Deploy 阶段与多个 Pod；终态默认是「结果」视图，先切到「执行细节」
-  await page.goto('/runs/r-20261105-0003')
+  await page.goto('/tasks/t-20261105-0003')
   await page.getByRole('tab', { name: '执行细节' }).click()
-  await expect(page.getByText('Deploy 日志', { exact: true })).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByText('部署 Pod 日志', { exact: false })).toBeVisible({ timeout: 20_000 })
 
   const panel = page.locator('section', { hasText: 'Deploy 日志' }).first()
   // 契约收窄后没有「全部 Pod」页签：`?pod=` 必选，页签就是具体 Pod 名
@@ -136,20 +136,20 @@ test('Deploy 日志面板：Pod 分页签 + gap 显式标记', async ({ page }) 
  */
 test('Deploy 日志：pod 页签带参 + tail/offset 二选一 + next_offset 续读', async ({ page }) => {
   test.setTimeout(120_000)
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
 
-  // mock 模式不发 HTTP 请求，所以给 `mockApi.getDeployLogs` 装个探针，记录每次调用的入参
-  await page.goto('/runs/r-20261105-0006')
+  // mock 模式不发 HTTP 请求，所以给 `mockApi.getTaskDeployLogs` 装个探针，记录每次调用的入参
+  await page.goto('/tasks/t-20261105-0006')
   await page.getByRole('tab', { name: '执行细节' }).click()
-  await expect(page.getByText('Deploy 日志', { exact: true })).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByText('部署 Pod 日志', { exact: false })).toBeVisible({ timeout: 20_000 })
   await page.evaluate(async () => {
     const mod = (await import('/src/api/mock.ts')) as unknown as {
-      mockApi: { getDeployLogs: (...args: unknown[]) => Promise<unknown> }
+      mockApi: { getTaskDeployLogs: (...args: unknown[]) => Promise<unknown> }
     }
     const w = window as unknown as { __logCalls: unknown[] }
     w.__logCalls = []
-    const original = mod.mockApi.getDeployLogs.bind(mod.mockApi)
-    mod.mockApi.getDeployLogs = (...args: unknown[]) => {
+    const original = mod.mockApi.getTaskDeployLogs.bind(mod.mockApi)
+    mod.mockApi.getTaskDeployLogs = (...args: unknown[]) => {
       w.__logCalls.push(args[1])
       return original(...args)
     }
@@ -182,8 +182,8 @@ test('Deploy 日志：pod 页签带参 + tail/offset 二选一 + next_offset 续
   // 游标续读：直接打 mock API（dev server 下模块可 import），limit=4 制造第二页
   const paging = await page.evaluate(async () => {
     const mod = await import('/src/api/mock.ts')
-    const first = await mod.mockApi.getDeployLogs('r-20261105-0006', { pod: 'genet-qwen3-32b-decode-0', offset: 0, limit: 4 })
-    const second = await mod.mockApi.getDeployLogs('r-20261105-0006', { pod: 'genet-qwen3-32b-decode-0', offset: first.next_offset, limit: 4 })
+    const first = await mod.mockApi.getTaskDeployLogs('t-20261105-0006', { pod: 'genet-qwen3-32b-decode-0', offset: 0, limit: 4 })
+    const second = await mod.mockApi.getTaskDeployLogs('t-20261105-0006', { pod: 'genet-qwen3-32b-decode-0', offset: first.next_offset, limit: 4 })
     return {
       firstOffset: first.entries[0]?.offset,
       firstCount: first.entries[0]?.line_count,
@@ -212,11 +212,11 @@ test('Deploy 日志：pod 页签带参 + tail/offset 二选一 + next_offset 续
         return (e as { code?: string }).code ?? 'unknown'
       }
     }
-    const missingPod = await grab(() => mod.mockApi.getDeployLogs('r-20261105-0006', {} as { pod: string }))
-    const unknownPod = await grab(() => mod.mockApi.getDeployLogs('r-20261105-0006', { pod: 'nope-0' }))
+    const missingPod = await grab(() => mod.mockApi.getTaskDeployLogs('t-20261105-0006', {} as { pod: string }))
+    const unknownPod = await grab(() => mod.mockApi.getTaskDeployLogs('t-20261105-0006', { pod: 'nope-0' }))
     return { missingPod, unknownPod }
   })
-  expect(errors.missingPod).toBe('VALIDATION_ERROR')
+  expect(errors.missingPod).toBe('CONFLICT')
   expect(errors.unknownPod).toBe('NOT_FOUND')
 
   await page.screenshot({ path: join(OUT_DIR, '05-deploy-logs-multi-pod.png'), fullPage: true })
@@ -228,7 +228,7 @@ test('Deploy 日志：pod 页签带参 + tail/offset 二选一 + next_offset 续
  *  - 品牌字标（侧栏顶部）与左栏导航项文字左边缘对齐（都是 24px 的节奏）。
  */
 test('页头没有竖分隔线，侧栏右边界=256，品牌与导航左边缘对齐', async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
 
   const measure = () =>
     page.evaluate(() => {
@@ -273,7 +273,7 @@ test('页头没有竖分隔线，侧栏右边界=256，品牌与导航左边缘�
   for (const width of [1280, 1440]) {
     await page.setViewportSize({ width, height: 900 })
     await page.goto('/')
-    await expect(page.getByText('进行中 Run')).toBeVisible()
+    await expect(page.getByText('进行中 Task')).toBeVisible()
     await page.waitForTimeout(400)
     const m = await measure()
 
@@ -289,7 +289,7 @@ test('页头没有竖分隔线，侧栏右边界=256，品牌与导航左边缘�
 
   await page.setViewportSize({ width: 1280, height: 900 })
   await page.goto('/')
-  await expect(page.getByText('进行中 Run')).toBeVisible()
+  await expect(page.getByText('进行中 Task')).toBeVisible()
   await page.waitForTimeout(500)
   await page.screenshot({ path: join(OUT_DIR, '06-overview-1280.png'), fullPage: false })
   await page.setViewportSize({ width: 1024, height: 900 })
@@ -305,7 +305,7 @@ test('页头没有竖分隔线，侧栏右边界=256，品牌与导航左边缘�
  */
 test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 Tab 缩进', async ({ page }) => {
   mkdirSync(OUT_DIR, { recursive: true })
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.setViewportSize({ width: 1440, height: 1100 })
   await page.goto('/submit')
 
@@ -314,7 +314,7 @@ test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 T
   await expect(page.getByText('一张卡两形态', { exact: false })).toBeVisible()
 
   // 部署形态：CodeMirror 编辑器在，且真做了语法高亮（key / 字符串至少两种颜色）+ 行号
-  const editor = page.getByLabel('deploy 段 YAML')
+  const editor = page.getByLabel('Genet 部署描述 YAML')
   await expect(editor).toBeVisible()
   await expect(page.getByTestId('yaml-editor')).toBeVisible()
   const highlight = await page.evaluate(() => {
@@ -350,9 +350,9 @@ test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 T
   await page.waitForTimeout(400)
   await page.screenshot({ path: join(OUT_DIR, '09-submit-yaml-highlight.png'), fullPage: true })
 
-  // 切到「不部署」：同一张卡里换成服务字段
-  await page.getByRole('group', { name: '服务来源' }).getByRole('button', { name: '不部署' }).click()
+  // 切到「外接」：同一张卡里换成服务字段
+  await page.getByRole('group', { name: '服务来源' }).getByRole('button', { name: '外接' }).click()
   await expect(page.getByLabel('服务 base URL')).toBeVisible()
   await expect(page.getByText('模型路径（可选）')).toBeVisible()
-  await expect(page.getByLabel('deploy 段 YAML')).toHaveCount(0)
+  await expect(page.getByLabel('Genet 部署描述 YAML')).toHaveCount(0)
 })

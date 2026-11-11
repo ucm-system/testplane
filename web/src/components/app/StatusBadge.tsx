@@ -1,16 +1,7 @@
 import { Badge, Tag } from '@/components/ui/badge'
-import { deployStateMeta, runStatusMeta, taskStatusMeta, waitingReasonLabel } from '@/lib/status'
+import { deployStateMeta, runnerStatusMeta, taskStatusMeta, waitingReasonLabel } from '@/lib/status'
 
-/** 状态徽标三件套：Run / Task / Deploy。文字 + 色，不靠颜色单独表意。 */
-
-export function RunStatusBadge({ status, className }: { status: string; className?: string }) {
-  const meta = runStatusMeta(status)
-  return (
-    <Badge tone={meta.tone} className={className} title={status}>
-      {meta.label}
-    </Badge>
-  )
-}
+/** 状态徽标三件套：Task / runner / Deploy。文字 + 色，不靠颜色单独表意。 */
 
 export function TaskStatusBadge({ status, className }: { status: string; className?: string }) {
   const meta = taskStatusMeta(status)
@@ -21,10 +12,19 @@ export function TaskStatusBadge({ status, className }: { status: string; classNa
   )
 }
 
-export function DeployStateBadge({ state, className }: { state: string; className?: string }) {
+export function RunnerStatusBadge({ status, className }: { status: string; className?: string }) {
+  const meta = runnerStatusMeta(status)
+  return (
+    <Badge tone={meta.tone} className={className} title={status}>
+      {meta.label}
+    </Badge>
+  )
+}
+
+export function DeployStateBadge({ state, className }: { state: string | null | undefined; className?: string }) {
   const meta = deployStateMeta(state)
   return (
-    <Badge tone={meta.tone} className={className} title={state}>
+    <Badge tone={meta.tone} className={className} title={state ?? undefined}>
       {meta.label}
     </Badge>
   )

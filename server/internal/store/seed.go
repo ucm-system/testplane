@@ -8,13 +8,15 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/ucm-system/testplane/server/internal/domain"
 )
 
-// SeedDefaults 是 MVP 的种子数据（03 §9"首次 seed"的简化）：
+// SeedDefaults 是种子数据（03 §9"首次 seed"的简化）：
 // 在 clusters / execution_profiles **表为空**时各插一行，非空则不插（幂等）。
 //
-// 为什么需要：QA 的 e2e 与设计示例都用 `--profile k8s-npu`，没有种子时提交会
-// EXECUTION_PROFILE_NOT_FOUND（C-5.1 第 6 条）。
+// 为什么需要：e2e 与设计示例都用 `profile: k8s-npu`，没有种子时提交会
+// EXECUTION_PROFILE_NOT_FOUND（C-5.1）。
 //
 // 注意：03 §3.2 的 execution_profiles **没有 storage_pvc 列**（PVC 名来自 Helm/Profile
 // 挂载配置），所以这里不写 storage_pvc，mounts 留空数组。
@@ -28,13 +30,13 @@ type SeedOptions struct {
 
 // DefaultSeedOptions 返回设计示例里的默认种子（k8s-npu / cluster-01）。
 func DefaultSeedOptions() SeedOptions {
-	apiServer := strings.TrimSpace(os.Getenv("TESTPLANE_SEED_API_SERVER"))
+	apiServer := strings.TrimSpace(os.Getenv("AG_SEED_API_SERVER"))
 	if apiServer == "" {
 		apiServer = "https://kubernetes.default.svc"
 	}
-	ns := strings.TrimSpace(os.Getenv("TESTPLANE_EXECUTOR_NAMESPACE"))
+	ns := strings.TrimSpace(os.Getenv("AG_EXECUTOR_NAMESPACE"))
 	if ns == "" {
-		ns = "testplane"
+		ns = "argus"
 	}
 	return SeedOptions{
 		ClusterName:          "cluster-01",
@@ -64,7 +66,7 @@ func (s *Store) SeedDefaultsWith(ctx context.Context, o SeedOptions) error {
 		o.ProfileName = "k8s-npu"
 	}
 	if o.Namespace == "" {
-		o.Namespace = "testplane"
+		o.Namespace = "argus"
 	}
 	if o.DeployTimeoutSeconds <= 0 {
 		o.DeployTimeoutSeconds = 259200
@@ -79,7 +81,7 @@ func (s *Store) SeedDefaultsWith(ctx context.Context, o SeedOptions) error {
 				INSERT INTO clusters (name, api_server, kubeconfig_key, description)
 				VALUES ($1, $2, '', $3)
 				ON CONFLICT (name) DO NOTHING`,
-				o.ClusterName, o.APIServer, "MVP 默认集群（启动时 seed）"); err != nil {
+				o.ClusterName, o.APIServer, "默认集群（启动时 seed，D-42）"); err != nil {
 				return fmt.Errorf("store: seed cluster: %w", err)
 			}
 		}
@@ -109,4 +111,9 @@ func (s *Store) SeedDefaultsWith(ctx context.Context, o SeedOptions) error {
 		}
 		return nil
 	})
+}
+
+// TaskOutcomeStatus 供 API 层判定终态语义——直接转调 domain 的唯一真源。
+func TaskOutcomeStatus(in domain.TaskOutcomeInput) domain.TaskStatus {
+	return domain.DecideTaskOutcome(in)
 }

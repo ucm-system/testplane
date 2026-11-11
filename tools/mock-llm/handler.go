@@ -17,7 +17,7 @@ const defaultModel = "mock-llm"
 
 // replyTokens 是预置回复的 token 序列：stream 模式逐 token 输出，non-stream 模式拼成 content。
 // 至少一个 token，保证 max_tokens=1 时 content 仍非空（endpoint-probe 的判定依赖这一点）。
-var replyTokens = []string{"TestPlane ", "mock ", "LLM ", "is ", "ready."}
+var replyTokens = []string{"Argus ", "mock ", "LLM ", "is ", "ready."}
 
 // Config 是假服务的默认行为；每个请求还可以用查询参数覆盖（见 Server.effectiveConfig）。
 //
@@ -131,7 +131,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			"id":       cfg.Model,
 			"object":   "model",
 			"created":  s.startedAt.Unix(),
-			"owned_by": "testplane",
+			"owned_by": "argus",
 		}},
 	})
 }

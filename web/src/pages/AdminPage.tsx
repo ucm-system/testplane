@@ -43,7 +43,7 @@ const TAB_ITEMS: Array<{ value: TabKey; label: string }> = [
 const EMPTY_PROFILE: ProfileWrite = {
   name: '',
   cluster: '',
-  namespace: 'testplane',
+  namespace: 'argus',
   scheduler: 'volcano',
   queue: 'npu-batch',
   deploy_timeout_seconds: 259200,
@@ -100,7 +100,7 @@ function ProfilesTab() {
       <CardHeader
         tone="primary"
         title="Execution Profiles"
-        sub="提交 Run 时 execution.profile 必须命中这里"
+        sub="提交 Task 时 execution.profile 必须命中这里"
         actions={
           <Button
             size="sm"
@@ -121,7 +121,7 @@ function ProfilesTab() {
       ) : profiles.loading && !profiles.data ? (
         <TableSkeleton rows={3} cols={6} />
       ) : (profiles.data ?? []).length === 0 ? (
-        <EmptyState title="没有 Profile" description="至少需要一个，否则提交 Run 会 EXECUTION_PROFILE_NOT_FOUND。" />
+        <EmptyState title="没有 Profile" description="至少需要一个，否则提交 Task 会 EXECUTION_PROFILE_NOT_FOUND。" />
       ) : (
         <TableWrap>
           <Table>
@@ -516,7 +516,7 @@ function ClustersTab() {
 /* ---------------------------------------------------------------- 挂载点（D-65） */
 
 /** 平台保留路径（与后端 D-63 一致）：这些目录由平台自己写 */
-const RESERVED_MOUNT_PATHS = ['/workspace/output', '/workspace/input', '/tmp', '/tester']
+const RESERVED_MOUNT_PATHS = ['/workspace/output', '/workspace/input', '/tmp', '/runner']
 
 /** 一段可直接复制到集群里 apply 的 PV + PVC（这是用户最容易填错的地方：Pod 里不能直接写 NFS 地址） */
 const PV_PVC_YAML = `# 1) 先在集群里建 PV + PVC（NFS 示例）
@@ -538,7 +538,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: models-pvc        # ← 这里填到这个页面的「PVC 名」
-  namespace: testplane
+  namespace: argus
 spec:
   accessModes:
     - ReadOnlyMany
@@ -707,7 +707,7 @@ function MountsTab() {
         <CardBody className="flex flex-col gap-2">
           <p className="text-xs leading-relaxed text-fg-2">
             平台不创建 PV/PVC，也不解析 NFS / CephFS / CSI 的协议字段：它只把 claim_name 渲染成
-            volumes[].persistentVolumeClaim，挂进所有 Tester Job（含 Pre-Check）。
+            volumes[].persistentVolumeClaim，挂进所有 runner Job（含 pre_check）。
             改完保存就生效，不需要重启，也不用 helm upgrade。
           </p>
           <pre
@@ -748,7 +748,7 @@ function MountsTab() {
           <EmptyState
             data-testid="mounts-empty"
             title="还没有挂载点"
-            description="未配置时不会阻断 Pod —— Tester 自己会报路径不存在。"
+            description="未配置时不会阻断 Pod —— Runner 自己会报路径不存在。"
           />
         ) : (
           <TableWrap>
@@ -818,7 +818,7 @@ function MountsTab() {
           </TableWrap>
         )}
         <CardFooter>
-          <span>只读挂载是默认值：模型权重、数据集这类输入不该被 Tester 写坏。</span>
+          <span>只读挂载是默认值：模型权重、数据集这类输入不该被 Runner 写坏。</span>
         </CardFooter>
       </Card>
 
@@ -910,7 +910,7 @@ function MountsTab() {
           setError(null)
         }}
         title="删除这个挂载点？"
-        description="只影响之后提交的 Run，已在跑的 Pod 不受影响。"
+        description="只影响之后提交的 Task，已在跑的 Pod 不受影响。"
         footer={
           <>
             <Button
@@ -936,7 +936,7 @@ function MountsTab() {
               路径：{pendingDelete.mount_path} · PVC：{pendingDelete.claim_name}
             </p>
           ) : null}
-          <p className="text-2xs text-fg-3">只影响之后提交的 Run；已提交 Run 的 Task 快照已冻结，不受影响。</p>
+          <p className="text-2xs text-fg-3">只影响之后提交的 Task；已提交 Task 的 runner 快照已冻结，不受影响。</p>
           {error ? <ErrorState error={error} compact /> : null}
         </div>
       </Dialog>
@@ -945,7 +945,7 @@ function MountsTab() {
 }
 /* ---------------------------------------------------------------- Secrets */
 
-const EMPTY_SECRET: SecretWrite = { name: '', namespace: 'testplane', secret_name: '', key: '', description: '' }
+const EMPTY_SECRET: SecretWrite = { name: '', namespace: 'argus', secret_name: '', key: '', description: '' }
 
 function SecretsTab() {
   const toast = useToast()
@@ -989,7 +989,7 @@ function SecretsTab() {
       ) : secrets.loading && !secrets.data ? (
         <TableSkeleton rows={3} cols={5} />
       ) : (secrets.data ?? []).length === 0 ? (
-        <EmptyState title="没有登记任何 Secret 引用" description="Run 的 secrets 只能引用这里登记的条目。" />
+        <EmptyState title="没有登记任何 Secret 引用" description="Task 的 secrets 只能引用这里登记的条目（C-10）。" />
       ) : (
         <TableWrap>
           <Table>
@@ -1037,7 +1037,7 @@ function SecretsTab() {
         {error ? <ErrorState error={error} compact className="mb-3" /> : null}
         {draft ? (
           <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="name（Run 里引用名）" required>
+            <Field label="name（Task secrets 里的引用名）" required>
               <Input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
             </Field>
             <Field label="namespace" required>

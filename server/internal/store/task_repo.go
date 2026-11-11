@@ -2,34 +2,29 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
 )
 
-// TaskRepo 是 tasks 表的读写。
+// TaskRepo 是 tasks 表（一次评测任务；v1 的 runs 表，D-66）的读写。
 type TaskRepo struct{ s *Store }
 
-const taskCols = `id, run_id, seq, name, tester_name, tester_version, image_ref, profile,
-	args_raw, args_argv, injected_argv, env, secret_env, on_failure, timeout_seconds,
-	retry_policy, status, status_reason, waiting_reason, endpoint_key, endpoint_exclusive,
-	current_attempt, available_at, cancel_requested, result_ref, reused_from_task_id, error,
-	created_at, updated_at`
+const taskCols = `id, name, status, manifest, resolved, endpoint, deploy, env, secret_env,
+	submitted_by, submitted_at, started_at, finished_at, error, retry_of,
+	current_attempt, cancel_requested, last_event_seq, revision`
 
 func scanTask(row pgx.Row) (*Task, error) {
 	var t Task
-	err := row.Scan(&t.ID, &t.RunID, &t.Seq, &t.Name, &t.TesterName, &t.TesterVersion,
-		&t.ImageRef, &t.Profile, &t.ArgsRaw, &t.ArgsArgv, &t.InjectedArgv, &t.Env, &t.SecretEnv,
-		&t.OnFailure, &t.TimeoutSeconds, &t.RetryPolicy, &t.Status, &t.StatusReason,
-		&t.WaitingReason, &t.EndpointKey, &t.EndpointExclusive, &t.CurrentAttempt,
-		&t.AvailableAt, &t.CancelRequested, &t.ResultRef, &t.ReusedFromTaskID, &t.Error,
-		&t.CreatedAt, &t.UpdatedAt)
-	if err != nil {
+	if err := row.Scan(&t.ID, &t.Name, &t.Status, &t.Manifest, &t.Resolved,
+		&t.Endpoint, &t.Deploy, &t.Env, &t.SecretEnv, &t.SubmittedBy, &t.SubmittedAt,
+		&t.StartedAt, &t.FinishedAt, &t.Error, &t.RetryOf,
+		&t.CurrentAttempt, &t.CancelRequested, &t.LastEventSeq, &t.Revision); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -47,20 +42,208 @@ func (r *TaskRepo) Get(ctx context.Context, tx pgx.Tx, id string) (*Task, error)
 	return t, nil
 }
 
-// RunIDOf 返回 Task 所属 Run 的 id（门面开事务后先锁 Run 用，02 §3.8）。
-func (r *TaskRepo) RunIDOf(ctx context.Context, tx pgx.Tx, taskID string) (string, error) {
-	var runID string
-	err := r.s.db(tx).QueryRow(ctx, `SELECT run_id FROM tasks WHERE id = $1`, taskID).Scan(&runID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", fmt.Errorf("store: task %s: %w", taskID, domain.ErrNotFound)
-	}
-	if err != nil {
-		return "", fmt.Errorf("store: run id of task %s: %w", taskID, err)
-	}
-	return runID, nil
+// TaskFilter 是 Task 列表的过滤条件（07 §5.1）。
+// WHERE 的唯一来源是本文件的 conds —— 列表/计数共用，不要在调用方再拼一遍。
+type TaskFilter struct {
+	Statuses []string
+	// Runners 多值：命中任一 runner 执行记录的 runner_name 即算（`runner=aisbench-acc`）。
+	Runners    []string
+	Submitters []string
+	Cursor     string
+	Limit      int
 }
 
-// Lock 对 Task 行加 FOR UPDATE（调用方必须已锁 Run）。
+// taskFilterConds 把 TaskFilter 的三个过滤维度编译成 WHERE 片段与参数。
+// exclude 指定"本次不计入"的维度（facets 按维度独立计数：其它维度生效、自己不生效），
+// 取值 "" | "status" | "submitter" | "runner"。
+//
+// WHERE 的唯一来源是本函数 —— List / Count / Facets 共用，保证计数口径与列表逐字一致
+// （tasks 表没有软删除列；状态口径 = tasks.status，与 v1 的 runs 软删无涉）。
+func taskFilterConds(f TaskFilter, exclude string) ([]string, []any) {
+	args := []any{}
+	var where []string
+	if exclude != "status" && len(f.Statuses) > 0 {
+		args = append(args, f.Statuses)
+		where = append(where, fmt.Sprintf("t.status = ANY($%d)", len(args)))
+	}
+	if exclude != "submitter" && len(f.Submitters) > 0 {
+		args = append(args, f.Submitters)
+		where = append(where, fmt.Sprintf("t.submitted_by = ANY($%d)", len(args)))
+	}
+	if exclude != "runner" && len(f.Runners) > 0 {
+		args = append(args, f.Runners)
+		where = append(where, fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM task_runners rr WHERE rr.task_id = t.id AND rr.runner_name = ANY($%d))", len(args)))
+	}
+	return where, args
+}
+
+// List 返回按 submitted_at DESC, id DESC 的游标分页结果。
+func (r *TaskRepo) List(ctx context.Context, tx pgx.Tx, f TaskFilter) ([]Task, string, error) {
+	limit := normalizeLimit(f.Limit)
+	where, args := taskFilterConds(f, "")
+	ts, id, err := DecodeCursor(f.Cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	if !ts.IsZero() {
+		args = append(args, ts, id)
+		where = append(where, fmt.Sprintf("(t.submitted_at, t.id) < ($%d, $%d)", len(args)-1, len(args)))
+	}
+	args = append(args, limit+1)
+	q := `SELECT ` + taskCols + ` FROM tasks t`
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += fmt.Sprintf(" ORDER BY t.submitted_at DESC, t.id DESC LIMIT $%d", len(args))
+
+	rows, err := r.s.db(tx).Query(ctx, q, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("store: list tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, "", fmt.Errorf("store: scan task: %w", err)
+		}
+		out = append(out, *t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		next = EncodeCursor(last.SubmittedAt, last.ID)
+	}
+	return out, next, nil
+}
+
+// Count 用与 List 完全相同的过滤口径做 SELECT count(*)（offset 分页的 total，D-61）。
+// f.Cursor 不参与计数：total 是"满足过滤条件的总条数"，与游标翻页无关。
+// 软删除/状态口径与 taskFilterConds（即 List）完全一致。
+func (r *TaskRepo) Count(ctx context.Context, tx pgx.Tx, f TaskFilter) (int, error) {
+	where, args := taskFilterConds(f, "")
+	q := `SELECT count(*) FROM tasks t`
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	var n int
+	if err := r.s.db(tx).QueryRow(ctx, q, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count tasks: %w", err)
+	}
+	return n, nil
+}
+
+// FacetBucket 是一个维度取值的计数（openapi FacetBucket）。
+type FacetBucket struct {
+	Value string
+	Count int
+}
+
+// TaskFacets 是 GET /tasks/facets 的三维精确计数（D-61）。
+type TaskFacets struct {
+	Status    []FacetBucket
+	Submitter []FacetBucket
+	Runner    []FacetBucket
+}
+
+// facetValueCap 是单维度返回桶数上限（防异常基数把响应撑爆；与旧内存聚合的
+// 列表上限口径一致）。
+const facetValueCap = 200
+
+// Facets 用 store 侧 GROUP BY 输出三维精确计数（替代旧的"拉一页内存聚合"——
+// 那个实现数据量超过列表上限时只是下界）。
+//
+// 口径：每个维度按"其它维度的过滤条件"聚合（自己不生效），与列表过滤互洽——
+// 用任一 facet 值过滤列表，命中的条数就等于该桶的计数。runner 维度按 Task 去重
+// （count(DISTINCT t.id)），与 List 的 runner 过滤（EXISTS task_runners 匹配任一
+// attempt）逐字一致。排序 count DESC, value ASC（精确计数后按热度排更有用）。
+func (r *TaskRepo) Facets(ctx context.Context, tx pgx.Tx, f TaskFilter) (*TaskFacets, error) {
+	out := &TaskFacets{
+		Status:    []FacetBucket{},
+		Submitter: []FacetBucket{},
+		Runner:    []FacetBucket{},
+	}
+	scanBuckets := func(rows pgx.Rows, qerr error, dst *[]FacetBucket) error {
+		if qerr != nil {
+			return fmt.Errorf("store: task facets: %w", qerr)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var b FacetBucket
+			if err := rows.Scan(&b.Value, &b.Count); err != nil {
+				return fmt.Errorf("store: scan task facet: %w", err)
+			}
+			*dst = append(*dst, b)
+		}
+		return rows.Err()
+	}
+
+	// status：status/submitter/runner 过滤中除 status 外全部生效。
+	where, args := taskFilterConds(f, "status")
+	q := `SELECT t.status, count(*) FROM tasks t`
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += fmt.Sprintf(" GROUP BY t.status ORDER BY 2 DESC, 1 ASC LIMIT %d", facetValueCap)
+	rows, qerr := r.s.db(tx).Query(ctx, q, args...)
+	if err := scanBuckets(rows, qerr, &out.Status); err != nil {
+		return nil, err
+	}
+
+	// submitter：除 submitter 外全部生效。
+	where, args = taskFilterConds(f, "submitter")
+	q = `SELECT t.submitted_by, count(*) FROM tasks t`
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += fmt.Sprintf(" GROUP BY t.submitted_by ORDER BY 2 DESC, 1 ASC LIMIT %d", facetValueCap)
+	rows, qerr = r.s.db(tx).Query(ctx, q, args...)
+	if err := scanBuckets(rows, qerr, &out.Submitter); err != nil {
+		return nil, err
+	}
+
+	// runner：除 runner 外全部生效；JOIN task_runners 并按 Task 去重。
+	where, args = taskFilterConds(f, "runner")
+	q = `SELECT rr.runner_name, count(DISTINCT t.id)
+	       FROM tasks t JOIN task_runners rr ON rr.task_id = t.id`
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += fmt.Sprintf(" GROUP BY rr.runner_name ORDER BY 2 DESC, 1 ASC LIMIT %d", facetValueCap)
+	rows, qerr = r.s.db(tx).Query(ctx, q, args...)
+	if err := scanBuckets(rows, qerr, &out.Runner); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Insert 插入一行 Task；调用方负责事务与后续事件（SubmitTask）。
+func (r *TaskRepo) Insert(ctx context.Context, tx pgx.Tx, t *Task) error {
+	_, err := r.s.db(tx).Exec(ctx, `
+		INSERT INTO tasks (id, name, status, manifest, resolved, endpoint, deploy,
+		                   env, secret_env, submitted_by, submitted_at, started_at, finished_at,
+		                   error, retry_of, current_attempt, cancel_requested,
+		                   last_event_seq, revision)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+		        COALESCE($16,0),COALESCE($17,false),COALESCE($18,0),COALESCE($19,1))`,
+		t.ID, t.Name, t.Status, t.Manifest, t.Resolved,
+		nullableBytes(t.Endpoint), nullableBytes(t.Deploy),
+		jsonOrEmptyObject(t.Env), jsonOrEmptyArray(t.SecretEnv),
+		t.SubmittedBy, t.SubmittedAt, t.StartedAt, t.FinishedAt,
+		nullableBytes(t.Error), t.RetryOf, intToAny(t.CurrentAttempt), boolToAny(t.CancelRequested),
+		zeroToNil(t.LastEventSeq), zeroToNil(t.Revision))
+	if err != nil {
+		return fmt.Errorf("store: insert task %s: %w", t.ID, err)
+	}
+	return nil
+}
+
+// Lock 对 Task 行加 FOR UPDATE 锁（统一锁顺序的第一步，02 §3.8）。
 func (r *TaskRepo) Lock(ctx context.Context, tx pgx.Tx, id string) (domain.TaskStatus, error) {
 	var st domain.TaskStatus
 	err := r.s.db(tx).QueryRow(ctx, `SELECT status FROM tasks WHERE id = $1 FOR UPDATE`, id).Scan(&st)
@@ -73,311 +256,193 @@ func (r *TaskRepo) Lock(ctx context.Context, tx pgx.Tx, id string) (domain.TaskS
 	return st, nil
 }
 
-// Insert 插入一行 Task（提交事务内用）。
-func (r *TaskRepo) Insert(ctx context.Context, tx pgx.Tx, t *Task) error {
+// SetEndpoint 写入 tasks.endpoint（deploy exports 收割回填 / service 静态提交，03 §4.3）。
+func (r *TaskRepo) SetEndpoint(ctx context.Context, tx pgx.Tx, id string, endpoint []byte) error {
+	_, err := r.s.db(tx).Exec(ctx, `UPDATE tasks SET endpoint = $2 WHERE id = $1`, id, endpoint)
+	if err != nil {
+		return fmt.Errorf("store: set endpoint %s: %w", id, err)
+	}
+	return nil
+}
+
+// SetDeploy 把 tasks.deploy 快照**深合并**进已有 JSON（03 §4.4）。
+//
+// 必须是合并而不是整段覆盖：release_name / provider / spec_digest 等冻结键只在提交时
+// 写一次，之后每次归档只带"变化的键"；覆盖会把冻结信息冲掉，重启后无法靠 release_name
+// 找回 Genet 侧的 release（§9.3 重放的输入）。
+func (r *TaskRepo) SetDeploy(ctx context.Context, tx pgx.Tx, id string, deploy []byte) error {
 	_, err := r.s.db(tx).Exec(ctx, `
-		INSERT INTO tasks (id, run_id, seq, name, tester_name, tester_version, image_ref, profile,
-		                   args_raw, args_argv, injected_argv, env, secret_env, on_failure,
-		                   timeout_seconds, retry_policy, status, status_reason, waiting_reason,
-		                   endpoint_key, endpoint_exclusive, current_attempt, available_at,
-		                   cancel_requested, result_ref, reused_from_task_id, error)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)`,
-		t.ID, t.RunID, t.Seq, t.Name, t.TesterName, t.TesterVersion, t.ImageRef, t.Profile,
-		t.ArgsRaw, jsonOrEmptyArray(t.ArgsArgv), jsonOrEmptyArray(t.InjectedArgv),
-		jsonOrEmptyObject(t.Env), jsonOrEmptyArray(t.SecretEnv), t.OnFailure,
-		t.TimeoutSeconds, jsonOrEmptyObject(t.RetryPolicy), t.Status, t.StatusReason,
-		t.WaitingReason, t.EndpointKey, t.EndpointExclusive, t.CurrentAttempt, t.AvailableAt,
-		t.CancelRequested, t.ResultRef, t.ReusedFromTaskID, nullableBytes(t.Error))
+		UPDATE tasks
+		   SET deploy = COALESCE(deploy, '{}'::jsonb) || $2::jsonb
+		 WHERE id = $1`, id, deploy)
 	if err != nil {
-		return fmt.Errorf("store: insert task %s: %w", t.ID, err)
+		return fmt.Errorf("store: set deploy %s: %w", id, err)
 	}
 	return nil
 }
 
-// ListByRun 按 (run_id, seq) 取 Task 列表，seq 游标分页。
-func (r *TaskRepo) ListByRun(ctx context.Context, tx pgx.Tx, runID, cursor string, limit int) ([]Task, string, error) {
-	limit = normalizeLimit(limit)
-	// 空 cursor = 首屏：seq 从 -1 起（`seq > -1` 含 seq=0 的 Pre-Check）。
-	// 若直接用 DecodeSeqCursor("")=0，`seq > 0` 会漏掉 precheck（QA 报的回归）。
-	since := int64(-1)
-	if cursor != "" {
-		v, err := DecodeSeqCursor(cursor)
-		if err != nil {
-			return nil, "", err
-		}
-		since = v
-	}
-	rows, err := r.s.db(tx).Query(ctx, `SELECT `+taskCols+`
-		  FROM tasks WHERE run_id = $1 AND seq > $2 ORDER BY seq LIMIT $3`, runID, since, limit+1)
-	if err != nil {
-		return nil, "", fmt.Errorf("store: list tasks by run %s: %w", runID, err)
-	}
-	out, err := collectTasks(rows)
-	if err != nil {
-		return nil, "", err
-	}
-	next := ""
-	if len(out) > limit {
-		out = out[:limit]
-		next = EncodeSeqCursor(int64(out[len(out)-1].Seq))
-	}
-	return out, next, nil
+// RunnerCounts 是 Task 的 runner 状态聚合（前端列表与看板用）。
+//
+// 口径：pending 含 queued；running 含 preparing；failed 含 canceled；skipped 单独一档。
+type RunnerCounts struct {
+	Total     int `json:"total"`
+	Pending   int `json:"pending"`
+	Running   int `json:"running"`
+	Succeeded int `json:"succeeded"`
+	Failed    int `json:"failed"`
+	Skipped   int `json:"skipped"`
 }
 
-// TaskFilter 是跨 Run 的 Task 列表过滤（07 §5.2）。
-type TaskFilter struct {
-	Statuses []string
-	Tester   string
-	RunID    string
-	Cursor   string
-	Limit    int
-}
-
-// List 返回跨 Run 的 Task 列表，按 created_at DESC, id DESC 游标分页。
-func (r *TaskRepo) List(ctx context.Context, tx pgx.Tx, f TaskFilter) ([]Task, string, error) {
-	limit := normalizeLimit(f.Limit)
-	args := []any{}
-	var where []string
-	if len(f.Statuses) > 0 {
-		args = append(args, f.Statuses)
-		where = append(where, fmt.Sprintf("status = ANY($%d)", len(args)))
+// RunnerCountsByTask 批量取多个 Task（按其 current_attempt）的 runner 计数
+// （一条 GROUP BY，避免 N+1）。
+func (r *TaskRepo) RunnerCountsByTask(ctx context.Context, tx pgx.Tx, taskIDs []string) (map[string]RunnerCounts, error) {
+	out := make(map[string]RunnerCounts, len(taskIDs))
+	if len(taskIDs) == 0 {
+		return out, nil
 	}
-	if f.Tester != "" {
-		args = append(args, f.Tester)
-		where = append(where, fmt.Sprintf("tester_name = $%d", len(args)))
-	}
-	if f.RunID != "" {
-		args = append(args, f.RunID)
-		where = append(where, fmt.Sprintf("run_id = $%d", len(args)))
-	}
-	ts, id, err := DecodeCursor(f.Cursor)
-	if err != nil {
-		return nil, "", err
-	}
-	if !ts.IsZero() {
-		args = append(args, ts, id)
-		where = append(where, fmt.Sprintf("(created_at, id) < ($%d, $%d)", len(args)-1, len(args)))
-	}
-	args = append(args, limit+1)
-	q := `SELECT ` + taskCols + ` FROM tasks`
-	if len(where) > 0 {
-		q += " WHERE " + strings.Join(where, " AND ")
-	}
-	q += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d", len(args))
-
-	rows, err := r.s.db(tx).Query(ctx, q, args...)
-	if err != nil {
-		return nil, "", fmt.Errorf("store: list tasks: %w", err)
-	}
-	out, err := collectTasks(rows)
-	if err != nil {
-		return nil, "", err
-	}
-	next := ""
-	if len(out) > limit {
-		out = out[:limit]
-		last := out[len(out)-1]
-		next = EncodeCursor(last.CreatedAt, last.ID)
-	}
-	return out, next, nil
-}
-
-// Candidate 是调度候选（C-4.2）：**不加行锁**，并发由后续 Run 锁 + CAS 兜住。
-type Candidate struct {
-	ID                string
-	RunID             string
-	Seq               int
-	EndpointKey       *string
-	EndpointExclusive bool
-}
-
-// Candidates 取一批可调度的 Task 候选。
-func (r *TaskRepo) Candidates(ctx context.Context, tx pgx.Tx, limit int) ([]Candidate, error) {
-	limit = normalizeLimit(limit)
 	rows, err := r.s.db(tx).Query(ctx, `
-		SELECT t.id, t.run_id, t.seq, t.endpoint_key, t.endpoint_exclusive
-		  FROM tasks t JOIN runs r ON r.id = t.run_id
-		 WHERE t.status = 'queued'
-		   AND r.status = 'testing'
-		   AND (t.available_at IS NULL OR t.available_at <= now())
-		 ORDER BY r.submitted_at, t.seq
-		 LIMIT $1`, limit)
+		SELECT rr.task_id,
+		       count(*),
+		       count(*) FILTER (WHERE rr.status IN ('pending','queued')),
+		       count(*) FILTER (WHERE rr.status IN ('preparing','running')),
+		       count(*) FILTER (WHERE rr.status = 'succeeded'),
+		       count(*) FILTER (WHERE rr.status IN ('failed','canceled')),
+		       count(*) FILTER (WHERE rr.status = 'skipped')
+		  FROM task_runners rr
+		 WHERE rr.task_id = ANY($1)
+		   AND rr.attempt_no = (SELECT t.current_attempt FROM tasks t WHERE t.id = rr.task_id)
+		 GROUP BY rr.task_id`, taskIDs)
 	if err != nil {
-		return nil, fmt.Errorf("store: candidates: %w", err)
+		return nil, fmt.Errorf("store: task runner counts: %w", err)
 	}
 	defer rows.Close()
-	var out []Candidate
 	for rows.Next() {
-		var c Candidate
-		if err := rows.Scan(&c.ID, &c.RunID, &c.Seq, &c.EndpointKey, &c.EndpointExclusive); err != nil {
-			return nil, fmt.Errorf("store: scan candidate: %w", err)
+		var taskID string
+		var c RunnerCounts
+		if err := rows.Scan(&taskID, &c.Total, &c.Pending, &c.Running,
+			&c.Succeeded, &c.Failed, &c.Skipped); err != nil {
+			return nil, fmt.Errorf("store: scan task runner counts: %w", err)
 		}
-		out = append(out, c)
+		out[taskID] = c
 	}
 	return out, rows.Err()
 }
 
-// SetWaitingReason 写调度等待原因（仅展示，C-4.7）。
-func (r *TaskRepo) SetWaitingReason(ctx context.Context, tx pgx.Tx, taskID, reason string) error {
-	var v *string
-	if reason != "" {
-		if !domain.ValidWaitingReason(reason) {
-			return fmt.Errorf("store: waiting_reason %q 非法: %w", reason, domain.ErrPrecondition)
-		}
-		v = &reason
-	}
-	_, err := r.s.db(tx).Exec(ctx, `UPDATE tasks SET waiting_reason = $2, updated_at = now() WHERE id = $1`, taskID, v)
-	if err != nil {
-		return fmt.Errorf("store: set waiting reason %s: %w", taskID, err)
-	}
-	return nil
+// ActiveEndpoints 返回当前非终态 Task 的 endpoint 投影（GET /api/v1/endpoints 用）。
+type EndpointRow struct {
+	Key       string `json:"key"`
+	URL       string `json:"url"`
+	ModelName string `json:"model_name,omitempty"`
+	ModelPath string `json:"model_path,omitempty"`
+	Source    string `json:"source,omitempty"`
+	TaskID    string `json:"task_id"`
 }
 
-// BackfillPublicParams 在 Deploy ready 时把 endpoint_key 与每个 Task 的 injected_argv
-// 一次性回填（C-5.3：与状态转移同事务，避免"已 testing 但 Task 还没 key"的窗口）。
-func (r *TaskRepo) BackfillPublicParams(ctx context.Context, tx pgx.Tx, runID, endpointKey string,
-	injected map[string][]string) error {
-	if endpointKey != "" {
-		if _, err := r.s.db(tx).Exec(ctx,
-			`UPDATE tasks SET endpoint_key = $2 WHERE run_id = $1 AND endpoint_key IS NULL`,
-			runID, endpointKey); err != nil {
-			return fmt.Errorf("store: backfill endpoint_key %s: %w", runID, err)
-		}
-	}
-	for taskID, argv := range injected {
-		if _, err := r.s.db(tx).Exec(ctx,
-			`UPDATE tasks SET injected_argv = $2, updated_at = now() WHERE id = $1`,
-			taskID, argv); err != nil {
-			return fmt.Errorf("store: backfill injected_argv %s: %w", taskID, err)
-		}
-	}
-	return nil
-}
-
-// SetResultRef 记录 Task 的结果引用（相对 Run 目录）。
-func (r *TaskRepo) SetResultRef(ctx context.Context, tx pgx.Tx, taskID, ref string) error {
-	_, err := r.s.db(tx).Exec(ctx, `UPDATE tasks SET result_ref = $2, updated_at = now() WHERE id = $1`, taskID, ref)
-	if err != nil {
-		return fmt.Errorf("store: set result ref %s: %w", taskID, err)
-	}
-	return nil
-}
-
-// CountNonTerminal 返回 Run 里还没到终态的 Task 数（Run 推进到 cleanup 的判定）。
-func (r *TaskRepo) CountNonTerminal(ctx context.Context, tx pgx.Tx, runID string) (int, error) {
-	var n int
-	err := r.s.db(tx).QueryRow(ctx, `
-		SELECT count(*) FROM tasks WHERE run_id = $1
-		   AND NOT (status = ANY($2))`, runID, domain.TerminalTaskStatusStrings()).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("store: count non-terminal %s: %w", runID, err)
-	}
-	return n, nil
-}
-
-// QueueTasks 把 Run 里等待中的 Task 批量置 queued（Pre-Check 通过 / precheck off）。
-// 只对 endpoint_key 非空的 pending Task 生效（C-4.5 调度守卫）。
-func (r *TaskRepo) QueueTasks(ctx context.Context, tx pgx.Tx, runID string, onlySeqZero bool) ([]string, error) {
-	q := `UPDATE tasks SET status = 'queued', waiting_reason = NULL, updated_at = now()
-	       WHERE run_id = $1 AND status = 'pending' AND endpoint_key IS NOT NULL`
-	if onlySeqZero {
-		q += ` AND seq = 0`
-	}
-	q += ` RETURNING id`
-	rows, err := r.s.db(tx).Query(ctx, q, runID)
-	if err != nil {
-		return nil, fmt.Errorf("store: queue tasks %s: %w", runID, err)
-	}
-	return collectIDs(rows)
-}
-
-// WaitingBreakdown 返回等待中的 Task 按 waiting_reason 分组计数（/queue-status 用）。
-// 只返回 6 个合法取值；没有写 waiting_reason 的 Task 归入 "unknown" 桶，
-// 由调用方决定如何呈现（openapi 的 by_reason 只允许 6 个键）。
-func (r *TaskRepo) WaitingBreakdown(ctx context.Context, tx pgx.Tx) (map[string]int, error) {
-	out := map[string]int{
-		domain.WaitPrecheckGate: 0, domain.WaitSlotWaiting: 0, domain.WaitGlobalLimit: 0,
-		domain.WaitQueueFull: 0, domain.WaitInsufficientResources: 0, domain.WaitGangPending: 0,
-	}
-	// 只统计**非终态 Run** 下的 Task：历史脏数据（Run 已终态但 Task 还挂在 pending/queued）
-	// 不得灌进 KPI/等待列表（D-60）。
+// ListActiveEndpoints 取非终态 Task 上登记的 Endpoint。
+func (r *TaskRepo) ListActiveEndpoints(ctx context.Context, tx pgx.Tx) ([]EndpointRow, error) {
 	rows, err := r.s.db(tx).Query(ctx, `
-		SELECT COALESCE(t.waiting_reason, 'unknown'), count(*)
-		  FROM tasks t JOIN runs r ON r.id = t.run_id
-		 WHERE t.status IN ('pending','queued')
-		   AND NOT (r.status = ANY($1))
-		 GROUP BY 1`, domain.TerminalRunStatusStrings())
+		SELECT id, endpoint->>'key', endpoint->>'url',
+		       COALESCE(endpoint->>'model_name',''), COALESCE(endpoint->>'model_path',''),
+		       COALESCE(endpoint->>'source','')
+		  FROM tasks
+		 WHERE endpoint IS NOT NULL
+		   AND status <> ALL($1)
+		 ORDER BY submitted_at DESC`, domain.TerminalTaskStatusStrings())
 	if err != nil {
-		return nil, fmt.Errorf("store: waiting breakdown: %w", err)
+		return nil, fmt.Errorf("store: list endpoints: %w", err)
 	}
 	defer rows.Close()
+	var out []EndpointRow
 	for rows.Next() {
-		var reason string
-		var n int
-		if err := rows.Scan(&reason, &n); err != nil {
-			return nil, fmt.Errorf("store: scan waiting breakdown: %w", err)
+		var e EndpointRow
+		if err := rows.Scan(&e.TaskID, &e.Key, &e.URL, &e.ModelName, &e.ModelPath, &e.Source); err != nil {
+			return nil, fmt.Errorf("store: scan endpoint: %w", err)
 		}
-		if _, known := out[reason]; known {
-			out[reason] = n
-		} else {
-			out["unknown"] += n
-		}
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }
 
-// WaitingTaskRow 是 /queue-status 的排队明细（C-4.7）。
-type WaitingTaskRow struct {
+// CleanupRequiredTask 是 clean 兜底对账扫描（§9.3 兜底的 MVP 形态）的命中行。
+type CleanupRequiredTask struct {
 	TaskID        string
-	RunID         string
-	Name          string
-	Seq           int
-	Status        string
-	WaitingReason *string
-	EndpointKey   *string
-	Since         *time.Time
+	AttemptNo     int
+	DeployRelease string // tasks.deploy->>'release_name'（日志可读，可能为空）
 }
 
-// WaitingTasks 返回排队明细，按 (run.submitted_at, seq) 升序即调度 FIFO 顺序（C-4.6）。
-func (r *TaskRepo) WaitingTasks(ctx context.Context, tx pgx.Tx, limit int) ([]WaitingTaskRow, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 100
-	}
+// ListCleanupRequired 扫描「Task 已终态 + tasks.deploy 非空 + 当前 attempt 没有
+// succeeded 的 clean 记录」的行（§9.3：deploy 泄漏候选）。
+//
+// 排除已写过 cleanup_required 事件（task 级 state_changed + payload.reason）的
+// (task, attempt)，扫描可周期重跑而不重复告警。**只读出口**：不自动重放 clean
+// （§14.2 P1），重放只走 POST /tasks/{id}/clean。
+func (r *TaskRepo) ListCleanupRequired(ctx context.Context, tx pgx.Tx, limit int) ([]CleanupRequiredTask, error) {
 	rows, err := r.s.db(tx).Query(ctx, `
-		SELECT t.id, t.run_id, t.name, t.seq, t.status, t.waiting_reason, t.endpoint_key,
-		       COALESCE(t.available_at, t.updated_at)
-		  FROM tasks t JOIN runs r ON r.id = t.run_id
-		 WHERE t.status IN ('pending','queued')
-		   AND NOT (r.status = ANY($2))
-		 ORDER BY r.submitted_at, t.seq
-		 LIMIT $1`, limit, domain.TerminalRunStatusStrings())
+		SELECT t.id, t.current_attempt, COALESCE(t.deploy->>'release_name', '')
+		  FROM tasks t
+		 WHERE t.status = ANY($1)
+		   AND t.deploy IS NOT NULL
+		   AND NOT EXISTS (
+		        SELECT 1 FROM task_runners rr
+		         WHERE rr.task_id = t.id
+		           AND rr.attempt_no = t.current_attempt
+		           AND rr.role = 'clean'
+		           AND rr.status = 'succeeded')
+		   AND NOT EXISTS (
+		        SELECT 1 FROM state_events se
+		         WHERE se.task_id = t.id
+		           AND se.type = 'state_changed'
+		           AND se.payload->>'reason' = 'cleanup_required'
+		           AND se.attempt_no IS NULL
+		           AND se.runner_seq IS NULL)
+		 ORDER BY t.submitted_at DESC
+		 LIMIT $2`, domain.TerminalTaskStatusStrings(), limit)
 	if err != nil {
-		return nil, fmt.Errorf("store: waiting tasks: %w", err)
+		return nil, fmt.Errorf("store: list cleanup-required tasks: %w", err)
 	}
 	defer rows.Close()
-	var out []WaitingTaskRow
+	var out []CleanupRequiredTask
 	for rows.Next() {
-		var w WaitingTaskRow
-		if err := rows.Scan(&w.TaskID, &w.RunID, &w.Name, &w.Seq, &w.Status,
-			&w.WaitingReason, &w.EndpointKey, &w.Since); err != nil {
-			return nil, fmt.Errorf("store: scan waiting task: %w", err)
+		var row CleanupRequiredTask
+		if err := rows.Scan(&row.TaskID, &row.AttemptNo, &row.DeployRelease); err != nil {
+			return nil, fmt.Errorf("store: scan cleanup-required task: %w", err)
 		}
-		out = append(out, w)
+		out = append(out, row)
 	}
 	return out, rows.Err()
 }
 
-func collectTasks(rows pgx.Rows) ([]Task, error) {
-	defer rows.Close()
-	var out []Task
-	for rows.Next() {
-		t, err := scanTask(rows)
-		if err != nil {
-			return nil, fmt.Errorf("store: scan task: %w", err)
-		}
-		out = append(out, *t)
+// ---- 小工具 --------------------------------------------------------------
+
+func normalizeLimit(n int) int {
+	if n <= 0 {
+		return 50
 	}
-	return out, rows.Err()
+	if n > 200 {
+		return 200
+	}
+	return n
+}
+
+func zeroToNil(n int64) any {
+	if n == 0 {
+		return nil
+	}
+	return n
+}
+
+func intToAny(n int) any {
+	if n == 0 {
+		return nil
+	}
+	return n
+}
+
+func boolToAny(b bool) any {
+	if !b {
+		return nil
+	}
+	return b
 }
 
 func jsonOrEmptyArray(b []byte) []byte {
@@ -392,4 +457,24 @@ func jsonOrEmptyObject(b []byte) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// ResolvedPrecheck 解析 resolved 快照里的 precheck 判据（03 §4.2）：
+// injected 是"这个 Task 到底有没有平台注入的 pre_check runner"的**唯一判据**
+// （precheck: "off" 时为 {"injected": false}，只有这一个键）。
+func ResolvedPrecheck(resolved []byte) (injected bool, runner string, version string, err error) {
+	if len(resolved) == 0 {
+		return false, "", "", nil
+	}
+	var snap struct {
+		Precheck struct {
+			Injected bool   `json:"injected"`
+			Runner   string `json:"runner"`
+			Version  string `json:"version"`
+		} `json:"precheck"`
+	}
+	if err := json.Unmarshal(resolved, &snap); err != nil {
+		return false, "", "", fmt.Errorf("store: parse resolved: %w", err)
+	}
+	return snap.Precheck.Injected, snap.Precheck.Runner, snap.Precheck.Version, nil
 }

@@ -2,19 +2,19 @@
 # 步骤：
 #   1. 重启 mock-llm-delayed（15s 后才就绪），提交一个 service 形态、2 个 test 的 Run；
 #   2. 等 Run 进入 testing 且至少一个 Attempt running；
-#   3. kubectl delete pod -l app.kubernetes.io/name=testplaned --grace-period=0 --force；
+#   3. kubectl delete pod -l app.kubernetes.io/name=argusd --grace-period=0 --force；
 #   4. 等新 Pod Ready（RecoveryTimeoutSeconds 内），检查启动日志与对账结果；
 #   5. 断言 Run 到终态（succeeded / 按事实 failed）、无租约/Job 残留、有 attempt.finished。
 # 负向：-RecoveryTimeoutSeconds 1 时，控制面 1s 内没恢复必须 FAIL（不会静默通过）。
 param(
     [string]$BaseUrl = 'http://127.0.0.1:8098',
     [string]$User = 'dev',
-    [string]$Namespace = 'testplane',
-    [string]$ControllerLabel = 'app.kubernetes.io/name=testplaned',
+    [string]$Namespace = 'argus',
+    [string]$ControllerLabel = 'app.kubernetes.io/name=argusd',
     [string]$DefaultNamespace = 'default',
-    [string]$PgContainer = 'testplane-pg',
-    [string]$PgUser = 'testplane',
-    [string]$PgDb = 'testplane',
+    [string]$PgContainer = 'argus-pg',
+    [string]$PgUser = 'argus',
+    [string]$PgDb = 'argus',
     [int]$RecoveryTimeoutSeconds = 60,
     [int]$RunTimeoutSeconds = 240,
     [int]$GcWaitSeconds = 90,
@@ -39,7 +39,7 @@ function Start-ApiForward {
     param([int]$Port)
     $log = Join-Path $OutDir ("forward-$Port.log")
     $p = Start-Process -FilePath 'kubectl' `
-        -ArgumentList @('-n', $Namespace, 'port-forward', 'svc/testplane', "${Port}:8080") `
+        -ArgumentList @('-n', $Namespace, 'port-forward', 'svc/argus', "${Port}:8080") `
         -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput $log -RedirectStandardError "$log.err"
     $deadline = (Get-Date).AddSeconds(20)
@@ -128,14 +128,14 @@ function Wait-ControllerReady {
 function New-Manifest {
     param([string]$Stamp)
     return @"
-{"run":{"name":"restart-$Stamp","service":{"url":"http://mock-llm-delayed.$DefaultNamespace.svc:18080/v1","model_name":"mock-llm"},"precheck":"off","cleanup":{"policy":"never"},"tests":[{"name":"drill-a","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"args":"--wait_timeout_seconds=60 --retry_interval_seconds=1","timeout_seconds":180},{"name":"drill-b","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"args":"--wait_timeout_seconds=60 --retry_interval_seconds=1","timeout_seconds":180}]}}
+{"task":{"name":"restart-$Stamp","service":{"url":"http://mock-llm-delayed.$DefaultNamespace.svc:18080/v1","model_name":"mock-llm"},"precheck":"off","runners":[{"name":"drill-a","runner":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"input":"{\"wait_timeout_seconds\":60,\"retry_interval_seconds\":1}","on_failure":"continue","timeout_seconds":180},{"name":"drill-b","runner":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"input":"{\"wait_timeout_seconds\":60,\"retry_interval_seconds\":1}","on_failure":"continue","timeout_seconds":180}]}}
 "@
 }
 
 if ($DryRun) {
     Write-Host "restart-drill dry-run（不连后端、不 kill）" -ForegroundColor Cyan
     Write-Host "  base_url=$BaseUrl controller ns=$Namespace label=$ControllerLabel"
-    Write-Host "  恢复阈值 ${RecoveryTimeoutSeconds}s；Run 终态阈值 ${RunTimeoutSeconds}s；GC 等待 ${GcWaitSeconds}s"
+    Write-Host "  恢复阈值 ${RecoveryTimeoutSeconds}s；Task 终态阈值 ${RunTimeoutSeconds}s；GC 等待 ${GcWaitSeconds}s"
     Write-Host (New-Manifest -Stamp (Get-Date -Format 'yyyyMMdd-HHmmss'))
     Write-Host "dry-run OK" -ForegroundColor Green
     exit 0
@@ -165,8 +165,8 @@ if (-not $SkipApply) {
 }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$submitted = Invoke-Api -Method POST -Path '/api/v1/runs' -Body (New-Manifest -Stamp $stamp)
-$runId = [string]$submitted.run.id
+$submitted = Invoke-Api -Method POST -Path '/api/v1/tasks' -Body (New-Manifest -Stamp $stamp)
+$runId = [string]$submitted.task.id
 Write-Host "已提交 Run $runId"
 
 # 等 testing 且至少一个 Attempt running
@@ -174,9 +174,9 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $run = $null
 $taskId = ''
 while ($sw.Elapsed.TotalSeconds -lt 60) {
-    $run = Invoke-Api -Method GET -Path "/api/v1/runs/$runId"
+    $run = Invoke-Api -Method GET -Path "/api/v1/tasks/$runId"
     if ($run.status -eq 'testing') {
-        foreach ($t in $run.tasks) {
+        foreach ($t in $run.runners) {
             if ($t.status -eq 'running') { $taskId = $t.id; break }
         }
         if ($taskId -ne '') { break }
@@ -229,25 +229,25 @@ while ((Get-Date) -lt $logDeadline) {
 Add-Check 'pod.logs_controller_started' ($logText -match 'controller started') $(if ($logText -match 'controller started') { '启动日志含 controller started' } else { '未见 controller started' })
 Add-Check 'pod.logs_startup_reconcile' ($logText -match 'startup reconcile') $(if ($logText -match 'startup reconcile') { '启动日志含 startup reconcile' } else { '未见 startup reconcile（当前实现成功路径不单独打；记录实际）' })
 
-# 等 Run 终态
+# 等 Task 终态
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $trace = @()
 while ($sw.Elapsed.TotalSeconds -lt $RunTimeoutSeconds) {
-    $run = Invoke-Api -Method GET -Path "/api/v1/runs/$runId"
-    $brief = ($run.tasks | ForEach-Object { "$($_.name)=$($_.status)" }) -join ', '
+    $run = Invoke-Api -Method GET -Path "/api/v1/tasks/$runId"
+    $brief = ($run.runners | ForEach-Object { "$($_.name)=$($_.status)" }) -join ', '
     $line = "t+{0:N1}s status={1} tasks: {2}" -f $sw.Elapsed.TotalSeconds, $run.status, $brief
     if ($trace.Count -eq 0 -or $trace[-1] -ne $line) { $trace += $line; Write-Host "  $line" }
-    if ($run.status -in @('succeeded', 'completed_with_errors', 'failed', 'service_unavailable', 'canceled')) { break }
+    if ($run.status -in @('succeeded', 'failed', 'service_unavailable', 'canceled')) { break }
     Start-Sleep -Seconds 1
 }
 $sw.Stop()
 $finalElapsed = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-$terminal = $run.status -in @('succeeded', 'completed_with_errors', 'failed', 'service_unavailable', 'canceled')
+$terminal = $run.status -in @('succeeded', 'failed', 'service_unavailable', 'canceled')
 Add-Check 'run.terminal' ($terminal -and $run.status -notin @('testing', 'cancelling')) ("status=" + $run.status + "，终态等待 " + $finalElapsed + "s")
 Add-Check 'run.not_hung_testing' ($run.status -ne 'testing') ("status=" + $run.status)
 Add-Check 'run.final_expected' ($run.status -in @('succeeded', 'failed')) ("status=" + $run.status + "（期望 succeeded 或按事实 failed）")
 
-$tasks = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/tasks?limit=200").items
+$tasks = (Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/runners?limit=200").items
 $taskIds = @($tasks | ForEach-Object { $_.id })
 $idsSql = @($taskIds | ForEach-Object { "'" + $_ + "'" }) -join ','
 try {
@@ -264,7 +264,7 @@ $gcSw = [System.Diagnostics.Stopwatch]::StartNew()
 while ($gcSw.Elapsed.TotalSeconds -lt $GcWaitSeconds) {
     $jobLeft = @()
     foreach ($tid in $taskIds) {
-        $name = "tp-t-" + $tid.ToLower() + "-a1"
+        $name = "argus-t-" + $tid.ToLower() + "-a1"
         $out = & kubectl -n $Namespace get job $name -o name --ignore-not-found 2>&1
         if ($LASTEXITCODE -ne 0) { Add-Check 'k8s.job_query' $false ("kubectl get job 失败：" + ($out -join ' ')); break }
         if (($out -join '') -ne '') { $jobLeft += ($out -join '') }
@@ -277,7 +277,7 @@ Add-Check 'k8s.jobs_empty' ($jobLeft.Count -eq 0) $(if ($jobLeft.Count -eq 0) { 
 
 # 事件：至少一条 attempt.finished；设计没有 reconciled 字段，按实际 payload 的
 # phase + exit_code 断言（不再用“没有标记就放行”的检查）。
-$events = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/events/history?limit=500").items
+$events = (Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/events/history?limit=500").items
 $finished = @($events | Where-Object { $_.type -eq 'attempt.finished' })
 $payloads = @($finished | ForEach-Object { $_.payload })
 $payloadComplete = $finished.Count -gt 0 -and @($payloads | Where-Object {

@@ -29,16 +29,16 @@ func (a *App) loadManifest() ([]byte, string, error) {
 	return []byte(a.builtinManifest()), "application/yaml", nil
 }
 
-// builtinManifest 生成最小可跑的 Manifest：
+// builtinManifest 生成最小可跑的 Manifest（v2：顶层嵌套 task:，D-40）：
 //
-//   - deploy 模式（默认）：有 deploy（Genet 部署）+ precheck auto 等价物 + 一个测试 Task；
-//     mock-llm 的地址放在 deploy.parameters.endpoint 里，好让 dev 的假 Genet 指向它。
-//   - service 模式：不部署，service.url 直接指向 mock-llm（本地没有 Genet 时用这个）。
+//   - service 模式：不部署，service.url 直接指向 mock-llm（本地没有 Genet 时用这个）；
+//   - deploy 模式（默认）：deploy（Genet 部署描述原文，service-deploy runner 消费）+ 一个测试 runner。
 //
-// precheck 写成显式对象而不是 auto：既固定 tester/version，也把等待窗口压短
-// （默认 600s 会让失败注入用例跑十分钟，e2e 必须能快进快出）。
+// precheck 写成显式对象而不是 auto：既固定 runner/version，也把等待窗口压短
+// （endpoint-probe 默认 600s 会让失败注入用例跑十分钟，e2e 必须能快进快出）。
+// 测试类 runner 用 aisbench-sla 的 stub（aisbench_cmd 参数指向镜像内 stub），秒级返回。
 func (a *App) builtinManifest() string {
-	name := a.opts.RunName
+	name := a.opts.TaskName
 	if name == "" {
 		name = "e2e-" + time.Now().Format("20060102-150405")
 	}
@@ -48,40 +48,46 @@ func (a *App) builtinManifest() string {
 		profileLine = fmt.Sprintf("      execution: { profile: %s }\n", a.opts.Profile)
 	}
 
-	tests := fmt.Sprintf(`    - name: probe-a
-      tester: endpoint-probe
-      version: "1.0.0"
-%s      args: "--wait_timeout_seconds=10 --retry_interval_seconds=1"
-`, profileLine)
+	runners := fmt.Sprintf(`    - name: probe-a
+      runner: %s
+      version: %q
+%s      input: |
+        {"sla":["ttft.avg:100000"],"input_len":128,"output_len":8,"data_num":8,"dataset":"/runner/fixtures/smoke_dataset.jsonl","work_path":"/tmp/aisbench-ws","aisbench_cmd":"/runner/tool/tests/stub_aisbench.py"}
+`, a.opts.RunnerName, a.opts.RunnerVersion, profileLine)
 
-	precheck := `  precheck:
-    tester: endpoint-probe
-    version: "1.0.0"
-    args: "--wait_timeout_seconds=60 --retry_interval_seconds=1"
-`
+	// precheck 块字段缩进是 4 空格（runners[] 内是 6），profile 行不能复用 profileLine。
+	precheckProfileLine := ""
+	if a.opts.Profile != "" {
+		precheckProfileLine = fmt.Sprintf("    execution: { profile: %s }\n", a.opts.Profile)
+	}
+	precheck := fmt.Sprintf(`  precheck:
+    runner: endpoint-probe
+    version: %q
+%s    input: |
+      {"wait_timeout_seconds":10,"retry_interval_seconds":1}
+`, a.opts.PrecheckVersion, precheckProfileLine)
 
 	header := fmt.Sprintf("# 由 tools/e2e 生成（mode=%s，%s）\n", a.opts.Mode, time.Now().Format(time.RFC3339))
 
 	if a.opts.Mode == "service" {
-		return header + fmt.Sprintf(`run:
+		return header + fmt.Sprintf(`task:
   name: %q
   service:
     url: %s
     model_name: %s
-%s  cleanup: { policy: never }
-  tests:
-%s`, name, a.opts.MockURL, a.opts.Model, precheck, tests)
+    model_path: /models/mock
+%s  runners:
+%s`, name, a.opts.MockURL, a.opts.Model, precheck, runners)
 	}
 
-	// 默认 deploy 模式
-	return header + fmt.Sprintf(`run:
+	// 默认 deploy 模式：deploy.spec 是 Genet 部署描述原文（平台不解析语义，service-deploy 消费）
+	return header + fmt.Sprintf(`task:
   name: %q
   deploy:
     provider: %s
-    parameters:
+    spec: |
       model: %s
       endpoint: %s
-%s  cleanup: { policy: always }
-  tests:
-%s`, name, a.opts.DeployProvider, a.opts.Model, a.opts.MockURL, precheck, tests)
+%s  runners:
+%s`, name, a.opts.DeployProvider, a.opts.Model, a.opts.MockURL, precheck, runners)
 }

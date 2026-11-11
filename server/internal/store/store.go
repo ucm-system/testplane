@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,30 +19,30 @@ import (
 // Store 是数据库访问的唯一入口（05 §3.2 硬规则 1：只有 store 执行 SQL）。
 //
 // 事务边界由调用方控制：事务型方法收一个 pgx.Tx，传 nil 表示用连接池自动提交。
-// 跨实体推进必须由调用方先按 Run → Task → Attempt 的顺序加锁（02 §3.8）。
+// 跨实体推进必须由调用方先按 Task → runner 执行记录的顺序加锁（02 §3.8）。
 type Store struct {
 	pool *pgxpool.Pool
 
-	Runs      *RunRepo
-	Tasks     *TaskRepo
-	Attempts  *AttemptRepo
-	Testers   *TesterRepo
-	Leases    *LeaseRepo
-	Events    *EventRepo
-	Clusters  *ClusterRepo
-	Audits    *AuditRepo
-	Profiles  *ProfileRepo
-	Artifacts *ArtifactRepo
+	Tasks      *TaskRepo
+	Attempts   *AttemptRepo
+	RunnerRuns *RunnerRunRepo
+	Runners    *RunnerRepo
+	Leases     *LeaseRepo
+	Events     *EventRepo
+	Clusters   *ClusterRepo
+	Audits     *AuditRepo
+	Profiles   *ProfileRepo
+	Artifacts  *ArtifactRepo
 	// SharedMounts 是平台级统一共享挂载（D-65，运行时可管理）。
 	SharedMounts *SharedMountRepo
 
 	// notifier 可为 nil：置位后，提交与 ClaimForExecution 会在提交后 NOTIFY。
 	notifier *Notifier
-	// clusterName 写进 attempts.executor_ref.cluster，默认 cluster-01（与 clusters 种子对齐）。
+	// clusterName 写进 task_runners.executor_ref.cluster，默认 cluster-01（与 clusters 种子对齐）。
 	clusterName string
-	// runFinishedHook 在 Run 落终态**提交之后**异步触发（报告生成；事务内不做文件 IO）。
-	runFinishedHook func(ctx context.Context, runID string)
-	// clock 是业务时间来源（05 §6.5）：写库时间戳、超窗与退避判定都走它，默认 SystemClock。
+	// taskFinishedHook 在 Task 落终态**提交之后**异步触发（报告生成；事务内不做文件 IO）。
+	taskFinishedHook func(ctx context.Context, taskID string)
+	// clock 是业务时间来源（05 §6.5）：写库时间戳、超窗判定都走它，默认 SystemClock。
 	clock domain.Clock
 }
 
@@ -77,10 +78,10 @@ func New(ctx context.Context, dsn string, maxConns int32) (*Store, error) {
 	}
 
 	s := &Store{pool: pool, clusterName: "cluster-01", clock: domain.SystemClock}
-	s.Runs = &RunRepo{s: s}
 	s.Tasks = &TaskRepo{s: s}
 	s.Attempts = &AttemptRepo{s: s}
-	s.Testers = &TesterRepo{s: s}
+	s.RunnerRuns = &RunnerRunRepo{s: s}
+	s.Runners = &RunnerRepo{s: s}
 	s.Leases = &LeaseRepo{s: s}
 	s.Events = &EventRepo{s: s}
 	s.Clusters = &ClusterRepo{s: s}
@@ -115,35 +116,37 @@ func (s *Store) SetNotifier(n *Notifier) { s.notifier = n }
 // Notifier 返回已注入的通知器（可能为 nil）。
 func (s *Store) NotifierRef() *Notifier { return s.notifier }
 
-// SetClusterName 设置本实例对接的集群名（写进 attempts.executor_ref.cluster）。
+// SetClusterName 设置本实例对接的集群名（写进 task_runners.executor_ref.cluster）。
 func (s *Store) SetClusterName(name string) {
 	if name != "" {
 		s.clusterName = name
 	}
 }
 
-// SetRunFinishedHook 注册 Run 终态回调（报告生成等外部动作，提交后异步执行）。
-func (s *Store) SetRunFinishedHook(h func(ctx context.Context, runID string)) { s.runFinishedHook = h }
+// SetTaskFinishedHook 注册 Task 终态回调（报告生成等外部动作，提交后异步执行）。
+func (s *Store) SetTaskFinishedHook(h func(ctx context.Context, taskID string)) {
+	s.taskFinishedHook = h
+}
 
-// fireRunFinished 在事务提交后异步触发回调；事务内禁止外部 IO（C-2.5）。
-func (s *Store) fireRunFinished(runID string) {
-	h := s.runFinishedHook
-	if h == nil || runID == "" {
+// fireTaskFinished 在事务提交后异步触发回调；事务内禁止外部 IO（C-2.5）。
+func (s *Store) fireTaskFinished(taskID string) {
+	h := s.taskFinishedHook
+	if h == nil || taskID == "" {
 		return
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		h(ctx, runID)
+		h(ctx, taskID)
 	}()
 }
 
-// EmitRunEvent 追加一条非状态转移事件（如 report.written），并分配 seq。
-func (s *Store) EmitRunEvent(ctx context.Context, runID, typ string, payload map[string]any, actor string) (int64, error) {
+// EmitTaskEvent 追加一条非状态转移事件（如 exports_harvested / report.written），并分配 seq。
+func (s *Store) EmitTaskEvent(ctx context.Context, taskID, typ string, payload map[string]any, actor string) (int64, error) {
 	var seq int64
 	err := s.InTx(ctx, func(tx pgx.Tx) error {
 		var err error
-		seq, err = s.nextSeq(ctx, tx, runID)
+		seq, err = s.nextSeq(ctx, tx, taskID)
 		if err != nil {
 			return err
 		}
@@ -152,8 +155,8 @@ func (s *Store) EmitRunEvent(ctx context.Context, runID, typ string, payload map
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO state_events (run_id, seq, type, payload, actor, created_at)
-			VALUES ($1, $2, $3, $4, $5, now())`, runID, seq, typ, raw, actorOf(actor)); err != nil {
+			INSERT INTO state_events (task_id, seq, type, payload, actor, created_at)
+			VALUES ($1, $2, $3, $4, $5, now())`, taskID, seq, typ, raw, actorOf(actor)); err != nil {
 			return err
 		}
 		return nil
@@ -162,7 +165,38 @@ func (s *Store) EmitRunEvent(ctx context.Context, runID, typ string, payload map
 		return 0, err
 	}
 	if s.notifier != nil && seq > 0 {
-		s.notifier.Notify(runID, seq)
+		s.notifier.Notify(taskID, seq)
+	}
+	return seq, nil
+}
+
+// EmitRunnerEvent 追加一条带执行记录定位的事件（如 exports_harvested）。
+func (s *Store) EmitRunnerEvent(ctx context.Context, k domain.RunnerKey, typ string, payload map[string]any, actor string) (int64, error) {
+	var seq int64
+	err := s.InTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		seq, err = s.nextSeq(ctx, tx, k.TaskID)
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		no, sq := k.AttemptNo, k.Seq
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO state_events (task_id, attempt_no, runner_seq, seq, type, payload, actor, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, now())`,
+			k.TaskID, no, sq, seq, typ, raw, actorOf(actor)); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if s.notifier != nil && seq > 0 {
+		s.notifier.Notify(k.TaskID, seq)
 	}
 	return seq, nil
 }
@@ -213,8 +247,9 @@ func (s *Store) db(tx pgx.Tx) DBTX {
 
 // ---- ID 生成（05 §6.5）---------------------------------------------------
 //
-// r-YYYYMMDD-XXXX / t-XXXXXX / <task>-a<n> / j-<8hex>
+// t-YYYYMMDD-XXXX（Task，03 §1）/ j-<8hex>（Job）
 // crypto 随机 + base32（去掉易混字符），禁止用名称或自增序列做对外标识（K-11）。
+// runner 执行记录没有独立 ID：定位键 (task_id, attempt_no, seq)（D-68）。
 
 // idEncoding 用 Crockford base32 字母表（去掉 I/L/O/U），避免人工转录出错。
 var idEncoding = base32.NewEncoding("0123456789ABCDEFGHJKMNPQRSTVWXYZ").WithPadding(base32.NoPadding)
@@ -232,16 +267,32 @@ func randomID(n int) string {
 	return s[:n]
 }
 
-// NewRunID 生成 r-YYYYMMDD-XXXX（UTC 日期）。
-func NewRunID(now time.Time) string {
-	return "r-" + now.UTC().Format("20060102") + "-" + randomID(4)
+// NewTaskID 生成 t-YYYYMMDD-XXXX（UTC 日期；03 §1 的 Task ID 形态）。
+func NewTaskID(now time.Time) string {
+	return "t-" + now.UTC().Format("20060102") + "-" + randomID(4)
 }
-
-// NewTaskID 生成 t-XXXXXX。
-func NewTaskID() string { return "t-" + randomID(6) }
-
-// AttemptID 生成 <task>-a<n>（03 §3.1）。
-func AttemptID(taskID string, idx int) string { return fmt.Sprintf("%s-a%d", taskID, idx) }
 
 // NewJobID 生成 j-<8hex>；幂等键，重复创建 Job 时由执行层复用。
 func NewJobID() string { return "j-" + randomID(8) }
+
+// JobName 按 (task_id, attempt_no, seq) 派生 K8s Job 名的**默认**前缀形态
+// （附录 B：幂等键 = 三元组的派生；执行层波次负责最终命名，这里只提供一致的派生）。
+func JobName(k domain.RunnerKey) string {
+	// 与 executor/render.go 的派生保持逐字一致（argus- 前缀 + TaskID 小写）：
+	// DB 的 job_id/executor_ref、GC 的按名反查、watch 的 Get 必须指向同一个对象。
+	return fmt.Sprintf("argus-%s-%d-%d", strings.ToLower(k.TaskID), k.AttemptNo, k.Seq)
+}
+
+func actorOf(actor string) string {
+	if actor == "" {
+		return "system:api"
+	}
+	return actor
+}
+
+func defaultString(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}

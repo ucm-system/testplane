@@ -26,8 +26,8 @@ test('real backend: /healthz + runs list 非空', async ({ page, request }) => {
   expect(body.items!.length).toBeGreaterThan(0)
 
   await page.goto('/')
-  await expect(page.getByText('全部 Run')).toBeVisible()
-  await expect(page.locator('tbody a[href^="/runs/"]').first()).toBeVisible()
+  await expect(page.getByText('全部 Task')).toBeVisible()
+  await expect(page.locator('tbody a[href^="/tasks/"]').first()).toBeVisible()
 })
 /**
  * 管理台 CRUD 的**真后端**回归（评审 #1）：走**前端自己的 client**（不是手写 HTTP），

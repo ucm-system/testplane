@@ -1,22 +1,22 @@
-# TestPlane · 产物存储（dev：hostPath 模拟 RWX）
+# Argus · 产物存储（dev：hostPath 模拟 RWX）
 #
 # 设计依据
 #   design/views/06-physical-view.md §2（PVC）、§3（目录树与属主）
 #   design/impl/execution.md §3（subPath、目录预创建、权限兜底）
 #
 # 链路：宿主 <你渲染时给的目录>（默认 .data\storage，可参数化）
-#         --(kind extraMounts，见 deploy/kind/testplane.yaml 模板 + render.ps1)--> 节点 /storage-root
-#         --(hostPath PV)--> PVC testplane-storage --> 控制面 /storage-root
-#                                                    --> Tester subPath /workspace/output
+#         --(kind extraMounts，见 deploy/kind/argus.yaml 模板 + render.ps1)--> 节点 /storage-root
+#         --(hostPath PV)--> PVC argus-storage --> 控制面 /storage-root
+#                                                    --> Runner subPath /workspace/output
 #
 # 为什么单节点 hostPath 也能声明 ReadWriteMany：
-#   RWX 在 P0 的语义是「控制面与多个 Tester Pod 同时读写同一份目录」。
+#   RWX 在 P0 的语义是「控制面与多个 Runner Pod 同时读写同一份目录」。
 #   hostPath 不提供跨节点共享，但 kind 单节点里所有 Pod 落在同一个节点，
 #   同一个 hostPath 天然满足这一点——所以 accessModes 写 RWX 是**事实成立**的，
 #   只是没有跨节点保证。多节点/生产必须换 NFS CSI（06 §5.5、W-9），改 kustomization
 #   的 storage 覆盖即可，PVC 名与挂载点不变。
 #
-# 容量 10Gi 只是元数据（hostPath 不做配额）；真实配额靠 TESTPLANE_ARTIFACT_MAX_BYTES
+# 容量 10Gi 只是元数据（hostPath 不做配额）；真实配额靠 AG_ARTIFACT_MAX_BYTES
 # 与保留期 sweep（06 §3.4）。prod 容量按 06 §5.4 的公式估算。
 #
 # 绑定点：PV 用 claimRef 预绑 + 两侧 storageClassName: ""，避免与 kind 自带的
@@ -24,11 +24,11 @@
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: testplane-storage
+  name: argus-storage
   labels:
-    app.kubernetes.io/name: testplane
-    app.kubernetes.io/part-of: testplane
-    testplane.io/role: storage-root
+    app.kubernetes.io/name: argus
+    app.kubernetes.io/part-of: argus
+    argus.io/role: storage-root
 spec:
   storageClassName: ""
   capacity:
@@ -39,8 +39,8 @@ spec:
   # Retain：删 PVC 不删宿主数据，dev 里误删清单不至于丢产物
   persistentVolumeReclaimPolicy: Retain
   claimRef:
-    namespace: testplane
-    name: testplane-storage
+    namespace: argus
+    name: argus-storage
   hostPath:
     # 节点内路径 = kind extraMounts 的 containerPath
     path: /storage-root
@@ -49,16 +49,16 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: testplane-storage
-  namespace: testplane
+  name: argus-storage
+  namespace: argus
   labels:
-    app.kubernetes.io/name: testplane
-    app.kubernetes.io/part-of: testplane
-    testplane.io/role: storage-root
+    app.kubernetes.io/name: argus
+    app.kubernetes.io/part-of: argus
+    argus.io/role: storage-root
 spec:
   # 空串 = 静态绑定到上面那个 PV，不走 StorageClass 动态供给
   storageClassName: ""
-  volumeName: testplane-storage
+  volumeName: argus-storage
   accessModes:
     - ReadWriteMany
   resources:

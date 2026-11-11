@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
+	"github.com/ucm-system/testplane/server/internal/orchestrator"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
 
@@ -14,8 +15,9 @@ import (
 //
 //	{"code","message","detail","retryable","trace_id"}
 //
-// code 只用附录 D 枚举；HTTP 状态由 code 映射（httpStatusByCode）。未知错误一律
-// INTERNAL_ERROR + trace_id，绝不回传 pgx / client-go 原文（05 §6.1）。
+// code 只用附录 D v2 枚举（domain.AllCodes 为同一集合）；HTTP 状态由 code 映射
+// （httpStatusByCode）。未知错误一律 INTERNAL_ERROR + trace_id，绝不回传 pgx /
+// client-go 原文（05 §6.1）。
 type errorBody struct {
 	Code      string         `json:"code"`
 	Message   string         `json:"message"`
@@ -24,27 +26,30 @@ type errorBody struct {
 	TraceID   string         `json:"trace_id,omitempty"`
 }
 
-// httpStatusByCode 是附录 D "HTTP" 列的机器版本。
+// httpStatusByCode 是附录 D v2 "HTTP" 列的机器版本（07 §3 的映射表）。
 var httpStatusByCode = map[string]int{
 	domain.CodeValidationError:         http.StatusBadRequest,
 	domain.CodeUnauthenticated:         http.StatusUnauthorized,
 	domain.CodeForbidden:               http.StatusForbidden,
 	domain.CodeNotFound:                http.StatusNotFound,
 	domain.CodeConflict:                http.StatusConflict,
-	domain.CodeTesterNotFound:          http.StatusBadRequest,
-	domain.CodeTesterVersionPinned:     http.StatusConflict,
-	domain.CodeTesterInvalid:           http.StatusBadRequest,
+	domain.CodeRunnerNotFound:          http.StatusBadRequest,
+	domain.CodeRunnerVersionPinned:     http.StatusConflict,
+	domain.CodeRunnerInvalid:           http.StatusBadRequest,
 	domain.CodeExecutionProfileMissing: http.StatusBadRequest,
-	domain.CodeRunTooLarge:             http.StatusBadRequest,
+	domain.CodeTaskTooLarge:            http.StatusBadRequest,
+	domain.CodeAttemptExhausted:        http.StatusConflict,
 	domain.CodeResourceExhausted:       http.StatusTooManyRequests,
 	domain.CodeArtifactQuotaExceeded:   http.StatusInsufficientStorage,
 	domain.CodeExecutorUnavailable:     http.StatusServiceUnavailable,
+	domain.CodeExecutorPodError:        http.StatusBadGateway,
 	domain.CodeImagePullFailed:         http.StatusBadGateway,
 	domain.CodeMountUnavailable:        http.StatusBadGateway,
+	domain.CodeExportInvalid:           http.StatusBadRequest,
 	domain.CodeEndpointUnreachable:     http.StatusBadGateway,
 	domain.CodePrecheckFailed:          http.StatusBadGateway,
-	domain.CodeTaskTimeout:             http.StatusGatewayTimeout,
-	domain.CodeTesterNonzeroExit:       http.StatusInternalServerError,
+	domain.CodeRunnerTimeout:           http.StatusGatewayTimeout,
+	domain.CodeRunnerNonzeroExit:       http.StatusInternalServerError,
 	domain.CodeResultMissing:           http.StatusInternalServerError,
 	domain.CodeResultInvalid:           http.StatusInternalServerError,
 	domain.CodeCleanupFailed:           http.StatusInternalServerError,
@@ -119,11 +124,26 @@ func (s *Server) failErr(w http.ResponseWriter, r *http.Request, err error) {
 			writeFailure(w, r, ve.Failure())
 			return
 		}
+		var fe *domain.FailureError
+		if errors.As(err, &fe) {
+			writeFailure(w, r, fe.Failure)
+			return
+		}
+		var cre *orchestratorReplayConflict
+		if errors.As(err, &cre) {
+			fail(w, r, http.StatusConflict, domain.CodeConflict,
+				"clean 重放前置条件不满足", cre.Detail, false)
+			return
+		}
 		s.logger.Error("未归类错误", "err", err, "request_id", RequestID(r.Context()))
 		fail(w, r, http.StatusInternalServerError, domain.CodeInternalError,
 			"内部错误", map[string]any{"trace_id": RequestID(r.Context())}, false)
 	}
 }
+
+// orchestratorReplayConflict 是 *orchestrator.ErrCleanReplayConflict 的包内别名
+// （errors.As 目标类型必须是本包命名类型之外的同构指针 —— 这里直接用原类型）。
+type orchestratorReplayConflict = orchestrator.ErrCleanReplayConflict
 
 // JSON 输出助手 -------------------------------------------------------------
 

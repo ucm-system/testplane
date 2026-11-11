@@ -1,6 +1,6 @@
 {{/*
 mock-llm Service
-ClusterIP：只给集群内（TestPlane 的 Tester Pod / 控制面）用，不对外暴露。
+ClusterIP：只给集群内（Argus 的 Runner Pod / 控制面）用，不对外暴露。
 控制面若要在宿主上直连，用 kubectl port-forward（见 deploy/README.md）。
 */}}
 apiVersion: v1

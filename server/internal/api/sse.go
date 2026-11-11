@@ -17,9 +17,11 @@ import (
 //   - 回放：从 Last-Event-ID+1 开始读库，窗口 24h、单次 ≤1000 条；越窗先发 resync_required；
 //   - 实时：本进程 LISTEN/NOTIFY 的 hub 立即唤醒；另有 500ms 轮询兜底（漏通知只影响延迟）；
 //   - 心跳：15s 一行 `: ping`；
-//   - 断开：客户端断开 / ctx 取消 / Run 已终态且事件发完。
+//   - 断开：客户端断开 / ctx 取消 / Task 已终态且事件发完。
 //
-// 事件只描述事实，不带凭据、不带日志正文。
+// 事件只描述事实，不带凭据、不带日志正文。事件名是 v2 无前缀集
+//（openapi EventType：submitted/state_changed/runner_started/runner_finished/
+// exports_harvested/clean_finished/cleanup_failed/task_finished/report.written/resync_required）。
 
 const (
 	sseReplayLimit = 1000
@@ -27,11 +29,15 @@ const (
 	ssePingEvery   = 15 * time.Second
 )
 
-// handleRunEvents 是 GET /api/v1/runs/{id}/events（SSE）。
-func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
+// handleTaskEvents 是 GET /api/v1/tasks/{task_id}/events（SSE）。
+func (s *Server) handleTaskEvents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	runID := chi.URLParam(r, "id")
-	if _, err := s.st.Runs.Get(ctx, nil, runID); err != nil {
+	taskID, ok := safePathComponent(chi.URLParam(r, "task_id"))
+	if !ok {
+		fail(w, r, http.StatusBadRequest, domain.CodeValidationError, "非法 task id", nil, false)
+		return
+	}
+	if _, err := s.st.Tasks.Get(ctx, nil, taskID); err != nil {
 		s.failErr(w, r, err)
 		return
 	}
@@ -50,8 +56,7 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	// 立刻 flush：否则响应头一直留在 bufio 里，要等到第一条事件（或 15s 心跳）才发出，
-	// 客户端在这段时间看到的是"未连接"（实测 /events 响应头 +15s 才到）。
+	// 立刻 flush：否则响应头一直留在 bufio 里，客户端在这段时间看到的是"未连接"。
 	if _, err := io.WriteString(w, ": connected\n\n"); err != nil {
 		return
 	}
@@ -59,9 +64,9 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 
 	// 回放窗口：起点早于窗口下界 → 先让客户端整页重建（不静默截断）。
 	if lastSeq > 0 {
-		oldest, err := s.st.Events.OldestSeqSince(ctx, nil, runID, s.now().Add(-s.cfg.SSEReplayWindow))
+		oldest, err := s.st.Events.OldestSeqSince(ctx, nil, taskID, s.now().Add(-s.cfg.SSEReplayWindow))
 		if err == nil && oldest > 0 && lastSeq < oldest-1 {
-			writeSSE(w, store.Event{Seq: lastSeq, RunID: runID, Type: domain.EventResyncRequired,
+			writeSSE(w, store.Event{Seq: lastSeq, TaskID: taskID, Type: domain.EventResyncRequired,
 				CreatedAt: s.now()}, domain.EventResyncRequired)
 			flusher.Flush()
 			lastSeq = oldest - 1
@@ -71,7 +76,7 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 	var hubCh <-chan store.Notification
 	if n := s.st.NotifierRef(); n != nil {
 		var cancel func()
-		hubCh, cancel = n.Hub().Subscribe(runID)
+		hubCh, cancel = n.Hub().Subscribe(taskID)
 		defer cancel()
 	}
 
@@ -82,9 +87,9 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		// 1) 把库里的新事件发出去：回放与实时共用一条路径，天然幂等。
-		events, err := s.st.Events.ListByRun(ctx, nil, runID, lastSeq, sseReplayLimit)
+		events, err := s.st.Events.ListByTask(ctx, nil, taskID, lastSeq, sseReplayLimit)
 		if err != nil {
-			s.logger.Warn("SSE 读事件失败", "err", err, "run_id", runID)
+			s.logger.Warn("SSE 读事件失败", "err", err, "task_id", taskID)
 		}
 		for i := range events {
 			ev := events[i]
@@ -95,16 +100,16 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 			if len(events) >= sseReplayLimit {
 				// 单次读满：先提示可能需要整页重建，随后继续补齐（不静默截断）。
-				writeSSE(w, store.Event{Seq: lastSeq, RunID: runID,
+				writeSSE(w, store.Event{Seq: lastSeq, TaskID: taskID,
 					Type: domain.EventResyncRequired, CreatedAt: s.now()}, domain.EventResyncRequired)
 				flusher.Flush()
 			}
 		}
 
-		// 2) Run 已终态且事件发完 → 收尾断开（客户端以 SSE 为最终结果，07 §8）。
-		if cur, err := s.st.Runs.Get(ctx, nil, runID); err == nil {
-			if domain.RunStatus(cur.Status).IsTerminal() {
-				latest, err := s.st.Events.LatestSeq(ctx, nil, runID)
+		// 2) Task 已终态且事件发完 → 收尾断开（客户端以 SSE 为最终结果，07 §8）。
+		if cur, err := s.st.Tasks.Get(ctx, nil, taskID); err == nil {
+			if domain.TaskStatus(cur.Status).IsTerminal() {
+				latest, err := s.st.Events.LatestSeq(ctx, nil, taskID)
 				if err == nil && lastSeq >= latest {
 					return
 				}
@@ -141,7 +146,7 @@ func sseLastEventID(r *http.Request) int64 {
 // writeSSE 按 07 §7 的格式写一条事件：id / event / data 三行 + 空行。
 func writeSSE(w http.ResponseWriter, ev store.Event, eventType string) {
 	if eventType == "" {
-		eventType = domain.EventRunStateChanged
+		eventType = domain.EventTaskStateChanged
 	}
 	payload := ev.Payload
 	if len(payload) == 0 {
@@ -150,9 +155,9 @@ func writeSSE(w http.ResponseWriter, ev store.Event, eventType string) {
 	body, err := json.Marshal(map[string]any{
 		"seq":        ev.Seq,
 		"type":       eventType,
-		"run_id":     ev.RunID,
 		"task_id":    ev.TaskID,
-		"attempt_id": ev.AttemptID,
+		"attempt_no": ev.AttemptNo,
+		"runner_seq": ev.RunnerSeq,
 		"from":       ev.FromStatus,
 		"to":         ev.ToStatus,
 		"reason":     ev.Reason,

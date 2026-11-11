@@ -22,11 +22,11 @@ var errorHints = map[string]Hint{
 	"VALIDATION_ERROR": {
 		Code: "VALIDATION_ERROR", Retryable: false,
 		NextAction: "按 detail.issues[] 修正字段后重新提交；不要重试相同 Manifest",
-		Hint:       "每个 issue 带 path（如 tests[2].args）、code、message，可直接定位",
+		Hint:       "每个 issue 带 path（如 runners[2].input，jsonl 带 line 行号）、code、message，可直接定位",
 	},
 	"UNAUTHENTICATED": {
 		Code: "UNAUTHENTICATED", Retryable: false,
-		NextAction: "重新获取 token（$TESTPLANE_TOKEN / --token）；dev 模式可先用 dev",
+		NextAction: "重新获取 token（$AG_TOKEN / --token）；dev 模式可先用 dev",
 		Hint:       "Bearer token 缺失或过期；控制面不提供匿名端点（/healthz、/readyz 除外）",
 	},
 	"FORBIDDEN": {
@@ -36,38 +36,48 @@ var errorHints = map[string]Hint{
 	},
 	"NOT_FOUND": {
 		Code: "NOT_FOUND", Retryable: false,
-		NextAction: "核对 ID 与资源是否存在；不确定时先 list runs/artifacts 或查 /queue-status",
+		NextAction: "核对 ID 与资源是否存在；不确定时先 argus_list_artifacts 或查 /queue-status",
 		Hint:       "ID 是不透明字符串，不要解析或拼接",
 	},
 	"CONFLICT": {
 		Code: "CONFLICT", Retryable: true,
-		NextAction: "先 wait 到终态再重试；不要并发改同一个 Run 的取消/重试",
+		NextAction: "先 wait 到终态再重试；不要并发改同一个 Task 的取消/重试",
 		Hint:       "乐观锁或状态前置条件不满足；以先落库状态为准（07 §8）",
 	},
-	"TESTER_NOT_FOUND": {
-		Code: "TESTER_NOT_FOUND", Retryable: false,
-		NextAction: "用 testplane_list_testers / tpctl testers 查看目录，修正 tester 名称或 version",
-		Hint:       "Tester 来自注册表自发现，运行时不注册（K-3）",
+	"RUNNER_NOT_FOUND": {
+		Code: "RUNNER_NOT_FOUND", Retryable: false,
+		NextAction: "用 argus_list_runners 查看目录，修正 runner 名称或 version",
+		Hint:       "Runner 来自注册表自发现，运行时不注册（K-3）",
 	},
-	"TESTER_VERSION_PINNED": {
-		Code: "TESTER_VERSION_PINNED", Retryable: false,
+	"RUNNER_VERSION_PINNED": {
+		Code: "RUNNER_VERSION_PINNED", Retryable: false,
 		NextAction: "版本不可覆盖：发布新 version 后改 Manifest 引用，别复用旧版本号",
-		Hint:       "同 name+version 不同内容会被拒绝（05 §5.7）",
+		Hint:       "同 name+version 不同内容会被拒绝（§5.7）",
 	},
-	"TESTER_INVALID": {
-		Code: "TESTER_INVALID", Retryable: false,
-		NextAction: "修 Tester 目录里的 tester.yaml / run.sh；修好后等注册表重扫",
-		Hint:       "Tester 定义未通过注册校验（附录 C）",
+	"RUNNER_INVALID": {
+		Code: "RUNNER_INVALID", Retryable: false,
+		NextAction: "修 runner.yaml / entry；修好后等注册表重扫",
+		Hint:       "Runner 定义未通过注册校验（附录 C v2）",
 	},
 	"EXECUTION_PROFILE_NOT_FOUND": {
 		Code: "EXECUTION_PROFILE_NOT_FOUND", Retryable: false,
-		NextAction: "用 testplane_list_profiles / tpctl profiles 看已登记 Profile，改 tests[].execution.profile",
+		NextAction: "用 argus_list_profiles 看已登记 Profile，改 runners[].execution.profile",
 		Hint:       "Profile 必须已登记；引导期例外已移除",
 	},
-	"RUN_TOO_LARGE": {
-		Code: "RUN_TOO_LARGE", Retryable: false,
-		NextAction: "拆分 Run：单 Run Task 数 ≤200（含平台注入的 precheck）",
-		Hint:       "先减少 tests[] 或拆成多个 Run",
+	"TASK_TOO_LARGE": {
+		Code: "TASK_TOO_LARGE", Retryable: false,
+		NextAction: "拆分 Task：单 Task runner 数 ≤200（含注入的 service-deploy / precheck / service-clean）",
+		Hint:       "先减少 runners[] 或拆成多个 Task",
+	},
+	"ATTEMPT_EXHAUSTED": {
+		Code: "ATTEMPT_EXHAUSTED", Retryable: false,
+		NextAction: "attempt 已达上限（默认 3，§12.7）；换新 Task 或修正输入",
+		Hint:       "v2 新增（D-73）；runner 级没有重试（D-69）",
+	},
+	"EXPORT_INVALID": {
+		Code: "EXPORT_INVALID", Retryable: false,
+		NextAction: "修 Runner 的 exports.env（每行 KEY=VALUE，值不含换行）",
+		Hint:       "v2 新增（D-71）；词法不合格整体拒绝收割",
 	},
 	"RESOURCE_EXHAUSTED": {
 		Code: "RESOURCE_EXHAUSTED", Retryable: true,
@@ -76,8 +86,8 @@ var errorHints = map[string]Hint{
 	},
 	"ARTIFACT_QUOTA_EXCEEDED": {
 		Code: "ARTIFACT_QUOTA_EXCEEDED", Retryable: false,
-		NextAction: "清理旧 Run 产物（admin）或减少产出后重新提交",
-		Hint:       "产物配额是平台级限制，与 Tester 无关",
+		NextAction: "清理旧 Task 产物（admin）或减少产出后重新提交",
+		Hint:       "产物配额是平台级限制，与 Runner 无关",
 	},
 	"EXECUTOR_UNAVAILABLE": {
 		Code: "EXECUTOR_UNAVAILABLE", Retryable: true,
@@ -96,43 +106,43 @@ var errorHints = map[string]Hint{
 	},
 	"MOUNT_UNAVAILABLE": {
 		Code: "MOUNT_UNAVAILABLE", Retryable: false,
-		NextAction: "对照 profile.mounts 与 Tester 的 mounts 声明，补齐挂载能力后再提交",
-		Hint:       "Profile 供给缺失，不是 Tester 参数问题",
+		NextAction: "对照 profile.mounts 与 Runner 的 mounts 声明，补齐挂载能力后再提交",
+		Hint:       "Profile 供给缺失，不是 Runner 参数问题",
 	},
 	"ENDPOINT_UNREACHABLE": {
 		Code: "ENDPOINT_UNREACHABLE", Retryable: true,
-		NextAction: "服务未就绪：等 10–30s 重试，或看 GET /runs/{id} 的 deploy.queue_reason",
+		NextAction: "服务未就绪：等 10–30s 重试，或看 GET /tasks/{id}/deploy 的 phase 与水位",
 		Hint:       "连接/健康检查失败；先确认端口、模型名与鉴权，再看 precheck 日志",
 	},
 	"PRECHECK_FAILED": {
 		Code: "PRECHECK_FAILED", Retryable: false,
-		NextAction: "检查被测服务的健康检查/端口/模型名；看 testplane_get_logs 的 precheck Attempt",
-		Hint:       "Pre-Check 是平台注入的 seq=0 Task；它的 retryable 以实例字段为准",
+		NextAction: "检查被测服务的健康检查/端口/模型名；看 argus_get_logs 的 precheck runner",
+		Hint:       "pre_check 是管道第一个测试类 runner（串行）；retryable 以实例字段为准",
 	},
-	"TASK_TIMEOUT": {
-		Code: "TASK_TIMEOUT", Retryable: false,
-		NextAction: "调大 tests[].timeout_seconds 或 TESTPLANE_TASK_TIMEOUT 后重新提交",
-		Hint:       "超时是终态；先确认 Tester 没有卡在等待外部资源",
+	"RUNNER_TIMEOUT": {
+		Code: "RUNNER_TIMEOUT", Retryable: false,
+		NextAction: "调大 runners[].timeout_seconds / AG_RUNNER_TIMEOUT 后整 Task retry",
+		Hint:       "超时是终态；先确认 Runner 没有卡在等待外部资源",
 	},
-	"TESTER_NONZERO_EXIT": {
-		Code: "TESTER_NONZERO_EXIT", Retryable: false,
-		NextAction: "看 Tester 日志与 result.json；非 0 退出通常是测试失败，不是平台故障",
-		Hint:       "退出码与 stderr 最有用；必要时重跑单 Task",
+	"RUNNER_NONZERO_EXIT": {
+		Code: "RUNNER_NONZERO_EXIT", Retryable: false,
+		NextAction: "看 Runner 日志与 result.json 的 error（若有）；非 0 退出通常是测试失败",
+		Hint:       "退出码与 stderr 最有用；重试入口只有整 Task retry（D-69）",
 	},
 	"RESULT_MISSING": {
 		Code: "RESULT_MISSING", Retryable: false,
-		NextAction: "看 Tester 日志：它没在 /workspace/output 写 result.json",
-		Hint:       "result.json 是 Tester 唯一必产出文件（附录 A）",
+		NextAction: "看日志：runner 退出 0 但三选一产物全缺（D-74）",
+		Hint:       "应产出 result.json/html/csv 至少其一",
 	},
 	"RESULT_INVALID": {
 		Code: "RESULT_INVALID", Retryable: false,
-		NextAction: "对照 result.json 契约修正 Tester 输出（格式/大小）；再看日志",
-		Hint:       "字段不限制，但必须是合法 JSON 且不超体积上限",
+		NextAction: "对照契约修 Runner 的 result.json（仅当 result.json 产出但不合法，D-74）",
+		Hint:       "html/csv 平台不解析；字段不限制",
 	},
 	"CLEANUP_FAILED": {
 		Code: "CLEANUP_FAILED", Retryable: true,
-		NextAction: "看 deploy/cleanup 日志；必要时人工清理后重试卸载",
-		Hint:       "日志/产物不受影响；只影响被测服务是否卸载",
+		NextAction: "看 service-clean 日志；可用 argus clean --task 重放（§9.3）",
+		Hint:       "不改变 Task 终态，只记 cleanup_failed（C-5.7）",
 	},
 	"CANCELED": {
 		Code: "CANCELED", Retryable: false,
@@ -146,15 +156,15 @@ var errorHints = map[string]Hint{
 	},
 	"DEPLOY_FAILED": {
 		Code: "DEPLOY_FAILED", Retryable: false,
-		NextAction: "平台调用 Genet 失败，**不要重试**同样参数；带 trace_id 找平台",
-		Hint:       "502；看 runs.deploy.failure 与 Genet 侧日志",
+		NextAction: "service-deploy 调 Genet 失败，不要直接重试同样参数；需要重试走 argus retry（fresh deploy）",
+		Hint:       "502；看 /tasks/{id}/deploy 的 failure.detail.reason",
 	},
 	"DEPLOY_BLOCKED": {
 		Code: "DEPLOY_BLOCKED", Retryable: true,
-		NextAction: "Genet 侧排队/阻塞；看 /queue-status 的 volcano 块，等队列前进后重试",
-		Hint:       "reason 原文在 deploy.failure.detail.reason；位次不可得（D-44～D-48）",
+		NextAction: "看 /tasks/{id}/deploy 的 phase 与水位（或 /queue-status volcano 块），等队列前进；需要重试走 argus retry",
+		Hint:       "reason 原文在 deploy-state 的 failure.detail.reason；只有水位没有位次（D-46）",
 	},
-	// SERVICE_UNAVAILABLE 是 Run 终态（不是 ErrorCode），但 wait/status 需要同一份提示。
+	// SERVICE_UNAVAILABLE 是 Task 终态（不是 ErrorCode），但 wait/status 需要同一份提示。
 	"SERVICE_UNAVAILABLE": {
 		Code: "SERVICE_UNAVAILABLE", Retryable: true,
 		NextAction: "服务未就绪：等 10–30s 重新 submit；或改用 service.url 直连已有服务",
@@ -174,8 +184,8 @@ func HintForError(code string) (Hint, bool) {
 	return h, ok
 }
 
-// HintForRunStatus 给没有 error 的终态（canceled / service_unavailable）补提示。
-func HintForRunStatus(status string) (Hint, bool) {
+// HintForTaskStatus 给没有 error 的终态（canceled / service_unavailable）补提示。
+func HintForTaskStatus(status string) (Hint, bool) {
 	switch status {
 	case "canceled":
 		return errorHints["CANCELED"], true

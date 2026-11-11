@@ -20,7 +20,7 @@ const OUT_DIR = join(process.cwd(), '.data', 'mounts')
 test.describe.configure({ mode: 'serial' })
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
 })
 
 /** 打开管理台的「挂载点」页签 */
@@ -163,7 +163,7 @@ test('④ 删除要二次确认：先弹确认框，确认后才消失', async (
   await page.getByTestId('delete-mount-to-delete').click()
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
-  await expect(dialog).toContainText('只影响之后提交的 Run')
+  await expect(dialog).toContainText('只影响之后提交的 Task')
   await expect(dialog).toContainText('已在跑的 Pod 不受影响')
   await page.getByRole('button', { name: '取消' }).click()
   await expect(page.getByTestId('mount-row-to-delete')).toBeVisible()

@@ -1,6 +1,6 @@
 # deploy/genet-local —— 本地 kind 上跑真 Genet（联调用，**不提交回 Genet 仓**）
 
-> 目的：给 TestPlane 的 `internal/genet`（`TESTPLANE_DEPLOY_PROVIDER=genet`）一个**真的**对端，
+> 目的：给 Argus 的 `internal/genet`（`AG_DEPLOY_PROVIDER=genet`）一个**真的**对端，
 > 用 Helm 把被测服务装起来，走「release 起来 → endpoint ready → precheck → test → 卸载」。
 >
 > 本目录的东西**只服务本地联调**：chart 在上游 Genet 仓（`.data/genet`），我们只放
@@ -12,9 +12,9 @@
 |---|---|---|
 | `genet` | **Genet 自己**（backend / chartrepo / webhook TLS） | `helm install genet -n genet` |
 | `genet-open-api` | **OpenAPI 控制态**：`genet-openapi-keys` Secret（key 元数据）。不是服务落地处 | 手工建（`openAPI.namespace`） |
-| `testplane-svc` | **真 Genet 部署的被测服务**；也是 API Key 绑定的 namespace（**必须事先不存在**，Genet 带身份标签自建） | 首次创建 API Key 时由 Genet 建 |
-| `testplane-mock` | **fake-genet / QA 脚本**装的被测服务；平台 `deploy/charts/mock-llm` 落这里 | `deploy/k8s/mock-namespace.yaml` |
-| `testplane` | 平台自己（控制面 + Tester Job + PVC） | `deploy/k8s/namespace.yaml` |
+| `argus-svc` | **真 Genet 部署的被测服务**；也是 API Key 绑定的 namespace（**必须事先不存在**，Genet 带身份标签自建） | 首次创建 API Key 时由 Genet 建 |
+| `argus-mock` | **fake-genet / QA 脚本**装的被测服务；平台 `deploy/charts/mock-llm` 落这里 | `deploy/k8s/mock-namespace.yaml` |
+| `argus` | 平台自己（控制面 + Runner Job + PVC） | `deploy/k8s/namespace.yaml` |
 
 > 真 / 假 Genet 的服务**不要混在同一个 ns**：真 Genet 的 release 由它的 webhook 独占管理
 > （手工 `helm uninstall` 会被拒：`Helm release storage is managed exclusively by the Genet backend`），
@@ -24,14 +24,14 @@
 
 ```powershell
 # 切「真 Genet」
-kubectl --context kind-testplane -n testplane create secret generic testplane-genet `
-  --from-literal=api-key='gk_...' --dry-run=client -o yaml | kubectl --context kind-testplane apply -f -
-#   configmap: TESTPLANE_GENET_BASE_URL=http://genet-backend.genet.svc:8080  → apply -k + rollout restart
+kubectl --context kind-argus -n argus create secret generic argus-genet `
+  --from-literal=api-key='gk_...' --dry-run=client -o yaml | kubectl --context kind-argus apply -f -
+#   configmap: AG_GENET_BASE_URL=http://genet-backend.genet.svc:8080  → apply -k + rollout restart
 
 # 切「fake-genet」（kind E2E 默认走这条）
-kubectl --context kind-testplane -n testplane create secret generic testplane-genet `
-  --from-literal=api-key='tp-local-2026' --dry-run=client -o yaml | kubectl --context kind-testplane apply -f -
-#   configmap: TESTPLANE_GENET_BASE_URL=http://host.docker.internal:18091 → apply -k + rollout restart
+kubectl --context kind-argus -n argus create secret generic argus-genet `
+  --from-literal=api-key='tp-local-2026' --dry-run=client -o yaml | kubectl --context kind-argus apply -f -
+#   configmap: AG_GENET_BASE_URL=http://host.docker.internal:18091 → apply -k + rollout restart
 ```
 
 | | 真 Genet | fake-genet |
@@ -39,12 +39,12 @@ kubectl --context kind-testplane -n testplane create secret generic testplane-ge
 | base_url | `http://genet-backend.genet.svc:8080` | `http://host.docker.internal:18091` |
 | API key | `gk_…`（管理 API 现建） | `tp-local-2026` |
 | 装哪个 chart | 固定 `charts/unified-cache-stack@0.0.1`（我们改名冒充，见下节） | `deploy/charts/mock-llm` |
-| 服务落地 ns | `testplane-svc` | `testplane-mock` |
-| 预期 endpoint | `http://tp-<sha12>-unified-cache-stack.testplane-svc.svc.cluster.local:18080` | `http://tp-<sha12>-mock-llm.testplane-mock.svc:18080/v1` |
+| 服务落地 ns | `argus-svc` | `argus-mock` |
+| 预期 endpoint | `http://arg-<sha12>-unified-cache-stack.argus-svc.svc.cluster.local:18080` | `http://arg-<sha12>-mock-llm.argus-mock.svc:18080/v1` |
 | 卸载 | 走它自己的 Open API DELETE（webhook 独占 Helm release storage） | 直接 `helm uninstall` |
 
-两条命令改完都要 `kubectl apply -k deploy/overlays/with-control-plane` + `rollout restart deploy/testplaned`，
-再用 `exec deploy/testplaned -- env | Select-String GENET` 确认。
+两条命令改完都要 `kubectl apply -k deploy/overlays/with-control-plane` + `rollout restart deploy/argusd`，
+再用 `exec deploy/argusd -- env | Select-String GENET` 确认。
 
 ## 目录
 
@@ -64,15 +64,15 @@ kubectl --context kind-testplane -n testplane create secret generic testplane-ge
 
 ```powershell
 # 0. 前置：kind 集群 + cert-manager（webhook TLS 与 Helm 受保护存储依赖它）
-kubectl --context kind-testplane apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.3/cert-manager.yaml
+kubectl --context kind-argus apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.3/cert-manager.yaml
 
 # 1. 构建 Genet backend（上下文 = .data/genet 仓根，不能用 backend/）
 docker build -f deploy/genet-local/backend.Dockerfile -t genet-backend:dev .data/genet
-& .\.tools\kind.exe load docker-image genet-backend:dev --name testplane
+& .\.tools\kind.exe load docker-image genet-backend:dev --name argus
 
 # 2. 两个 namespace：Genet 自己一个，OpenAPI 控制态一个
-kubectl --context kind-testplane create namespace genet
-kubectl --context kind-testplane create namespace genet-open-api
+kubectl --context kind-argus create namespace genet
+kubectl --context kind-argus create namespace genet-open-api
 
 # 3. 装 Genet（装在 genet，控制态在 genet-open-api；被测服务落在 API Key 绑定的 ns）
 & .\.tools\helm.exe install genet .data\genet\helm\genet -n genet `
@@ -96,35 +96,35 @@ pwsh deploy/genet-local/build-chartrepo.ps1
 
 ```powershell
 # 1) 种空 records（只需一次；重建集群后要重来）
-kubectl --context kind-testplane -n genet-open-api create secret generic genet-openapi-keys --from-literal=records.json='[]' --dry-run=client -o yaml | kubectl --context kind-testplane apply -f -
-kubectl --context kind-testplane -n genet-open-api label secret genet-openapi-keys "genet.io/managed=true" "genet.io/type=openapi-keys" --overwrite
+kubectl --context kind-argus -n genet-open-api create secret generic genet-openapi-keys --from-literal=records.json='[]' --dry-run=client -o yaml | kubectl --context kind-argus apply -f -
+kubectl --context kind-argus -n genet-open-api label secret genet-openapi-keys "genet.io/managed=true" "genet.io/type=openapi-keys" --overwrite
 # 2) 建 key（oauth 关掉后 dev 模式用户是 dev-user，已在 values-min 的 adminUsers 里）
-$body = @{ name='testplane-e2e'; namespace='testplane-svc'; scope='write'; poolType='exclusive' } | ConvertTo-Json
+$body = @{ name='argus-e2e'; namespace='argus-svc'; scope='write'; poolType='exclusive' } | ConvertTo-Json
 $resp = Invoke-RestMethod -Uri 'http://127.0.0.1:18083/api/admin/apikeys?user=dev-user' -Method Post -ContentType 'application/json' -Body $body
 $resp.plaintextKey   # ← 明文只出现这一次，立刻存进平台 Secret
 # 3) 落到平台侧 Secret（别写进任何仓库文件/ConfigMap/日志）
-kubectl --context kind-testplane -n testplane create secret generic testplane-genet --from-literal=api-key=$resp.plaintextKey --dry-run=client -o yaml | kubectl --context kind-testplane apply -f -
+kubectl --context kind-argus -n argus create secret generic argus-genet --from-literal=api-key=$resp.plaintextKey --dry-run=client -o yaml | kubectl --context kind-argus apply -f -
 ```
 
 要点：
 
 - **key 明文只在创建响应里出现一次**（`plaintextKey`），之后管理 API 只能拿到 `keyPreview`；
   丢了就删了重建（`DELETE /api/admin/apikeys/{id}`）。
-- 明文**只落** `testplane-genet` Secret（key 名 `api-key`），不写进 ConfigMap / 仓库 / 日志。
-- 当前环境：key 已建好并写进 `testplane-genet`；**真 Genet 用 `gk_…`，fake-genet 用 `tp-local-2026`**，
+- 明文**只落** `argus-genet` Secret（key 名 `api-key`），不写进 ConfigMap / 仓库 / 日志。
+- 当前环境：key 已建好并写进 `argus-genet`；**真 Genet 用 `gk_…`，fake-genet 用 `tp-local-2026`**，
   切换时改这个 Secret 即可（见上面「切真/fake」一节）。
 - **namespace 语义（容易误解）**：`openAPI.namespace`（`genet-open-api`）是**控制态**（放 keys Secret），
-  不是被测服务落地的 ns；服务落到 **API Key 绑定**的 namespace（`testplane-svc`），且该 ns 必须
+  不是被测服务落地的 ns；服务落到 **API Key 绑定**的 namespace（`argus-svc`），且该 ns 必须
   **先不存在**（Genet 会带身份标签自己创建，已存在的会 409）。
 
-## 接进 TestPlane（本集群当前状态）
+## 接进 Argus（本集群当前状态）
 
 ```powershell
-kubectl --context kind-testplane -n testplane create secret generic testplane-genet `
-  --from-literal=api-key='<上一步的 gk_...>' --dry-run=client -o yaml | kubectl --context kind-testplane apply -f -
-# ConfigMap: TESTPLANE_DEPLOY_PROVIDER=genet + TESTPLANE_GENET_BASE_URL=http://genet-backend.genet.svc:8080
-kubectl --context kind-testplane apply -k deploy/overlays/with-control-plane
-kubectl --context kind-testplane -n testplane rollout restart deploy/testplaned
+kubectl --context kind-argus -n argus create secret generic argus-genet `
+  --from-literal=api-key='<上一步的 gk_...>' --dry-run=client -o yaml | kubectl --context kind-argus apply -f -
+# ConfigMap: AG_DEPLOY_PROVIDER=genet + AG_GENET_BASE_URL=http://genet-backend.genet.svc:8080
+kubectl --context kind-argus apply -k deploy/overlays/with-control-plane
+kubectl --context kind-argus -n argus rollout restart deploy/argusd
 ```
 
 **已验证**（2026-11-05）：
@@ -170,8 +170,8 @@ pwsh deploy/genet-local/make-chartrepo.ps1 -Name other-chart -Version 1.2.3 # �
 ```powershell
 Copy-Item -Recurse deploy\charts\mock-llm .data\packages\unified-cache-stack   # 改 Chart.yaml: name/version
 pwsh deploy/genet-local/build-chartrepo.ps1                                   # 打包 + 重建 ChartMuseum
-kubectl --context kind-testplane -n genet rollout restart deploy/genet-backend # 立刻刷新缓存
-kubectl --context kind-testplane -n genet logs -l app=genet-backend --tail=80 | Select-String 'Chart cache refreshed'
+kubectl --context kind-argus -n genet rollout restart deploy/genet-backend # 立刻刷新缓存
+kubectl --context kind-argus -n genet logs -l app=genet-backend --tail=80 | Select-String 'Chart cache refreshed'
 ```
 </details>
 
@@ -179,13 +179,13 @@ kubectl --context kind-testplane -n genet logs -l app=genet-backend --tail=80 | 
 
 ```powershell
 $key = '<gk_...>'
-$body = @{ releaseName='tp-ucs-0001'; noWait=$true; timeoutSec=300; values="replicaCount: 1`n" } | ConvertTo-Json
+$body = @{ releaseName='arg-ucs-0001'; noWait=$true; timeoutSec=300; values="replicaCount: 1`n" } | ConvertTo-Json
 Invoke-RestMethod -Uri "$BASE/api/open/helm/uc-packages/stack/releases" -Method Post `
   -Headers @{ Authorization = "Bearer $key" } -ContentType 'application/json' -Body $body
-Invoke-RestMethod -Uri "$BASE/api/open/helm/releases/tp-ucs-0001" -Headers @{ Authorization = "Bearer $key" }
+Invoke-RestMethod -Uri "$BASE/api/open/helm/releases/arg-ucs-0001" -Headers @{ Authorization = "Bearer $key" }
 ```
 
-**实测结果（2026-11-05，`tp-ucs-0001`）**：
+**实测结果（2026-11-05，`arg-ucs-0001`）**：
 
 ```json
 "status": "deployed",
@@ -193,12 +193,12 @@ Invoke-RestMethod -Uri "$BASE/api/open/helm/releases/tp-ucs-0001" -Headers @{ Au
   "endpoint": {
     "status": "ready",
     "source": "cluster",
-    "url": "http://tp-ucs-0001-unified-cache-stack.testplane-svc.svc.cluster.local:18080",
+    "url": "http://arg-ucs-0001-unified-cache-stack.argus-svc.svc.cluster.local:18080",
     "port": 18080
   },
-  "serviceName": "tp-ucs-0001-unified-cache-stack",
-  "namespace": "testplane-svc",
-  "model": "tp-ucs-0001"
+  "serviceName": "arg-ucs-0001-unified-cache-stack",
+  "namespace": "argus-svc",
+  "model": "arg-ucs-0001"
 },
 "pods": [{ "phase": "Running", "ready": true }]
 ```
@@ -216,12 +216,12 @@ Invoke-RestMethod -Uri "$BASE/api/open/helm/releases/tp-ucs-0001" -Headers @{ Au
 命中后 URL = `http://<svc>.<ns>.svc.cluster.local:<svc 的第一个端口>`。
 **结论：不要求特定的 Service 名后缀，也不要求 8000 端口** —— 我们的 chart 用
 `<release>-<chartname>` + 18080 就落到了规则 5，`endpoint.status=ready`。
-（`model` 字段在 values 里没给 model 时回退成 **release 名**，TestPlane 侧用自己的 `--model_name` 注入覆盖，不影响探活。）
+（`model` 字段在 values 里没给 model 时回退成 **release 名**，Argus 侧用自己的 `--model_name` 注入覆盖，不影响探活。）
 
 ### `values` 最小集合 & `package_type` 的差别（2026-11-05 实测）
 
 **`values` 最小集合 = 任意一行非空 YAML。** 实测只给 `replicaCount: 1` 就能装起来并 `endpoint=ready`
-（镜像沿用 chart 默认 `testplane/mock-llm:dev`）。规则来自 `UcStackInstallRequest` 的校验：
+（镜像沿用 chart 默认 `argus/mock-llm:dev`）。规则来自 `UcStackInstallRequest` 的校验：
 
 | 传入 | 结果 |
 |---|---|
@@ -243,7 +243,7 @@ Invoke-RestMethod -Uri "$BASE/api/open/helm/releases/tp-ucs-0001" -Headers @{ Au
 
 1. **真 Genet 路径的「终态卸载」没接上**（backend 修，已派单）：
    Run `r-20261105-Z2K9`（真 Genet）跑到 `succeeded`、`cleanup.started` 也发了，但 release
-   `tp-5095cf6caa26` 仍 `deployed`，Genet 日志里**没有**来自 `testplane-controller` 的 DELETE。
+   `tp-5095cf6caa26` 仍 `deployed`，Genet 日志里**没有**来自 `argus-controller` 的 DELETE。
    两个连带事实：
    - 手工 `helm uninstall` 会被 inadmission 拒绝：`Helm release storage is managed exclusively by the Genet backend`；
      只能走 `DELETE /api/open/helm/releases/{name}`（实测 200，可清干净）。
@@ -263,28 +263,28 @@ Invoke-RestMethod -Uri "$BASE/api/open/helm/releases/tp-ucs-0001" -Headers @{ Au
 
 | 概念 | 值 | 说明 |
 |---|---|---|
-| Genet 自身 | `genet` | chart 装在它自己的 ns；**不要**装进 `testplane-mock` |
+| Genet 自身 | `genet` | chart 装在它自己的 ns；**不要**装进 `argus-mock` |
 | OpenAPI **控制态** | `genet-open-api` | `openAPI.namespace`，放 `genet-openapi-keys` Secret；**不是**服务落地 ns |
-| **API Key 绑定 ns** | `testplane-svc` | 被测服务实际落地在这里；**必须是事先不存在的 ns** —— Genet 会带身份标签自己创建，已存在的会 409 `already exists without a Genet API key identity` |
-| 平台自己的 ns | `testplane` | 控制面 + Tester Job；与上面三个都分开 |
+| **API Key 绑定 ns** | `argus-svc` | 被测服务实际落地在这里；**必须是事先不存在的 ns** —— Genet 会带身份标签自己创建，已存在的会 409 `already exists without a Genet API key identity` |
+| 平台自己的 ns | `argus` | 控制面 + Runner Job；与上面三个都分开 |
 
-创建 key 时 `namespace` 传 `testplane-svc`（当前环境已是这个）。换一个全新的名字即可重新开一个
-"服务空间"，例如 `testplane-svc2`；同一个 ns 不能被两个 **write** key 同时占用。
+创建 key 时 `namespace` 传 `argus-svc`（当前环境已是这个）。换一个全新的名字即可重新开一个
+"服务空间"，例如 `argus-svc2`；同一个 ns 不能被两个 **write** key 同时占用。
 
 ## 与 fake-genet 的分工
 
 - **真 Genet**：验证 `internal/genet` 客户端与真对端的契约（本目录）。当前被上面第 1、2 条挡住。
-- **fake-genet**（`tools/fake-genet`，backend-exec 维护）：实现 TestPlane 真正调的那几条端点、
+- **fake-genet**（`tools/fake-genet`，backend-exec 维护）：实现 Argus 真正调的那几条端点、
   内部用真 `helm install` 装 `deploy/charts/mock-llm`。功能联调优先用它；
   真 Genet 留作 P1 的契约对齐环境。
 
 启动 fake-genet（真 helm 驱动，装我们的 chart）：
 
 ```powershell
-kubectl config view --context kind-testplane --minify --flatten | Out-File -Encoding utf8 .data\kubeconfig-kind
+kubectl config view --context kind-argus --minify --flatten | Out-File -Encoding utf8 .data\kubeconfig-kind
 $env:KUBECONFIG = (Resolve-Path .data\kubeconfig-kind).Path
 .\tools\fake-genet\fake-genet.exe -addr :18091 -helm -kubeconfig $env:KUBECONFIG `
-  -chart deploy/charts/mock-llm -namespace testplane-mock -helm-bin .tools/helm.exe -api-key tp-local-2026
+  -chart deploy/charts/mock-llm -namespace argus-mock -helm-bin .tools/helm.exe -api-key tp-local-2026
 ```
 
-控制面在集群内 → `TESTPLANE_GENET_BASE_URL=http://host.docker.internal:18091`（已实测 Pod 内可达）。
+控制面在集群内 → `AG_GENET_BASE_URL=http://host.docker.internal:18091`（已实测 Pod 内可达）。

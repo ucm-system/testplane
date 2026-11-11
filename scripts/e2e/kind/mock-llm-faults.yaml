@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: mock-llm
-          image: testplane/mock-llm:dev
+          image: argus/mock-llm:dev
           imagePullPolicy: IfNotPresent
           args: ["-addr=:18080", "-fail=500"]
           ports: [{ name: http, containerPort: 18080 }]
@@ -54,7 +54,7 @@ spec:
     spec:
       containers:
         - name: mock-llm
-          image: testplane/mock-llm:dev
+          image: argus/mock-llm:dev
           imagePullPolicy: IfNotPresent
           args: ["-addr=:18080", "-fail=401"]
           ports: [{ name: http, containerPort: 18080 }]
@@ -89,7 +89,7 @@ spec:
     spec:
       containers:
         - name: mock-llm
-          image: testplane/mock-llm:dev
+          image: argus/mock-llm:dev
           imagePullPolicy: IfNotPresent
           args: ["-addr=:18080", "-error-in-200"]
           ports: [{ name: http, containerPort: 18080 }]
@@ -124,7 +124,7 @@ spec:
     spec:
       containers:
         - name: mock-llm
-          image: testplane/mock-llm:dev
+          image: argus/mock-llm:dev
           imagePullPolicy: IfNotPresent
           # 窗口内永远不会就绪：用于断言 precheck 可重试失败 → service_unavailable。
           # 用 24h（不是 3600s）：3600s 的 mock 跑满 1h 后会真的就绪，timeout 用例会“意外成功”。

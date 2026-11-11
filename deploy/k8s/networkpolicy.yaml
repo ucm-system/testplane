@@ -1,4 +1,4 @@
-# TestPlane · NetworkPolicy（**默认不启用，opt-in**）
+# Argus · NetworkPolicy（**默认不启用，opt-in**）
 #
 # 依据 design/views/06-physical-view.md §4（网络与安全边界）。
 #
@@ -17,11 +17,11 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: testplane-default-deny
-  namespace: testplane
+  name: argus-default-deny
+  namespace: argus
   labels:
-    app.kubernetes.io/name: testplane
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argus
+    app.kubernetes.io/part-of: argus
 spec:
   podSelector: {}
   policyTypes:
@@ -32,15 +32,15 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: testplaned-allow-ingress-8080
-  namespace: testplane
+  name: argusd-allow-ingress-8080
+  namespace: argus
   labels:
-    app.kubernetes.io/name: testplaned
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argusd
+    app.kubernetes.io/part-of: argus
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: testplaned
+      app.kubernetes.io/name: argusd
   policyTypes:
     - Ingress
   ingress:
@@ -52,15 +52,15 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: testplaned-allow-egress
-  namespace: testplane
+  name: argusd-allow-egress
+  namespace: argus
   labels:
-    app.kubernetes.io/name: testplaned
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argusd
+    app.kubernetes.io/part-of: argus
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: testplaned
+      app.kubernetes.io/name: argusd
   policyTypes:
     - Egress
   egress:
@@ -87,21 +87,21 @@ spec:
         - port: 2049
           protocol: TCP
 ---
-# Tester Pod 出站：DNS + 被测服务（06 §4.3）。
+# Runner Pod 出站：DNS + 被测服务（06 §4.3）。
 # 平台会**按 Job 再渲染一条**同名策略（E-2.1），这里给的是手工跑冒烟用的兜底。
 # 生产要把它收紧到 Execution Profile 的 egress_allow 网段，本文件不替代执行层渲染。
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: tester-allow-egress
-  namespace: testplane
+  name: runner-allow-egress
+  namespace: argus
   labels:
-    app.kubernetes.io/name: tester
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: runner
+    app.kubernetes.io/part-of: argus
 spec:
   podSelector:
     matchLabels:
-      testplane.io/managed: "true"
+      argus.io/managed: "true"
   policyTypes:
     - Egress
   egress:
@@ -121,4 +121,8 @@ spec:
         - port: 8000
           protocol: TCP
         - port: 443
+          protocol: TCP
+        - port: 18080  # dev：被测 mock 服务（run-local / deploy-check）
+          protocol: TCP
+        - port: 18091  # dev：fake-genet（host.docker.internal）
           protocol: TCP

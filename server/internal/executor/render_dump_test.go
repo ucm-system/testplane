@@ -11,28 +11,22 @@ import (
 // TestDumpRenderedJobYAML 把渲染结果写成 YAML，供真集群手工验证
 // （`kubectl apply --dry-run=client -f` / `kubectl apply -f`）。
 //
-// 只有设置了 TESTPLANE_RENDER_OUT 才会执行，默认跳过，避免污染常规测试：
+// 只有设置了 AG_RENDER_OUT 才会执行，默认跳过，避免污染常规测试：
 //
-//	TESTPLANE_RENDER_OUT=%TEMP%\tp-job.yaml go test ./internal/executor -run TestDumpRenderedJobYAML
+//	AG_RENDER_OUT=%TEMP%\argus-job.yaml go test ./internal/executor -run TestDumpRenderedJobYAML
 func TestDumpRenderedJobYAML(t *testing.T) {
-	out := os.Getenv("TESTPLANE_RENDER_OUT")
+	out := os.Getenv("AG_RENDER_OUT")
 	if out == "" {
-		t.Skip("set TESTPLANE_RENDER_OUT to dump the rendered Job YAML")
+		t.Skip("set AG_RENDER_OUT to dump the rendered Job YAML")
 	}
-	// 用真实集群里的名字：namespace=testplane、PVC=testplane-storage（infra 提供）。
+	// 用真实集群里的名字：namespace=argus、PVC=argus-storage（infra 提供）。
 	spec := sampleSpec()
-	// 真集群验证不需要示例里的 Secret/额外 env（Secret 由 Run 级注入，验证时不建）。
+	// 真集群验证不需要示例里的 Secret/额外 env（Secret 由 Task 级注入，验证时不建）。
 	spec.SecretEnv = nil
 	spec.Env = nil
-	spec.Namespace = "testplane"
-	spec.StoragePVC = "testplane-storage"
-	spec.Image = "registry.dev.huawei.com/testplane/endpoint-probe:1.0.0"
-	spec.Args = []string{
-		"--wait_timeout_seconds=5",
-		"--retry_interval_seconds=1",
-		"--url=http://mock-llm.testplane.svc:8080/v1",
-		"--model_name=mock-model",
-	}
+	spec.Namespace = "argus"
+	spec.StoragePVC = "argus-storage"
+	spec.Image = "registry.dev.huawei.com/argus/endpoint-probe:1.0.0"
 
 	job, err := Render(spec)
 	if err != nil {

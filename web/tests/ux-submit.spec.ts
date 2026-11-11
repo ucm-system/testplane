@@ -11,14 +11,14 @@ test.describe.configure({ mode: 'serial' })
 
 /** 打开提交页并等 Tester 目录到位（否则 B10 的置灰会把按钮一直拦住） */
 async function openSubmit(page: Page): Promise<void> {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'operator'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/submit')
-  await expect(page.getByLabel('Task 1 Tester')).toContainText('aisbench', { timeout: 15_000 })
+  await expect(page.getByLabel('runner 1 Runner')).toContainText('aisbench', { timeout: 15_000 })
 }
 
 /** 把 YAML 编辑器内容整体换掉（CodeMirror 是 contenteditable，不能直接 fill 语义） */
 async function replaceYaml(page: Page, text: string): Promise<void> {
-  const editor = page.getByLabel('deploy 段 YAML')
+  const editor = page.getByLabel('Genet 部署描述 YAML')
   await editor.click()
   await page.keyboard.press('ControlOrMeta+A')
   await page.keyboard.insertText(text)
@@ -28,26 +28,26 @@ test('① 0 个测试 Task：提交/校验置灰（disabled + aria-disabled + ti
   await openSubmit(page)
 
   // 默认 1 个 Task → 先确认按钮是能点的（否则下面的置灰断言没有说服力）
-  const submit = page.getByTestId('submit-run')
-  const validate = page.getByTestId('validate-run')
+  const submit = page.getByTestId('submit-task')
+  const validate = page.getByTestId('validate-task')
   await expect(submit).toBeEnabled()
 
-  await page.getByTestId('remove-task-1').click()
+  await page.getByTestId('remove-runner-1').click()
 
   // 说明就出现在 Task 卡片区
-  const hint = page.getByTestId('task-empty-hint')
+  const hint = page.getByTestId('runner-empty-hint')
   await expect(hint).toBeVisible()
-  await expect(hint).toHaveText('至少需要 1 个测试 Task（Pre-Check 由平台注入，不计入测试）')
+  await expect(hint).toHaveText('至少需要 1 个 runner（service-deploy / precheck / service-clean 由平台注入，不计入）')
 
   // 两个按钮：真 disabled + aria-disabled + title 说清原因
   for (const button of [submit, validate]) {
     await expect(button).toBeDisabled()
     await expect(button).toHaveAttribute('aria-disabled', 'true')
-    await expect(button).toHaveAttribute('title', /至少需要 1 个测试 Task/)
+    await expect(button).toHaveAttribute('title', /至少需要 1 个 runner/)
   }
 
   // 点了也不会发请求（按钮 disabled，dry-run 的摘要区不该出现）
-  await page.getByTestId('submit-run').click({ force: true })
+  await page.getByTestId('submit-task').click({ force: true })
   await expect(page.getByTestId('form-error-summary')).toHaveCount(0)
 })
 
@@ -55,23 +55,23 @@ test('② 删掉最后一个 Task 后立即置灰；撤销后恢复并重新可�
   await openSubmit(page)
 
   // 默认值是空的（见 ux-submit-defaults）：先自己写一个名字，撤销才有「原值」可恢复
-  await page.getByLabel('Task 1 名称').fill('accuracy-dataset-a')
+  await page.getByLabel('runner 1 名称').fill('accuracy-dataset-a')
 
-  const submit = page.getByTestId('submit-run')
-  await page.getByTestId('remove-task-1').click()
+  const submit = page.getByTestId('submit-task')
+  await page.getByTestId('remove-runner-1').click()
 
   // 「立即」：不等 dry-run、不刷新，点完就应该变灰
   await expect(submit).toBeDisabled()
-  await expect(page.getByTestId('task-empty-hint')).toBeVisible()
+  await expect(page.getByTestId('runner-empty-hint')).toBeVisible()
 
   // C5：删除给 undo toast，撤销把 Task 原位置放回去，A4 的置灰随之解除
   const toast = page.locator('[data-sonner-toaster]')
-  await expect(toast).toContainText('已删除 Task accuracy-dataset-a')
+  await expect(toast).toContainText('已删除 runner accuracy-dataset-a')
   await toast.getByRole('button', { name: '撤销' }).click()
 
-  await expect(page.getByLabel('Task 1 名称')).toHaveValue('accuracy-dataset-a')
+  await expect(page.getByLabel('runner 1 名称')).toHaveValue('accuracy-dataset-a')
   await expect(submit).toBeEnabled()
-  await expect(page.getByTestId('task-empty-hint')).toHaveCount(0)
+  await expect(page.getByTestId('runner-empty-hint')).toHaveCount(0)
 })
 
 test('③ 环境变量删除后给 undo toast，撤销恢复原位置原值', async ({ page }) => {
@@ -131,9 +131,9 @@ test('④ YAML 语法错误：波浪线 + gutter 标记存在，且编辑器滚�
 test('⑤ Run 名称：200 rune 通过、201 rune 红字 + 置灰（不等后端 400）', async ({ page }) => {
   await openSubmit(page)
 
-  const name = page.getByLabel('Run 名称')
-  const counter = page.getByTestId('run-name-counter')
-  const submit = page.getByTestId('submit-run')
+  const name = page.getByLabel('Task 名称')
+  const counter = page.getByTestId('task-name-counter')
+  const submit = page.getByTestId('submit-task')
 
   // 200 个中文 = 200 rune（按 UTF-16 算会是 200，按字节算才是 600 —— 这里断言的就是 rune）
   await name.fill('中'.repeat(200))
@@ -179,34 +179,34 @@ test('⑥ YAML 长值（超长 model 名）横向滚动看全', async ({ page })
   expect(wrapped).not.toBe('pre-wrap')
 })
 
-test('⑦ 只有 pre_check 角色的 Tester：无可用 Tester 时置灰并在 Task 区说明原因', async ({ page }) => {
+test('⑦ 只有 pre_check 角色的 Runner：无可用测试 runner 时置灰并在 runner 区说明原因', async ({ page }) => {
   await openSubmit(page)
 
   // 目录里只剩 pre_check 角色：B10 描述的就是这种「下拉只有一句占位」的状态
   await page.evaluate(async () => {
     const mock = (await import('/src/api/mock.ts')) as {
-      mockApi: { listTesters: (query?: unknown) => Promise<Array<{ role: string }>> }
+      mockApi: { listRunners: (query?: unknown) => Promise<Array<{ role: string }>> }
     }
-    const original = mock.mockApi.listTesters.bind(mock.mockApi)
-    mock.mockApi.listTesters = async (query) => (await original(query)).filter((tester) => tester.role === 'pre_check')
+    const original = mock.mockApi.listRunners.bind(mock.mockApi)
+    mock.mockApi.listRunners = async (query) => (await original(query)).filter((runner) => runner.role === 'pre_check')
   })
 
   // 站内切走再切回：提交页真卸载再重挂 → 重新拉目录（补丁还在，整页刷新会丢）
   await page.getByRole('link', { name: '概览' }).click()
-  await expect(page.getByText('全部 Run')).toBeVisible()
-  await page.getByRole('link', { name: '提交运行' }).click()
+  await expect(page.getByText('全部 Task')).toBeVisible()
+  await page.getByRole('link', { name: '提交 Task' }).click()
   await expect(page).toHaveURL(/\/submit$/)
 
-  const hint = page.getByTestId('tester-empty-hint')
+  const hint = page.getByTestId('runner-empty-registered')
   await expect(hint).toBeVisible({ timeout: 15_000 })
-  await expect(hint).toHaveText('当前没有可用的 Tester；只有 pre_check 角色的 Tester 不能作为测试 Task')
+  await expect(hint).toHaveText('当前没有可用的 Runner；deploy / clean 角色仅内置（D-70），不能作为测试 runner')
 
-  const submit = page.getByTestId('submit-run')
+  const submit = page.getByTestId('submit-task')
   await expect(submit).toBeDisabled()
   await expect(submit).toHaveAttribute('aria-disabled', 'true')
-  await expect(submit).toHaveAttribute('title', /只有 pre_check 角色的 Tester 不能作为测试 Task/)
-  await expect(page.getByTestId('validate-run')).toBeDisabled()
+  await expect(submit).toHaveAttribute('title', /当前没有可用的 Runner/)
+  await expect(page.getByTestId('validate-task')).toBeDisabled()
 
-  // 下拉里只剩占位，没有可选的 Tester
-  await expect(page.getByLabel('Task 1 Tester')).toHaveValue('')
+  // 下拉里只剩占位，没有可选的测试 runner
+  await expect(page.getByLabel('runner 1 Runner')).toHaveValue('')
 })

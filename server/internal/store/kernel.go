@@ -18,10 +18,11 @@ import (
 //
 // 事务内动作顺序固定：
 //  1. 校验 (entity, from→to) 在转移表内，否则 ErrIllegalState；
-//  2. SELECT ... FOR UPDATE 锁实体行（调用方必须先锁 Run，Kernel 不重复锁）；
+//  2. SELECT ... FOR UPDATE 锁实体行（**调用方必须先锁 Task**——统一顺序
+//     Task → runner 执行记录，02 §3.8；Kernel 不重复锁 Task）；
 //  3. 当前状态 == To → Noop；不在 From 集合 → ErrConflict；
-//  4. UPDATE ... WHERE id=? AND status IN (from) 做 CAS 双保险；
-//  5. UPDATE runs SET last_event_seq = last_event_seq+1 RETURNING 分配 seq；
+//  4. UPDATE ... WHERE key=? AND status IN (from) 做 CAS 双保险；
+//  5. UPDATE tasks SET last_event_seq = last_event_seq+1 RETURNING 分配 seq；
 //  6. INSERT state_events；
 //  7. 执行本转移的 effects（只允许 DB 写）；
 //  8. 返回；提交后由调用方 NOTIFY。
@@ -51,15 +52,14 @@ func (s *Store) Apply(ctx context.Context, tx pgx.Tx, tr domain.Transition) (dom
 	}
 
 	switch tr.Entity {
-	case domain.EntityRun:
-		return s.applyRun(ctx, tx, tr, at)
 	case domain.EntityTask:
 		return s.applyTask(ctx, tx, tr, at)
-	case domain.EntityAttempt:
-		return s.applyAttempt(ctx, tx, tr, at)
-	case domain.EntityTester:
-		// Tester 是启动期注册表状态（02 §2.4），不落 status 列、不走运行期 Kernel。
-		return domain.Applied{}, fmt.Errorf("store: kernel: tester 状态机只在注册表同步期使用: %w", domain.ErrPrecondition)
+	case domain.EntityRunnerRun:
+		key, ok := domain.ParseRunnerKey(tr.ID)
+		if !ok {
+			return domain.Applied{}, fmt.Errorf("store: kernel task_runner: 非法 key %q: %w", tr.ID, domain.ErrIllegalState)
+		}
+		return s.applyRunnerRun(ctx, tx, tr, key, at)
 	}
 	return domain.Applied{}, fmt.Errorf("store: kernel: 未知实体 %q: %w", tr.Entity, domain.ErrIllegalState)
 }
@@ -102,109 +102,74 @@ func requireEdge(entity domain.EntityType, id string, current, to domain.Status)
 // allStatuses 枚举某实体的全部状态值，只给 From 为空时的兜底校验用。
 func allStatuses(entity domain.EntityType) []domain.Status {
 	switch entity {
-	case domain.EntityRun:
-		return domain.RunStatuses(domain.RunSubmitted, domain.RunQueued, domain.RunDeploying,
-			domain.RunTesting, domain.RunCleanup, domain.RunCancelling, domain.RunSucceeded,
-			domain.RunCompletedWithErrors, domain.RunServiceUnavailable, domain.RunFailed, domain.RunCanceled)
 	case domain.EntityTask:
-		return domain.TaskStatuses(domain.TaskPending, domain.TaskQueued, domain.TaskPreparing,
-			domain.TaskRunning, domain.TaskSucceeded, domain.TaskFailed, domain.TaskCanceled, domain.TaskSkipped)
-	case domain.EntityAttempt:
-		return domain.AttemptStatuses(domain.AttemptPreparing, domain.AttemptRunning,
-			domain.AttemptSucceeded, domain.AttemptFailed, domain.AttemptCanceled)
+		return domain.TaskStatuses(domain.TaskSubmitted, domain.TaskQueued, domain.TaskRunning,
+			domain.TaskCancelling, domain.TaskSucceeded, domain.TaskFailed,
+			domain.TaskServiceUnavailable, domain.TaskCanceled)
+	case domain.EntityRunnerRun:
+		return domain.RunnerStatuses(domain.RunnerPending, domain.RunnerQueued, domain.RunnerPreparing,
+			domain.RunnerRunning, domain.RunnerSucceeded, domain.RunnerFailed,
+			domain.RunnerSkipped, domain.RunnerCanceled)
 	}
 	return nil
 }
 
-// ---- Run ----------------------------------------------------------------
+// ---- Task ----------------------------------------------------------------
 
-func (s *Store) applyRun(ctx context.Context, tx pgx.Tx, tr domain.Transition, at time.Time) (domain.Applied, error) {
-	var cur domain.RunStatus
-	var hasEndpoint bool
+func (s *Store) applyTask(ctx context.Context, tx pgx.Tx, tr domain.Transition, at time.Time) (domain.Applied, error) {
+	var cur domain.TaskStatus
 	err := tx.QueryRow(ctx,
-		`SELECT status, (endpoint IS NOT NULL) FROM runs WHERE id = $1 FOR UPDATE`, tr.ID).
-		Scan(&cur, &hasEndpoint)
+		`SELECT status FROM tasks WHERE id = $1 FOR UPDATE`, tr.ID).Scan(&cur)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Applied{}, fmt.Errorf("store: kernel run %s: %w", tr.ID, domain.ErrNotFound)
+		return domain.Applied{}, fmt.Errorf("store: kernel task %s: %w", tr.ID, domain.ErrNotFound)
 	}
 	if err != nil {
-		return domain.Applied{}, fmt.Errorf("store: kernel run %s: lock: %w", tr.ID, err)
+		return domain.Applied{}, fmt.Errorf("store: kernel task %s: lock: %w", tr.ID, err)
 	}
 
-	to := domain.RunStatus(tr.To)
+	to := domain.TaskStatus(tr.To)
 
 	// 3. 幂等与前置状态
 	if cur == to {
 		return domain.Applied{From: cur.Status(), To: to.Status(), Noop: true}, nil
 	}
 	if len(tr.From) > 0 && !containsStatus(tr.From, cur.Status()) {
-		return domain.Applied{}, fmt.Errorf("store: kernel run %s: 当前状态 %s 不在允许集合 %v: %w",
+		return domain.Applied{}, fmt.Errorf("store: kernel task %s: 当前状态 %s 不在允许集合 %v: %w",
 			tr.ID, cur, tr.From, domain.ErrConflict)
 	}
 	if err := requireEdge(tr.Entity, tr.ID, cur.Status(), to.Status()); err != nil {
 		return domain.Applied{}, err
 	}
 
-	// 守卫：有 Endpoint 才能进 testing（C-3.4）。
-	if to == domain.RunTesting && !hasEndpoint && payloadValue(tr.Payload, "endpoint") == nil {
-		return domain.Applied{}, fmt.Errorf("store: kernel run %s: 缺少 endpoint，不能进入 testing: %w",
-			tr.ID, domain.ErrPrecondition)
-	}
-	// 守卫：由 cleanup 判定终态时，所有 Task 必须已终态（C-3.4、C-5.8）。
-	if cur == domain.RunCleanup && (to == domain.RunSucceeded ||
-		to == domain.RunCompletedWithErrors || to == domain.RunServiceUnavailable) {
-		var pending int
-		if err := tx.QueryRow(ctx,
-			`SELECT count(*) FROM tasks WHERE run_id = $1 AND NOT (status = ANY($2))`,
-			tr.ID, domain.TerminalTaskStatusStrings()).Scan(&pending); err != nil {
-			return domain.Applied{}, fmt.Errorf("store: kernel run %s: guard tasks: %w", tr.ID, err)
-		}
-		if pending > 0 {
-			return domain.Applied{}, fmt.Errorf("store: kernel run %s: 仍有 %d 个未终态 Task: %w",
-				tr.ID, pending, domain.ErrPrecondition)
-		}
-	}
-
 	// 4. CAS
 	from := casFrom(tr.From, cur.Status())
-	setStarted := to == domain.RunDeploying || to == domain.RunTesting || to == domain.RunCleanup
+	setStarted := to == domain.TaskRunning
 	setFinished := to.IsTerminal()
 	errJSON := payloadJSON(tr.Payload, "error")
-	endpointJSON := payloadJSON(tr.Payload, "endpoint")
-	deployJSON := payloadJSON(tr.Payload, "deploy")
-	if len(errJSON) > 0 && len(tr.Payload) > 0 {
-		// 允许直接传 domain.Failure
-		if f, ok := tr.Payload["error"].(domain.Failure); ok {
-			errJSON, _ = json.Marshal(f)
-		}
+	if f, ok := tr.Payload["error"].(domain.Failure); ok {
+		errJSON, _ = json.Marshal(f)
 	}
 	tag, err := tx.Exec(ctx, `
-		UPDATE runs
+		UPDATE tasks
 		   SET status      = $2,
 		       revision    = revision + 1,
 		       started_at  = CASE WHEN $3 THEN COALESCE(started_at, $4) ELSE started_at END,
 		       finished_at = CASE WHEN $5 THEN $4 ELSE finished_at END,
-		       error       = COALESCE($6, error),
-		       endpoint    = COALESCE($7, endpoint),
-		       -- deploy 必须**合并**：冻结字段（release_name/values_digest/…）写一次，
-		       -- 之后每次状态推进只带变化的键；整段覆盖会让重启后无法找回 Genet release（§9.2）。
-		       deploy      = CASE
-		                       WHEN $8::jsonb IS NULL THEN deploy
-		                       ELSE COALESCE(deploy, '{}'::jsonb) || $8::jsonb
-		                     END
-		 WHERE id = $1 AND status = ANY($9)`,
+		       error       = COALESCE($6, error)
+		 WHERE id = $1 AND status = ANY($7)`,
 		tr.ID, string(to), setStarted, at, setFinished,
-		nullableBytes(errJSON), nullableBytes(endpointJSON), nullableBytes(deployJSON), from)
+		nullableBytes(errJSON), from)
 	if err != nil {
-		return domain.Applied{}, fmt.Errorf("store: kernel run %s: cas: %w", tr.ID, err)
+		return domain.Applied{}, fmt.Errorf("store: kernel task %s: cas: %w", tr.ID, err)
 	}
 	if tag.RowsAffected() == 0 {
-		return domain.Applied{}, fmt.Errorf("store: kernel run %s: cas 未命中（并发修改）: %w", tr.ID, domain.ErrConflict)
+		return domain.Applied{}, fmt.Errorf("store: kernel task %s: cas 未命中（并发修改）: %w", tr.ID, domain.ErrConflict)
 	}
 
 	// 5+6. seq 与事件
 	spec, _ := domain.LookupTransition(tr.Entity, cur.Status(), to.Status())
-	seq, err := s.insertTransitionEvent(ctx, tx, tr, spec, cur.Status(), to.Status(), at, evIDs{runID: tr.ID})
+	seq, err := s.insertTransitionEvent(ctx, tx, tr, spec, cur.Status(), to.Status(), at,
+		evIDs{taskID: tr.ID})
 	if err != nil {
 		return domain.Applied{}, err
 	}
@@ -217,46 +182,58 @@ func (s *Store) applyRun(ctx context.Context, tx pgx.Tx, tr domain.Transition, a
 	return domain.Applied{From: cur.Status(), To: to.Status(), Seq: seq}, nil
 }
 
-// ---- Task ---------------------------------------------------------------
+// ---- runner 执行记录 -----------------------------------------------------
 
-func (s *Store) applyTask(ctx context.Context, tx pgx.Tx, tr domain.Transition, at time.Time) (domain.Applied, error) {
-	var cur domain.TaskStatus
-	var runID string
-	var seed int
+func (s *Store) applyRunnerRun(ctx context.Context, tx pgx.Tx, tr domain.Transition,
+	k domain.RunnerKey, at time.Time) (domain.Applied, error) {
+
+	var cur domain.RunnerStatus
 	var endpointKey *string
 	err := tx.QueryRow(ctx, `
-		SELECT status, run_id, seq, endpoint_key
-		  FROM tasks WHERE id = $1 FOR UPDATE`, tr.ID).
-		Scan(&cur, &runID, &seed, &endpointKey)
+		SELECT status, endpoint_key
+		  FROM task_runners
+		 WHERE task_id = $1 AND attempt_no = $2 AND seq = $3
+		 FOR UPDATE`, k.TaskID, k.AttemptNo, k.Seq).
+		Scan(&cur, &endpointKey)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Applied{}, fmt.Errorf("store: kernel task %s: %w", tr.ID, domain.ErrNotFound)
+		return domain.Applied{}, fmt.Errorf("store: kernel task_runner %s: %w", k.ID(), domain.ErrNotFound)
 	}
 	if err != nil {
-		return domain.Applied{}, fmt.Errorf("store: kernel task %s: lock: %w", tr.ID, err)
+		return domain.Applied{}, fmt.Errorf("store: kernel task_runner %s: lock: %w", k.ID(), err)
 	}
 
-	to := domain.TaskStatus(tr.To)
+	to := domain.RunnerStatus(tr.To)
 
 	if cur == to {
 		return domain.Applied{From: cur.Status(), To: to.Status(), Noop: true}, nil
 	}
 	if len(tr.From) > 0 && !containsStatus(tr.From, cur.Status()) {
-		return domain.Applied{}, fmt.Errorf("store: kernel task %s: 当前状态 %s 不在允许集合 %v: %w",
-			tr.ID, cur, tr.From, domain.ErrConflict)
+		return domain.Applied{}, fmt.Errorf("store: kernel task_runner %s: 当前状态 %s 不在允许集合 %v: %w",
+			k.ID(), cur, tr.From, domain.ErrConflict)
 	}
-	if err := requireEdge(tr.Entity, tr.ID, cur.Status(), to.Status()); err != nil {
+	if err := requireEdge(tr.Entity, k.ID(), cur.Status(), to.Status()); err != nil {
 		return domain.Applied{}, err
 	}
 
-	// 守卫 1：queued 的 Task 必须有 endpoint_key（C-4.5，不得用占位键绕过）。
-	if to == domain.TaskQueued && (endpointKey == nil || *endpointKey == "") {
-		return domain.Applied{}, fmt.Errorf("store: kernel task %s: endpoint_key 为空，不能进入 queued: %w",
-			tr.ID, domain.ErrPrecondition)
+	// 守卫 1：外接模式（Task 无 deploy）下 queued 的 runner 必须有 endpoint_key
+	// （C-3.4 / C-4.5，不得用占位键绕过；部署模式无租约，不校验）。
+	if to == domain.RunnerQueued && endpointKey != nil && *endpointKey == "" {
+		// 空串键 = 声明了但没值：按守卫失败处理。
+		var hasDeploy bool
+		if err := tx.QueryRow(ctx,
+			`SELECT (deploy IS NOT NULL) FROM tasks WHERE id = $1`, k.TaskID).Scan(&hasDeploy); err != nil {
+			return domain.Applied{}, fmt.Errorf("store: kernel task_runner %s: guard deploy: %w", k.ID(), err)
+		}
+		if !hasDeploy {
+			return domain.Applied{}, fmt.Errorf(
+				"store: kernel task_runner %s: 外接模式下 endpoint_key 为空，不能进入 queued: %w",
+				k.ID(), domain.ErrPrecondition)
+		}
 	}
 	// 守卫 2：skipped 必须有合法 reason（03 §3.2 CHECK）。
-	if to == domain.TaskSkipped && !domain.ValidSkipReason(tr.Reason) {
-		return domain.Applied{}, fmt.Errorf("store: kernel task %s: skip reason %q 非法: %w",
-			tr.ID, tr.Reason, domain.ErrPrecondition)
+	if to == domain.RunnerSkipped && !domain.ValidSkipReason(tr.Reason) {
+		return domain.Applied{}, fmt.Errorf("store: kernel task_runner %s: skip reason %q 非法: %w",
+			k.ID(), tr.Reason, domain.ErrPrecondition)
 	}
 
 	// 4. CAS
@@ -265,115 +242,39 @@ func (s *Store) applyTask(ctx context.Context, tx pgx.Tx, tr domain.Transition, 
 	if f, ok := tr.Payload["error"].(domain.Failure); ok {
 		errJSON, _ = json.Marshal(f)
 	}
-	// result_ref：Task 终态时写（03-data-view §3.1），payload 里没有就保持原值。
-	// 这条链路之前是断的：`tasks.result_ref` 从来没人写 → report.json 的 tasks[].result_ref 全空，
-	// UI 指标表因此拿不到 result.json（票 UX-2026-11）。
-	taskResultRef := payloadString(tr.Payload, "result_ref")
+	errorCode := payloadString(tr.Payload, "error_code")
+	if errorCode == "" {
+		if f, ok := tr.Payload["error"].(domain.Failure); ok {
+			errorCode = f.Code
+		}
+	}
+	setStarted := to == domain.RunnerRunning
+	setFinished := to.IsTerminal()
 	tag, err := tx.Exec(ctx, `
-		UPDATE tasks
+		UPDATE task_runners
 		   SET status          = $2,
 		       status_reason   = NULLIF($3, ''),
-		       updated_at      = $4,
-		       waiting_reason  = CASE WHEN $2 = 'queued' OR $2 = ANY($7)
-		                              THEN NULL ELSE waiting_reason END,
+		       waiting_reason  = CASE WHEN $2 = 'queued' OR $2 = ANY($8) THEN NULL ELSE waiting_reason END,
+		       error_code      = COALESCE(NULLIF($4, ''), error_code),
 		       error           = COALESCE($5, error),
-		       result_ref      = COALESCE($8, result_ref)
-		 WHERE id = $1 AND status = ANY($6)`,
-		tr.ID, string(to), tr.Reason, at, nullableBytes(errJSON), from,
-		domain.TerminalTaskStatusStrings(), nullableText(taskResultRef))
+		       started_at      = CASE WHEN $6 THEN COALESCE(started_at, $9) ELSE started_at END,
+		       finished_at     = CASE WHEN $7 THEN $9 ELSE finished_at END,
+		       updated_at      = $9
+		 WHERE task_id = $1 AND attempt_no = $10 AND seq = $11 AND status = ANY($12)`,
+		k.TaskID, string(to), tr.Reason, errorCode, nullableBytes(errJSON),
+		setStarted, setFinished, domain.TerminalRunnerStatusStrings(), at,
+		k.AttemptNo, k.Seq, from)
 	if err != nil {
-		return domain.Applied{}, fmt.Errorf("store: kernel task %s: cas: %w", tr.ID, err)
+		return domain.Applied{}, fmt.Errorf("store: kernel task_runner %s: cas: %w", k.ID(), err)
 	}
 	if tag.RowsAffected() == 0 {
-		return domain.Applied{}, fmt.Errorf("store: kernel task %s: cas 未命中（并发修改）: %w", tr.ID, domain.ErrConflict)
+		return domain.Applied{}, fmt.Errorf("store: kernel task_runner %s: cas 未命中（并发修改）: %w",
+			k.ID(), domain.ErrConflict)
 	}
 
 	spec, _ := domain.LookupTransition(tr.Entity, cur.Status(), to.Status())
-	taskID := tr.ID
 	seq, err := s.insertTransitionEvent(ctx, tx, tr, spec, cur.Status(), to.Status(), at,
-		evIDs{runID: runID, taskID: &taskID})
-	if err != nil {
-		return domain.Applied{}, err
-	}
-
-	if err := s.applyEffects(ctx, tx, tr, cur.Status(), to.Status(), at); err != nil {
-		return domain.Applied{}, err
-	}
-
-	return domain.Applied{From: cur.Status(), To: to.Status(), Seq: seq}, nil
-}
-
-// ---- Attempt ------------------------------------------------------------
-
-func (s *Store) applyAttempt(ctx context.Context, tx pgx.Tx, tr domain.Transition, at time.Time) (domain.Applied, error) {
-	var cur domain.AttemptStatus
-	var taskID, runID string
-	err := tx.QueryRow(ctx, `
-		SELECT a.status, a.task_id, t.run_id
-		  FROM attempts a JOIN tasks t ON t.id = a.task_id
-		 WHERE a.id = $1 FOR UPDATE OF a`, tr.ID).
-		Scan(&cur, &taskID, &runID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Applied{}, fmt.Errorf("store: kernel attempt %s: %w", tr.ID, domain.ErrNotFound)
-	}
-	if err != nil {
-		return domain.Applied{}, fmt.Errorf("store: kernel attempt %s: lock: %w", tr.ID, err)
-	}
-
-	to := domain.AttemptStatus(tr.To)
-	if cur == to {
-		return domain.Applied{From: cur.Status(), To: to.Status(), Noop: true}, nil
-	}
-	if len(tr.From) > 0 && !containsStatus(tr.From, cur.Status()) {
-		return domain.Applied{}, fmt.Errorf("store: kernel attempt %s: 当前状态 %s 不在允许集合 %v: %w",
-			tr.ID, cur, tr.From, domain.ErrConflict)
-	}
-	if err := requireEdge(tr.Entity, tr.ID, cur.Status(), to.Status()); err != nil {
-		return domain.Applied{}, err
-	}
-
-	from := casFrom(tr.From, cur.Status())
-	errJSON := payloadJSON(tr.Payload, "error")
-	if f, ok := tr.Payload["error"].(domain.Failure); ok {
-		errJSON, _ = json.Marshal(f)
-	}
-	phase := payloadString(tr.Payload, "phase")
-	execRef := payloadJSON(tr.Payload, "executor_ref")
-	exitCode := payloadInt(tr.Payload, "exit_code")
-	logRef := payloadString(tr.Payload, "log_ref")
-	artifactRef := payloadString(tr.Payload, "artifact_ref")
-	resultRef := payloadString(tr.Payload, "result_ref")
-
-	setStarted := to == domain.AttemptRunning
-	setFinished := to.IsTerminal()
-
-	tag, err := tx.Exec(ctx, `
-		UPDATE attempts
-		   SET status       = $2,
-		       phase        = COALESCE($3, phase),
-		       exit_code    = COALESCE($4, exit_code),
-		       started_at   = CASE WHEN $5 THEN COALESCE(started_at, $6) ELSE started_at END,
-		       finished_at  = CASE WHEN $7 THEN $6 ELSE finished_at END,
-		       error        = COALESCE($8, error),
-		       executor_ref = COALESCE($9, executor_ref),
-		       log_ref      = COALESCE($10, log_ref),
-		       artifact_ref = COALESCE($11, artifact_ref),
-		       result_ref   = COALESCE($12, result_ref)
-		 WHERE id = $1 AND status = ANY($13)`,
-		tr.ID, string(to), nullableText(phase), exitCode, setStarted, at, setFinished,
-		nullableBytes(errJSON), nullableBytes(execRef), nullableText(logRef),
-		nullableText(artifactRef), nullableText(resultRef), from)
-	if err != nil {
-		return domain.Applied{}, fmt.Errorf("store: kernel attempt %s: cas: %w", tr.ID, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return domain.Applied{}, fmt.Errorf("store: kernel attempt %s: cas 未命中（并发修改）: %w", tr.ID, domain.ErrConflict)
-	}
-
-	spec, _ := domain.LookupTransition(tr.Entity, cur.Status(), to.Status())
-	attemptID := tr.ID
-	seq, err := s.insertTransitionEvent(ctx, tx, tr, spec, cur.Status(), to.Status(), at,
-		evIDs{runID: runID, taskID: &taskID, attemptID: &attemptID})
+		evIDs{taskID: k.TaskID, attemptNo: &k.AttemptNo, runnerSeq: &k.Seq})
 	if err != nil {
 		return domain.Applied{}, err
 	}
@@ -388,16 +289,16 @@ func (s *Store) applyAttempt(ctx context.Context, tx pgx.Tx, tr domain.Transitio
 // ---- 事件写入 ------------------------------------------------------------
 
 type evIDs struct {
-	runID     string
-	taskID    *string
-	attemptID *string
+	taskID    string
+	attemptNo *int
+	runnerSeq *int
 }
 
-// insertTransitionEvent 分配 seq（runs.last_event_seq 行级自增）并插入 state_events。
+// insertTransitionEvent 分配 seq（tasks.last_event_seq 行级自增）并插入 state_events。
 func (s *Store) insertTransitionEvent(ctx context.Context, tx pgx.Tx, tr domain.Transition,
 	spec domain.TransitionSpec, from, to domain.Status, at time.Time, ids evIDs) (int64, error) {
 
-	seq, err := s.nextSeq(ctx, tx, ids.runID)
+	seq, err := s.nextSeq(ctx, tx, ids.taskID)
 	if err != nil {
 		return 0, err
 	}
@@ -413,7 +314,7 @@ func (s *Store) insertTransitionEvent(ctx context.Context, tx pgx.Tx, tr domain.
 
 	evType := spec.Event
 	if evType == "" {
-		evType = domain.EventRunStateChanged
+		evType = domain.EventTaskStateChanged
 	}
 	actor := tr.Actor
 	if actor == "" {
@@ -424,26 +325,26 @@ func (s *Store) insertTransitionEvent(ctx context.Context, tx pgx.Tx, tr domain.
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO state_events
-		  (run_id, task_id, attempt_id, seq, type, from_status, to_status, reason, payload, actor, created_at)
+		  (task_id, attempt_no, runner_seq, seq, type, from_status, to_status, reason, payload, actor, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		ids.runID, ids.taskID, ids.attemptID, seq, evType, fromS, toS, reason, raw, actor, at)
+		ids.taskID, ids.attemptNo, ids.runnerSeq, seq, evType, fromS, toS, reason, raw, actor, at)
 	if err != nil {
 		return 0, fmt.Errorf("store: kernel: insert state_event: %w", err)
 	}
 	return seq, nil
 }
 
-// nextSeq 原子分配该 Run 的下一个事件序号（不用 max(seq)+1，避免读-改-写竞态）。
-func (s *Store) nextSeq(ctx context.Context, tx pgx.Tx, runID string) (int64, error) {
+// nextSeq 原子分配该 Task 的下一个事件序号（不用 max(seq)+1，避免读-改-写竞态）。
+func (s *Store) nextSeq(ctx context.Context, tx pgx.Tx, taskID string) (int64, error) {
 	var seq int64
 	err := tx.QueryRow(ctx,
-		`UPDATE runs SET last_event_seq = last_event_seq + 1 WHERE id = $1 RETURNING last_event_seq`,
-		runID).Scan(&seq)
+		`UPDATE tasks SET last_event_seq = last_event_seq + 1 WHERE id = $1 RETURNING last_event_seq`,
+		taskID).Scan(&seq)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, fmt.Errorf("store: nextSeq: run %s: %w", runID, domain.ErrNotFound)
+		return 0, fmt.Errorf("store: nextSeq: task %s: %w", taskID, domain.ErrNotFound)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("store: nextSeq: run %s: %w", runID, err)
+		return 0, fmt.Errorf("store: nextSeq: task %s: %w", taskID, err)
 	}
 	return seq, nil
 }
@@ -525,46 +426,4 @@ func payloadString(p map[string]any, key string) string {
 		return s
 	}
 	return ""
-}
-
-// payloadStrings 取 []string（或 []any 的字符串元素）型 payload 字段。
-func payloadStrings(p map[string]any, key string) []string {
-	v, ok := p[key]
-	if !ok || v == nil {
-		return nil
-	}
-	switch t := v.(type) {
-	case []string:
-		return t
-	case []any:
-		out := make([]string, 0, len(t))
-		for _, e := range t {
-			if s, ok := e.(string); ok {
-				out = append(out, s)
-			}
-		}
-		return out
-	}
-	return nil
-}
-
-func payloadInt(p map[string]any, key string) *int32 {
-	v, ok := p[key]
-	if !ok || v == nil {
-		return nil
-	}
-	switch n := v.(type) {
-	case int:
-		c := int32(n)
-		return &c
-	case int32:
-		return &n
-	case int64:
-		c := int32(n)
-		return &c
-	case float64:
-		c := int32(n)
-		return &c
-	}
-	return nil
 }

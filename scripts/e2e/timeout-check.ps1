@@ -8,10 +8,10 @@
 param(
     [string]$BaseUrl = 'http://127.0.0.1:8093',
     [string]$User = 'dev',
-    [string]$Namespace = 'testplane',
-    [string]$PgContainer = 'testplane-pg',
-    [string]$PgUser = 'testplane',
-    [string]$PgDb = 'testplane',
+    [string]$Namespace = 'argus',
+    [string]$PgContainer = 'argus-pg',
+    [string]$PgUser = 'argus',
+    [string]$PgDb = 'argus',
     [int]$AssertRunSeconds = 30,
     [int]$LoopLimitSeconds = 90,
     [int]$CleanupWaitSeconds = 60,
@@ -71,7 +71,7 @@ function Get-K8sOneObject {
 function New-Manifest {
     param([string]$Stamp)
     return @"
-{"run":{"name":"timeout-check-$Stamp","service":{"url":"http://mock-llm-slow.default.svc:18080/v1","model_name":"mock-llm"},"precheck":"off","tests":[{"name":"slow-timeout","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"args":"--wait_timeout_seconds=600","timeout_seconds":$TaskTimeoutSeconds}]}}
+{"task":{"name":"timeout-check-$Stamp","service":{"url":"http://mock-llm-slow.default.svc:18080/v1","model_name":"mock-llm"},"precheck":"off","runners":[{"name":"slow-timeout","runner":"endpoint-probe","version":"1.0.0","execution":{"profile":"k8s-npu"},"input":"{\"wait_timeout_seconds\":600}","on_failure":"continue","timeout_seconds":$TaskTimeoutSeconds}]}}
 "@
 }
 
@@ -79,7 +79,7 @@ if ($DryRun) {
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     Write-Host "timeout-check dry-run（不连后端）" -ForegroundColor Cyan
     Write-Host "  base_url=$BaseUrl namespace=$Namespace"
-    Write-Host "  断言：Run failed ≤ ${AssertRunSeconds}s；循环上界 ${LoopLimitSeconds}s；Attempt 容差 timeout+30s"
+    Write-Host "  断言：Task failed ≤ ${AssertRunSeconds}s；循环上界 ${LoopLimitSeconds}s；Attempt 容差 timeout+30s"
     Write-Host "  manifest:"
     Write-Host (New-Manifest -Stamp $stamp)
     Write-Host "dry-run OK" -ForegroundColor Green
@@ -97,20 +97,20 @@ $null = Invoke-WebRequest -UseBasicParsing "$BaseUrl/healthz" -TimeoutSec 5
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $manifest = New-Manifest -Stamp $stamp
-$submitted = Invoke-Api -Method POST -Path '/api/v1/runs' -Body $manifest
-$runId = [string]$submitted.run.id
-Write-Host "已提交 Run $runId（timeout_seconds=$TaskTimeoutSeconds，mock-llm-slow）"
+$submitted = Invoke-Api -Method POST -Path '/api/v1/tasks' -Body $manifest
+$runId = [string]$submitted.task.id
+Write-Host "已提交 Task $runId（timeout_seconds=$TaskTimeoutSeconds，mock-llm-slow）"
 
 # 轮询上界与断言阈值分离（票 #16）。
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $trace = @()
 $run = $null
 while ($sw.Elapsed.TotalSeconds -lt $LoopLimitSeconds) {
-    $run = Invoke-Api -Method GET -Path "/api/v1/runs/$runId"
-    $brief = ($run.tasks | ForEach-Object { "$($_.name)=$($_.status)" }) -join ', '
+    $run = Invoke-Api -Method GET -Path "/api/v1/tasks/$runId"
+    $brief = ($run.runners | ForEach-Object { "$($_.name)=$($_.status)" }) -join ', '
     $line = "t+{0:N1}s status={1} tasks: {2}" -f $sw.Elapsed.TotalSeconds, $run.status, $brief
     if ($trace.Count -eq 0 -or $trace[-1] -ne $line) { $trace += $line; Write-Host "  $line" }
-    if ($run.status -in @('failed', 'completed_with_errors', 'service_unavailable', 'succeeded', 'canceled')) { break }
+    if ($run.status -in @('failed', 'service_unavailable', 'succeeded', 'canceled')) { break }
     Start-Sleep -Milliseconds 500
 }
 $sw.Stop()
@@ -121,7 +121,7 @@ Write-Host "断言：" -ForegroundColor Cyan
 Add-Check 'run.terminal_failed' ($run.status -eq 'failed') ("status=" + $run.status + "（期望 failed：TASK_TIMEOUT 属平台 C 类）")
 Add-Check 'run.within_30s' ($terminalElapsed -le $AssertRunSeconds) ($terminalElapsed.ToString() + "s <= " + $AssertRunSeconds + "s（阈值独立于循环上界 " + $LoopLimitSeconds + "s）")
 
-$taskList = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/tasks?limit=200").items
+$taskList = (Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/runners?limit=200").items
 $task = @($taskList | Where-Object { $_.name -eq 'slow-timeout' })[0]
 if (-not $task) { Add-Check 'task.present' $false '找不到 slow-timeout Task'; $task = $taskList[0] }
 Add-Check 'task.present' ($null -ne $task) ("task=" + $task.id)
@@ -129,11 +129,11 @@ Add-Check 'task.failed' ($task.status -eq 'failed') ("status=" + $task.status)
 Add-Check 'task.error_code' ($task.error.code -eq 'TASK_TIMEOUT') ("code=" + $task.error.code)
 Add-Check 'task.retryable' ($task.error.retryable -eq $true) ("retryable=" + $task.error.retryable)
 
-$attempt = @((Invoke-Api -Method GET -Path "/api/v1/tasks/$($task.id)/attempts").items)[0]
+$attempt = @((Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/attempts").items)[0]   # v2：attempt 是 Task 级
 if (-not $attempt) {
     Add-Check 'attempt.present' $false '没有 Attempt'
 } else {
-    Add-Check 'attempt.present' $true ("attempt=" + $attempt.id)
+    Add-Check 'attempt.present' $true ("attempt_no=" + $attempt.attempt_no)
     Add-Check 'attempt.terminal' ($attempt.status -in @('failed', 'canceled')) ("status=" + $attempt.status + "/phase=" + $attempt.phase)
     Add-Check 'attempt.error_code' ($attempt.error.code -eq 'TASK_TIMEOUT') ("code=" + $attempt.error.code)
     try {
@@ -151,7 +151,7 @@ if (-not $attempt) {
 }
 
 # 事件：task.state_changed running->failed + payload.error.code=TASK_TIMEOUT，或有 task.timeout。
-$events = (Invoke-Api -Method GET -Path "/api/v1/runs/$runId/events/history?limit=200").items
+$events = (Invoke-Api -Method GET -Path "/api/v1/tasks/$runId/events/history?limit=200").items
 $timeoutEvent = @($events | Where-Object {
     $_.type -eq 'task.timeout' -or
     ($_.type -eq 'task.state_changed' -and $_.from -eq 'running' -and $_.to -eq 'failed' -and $_.payload.error.code -eq 'TASK_TIMEOUT')
@@ -166,8 +166,8 @@ $podsLeft = @()
 $jobLeft = @()
 while ($cleanupSw.Elapsed.TotalSeconds -lt $CleanupWaitSeconds) {
     try {
-        $podsLeft = Get-K8sObjectNames -Kind 'pods' -Selector "job-name=tp-t-$($task.id.ToLower())-a1"
-        $jobLeft = Get-K8sOneObject -Kind 'jobs' -Name "tp-t-$($task.id.ToLower())-a1"
+        $podsLeft = Get-K8sObjectNames -Kind 'pods' -Selector "argus.io/task=$runId"   # v2：按附录 B 标签查
+        $jobLeft = Get-K8sObjectNames -Kind 'jobs' -Selector "argus.io/task=$runId"
     } catch {
         $podQueryFailed = $true
         Add-Check 'k8s.cleanup_query' $false ($_.Exception.Message)
@@ -183,7 +183,7 @@ if (-not $podQueryFailed) {
 }
 
 try {
-    $leaseCount = Invoke-PsqlCount "select count(*) from endpoint_leases where task_id='$($task.id)';"
+    $leaseCount = Invoke-PsqlCount "select count(*) from endpoint_leases where task_id='$runId';"
     Add-Check 'endpoint_leases.query' $true '查询成功'
     Add-Check 'endpoint_leases.empty' ($leaseCount -eq 0) ("剩余租约=$leaseCount")
 } catch {
@@ -207,7 +207,7 @@ $outObj = [pscustomobject]@{
     ok = $ok
     run_id = $runId
     task_id = $task.id
-    attempt_id = $(if ($attempt) { $attempt.id } else { '' })
+    attempt_no = $(if ($attempt) { $attempt.attempt_no } else { '' })
     final_status = $run.status
     elapsed_seconds = $terminalElapsed
     assert_run_seconds = $AssertRunSeconds

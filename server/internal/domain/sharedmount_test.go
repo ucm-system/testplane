@@ -35,7 +35,7 @@ func TestNormalizeSharedMounts(t *testing.T) {
 		}
 	})
 	t.Run("不得占用平台保留路径", func(t *testing.T) {
-		for _, p := range []string{WorkspaceOutputPath, WorkspaceInputPath, TmpPath, TesterDirPath} {
+		for _, p := range []string{WorkspaceOutputPath, WorkspaceInputPath, TmpPath, RunnerDirPath} {
 			if _, err := NormalizeSharedMounts([]SharedMountSpec{{MountPath: p, ClaimName: "c"}}); err == nil {
 				t.Errorf("%s 应被拒绝（平台保留路径）", p)
 			}
@@ -57,11 +57,11 @@ func TestNormalizeSharedMounts(t *testing.T) {
 	})
 }
 
-// #74：保留路径只有一套（registry / render / 提交期共用 domain 的常量）。
+// #74：保留路径只有一套（registry / executor 渲染 / 提交期共用 domain 的常量）。
 func TestReservedMountPathsSingleSource(t *testing.T) {
 	shared := []SharedMountSpec{{Name: "models", MountPath: "/models", ClaimName: "c"}}
 	reserved := ReservedMountPaths(shared)
-	for _, p := range []string{WorkspaceOutputPath, WorkspaceInputPath, TmpPath, TesterDirPath, "/models"} {
+	for _, p := range []string{WorkspaceOutputPath, WorkspaceInputPath, TmpPath, RunnerDirPath, "/models"} {
 		if _, ok := reserved[p]; !ok {
 			t.Errorf("%s 不在保留集合里（#74 的两套集合回归）", p)
 		}
@@ -71,7 +71,7 @@ func TestReservedMountPathsSingleSource(t *testing.T) {
 	}
 }
 
-// 提交期冲突：Tester mounts 与统一挂载/保留路径同路径 → 冲突（不做只读交集）。
+// 提交期冲突：Runner mounts 与统一挂载/保留路径同路径 → 冲突（不做只读交集）。
 func TestMountPathConflicts(t *testing.T) {
 	shared := []SharedMountSpec{{Name: "models", MountPath: "/models", ClaimName: "c"}}
 	cases := []struct {
@@ -80,7 +80,7 @@ func TestMountPathConflicts(t *testing.T) {
 	}{
 		{"/models", true},
 		{"/workspace/output", true},
-		{"/tester", true},
+		{"/runner", true},
 		{"/data", false},
 	}
 	for _, c := range cases {

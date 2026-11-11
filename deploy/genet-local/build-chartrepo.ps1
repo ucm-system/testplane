@@ -1,4 +1,4 @@
-# TestPlane infra · 打包 chart 并部署「假 ChartMuseum」（供 Genet 的 Helm 管理功能拉 chart）
+# Argus infra · 打包 chart 并部署「假 ChartMuseum」（供 Genet 的 Helm 管理功能拉 chart）
 #
 # 为什么需要：Genet 的 chartRepo 只支持 harbor-oci（要真 Harbor artifacts API）与
 # harbor-chartmuseum（形如 GET /api/chartrepo/<project>/charts[/name[/version]] 与
@@ -148,12 +148,12 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $manifestPath) | O
 Write-Host "   → $manifestPath"
 
 Write-Host '== 3/3 apply + 重启（ConfigMap 内容变了要重建 Pod 才生效）=='
-& kubectl --context kind-testplane apply -f $manifestPath | Write-Host
-& kubectl --context kind-testplane -n $Namespace rollout restart deploy/genet-chartrepo | Write-Host
-& kubectl --context kind-testplane -n $Namespace rollout status deploy/genet-chartrepo --timeout=120s | Write-Host
+& kubectl --context kind-argus apply -f $manifestPath | Write-Host
+& kubectl --context kind-argus -n $Namespace rollout restart deploy/genet-chartrepo | Write-Host
+& kubectl --context kind-argus -n $Namespace rollout status deploy/genet-chartrepo --timeout=120s | Write-Host
 
 Write-Host ''
 Write-Host '自检：'
-Write-Host "  kubectl --context kind-testplane -n $Namespace exec deploy/genet-chartrepo -- wget -qO- http://127.0.0.1/api/chartrepo/charts/charts"
+Write-Host "  kubectl --context kind-argus -n $Namespace exec deploy/genet-chartrepo -- wget -qO- http://127.0.0.1/api/chartrepo/charts/charts"
 Write-Host '  Genet 的 chart 缓存 TTL 300s；想立刻刷新就重启 genet-backend：'
-Write-Host "  kubectl --context kind-testplane -n $Namespace rollout restart deploy/genet-backend"
+Write-Host "  kubectl --context kind-argus -n $Namespace rollout restart deploy/genet-backend"

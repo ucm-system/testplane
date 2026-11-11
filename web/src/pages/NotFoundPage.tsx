@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 
 export interface NotFoundPageProps {
-  /** 一句话说明（按上下文变化：路由不存在 / Run 已被清理 / …） */
+  /** 一句话说明（按上下文变化：路由不存在 / Task 已被清理 / …） */
   title?: string
   description?: string
 }
@@ -13,9 +13,9 @@ export interface NotFoundPageProps {
 /**
  * 全站统一的 404 页。
  *
- * 三处必须走**同一个组件**（`App.tsx` 里 `/404` 与 `*`，以及 `/runs/:id` 取到 404 时）：
+ * 三处必须走**同一个组件**（`App.tsx` 里 `/404` 与 `*`，以及 `/tasks/:id` 取到 404 时）：
  *  - 未匹配路由、`/404`：默认文案「这个地址没有对应的页面」；
- *  - Run 详情 404：换一句上下文文案（「Run 不存在或已被清理」），动作与插画不变。
+ *  - Task 详情 404：换一句上下文文案（「Task 不存在或已被清理」），动作与插画不变。
  *
  * **landmark 纪律**：`AppShell` 已经有 `<main id="main">`，这里**不能再有** `role="main"`
  * —— 同页两个 main landmark 会让"跳到主内容"的目标变歧义，读屏也会重复播报。
@@ -32,7 +32,7 @@ export interface NotFoundPageProps {
  */
 export function NotFoundPage({
   title = '这个地址没有对应的页面',
-  description = '可能是链接过期了，或者地址打错了。回到概览重新开始，或者去看看最近的 Run。',
+  description = '可能是链接过期了，或者地址打错了。回到概览重新开始，或者去看看最近的 Task。',
 }: NotFoundPageProps) {
   useEffect(() => {
     const previous = document.title
@@ -75,9 +75,9 @@ export function NotFoundPage({
                   回到概览
                 </Button>
               </Link>
-              <Link to="/runs" data-testid="not-found-runs">
+              <Link to="/tasks" data-testid="not-found-tasks">
                 <Button icon={<List className="size-3.5" aria-hidden />} className="w-full sm:w-auto">
-                  打开最近 Run 列表
+                  打开全部 Task
                 </Button>
               </Link>
             </div>

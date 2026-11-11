@@ -51,7 +51,7 @@ func New(cfg Config) (*Authenticator, error) {
 		cfg.Mode = "dev"
 	}
 	if cfg.CookieName == "" {
-		cfg.CookieName = "tp_session"
+		cfg.CookieName = "ag_session"
 	}
 	if cfg.TTL <= 0 {
 		cfg.TTL = 8 * time.Hour

@@ -121,7 +121,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	req.Header.Set("Authorization", "Bearer "+tokenOrDefault(c.Token))
 	req.Header.Set("Accept", "application/json, text/plain, text/markdown")
-	req.Header.Set("User-Agent", "testplane-mcp/"+Version)
+	req.Header.Set("User-Agent", "argus-mcp/"+Version)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -150,24 +150,24 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	return res, nil
 }
 
-// GetRun 是 RunReader 的实现：返回 GET /api/v1/runs/{id} 的原始 JSON。
-func (c *Client) GetRun(ctx context.Context, runID string) ([]byte, error) {
-	res, err := c.Get(ctx, "/api/v1/runs/"+url.PathEscape(runID), nil)
+// GetTask 是 TaskReader 的实现：返回 GET /api/v1/tasks/{id} 的原始 JSON。
+func (c *Client) GetTask(ctx context.Context, taskID string) ([]byte, error) {
+	res, err := c.Get(ctx, "/api/v1/tasks/"+url.PathEscape(taskID), nil)
 	if err != nil {
 		return nil, err
 	}
 	return res.Body, nil
 }
 
-// OpenRunEvents 打开 SSE（GET /api/v1/runs/{id}/events），返回未读取的 body。
+// OpenTaskEvents 打开 SSE（GET /api/v1/tasks/{id}/events），返回未读取的 body。
 //
 // 不可用（404/405/5xx/Content-Type 不是 text/event-stream/连接失败）→ *SSEUnavailableError，
 // 由 Wait 降级为轮询；401/403 等鉴权错误 → *APIError，原样上抛（轮询也会失败）。
-func (c *Client) OpenRunEvents(ctx context.Context, runID string, lastEventID int64) (io.ReadCloser, error) {
+func (c *Client) OpenTaskEvents(ctx context.Context, taskID string, lastEventID int64) (io.ReadCloser, error) {
 	if c == nil || c.streamHTTP == nil {
 		return nil, errors.New("mcp: 未初始化 SSE 客户端")
 	}
-	target := c.BaseURL + "/api/v1/runs/" + url.PathEscape(runID) + "/events"
+	target := c.BaseURL + "/api/v1/tasks/" + url.PathEscape(taskID) + "/events"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, &SSEUnavailableError{Reason: "构造事件流请求失败", Err: err}
@@ -175,7 +175,7 @@ func (c *Client) OpenRunEvents(ctx context.Context, runID string, lastEventID in
 	req.Header.Set("Authorization", "Bearer "+tokenOrDefault(c.Token))
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
-	req.Header.Set("User-Agent", "testplane-mcp/"+Version)
+	req.Header.Set("User-Agent", "argus-mcp/"+Version)
 	if lastEventID > 0 {
 		req.Header.Set("Last-Event-ID", strconv.FormatInt(lastEventID, 10))
 	}

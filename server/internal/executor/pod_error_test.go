@@ -68,7 +68,7 @@ func TestPodErrorClassification(t *testing.T) {
 		}
 	})
 
-	t.Run("tester 自身非零退出仍归 TESTER_NONZERO_EXIT", func(t *testing.T) {
+	t.Run("runner 自身非零退出仍归 RUNNER_NONZERO_EXIT", func(t *testing.T) {
 		pod := &corev1.Pod{Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{{
 				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
@@ -77,7 +77,7 @@ func TestPodErrorClassification(t *testing.T) {
 			}},
 		}}
 		out, terminal := classifyOutcome(nil, pod, time.Unix(1_700_000_000, 0))
-		if !terminal || OutcomeCode(*out) != CodeTesterNonZeroExit {
+		if !terminal || OutcomeCode(*out) != CodeRunnerNonZeroExit {
 			t.Fatalf("out = %+v code=%q（不应被 Pod 错误码吞掉）", out, OutcomeCode(*out))
 		}
 	})

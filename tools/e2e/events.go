@@ -12,23 +12,25 @@ import (
 	"time"
 )
 
-// Event 是 07 §7 的事件信封：
+// Event 是 07 §7 的事件信封（v2）：
 //
 //	id: 43
-//	event: task.state_changed
-//	data: {"seq":43,"type":"task.state_changed","run_id":"r-...","task_id":"t-...",
-//	       "at":"...","payload":{"from":"queued","to":"preparing"}}
+//	event: runner_finished
+//	data: {"seq":43,"type":"runner_finished","task_id":"t-…","attempt_no":1,"runner_seq":3,
+//	       "at":"…","payload":{"status":"failed","error_code":"RUNNER_NONZERO_EXIT"}}
 //
 // 也容忍把 from/to 放在顶层（不同实现常见），读取时以 payload 优先。
 type Event struct {
-	Seq     int64          `json:"seq"`
-	Type    string         `json:"type"`
-	RunID   string         `json:"run_id"`
-	TaskID  string         `json:"task_id"`
-	At      string         `json:"at"`
-	Payload map[string]any `json:"payload"`
-	From    string         `json:"from"`
-	To      string         `json:"to"`
+	Seq       int64          `json:"seq"`
+	Type      string         `json:"type"`
+	TaskID    string         `json:"task_id"`
+	AttemptNo *int           `json:"attempt_no"`
+	RunnerSeq *int           `json:"runner_seq"`
+	At        string         `json:"at"`
+	Payload   map[string]any `json:"payload"`
+	From      string         `json:"from"`
+	To        string         `json:"to"`
+	Reason    string         `json:"reason"`
 }
 
 // Transition 取状态转移的两端；缺任一端返回 ok=false。
@@ -50,64 +52,59 @@ func (e Event) Transition() (from, to string, ok bool) {
 	return from, to, from != "" && to != ""
 }
 
-// 转移表：C-3.1（Task）与 C-3.2（Run）。这里是 e2e 的"合法性裁判"，
-// 与设计状态机逐字对应；表外的一律算违约，不做"看起来合理就放行"。
-var runTransitions = map[string][]string{
-	"submitted":  {"queued"},
-	"queued":     {"deploying", "testing"},
-	"deploying":  {"testing", "service_unavailable"},
-	"testing":    {"cleanup"},
-	"cleanup":    {"succeeded", "completed_with_errors", "service_unavailable", "failed"},
-	"cancelling": {"canceled"},
+// IsRunnerLevel 判断事件是否挂在具体 runner 上（runner_seq 非空）。
+func (e Event) IsRunnerLevel() bool {
+	return e.RunnerSeq != nil && *e.RunnerSeq > 0
 }
 
+// 转移表：§2.1（Task）与 §2.2（runner）。这里是 e2e 的"合法性裁判"，
+// 与设计状态机逐字对应；表外的一律算违约，不做"看起来合理就放行"。
 var taskTransitions = map[string][]string{
+	"submitted":           {"queued", "failed"},
+	"queued":              {"running"},
+	"running":             {"succeeded", "failed", "service_unavailable"},
+	"cancelling":          {"canceled"},
+	"succeeded":           {"queued"}, // retry：整 Task 新 attempt 全量重跑（§7.8）
+	"failed":              {"queued"}, // retry（canceled 不可重试）
+	"service_unavailable": {"queued"}, // retry
+}
+
+var runnerTransitions = map[string][]string{
 	"pending":   {"queued", "skipped"},
-	"queued":    {"preparing", "skipped"},
+	"queued":    {"preparing", "skipped", "canceled"},
 	"preparing": {"running", "failed", "canceled"},
 	"running":   {"succeeded", "failed", "canceled"},
-	"failed":    {"queued"}, // retry_on 命中时重试
 }
 
 var knownEventTypes = map[string]bool{
-	"run.submitted":        true,
-	"run.state_changed":    true,
-	"task.state_changed":   true,
-	"attempt.started":      true,
-	"attempt.finished":     true,
-	"deploy.state_changed": true,
-	"cleanup.started":      true,
-	"run.finished":         true,
-	"report.written":       true,
-	"resync_required":      true,
+	"submitted":         true,
+	"state_changed":     true,
+	"runner_started":    true,
+	"runner_finished":   true,
+	"exports_harvested": true,
+	"clean_finished":    true,
+	"cleanup_failed":    true,
+	"task_finished":     true,
+	"report.written":    true,
+	"resync_required":   true,
 }
 
-// legalTransition 判断 kind=run|task 的 from -> to 是否在转移表内。
-// 额外规则来自 C-3.2：任意非终态 → cancelling / failed 合法。
-func legalTransition(kind, from, to string) bool {
+// legalTransition 判断 runner 级 / task 级的 from -> to 是否在转移表内。
+// 额外规则：任意非终态 Task → cancelling 合法（R6 取消边）；runner 终态无出边（无重试回路，D-69）。
+func legalTransition(runnerLevel bool, from, to string) bool {
 	if from == "" || to == "" || from == to {
 		return false
 	}
-	if kind == "run" {
-		if isTerminalRun(from) {
-			return false
-		}
-		if to == "cancelling" || to == "failed" {
-			return true
-		}
-		for _, next := range runTransitions[from] {
+	if runnerLevel {
+		for _, next := range runnerTransitions[from] {
 			if next == to {
 				return true
 			}
 		}
 		return false
 	}
-	// task：failed -> queued 是重试边，先于"终态无出边"判断
-	if from == "failed" {
-		return to == "queued"
-	}
-	if isTerminalTask(from) {
-		return false
+	if to == "cancelling" && !isTerminalTask(from) {
+		return true
 	}
 	for _, next := range taskTransitions[from] {
 		if next == to {
@@ -119,14 +116,10 @@ func legalTransition(kind, from, to string) bool {
 
 // collectEvents 优先用 JSON 事件历史；不可用时回退 SSE 抓取（只用于排障，
 // 主断言仍要求 /events/history 可用）。返回空表示两条路都没拿到。
-func (a *App) collectEvents(ctx context.Context, runID string) []Event {
-	path := fmt.Sprintf("/runs/%s/events/history?since_seq=0&limit=1000", url.PathEscape(runID))
+func (a *App) collectEvents(ctx context.Context, taskID string) []Event {
+	path := fmt.Sprintf("/tasks/%s/events/history?since_seq=0&limit=1000", url.PathEscape(taskID))
 	status, _, body, err := a.client.Get(ctx, path)
 	if err != nil {
-		if IsConnectError(err) {
-			a.addCheck("events.history", false, err.Error())
-			return nil
-		}
 		a.addCheck("events.history", false, err.Error())
 		return nil
 	}
@@ -142,8 +135,8 @@ func (a *App) collectEvents(ctx context.Context, runID string) []Event {
 	}
 	a.addCheck("events.history", false, fmt.Sprintf("HTTP %d：%s", status, apiError(status, body).Error()))
 
-	a.warn("事件历史接口不可用，回退到 SSE GET /runs/{id}/events 抓取；只验证连接期间的重放")
-	events, sseErr := a.readSSE(ctx, runID, a.opts.SSETimeout)
+	a.warn("事件历史接口不可用，回退到 SSE GET /tasks/{id}/events 抓取；只验证连接期间的重放")
+	events, sseErr := a.readSSE(ctx, taskID, a.opts.SSETimeout)
 	if sseErr != nil {
 		a.addCheck("events.sse", false, sseErr.Error())
 		return nil
@@ -184,25 +177,25 @@ func decodeEvents(raw []byte) ([]Event, error) {
 	return nil, fmt.Errorf("事件响应既不是数组，也没有 events/items/data 字段：%s", truncate(string(trimmed), 300))
 }
 
-// validateEvents 是"事件序列合法"的裁判（票 #3 的断言之一）。
-// 硬性：seq 单调、状态转移在表内、有 run.submitted、最后一条 Run 状态等于实际终态。
-// 软性（--strict 时升级为失败）：缺 run.finished、attempt 事件覆盖不全。
-func (a *App) validateEvents(events []Event, run *Run) {
+// validateEvents 是"事件序列合法"的裁判。
+// 硬性：seq 单调、状态转移在表内、有 submitted、Task 终态事实与实际终态一致。
+// 软性（--strict 时升级为失败）：缺 task_finished、runner 事件覆盖不全。
+func (a *App) validateEvents(events []Event, task *Task) {
 	if len(events) == 0 {
 		a.addCheck("events.available", false, "没有拿到任何事件")
 		return
 	}
 	a.addCheck("events.available", true, fmt.Sprintf("%d 条", len(events)))
 
-	// run_id 一致性
-	var badRunIDs []string
+	// task_id 一致性
+	var badTaskIDs []string
 	for _, ev := range events {
-		if ev.RunID != "" && ev.RunID != run.ID {
-			badRunIDs = append(badRunIDs, fmt.Sprintf("seq=%d run_id=%s", ev.Seq, ev.RunID))
+		if ev.TaskID != "" && ev.TaskID != task.ID {
+			badTaskIDs = append(badTaskIDs, fmt.Sprintf("seq=%d task_id=%s", ev.Seq, ev.TaskID))
 		}
 	}
-	a.addCheck("events.run_id_consistent", len(badRunIDs) == 0,
-		firstN(badRunIDs, 3, fmt.Sprintf("事件属于本题 Run %s", run.ID)))
+	a.addCheck("events.task_id_consistent", len(badTaskIDs) == 0,
+		firstN(badTaskIDs, 3, fmt.Sprintf("事件属于本题 Task %s", task.ID)))
 
 	// seq 严格单调
 	allZero := true
@@ -228,10 +221,10 @@ func (a *App) validateEvents(events []Event, run *Run) {
 		a.addCheck("events.seq_monotonic", len(bad) == 0, firstN(bad, 5, fmt.Sprintf("seq 严格递增（%d..%d）", events[0].Seq, prev)))
 	}
 
-	// 状态转移合法性（run 级包含 run.state_changed / cleanup.started / run.finished）
+	// 状态转移合法性（task 级 = runner_seq 为空的 state_changed；task_finished 是终态事实）
 	var transitionBad []string
 	terminalStatuses := map[string]bool{}
-	lastRunTo := ""
+	terminalFact := "" // 最后一条终态事实（state_changed to=终态 或 task_finished.status）
 	typeCount := map[string]int{}
 	var unknownTypes []string
 	for _, ev := range events {
@@ -239,59 +232,68 @@ func (a *App) validateEvents(events []Event, run *Run) {
 		if !knownEventTypes[ev.Type] && ev.Type != "" {
 			unknownTypes = append(unknownTypes, ev.Type)
 		}
-		var kind string
-		switch ev.Type {
-		case "run.state_changed", "cleanup.started", "run.finished":
-			kind = "run"
-		case "task.state_changed":
-			kind = "task"
+		switch {
+		case ev.Type == "state_changed" && ev.IsRunnerLevel():
+			from, to, ok := ev.Transition()
+			who := fmt.Sprintf("runner_seq=%d", *ev.RunnerSeq)
+			if ev.TaskID != "" {
+				who += "@" + ev.TaskID
+			}
+			if !ok {
+				transitionBad = append(transitionBad, fmt.Sprintf("seq=%d state_changed（%s）缺 from/to", ev.Seq, who))
+				continue
+			}
+			if !legalTransition(true, from, to) {
+				transitionBad = append(transitionBad, fmt.Sprintf("seq=%d state_changed（%s）%s -> %s 不在 runner 转移表内", ev.Seq, who, from, to))
+			}
+		case ev.Type == "task_finished":
+			// task_finished 是终态**事实**而不是转移：只带 status（或 from/to 都缺），
+			// 不参与转移表判定；终态一致性由 events.final_state / terminal_once 把关。
+			to := eventStatus(ev)
+			if _, t2, ok := ev.Transition(); ok {
+				to = t2
+			}
+			if to == "" {
+				transitionBad = append(transitionBad, fmt.Sprintf("seq=%d task_finished 缺 status", ev.Seq))
+				continue
+			}
+			if isTerminalTask(to) {
+				terminalStatuses[to] = true
+				terminalFact = to
+			}
+		case ev.Type == "state_changed":
+			from, to, ok := ev.Transition()
+			who := ev.TaskID
+			if !ok {
+				transitionBad = append(transitionBad, fmt.Sprintf("seq=%d %s（%s）缺 from/to", ev.Seq, ev.Type, who))
+				continue
+			}
+			if !legalTransition(false, from, to) {
+				transitionBad = append(transitionBad, fmt.Sprintf("seq=%d %s（%s）%s -> %s 不在转移表内", ev.Seq, ev.Type, who, from, to))
+			}
+			if isTerminalTask(to) {
+				terminalStatuses[to] = true
+				terminalFact = to
+			}
 		default:
 			continue
 		}
-		from, to, ok := ev.Transition()
-		if ev.Type == "run.finished" {
-			// 实现的 run.finished 可能只带 status（没有 from/to）；终态事实以它为准。
-			if to == "" {
-				to = eventStatus(ev)
-			}
-			if from == "" && to != "" {
-				from = "cleanup"
-			}
-			ok = to != ""
-		}
-		who := ev.RunID
-		if ev.TaskID != "" {
-			who = ev.TaskID
-		}
-		if !ok {
-			transitionBad = append(transitionBad, fmt.Sprintf("seq=%d %s（%s）缺 from/to", ev.Seq, ev.Type, who))
-			continue
-		}
-		if !legalTransition(kind, from, to) {
-			transitionBad = append(transitionBad, fmt.Sprintf("seq=%d %s（%s）%s -> %s 不在转移表内", ev.Seq, ev.Type, who, from, to))
-		}
-		if kind == "run" {
-			lastRunTo = to
-			if isTerminalRun(to) {
-				terminalStatuses[to] = true
-			}
-		}
 	}
 	a.addCheck("events.transitions_legal", len(transitionBad) == 0,
-		firstN(transitionBad, 5, "所有 run/task 状态转移都在 C-3.1/C-3.2 转移表内"))
+		firstN(transitionBad, 5, "所有 task/runner 状态转移都在 §2.1/§2.2 转移表内"))
 	sort.Strings(unknownTypes)
 	if len(unknownTypes) > 0 {
-		a.warn("未知事件类型（C-9.1 未列出）：%s", strings.Join(uniqueStrings(unknownTypes), ", "))
+		a.warn("未知事件类型（07 §7 未列出）：%s", strings.Join(uniqueStrings(unknownTypes), ", "))
 	}
 
 	// 必需事件与收尾
-	if typeCount["run.submitted"] == 0 {
-		a.addCheck("events.run_submitted", false, "缺少 run.submitted 事件（C-9.1）")
+	if typeCount["submitted"] == 0 {
+		a.addCheck("events.submitted", false, "缺少 submitted 事件（07 §7）")
 	} else {
-		a.addCheck("events.run_submitted", true, "存在 run.submitted")
+		a.addCheck("events.submitted", true, "存在 submitted")
 	}
-	if typeCount["run.finished"] == 0 {
-		a.warn("缺少 run.finished 事件（C-9.1）；当前实现可能只发 run.state_changed")
+	if typeCount["task_finished"] == 0 {
+		a.warn("缺少 task_finished 事件（07 §7）；当前实现可能只发 state_changed")
 	}
 	terminalList := make([]string, 0, len(terminalStatuses))
 	for status := range terminalStatuses {
@@ -300,52 +302,46 @@ func (a *App) validateEvents(events []Event, run *Run) {
 	sort.Strings(terminalList)
 	switch {
 	case len(terminalList) == 0:
-		a.addCheck("events.terminal_once", false, "事件流里没有 Run 终态事件（run.state_changed/cleanup.started/run.finished 都没有 terminal to）")
+		a.addCheck("events.terminal_once", false, "事件流里没有 Task 终态事件（state_changed/task_finished 都没有 terminal to）")
 	case len(terminalList) > 1:
-		a.addCheck("events.terminal_once", false, fmt.Sprintf("Run 终态事件出现多个不同目标：%s", strings.Join(terminalList, ", ")))
+		a.addCheck("events.terminal_once", false, fmt.Sprintf("Task 终态事件出现多个不同目标：%s", strings.Join(terminalList, ", ")))
 	default:
-		a.addCheck("events.terminal_once", true, "Run 终态事件目标唯一："+terminalList[0])
+		a.addCheck("events.terminal_once", true, "Task 终态事件目标唯一："+terminalList[0])
 	}
-	if lastRunTo == "" {
-		a.addCheck("events.final_state", false, "事件流里没有 run 级状态转移，无法核对终态")
-	} else if lastRunTo != run.Status {
-		a.addCheck("events.final_state", false, fmt.Sprintf("最后一条 run 级转移的 to=%s，与 Run 实际终态 %s 不一致", lastRunTo, run.Status))
+	// 终态一致性：最后一条终态事实（state_changed to=终态 或 task_finished.status）必须等于实际终态。
+	// 终态后的 retry 边（terminal→queued）不算事实，不影响判定。
+	if terminalFact == "" {
+		a.addCheck("events.final_state", false, "事件流里没有 Task 终态事实，无法核对终态")
+	} else if terminalFact != task.Status {
+		a.addCheck("events.final_state", false, fmt.Sprintf("最后一条终态事实=%s，与 Task 实际终态 %s 不一致", terminalFact, task.Status))
 	} else {
-		a.addCheck("events.final_state", true, "最后一条 run 级转移的 to="+lastRunTo)
+		a.addCheck("events.final_state", true, "终态事实与实际终态一致："+terminalFact)
 	}
 
-	// Attempt 事件覆盖（软性）
-	for _, task := range run.Tasks {
-		if task.Attempts <= 0 {
+	// runner 事件覆盖（软性）：终态 runner 至少有 runner_finished。
+	for _, r := range task.Runners {
+		if !isTerminalRunner(r.Status) || r.Role == "deploy" || r.Role == "clean" {
 			continue
 		}
-		started := 0
 		finished := 0
 		for _, ev := range events {
-			if ev.TaskID != task.ID {
-				continue
-			}
-			switch ev.Type {
-			case "attempt.started":
-				started++
-			case "attempt.finished":
+			if ev.Type == "runner_finished" && ev.RunnerSeq != nil && *ev.RunnerSeq == r.Seq {
 				finished++
 			}
 		}
-		if started < task.Attempts || finished < task.Attempts {
-			a.warn("Task %s 有 %d 个 Attempt，但事件里 attempt.started=%d、attempt.finished=%d（期望各 %d）",
-				task.Name, task.Attempts, started, finished, task.Attempts)
+		if finished == 0 {
+			a.warn("runner %s（seq=%d）已终态但事件里没有 runner_finished（07 §7）", r.Name, r.Seq)
 		}
 	}
 }
 
-// readSSE 连接 GET /runs/{id}/events 并把 data: 帧解成事件，
+// readSSE 连接 GET /tasks/{id}/events 并把 data: 帧解成事件，
 // 收到终态事件或窗口耗尽即停。
-func (a *App) readSSE(ctx context.Context, runID string, window time.Duration) ([]Event, error) {
+func (a *App) readSSE(ctx context.Context, taskID string, window time.Duration) ([]Event, error) {
 	sctx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
 
-	resp, err := a.client.Stream(sctx, "/runs/"+url.PathEscape(runID)+"/events", map[string]string{"Last-Event-ID": "0"})
+	resp, err := a.client.Stream(sctx, "/tasks/"+url.PathEscape(taskID)+"/events", map[string]string{"Last-Event-ID": "0"})
 	if err != nil {
 		return nil, fmt.Errorf("SSE 连接失败：%w", err)
 	}
@@ -371,11 +367,11 @@ func (a *App) readSSE(ctx context.Context, runID string, window time.Duration) (
 			continue
 		}
 		events = append(events, ev)
-		if ev.Type == "run.finished" {
+		if ev.Type == "task_finished" {
 			break
 		}
-		if ev.Type == "run.state_changed" {
-			if _, to, ok := ev.Transition(); ok && isTerminalRun(to) {
+		if ev.Type == "state_changed" && !ev.IsRunnerLevel() {
+			if _, to, ok := ev.Transition(); ok && isTerminalTask(to) {
 				break
 			}
 		}
@@ -389,13 +385,13 @@ func (a *App) readSSE(ctx context.Context, runID string, window time.Duration) (
 	return events, nil
 }
 
-// checkSSESmoke 是 SSE 连通性冒烟：终态 Run 上建立连接，断言 200 与
+// checkSSESmoke 是 SSE 连通性冒烟：终态 Task 上建立连接，断言 200 与
 // Content-Type: text/event-stream，并在窗口内至少读到一行（id/data/: ping 均算）。
-func (a *App) checkSSESmoke(ctx context.Context, runID string) {
+func (a *App) checkSSESmoke(ctx context.Context, taskID string) {
 	sctx, cancel := context.WithTimeout(ctx, a.opts.SSETimeout)
 	defer cancel()
 
-	path := "/runs/" + url.PathEscape(runID) + "/events"
+	path := "/tasks/" + url.PathEscape(taskID) + "/events"
 	resp, err := a.client.Stream(sctx, path, map[string]string{"Last-Event-ID": "0"})
 	if err != nil {
 		a.addCheck("sse.connect", false, err.Error())
@@ -423,7 +419,7 @@ func (a *App) checkSSESmoke(ctx context.Context, runID string) {
 	select {
 	case line := <-lineCh:
 		if line == "" {
-			a.addCheck("sse.first_line", false, "连接建立后立刻 EOF，没有收到任何行（终态 Run 应能回放历史事件）")
+			a.addCheck("sse.first_line", false, "连接建立后立刻 EOF，没有收到任何行（终态 Task 应能回放历史事件）")
 			return
 		}
 		a.addCheck("sse.connect", true, fmt.Sprintf("HTTP 200 text/event-stream；首行 %q", truncate(line, 80)))
@@ -445,7 +441,7 @@ func uniqueStrings(in []string) []string {
 	return out
 }
 
-// eventStatus 读 run.finished 这类事件里可能的 status 字段。
+// eventStatus 读 task_finished 这类事件里可能的 status 字段。
 func eventStatus(ev Event) string {
 	if ev.Payload == nil {
 		return ""

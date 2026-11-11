@@ -1,12 +1,12 @@
-# TestPlane · 生产形态 overlay（镜像钉 digest）
+# Argus · 生产形态 overlay（镜像钉 digest）
 #
-# 本 overlay 只做一件事：把控制面镜像从可变的 `testplane-server:dev` 换成
+# 本 overlay 只做一件事：把控制面镜像从可变的 `argus-server:dev` 换成
 # `@sha256:` digest 形态。`deployment.yaml` 与 `migrate-job.yaml` 里的 `:dev` 是给
 # 本地 kind + `kind load docker-image` 用的（那里根本没有仓库可拉），**生产必须钉 digest**。
 #
 # 用法（先看 deploy/README.md §7「钉 digest」）：
 #   # 1) 取 digest
-#   docker inspect --format '{{index .RepoDigests 0}}' registry.internal/testplane/testplane-server:0.1.0
+#   docker inspect --format '{{index .RepoDigests 0}}' registry.internal/argus/argus-server:0.1.0
 #   # 2) 把下面两处 `<REPO>` / `<TAG>` / `<DIGEST>` 换成实际值（或直接在命令行 - 见 README）
 #   # 3) 出清单并 apply
 #   kubectl kustomize deploy/overlays/digest
@@ -27,10 +27,10 @@ images:
   # 控制面 + 迁移 Job 共用同一个镜像（两者引用同一 image 名）
   #
   # ⚠️ 下面三个占位值必须替换成真实值再 apply：
-  #   <REPO>   = 镜像仓库地址（例如 registry.internal/testplane/testplane-server）
+  #   <REPO>   = 镜像仓库地址（例如 registry.internal/argus/argus-server）
   #   <TAG>    = 语义化 tag（保留可读性，真正生效的是 digest）
   #   <DIGEST> = sha256:<64 hex>
-  - name: testplane-server:dev
+  - name: argus-server:dev
     newName: <REPO>
     newTag: <TAG>
     digest: sha256:<DIGEST>

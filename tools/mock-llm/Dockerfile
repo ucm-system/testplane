@@ -1,8 +1,8 @@
-# TestPlane · mock-llm 镜像构建定义
+# Argus · mock-llm 镜像构建定义
 #
 # 本地/Kind 用（CI 不需要发布这个镜像——它只服务于测试）：
-#   docker build -t testplane/mock-llm:dev tools/mock-llm
-#   kind load docker-image testplane/mock-llm:dev --name testplane
+#   docker build -t argus/mock-llm:dev tools/mock-llm
+#   kind load docker-image argus/mock-llm:dev --name argus
 #
 # 只用标准库，构建阶段不联网（没有 go.sum 依赖）。
 

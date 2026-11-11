@@ -12,33 +12,35 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/ucm-system/testplane/server/internal/domain"
+	"github.com/ucm-system/testplane/server/internal/orchestrator"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
 
-// Run 打包下载（issue #41 / 裁决 D-56）：把"人排错 / AI 读盘"要的东西一次打成 zip。
+// Task 打包下载（issue #41 / 裁决 D-56）：把"人排错 / AI 读盘"要的东西一次打成 zip。
 //
 // 固定布局（顺序也是这个顺序，MANIFEST.json 在最前）：
 //
-//	MANIFEST.json                       包内清单（files/missing/counts，唯一可信的"缺了什么"）
-//	report.json  report.md  metadata.json   来自 <storage-root>/<run>/（缺失 → MANIFEST.missing）
-//	events.jsonl                        全量 state_events（库是权威，按 seq 升序；已脱敏）
-//	artifacts/index.json                产物索引（与 GET /runs/{id}/artifacts 同源）
-//	artifacts/<path>                    逐条产物（超过 ResultMaxBytes 截断并在 MANIFEST 标记）
-//	logs/tasks/<task>/attempts/<n>.log  Task/Attempt 日志（stdout+stderr 拼接）
-//	logs/deploy/<pod>.log               Deploy 侧 Pod 日志（当前窗口可得部分）
+//	MANIFEST.json                                包内清单（files/missing/counts，唯一可信的"缺了什么"）
+//	report.json  report.md  metadata.json        来自 <storage-root>/<task_id>/（缺失 → MANIFEST.missing）
+//	events.jsonl                                 全量 state_events（库是权威，按 seq 升序；已脱敏）
+//	artifacts/index.json                         产物索引（与 GET /tasks/{id}/artifacts 同源）
+//	artifacts/<path>                             逐条产物（超过 ResultMaxBytes 截断并在 MANIFEST 标记）
+//	exports/<n>/<seq>.exports.env                exports 落档（含注入清单，§5.12）
+//	logs/attempts/<n>/runners/<seq>.log          runner 执行日志（logs/stdout.log）
+//	logs/deploy/<pod>.log                        部署 Pod 日志（当前窗口可得部分）
 //
 // 流式：zip.Writer 直接写响应；只有 events 走临时文件（避免整包进内存），
-// 其余条目边读边写、单条按上限截断。响应头：application/zip。
+// 其余条目边读边写、单条按上限截断。Task 非终态仍返回 200（MANIFEST.terminal=false）。
 
 const (
-	bundleFormatVersion = "1"
+	bundleFormatVersion = "2"
 	bundleDeployTail    = 2000 // 每个 Pod 取最后 N 行
 	bundleMaxDeployPods = 20
 )
@@ -47,8 +49,8 @@ const (
 type bundleFile struct {
 	name       string
 	disk       string   // 磁盘绝对路径
-	concatLogs []string // 非空时按序拼接这些日志文件（stdout+stderr）
-	bytes      []byte   // 内存内容（deploy 日志）
+	concatLogs []string // 非空时按序拼接这些日志文件
+	bytes      []byte   // 内存内容
 	truncated  bool
 	size       int64
 }
@@ -56,7 +58,7 @@ type bundleFile struct {
 // bundleManifest 是 MANIFEST.json 的结构。
 type bundleManifest struct {
 	FormatVersion string         `json:"format_version"`
-	RunID         string         `json:"run_id"`
+	TaskID        string         `json:"task_id"`
 	State         string         `json:"state"`
 	Terminal      bool           `json:"terminal"`
 	GeneratedAt   string         `json:"generated_at"`
@@ -104,11 +106,15 @@ func redactSecrets(v any) any {
 	}
 }
 
-// handleRunBundle GET /runs/{id}/bundle → application/zip。
-func (s *Server) handleRunBundle(w http.ResponseWriter, r *http.Request) {
+// handleTaskBundle GET /tasks/{id}/bundle → application/zip。
+func (s *Server) handleTaskBundle(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	runID := chi.URLParam(r, "id")
-	run, err := s.st.Runs.Get(ctx, nil, runID)
+	taskID, ok := safePathComponent(chi.URLParam(r, "task_id"))
+	if !ok {
+		fail(w, r, http.StatusBadRequest, domain.CodeValidationError, "非法 task id", nil, false)
+		return
+	}
+	task, err := s.st.Tasks.Get(ctx, nil, taskID)
 	if err != nil {
 		s.failErr(w, r, err)
 		return
@@ -116,9 +122,9 @@ func (s *Server) handleRunBundle(w http.ResponseWriter, r *http.Request) {
 
 	man := bundleManifest{
 		FormatVersion: bundleFormatVersion,
-		RunID:         run.ID,
-		State:         run.Status,
-		Terminal:      store.TerminalRunStatus(domain.RunStatus(run.Status)),
+		TaskID:        task.ID,
+		State:         task.Status,
+		Terminal:      domain.TerminalTaskStatus(domain.TaskStatus(task.Status)),
 		GeneratedAt:   s.now().UTC().Format(time.RFC3339),
 		Counts:        map[string]int{},
 		Files:         []bundleEntry{},
@@ -129,383 +135,214 @@ func (s *Server) handleRunBundle(w http.ResponseWriter, r *http.Request) {
 	addMissing := func(path, reason string) {
 		man.Missing = append(man.Missing, bundleMiss{Path: path, Reason: reason})
 	}
+	addDisk := func(name, disk string, max int64) {
+		st, err := os.Stat(disk)
+		if err != nil {
+			addMissing(name, "file_not_found")
+			return
+		}
+		bf := bundleFile{name: name, disk: disk, size: st.Size()}
+		if max > 0 && st.Size() > max {
+			bf.truncated = true
+			bf.size = max
+		}
+		man.Counts["files"]++
+		files = append(files, bf)
+	}
 
-	// ---- 1) 报告三件套（磁盘；未生成 → missing，不静默省略）----
-	runDir := s.runDir(run.ID)
+	// 报告产物（未生成 → missing，不静默省略）。
 	for _, name := range []string{"report.json", "report.md", "metadata.json"} {
-		if runDir == "" {
-			addMissing(name, "storage_root 未配置")
-			continue
-		}
-		p := filepath.Join(runDir, name)
-		if st, err := os.Stat(p); err != nil || st.IsDir() {
-			reason := "文件不存在（Run 未终态时报告尚未生成）"
-			if err != nil && !os.IsNotExist(err) {
-				reason = "读取失败: " + err.Error()
-			}
-			addMissing(name, reason)
-			continue
-		}
-		files = append(files, bundleFile{name: name, disk: p})
+		addDisk(name, filepath.Join(s.cfg.StorageRoot, task.ID, name), s.cfg.ResultMaxBytes)
 	}
 
-	// ---- 2) events.jsonl：永远从库里重建（权威、按 seq，且已脱敏）----
-	eventsTmp, nEvents, err := s.writeEventsTempFile(ctx, run.ID)
-	if err != nil {
-		addMissing("events.jsonl", "读取事件失败: "+err.Error())
+	// events.jsonl：库是权威，按 seq 升序；敏感键打码。
+	var events []store.Event
+	if evs, err := s.st.Events.AllByTask(ctx, nil, task.ID); err == nil {
+		events = evs
 	} else {
-		defer os.Remove(eventsTmp)
-		man.Counts["events"] = nEvents
-		files = append(files, bundleFile{name: "events.jsonl", disk: eventsTmp})
+		addMissing("events.jsonl", "events_query_failed")
 	}
+	var evBuf strings.Builder
+	for _, ev := range events {
+		var payload any
+		if len(ev.Payload) > 0 {
+			_ = json.Unmarshal(ev.Payload, &payload)
+			payload = redactSecrets(payload)
+		}
+		line, _ := json.Marshal(map[string]any{
+			"seq": ev.Seq, "type": ev.Type, "task_id": ev.TaskID,
+			"attempt_no": ev.AttemptNo, "runner_seq": ev.RunnerSeq,
+			"from": ev.FromStatus, "to": ev.ToStatus, "reason": ev.Reason,
+			"actor": ev.Actor, "at": ev.CreatedAt.UTC(), "payload": payload,
+		})
+		evBuf.Write(line)
+		evBuf.WriteByte('\n')
+	}
+	man.Counts["events"] = len(events)
+	files = append(files, bundleFile{name: "events.jsonl", bytes: []byte(evBuf.String()), size: int64(evBuf.Len())})
 
-	// ---- 3) artifacts/index.json + artifacts/<path> ----
-	arts, err := s.st.Artifacts.ListByRun(ctx, nil, run.ID)
+	// 产物索引与逐条产物。
+	rows, err := s.st.Artifacts.ListByTask(ctx, nil, task.ID)
 	if err != nil {
-		addMissing("artifacts/index.json", "读取产物索引失败: "+err.Error())
+		addMissing("artifacts/index.json", "artifacts_query_failed")
 	} else {
-		man.Counts["artifacts"] = len(arts)
-		index := make([]map[string]any, 0, len(arts))
-		for _, a := range arts {
-			index = append(index, map[string]any{
-				"path": a.Path, "size_bytes": a.SizeBytes, "sha256": a.SHA256,
-				"kind": a.Kind, "task_id": a.TaskID, "attempt_id": a.AttemptID,
-			})
-			abs := filepath.FromSlash(a.Path)
-			if !filepath.IsAbs(abs) && runDir != "" {
-				abs = filepath.Join(s.cfg.StorageRoot, abs)
-			}
-			if st, statErr := os.Stat(abs); statErr != nil || st.IsDir() {
-				addMissing("artifacts/"+a.Path, "产物文件不存在")
+		idx, _ := json.Marshal(groupArtifacts(rows))
+		files = append(files, bundleFile{name: "artifacts/index.json", bytes: idx, size: int64(len(idx))})
+		for _, a := range rows {
+			full, ok := safeJoin(s.cfg.StorageRoot, task.ID, a.Path)
+			if !ok {
+				addMissing("artifacts/"+a.Path, "unsafe_path")
 				continue
 			}
-			files = append(files, bundleFile{name: "artifacts/" + filepath.ToSlash(a.Path), disk: abs})
-		}
-		if raw, mErr := json.MarshalIndent(index, "", "  "); mErr == nil {
-			files = append(files, bundleFile{name: "artifacts/index.json", bytes: raw})
-		} else {
-			addMissing("artifacts/index.json", "序列化失败: "+mErr.Error())
+			man.Counts["artifacts"]++
+			addDisk("artifacts/"+a.Path, full, s.cfg.ResultMaxBytes)
 		}
 	}
 
-	// ---- 4) Task / Attempt 日志 ----
-	tasks, listErr := s.listRunTasks(ctx, run.ID)
-	if listErr != nil {
-		addMissing("logs/tasks", "读取 Task 列表失败: "+listErr.Error())
-	}
-	for _, t := range tasks {
-		if t.CurrentAttempt <= 0 {
-			continue
+	// exports 落档（attempts/<n>/exports/<seq>.exports.env）。
+	if s.cfg.StorageRoot != "" {
+		if entries, rerr := os.ReadDir(filepath.Join(s.cfg.StorageRoot, task.ID, "attempts")); rerr == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				expDir := filepath.Join(s.cfg.StorageRoot, task.ID, "attempts", e.Name(), "exports")
+				fs, ferr := os.ReadDir(expDir)
+				if ferr != nil {
+					continue
+				}
+				for _, f := range fs {
+					if f.IsDir() {
+						continue
+					}
+					rel := "attempts/" + e.Name() + "/exports/" + f.Name()
+					addDisk("exports/"+e.Name()+"/"+f.Name(),
+						filepath.Join(s.cfg.StorageRoot, task.ID, filepath.FromSlash(rel)), 0)
+				}
+			}
 		}
-		entry := fmt.Sprintf("logs/tasks/%s/attempts/%d.log", t.ID, t.CurrentAttempt)
-		dir := filepath.Join(runDir, "tasks", t.ID, "attempts", fmt.Sprint(t.CurrentAttempt), "logs")
-		if runDir == "" {
-			addMissing(entry, "storage_root 未配置")
-			continue
-		}
-		names, globErr := filepath.Glob(filepath.Join(dir, "*.log"))
-		if globErr != nil || len(names) == 0 {
-			addMissing(entry, "attempt 日志不存在")
-			continue
-		}
-		sort.Strings(names)
-		files = append(files, bundleFile{name: entry, disk: names[0], concatLogs: names})
 	}
 
-	// ---- 5) Deploy 侧 Pod 日志（实时窗口；不可得 → missing）----
-	s.appendDeployLogs(ctx, run, &files, addMissing)
-
-	// ---- 6) 落 MANIFEST（先算好 Entry，再写 zip）----
-	for i := range files {
-		f := &files[i]
-		size, trunc, sha, sizeErr := s.bundleEntryStats(ctx, *f)
-		if sizeErr != nil {
-			addMissing(f.name, "读取失败: "+sizeErr.Error())
-			f.name = "" // 标记跳过
-			continue
+	// runner 日志（attempts/<n>/runners/<seq>/logs/stdout.log）。
+	runs, rerr := s.st.RunnerRuns.ListByTask(ctx, nil, task.ID)
+	if rerr == nil {
+		for _, rr := range runs {
+			logPath := filepath.Join(s.runnerDirFor(task.ID, rr.AttemptNo, rr.Seq), "logs", orchestrator.AttemptLogFileName)
+			name := fmt.Sprintf("logs/attempts/%d/runners/%d.log", rr.AttemptNo, rr.Seq)
+			if _, err := os.Stat(logPath); err != nil {
+				addMissing(name, "log_not_captured")
+				continue
+			}
+			man.Counts["runner_logs"]++
+			addDisk(name, logPath, 0)
 		}
-		f.size, f.truncated = size, trunc
-		man.Files = append(man.Files, bundleEntry{Path: f.name, SizeBytes: size, Truncated: trunc, SHA256: sha})
 	}
-	man.Counts["files"] = len(man.Files)
+
+	// 部署 Pod 日志（attempts/<n>/runners/<deploy_seq>/logs/<pod>.log，只取可得部分）。
+	s.appendDeployLogs(ctx, task, &files, &man)
+
+	// MANIFEST.json 永远是第一个条目。
+	manBytes, _ := json.MarshalIndent(man, "", "  ")
+	files = append([]bundleFile{{name: "MANIFEST.json", bytes: manBytes, size: int64(len(manBytes))}}, files...)
 
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-bundle.zip"`, run.ID))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", task.ID+"-bundle.zip"))
 	w.WriteHeader(http.StatusOK)
 
 	zw := zip.NewWriter(w)
-	defer zw.Close()
-
-	manRaw, err := json.MarshalIndent(man, "", "  ")
-	if err != nil {
-		return
-	}
-	if err := writeZipBytes(zw, "MANIFEST.json", manRaw); err != nil {
-		return
-	}
-	for _, f := range files {
-		if f.name == "" {
-			continue
-		}
-		if err := s.writeBundleEntry(ctx, zw, f); err != nil {
-			s.logger.Warn("bundle: 写条目失败", "run_id", run.ID, "entry", f.name, "err", err)
+	for _, bf := range files {
+		hdr := &zip.FileHeader{Name: bf.name, Method: zip.Deflate}
+		hdr.Modified = s.now()
+		fw, err := zw.CreateHeader(hdr)
+		if err != nil {
 			return
 		}
+		if err := s.writeBundleEntry(fw, bf); err != nil {
+			s.logger.Warn("bundle 条目写入失败", "err", err, "entry", bf.name, "task_id", task.ID)
+		}
 	}
+	_ = zw.Close()
 }
 
-// runDir 是某个 Run 的存储根目录（storage_root 未配置时返回空串）。
-func (s *Server) runDir(runID string) string {
-	if s.cfg == nil || strings.TrimSpace(s.cfg.StorageRoot) == "" {
-		return ""
+// writeBundleEntry 把一个条目写进 zip（disk 截断 / concat / bytes 三种来源）。
+func (s *Server) writeBundleEntry(w io.Writer, bf bundleFile) error {
+	if len(bf.bytes) > 0 {
+		_, err := w.Write(bf.bytes)
+		return err
 	}
-	return filepath.Join(s.cfg.StorageRoot, runID)
-}
-
-// listRunTasks 取 Run 的全部 Task（bundle 用；失败不致命）。
-func (s *Server) listRunTasks(ctx context.Context, runID string) ([]*store.Task, error) {
-	var out []*store.Task
-	cursor := ""
-	for {
-		batch, next, err := s.st.Tasks.ListByRun(ctx, nil, runID, cursor, 200)
-		if err != nil {
-			return out, err
-		}
-		for i := range batch {
-			out = append(out, &batch[i])
-		}
-		if next == "" || len(batch) == 0 {
-			return out, nil
-		}
-		cursor = next
-	}
-}
-
-// writeEventsTempFile 把全量事件（脱敏后，按 seq）写成临时 JSONL，返回路径与条数。
-// 走临时文件而不是内存：事件数量与 payload 都可能很大，整包进内存会 OOM。
-func (s *Server) writeEventsTempFile(ctx context.Context, runID string) (string, int, error) {
-	events, err := s.st.Events.AllByRun(ctx, nil, runID)
-	if err != nil {
-		return "", 0, err
-	}
-	f, err := os.CreateTemp("", "tp-bundle-events-*.jsonl")
-	if err != nil {
-		return "", 0, err
-	}
-	enc := json.NewEncoder(f)
-	n := 0
-	for _, e := range events {
-		var payload any
-		if len(e.Payload) > 0 {
-			if err := json.Unmarshal(e.Payload, &payload); err == nil {
-				payload = redactSecrets(payload)
+	if len(bf.concatLogs) > 0 {
+		for _, p := range bf.concatLogs {
+			f, err := os.Open(p)
+			if err != nil {
+				continue
 			}
+			_, _ = io.Copy(w, f)
+			_ = f.Close()
 		}
-		row := map[string]any{
-			"seq": e.Seq, "type": e.Type, "to_status": e.ToStatus,
-			"actor": e.Actor, "created_at": e.CreatedAt.UTC().Format(time.RFC3339),
-			"payload": payload,
-		}
-		if err := enc.Encode(row); err != nil {
-			f.Close()
-			os.Remove(f.Name())
-			return "", 0, err
-		}
-		n++
+		return nil
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(f.Name())
-		return "", 0, err
+	if bf.disk == "" {
+		return nil
 	}
-	return f.Name(), n, nil
-}
-
-// appendDeployLogs 收集 Deploy 侧 Pod 日志（只做"当前可得部分"）。
-func (s *Server) appendDeployLogs(ctx context.Context, run *store.Run, files *[]bundleFile,
-	addMissing func(path, reason string)) {
-
-	var deploy struct {
-		Namespace   string `json:"namespace"`
-		ReleaseName string `json:"release_name"`
-		State       string `json:"state"`
-	}
-	if len(run.Deploy) > 0 {
-		_ = json.Unmarshal(run.Deploy, &deploy)
-	}
-	// Deploy 的 Pod 在 Genet 的 namespace 里（`runs.deploy.namespace`）。缺这个键时回退平台
-	// namespace，但要在 missing 里**说清这是回退**——静默回退会让 bundle 看起来"没有日志"却查不出原因。
-	ns := deploy.Namespace
-	fallbackNote := ""
-	if ns == "" {
-		ns = k8sDefaultNamespace(s.cfg)
-		fallbackNote = fmt.Sprintf("runs.deploy 缺 namespace，已回退到 %q", ns)
-		addMissing("logs/deploy", fallbackNote+"（Deploy 的 Pod 通常在 Genet 的 namespace，如 testplane-mock，这里可能读不到）")
-	}
-	client, err := s.deployLogsClient()
-	// D-59：先读盘（落盘副本是唯一真源），不再实时抓 deploy 日志。
-	listed := 0
-	for _, rel := range deployLogFiles(s.cfg.StorageRoot, run.ID) {
-		raw, rerr := os.ReadFile(filepath.Join(s.cfg.StorageRoot, run.ID, filepath.FromSlash(rel)))
-		if rerr != nil {
-			addMissing(rel, "读盘失败: "+rerr.Error())
-			continue
-		}
-		*files = append(*files, bundleFile{name: "logs/deploy/" + filepath.Base(rel), bytes: raw})
-		listed++
-		if listed >= bundleMaxDeployPods {
-			addMissing("logs/deploy", fmt.Sprintf("Deploy 日志文件超过上限 %d，其余未打包", bundleMaxDeployPods))
-			break
-		}
-	}
-	client, cerr := s.deployLogsClient()
-	if cerr != nil {
-		if listed == 0 {
-			addMissing("logs/deploy", "K8s 客户端不可用（盘上也没有落盘副本）: "+cerr.Error())
-		}
-		return
-	}
-	pods, err := client.ListPods(ctx, ns)
-	if err != nil {
-		addMissing("logs/deploy", "列 Pod 失败: "+err.Error())
-		return
-	}
-	for _, pod := range pods {
-		name := pod.Name
-		// #45-2：归属判定统一走 podBelongsToRun（与 /deploy、collector 同一套语义）。
-		if !podBelongsToRun(pod, run, deploy.ReleaseName) {
-			continue
-		}
-		if _, _, ok := deployLogLinesFromDisk(s.cfg.StorageRoot, run.ID, name); ok {
-			continue // 已有落盘副本，不重复实时抓
-		}
-		if listed >= bundleMaxDeployPods {
-			addMissing("logs/deploy", fmt.Sprintf("Pod 数超过上限 %d，其余未打包", bundleMaxDeployPods))
-			return
-		}
-		listed++
-		container := firstContainer(name, pods)
-		text, logErr := client.Logs(ctx, ns, name, container, bundleDeployTail)
-		if logErr != nil {
-			addMissing("logs/deploy/"+name+".log", "拉取失败: "+logErr.Error())
-			continue
-		}
-		*files = append(*files, bundleFile{
-			name: "logs/deploy/" + name + ".log", bytes: []byte(text),
-		})
-	}
-	if listed == 0 {
-		addMissing("logs/deploy", "当前窗口没有与本 Run 相关的 Pod")
-	}
-}
-
-// bundleEntryStats 计算单条目大小 / 是否截断 / sha256（截断按 ResultMaxBytes 上限）。
-func (s *Server) bundleEntryStats(ctx context.Context, f bundleFile) (int64, bool, *string, error) {
-	limit := s.resultMaxBytes()
-	if f.bytes != nil {
-		data := f.bytes
-		trunc := false
-		if int64(len(data)) > limit {
-			data = data[:limit]
-			trunc = true
-		}
-		sum := sha256.Sum256(data)
-		sha := hex.EncodeToString(sum[:])
-		return int64(len(data)), trunc, &sha, nil
-	}
-	// 磁盘条目：大小取所有拼接文件之和。
-	var total int64
-	paths := f.concatLogs
-	if len(paths) == 0 {
-		paths = []string{f.disk}
-	}
-	for _, p := range paths {
-		st, err := os.Stat(p)
-		if err != nil {
-			return 0, false, nil, err
-		}
-		total += st.Size()
-	}
-	trunc := total > limit
-	size := total
-	if trunc {
-		size = limit
-	}
-	sha, err := hashFiles(f.disk, paths, size)
-	if err != nil {
-		return 0, false, nil, err
-	}
-	return size, trunc, sha, nil
-}
-
-// hashFiles 对（前 size 字节的）内容算 sha256。
-func hashFiles(primary string, paths []string, size int64) (*string, error) {
-	h := sha256.New()
-	var written int64
-	for _, p := range paths {
-		f, err := os.Open(p)
-		if err != nil {
-			return nil, err
-		}
-		remain := size - written
-		if remain <= 0 {
-			f.Close()
-			break
-		}
-		n, err := io.CopyN(h, f, remain)
-		f.Close()
-		if err != nil {
-			return nil, err
-		}
-		written += n
-	}
-	sum := hex.EncodeToString(h.Sum(nil))
-	return &sum, nil
-}
-
-// writeBundleEntry 把一条内容流式写进 zip（截断到 limit）。
-func (s *Server) writeBundleEntry(ctx context.Context, zw *zip.Writer, f bundleFile) error {
-	w, err := zw.Create(f.name)
+	f, err := os.Open(bf.disk)
 	if err != nil {
 		return err
 	}
-	// f.size 已是"截断后"的大小（bundleEntryStats 算过上限），直接按它拷贝；
-	// 不能用 resultMaxBytes() 当剩余量——否则小文件会因 CopyN 未填满而不必要地报 EOF。
-	remain := f.size
-	if f.bytes != nil {
-		data := f.bytes
-		if int64(len(data)) > remain {
-			data = data[:remain]
-		}
-		_, err = w.Write(data)
+	defer func() { _ = f.Close() }()
+	if bf.truncated && bf.size > 0 {
+		_, err = io.CopyN(w, f, bf.size)
 		return err
 	}
-	paths := f.concatLogs
-	if len(paths) == 0 {
-		paths = []string{f.disk}
-	}
-	for _, p := range paths {
-		if remain <= 0 {
-			break
-		}
-		src, err := os.Open(p)
-		if err != nil {
-			return err
-		}
-		n, copyErr := io.CopyN(w, src, remain)
-		src.Close()
-		remain -= n
-		if copyErr != nil {
-			return copyErr
-		}
-	}
-	return nil
-}
-
-func writeZipBytes(zw *zip.Writer, name string, data []byte) error {
-	w, err := zw.Create(name)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(data)
+	_, err = io.Copy(w, f)
 	return err
 }
+
+// appendDeployLogs 把部署 Pod 日志的当前可得部分加进包（logs/deploy/<pod>.log）。
+func (s *Server) appendDeployLogs(ctx context.Context, task *store.Task, files *[]bundleFile, man *bundleManifest) {
+	if s.cfg.StorageRoot == "" {
+		return
+	}
+	attemptNo := task.CurrentAttempt
+	if attemptNo < 1 {
+		attemptNo = 1
+	}
+	runs, err := s.st.RunnerRuns.ListByAttempt(ctx, nil, task.ID, attemptNo)
+	if err != nil {
+		return
+	}
+	var deploySeq int
+	for _, rr := range runs {
+		if rr.Role == domain.RoleDeploy && rr.RunnerName == "service-deploy" {
+			deploySeq = rr.Seq
+			break
+		}
+	}
+	if deploySeq == 0 {
+		return
+	}
+	logsDir := filepath.Join(s.runnerDirFor(task.ID, attemptNo, deploySeq), "logs")
+	pods := listDeployPods(logsDir)
+	count := 0
+	for _, pod := range pods {
+		if count >= bundleMaxDeployPods {
+			break
+		}
+		count++
+		segs := deployPodLogSegments(logsDir, pod)
+		if len(segs) == 0 {
+			continue
+		}
+		lines := tailLinesOf(segs, bundleDeployTail)
+		text := strings.Join(lines, "\n")
+		sum := sha256.Sum256([]byte(text))
+		man.Files = append(man.Files, bundleEntry{
+			Path: "logs/deploy/" + pod + ".log", SizeBytes: int64(len(text)),
+			SHA256: strPtr(hex.EncodeToString(sum[:])),
+		})
+		*files = append(*files, bundleFile{name: "logs/deploy/" + pod + ".log", bytes: []byte(text), size: int64(len(text))})
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+var _ = strconv.Itoa

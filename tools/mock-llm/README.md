@@ -1,6 +1,6 @@
 # mock-llm：OpenAI 兼容的假 LLM 服务
 
-给 TestPlane 的 **Pre-Check（`testers/endpoint-probe`）** 和 **e2e** 喂一个可控的"被测 LLM 服务"：
+给 Argus 的 **Pre-Check（`runners/endpoint-probe`）** 和 **e2e** 喂一个可控的"被测 LLM 服务"：
 不需要真模型、不需要 GPU，就能复现"就绪 / 就绪慢 / 500 / 401 / HTTP 200 包错误"这几种现场。
 
 只用 Go 标准库，零依赖。默认监听 **`:18080`**（控制面是 8080，不要占用）。
@@ -39,7 +39,7 @@ curl -sS http://127.0.0.1:18080/v1/models                     # {"data":[{"id":"
 curl -sS -N -X POST 'http://127.0.0.1:18080/v1/chat/completions' \
   -H 'Content-Type: application/json' \
   -d '{"model":"mock-llm","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"stream":true}'
-# data: {"choices":[{"delta":{"content":"TestPlane ","role":"assistant"},...}]}
+# data: {"choices":[{"delta":{"content":"Argus ","role":"assistant"},...}]}
 # data: {"choices":[{"delta":{},"finish_reason":"stop",...}]}
 # data: [DONE]
 ```
@@ -98,8 +98,8 @@ go test ./... -v
 
 ## 与真实 Tester 的联调记录（2026-11-05）
 
-不 build Tester 镜像、不改 `testers/`：用一次性 alpine 容器装 `jq/bash/curl`，
-只把 `testers/endpoint-probe/run.sh` 只读挂进去跑——这正是"契约同构"的验证。
+不 build Tester 镜像、不改 `runners/`：用一次性 alpine 容器装 `jq/bash/curl`，
+只把 `runners/endpoint-probe/run.sh` 只读挂进去跑——这正是"契约同构"的验证。
 
 ```bash
 # 宿主上先起 mock（一个场景一个端口）
@@ -111,10 +111,10 @@ mock-llm -addr=:18085 -ready-after=15s
 
 # 容器内跑真实探针（base URL 用 host.docker.internal 回指宿主）
 docker run --rm --add-host=host.docker.internal:host-gateway \
-  -v "$REPO/testers/endpoint-probe/run.sh:/tester/run.sh:ro" \
+  -v "$REPO/runners/endpoint-probe/run.sh:/runner/run.sh:ro" \
   -v "$REPO/.data/qa-probe/ready:/workspace/output" \
   alpine:3.20 sh -c \
-  'apk add --no-cache jq bash curl >/dev/null && exec bash /tester/run.sh \
+  'apk add --no-cache jq bash curl >/dev/null && exec bash /runner/run.sh \
      --url=http://host.docker.internal:18080/v1 --model_name=mock-llm \
      --wait_timeout_seconds=20 --retry_interval_seconds=1'
 ```
@@ -151,9 +151,9 @@ docker run --rm --add-host=host.docker.internal:host-gateway \
 ## Docker / Kind
 
 ```bash
-docker build -t testplane/mock-llm:dev tools/mock-llm
-docker run --rm -p 18080:18080 testplane/mock-llm:dev
-kind load docker-image testplane/mock-llm:dev --name testplane
+docker build -t argus/mock-llm:dev tools/mock-llm
+docker run --rm -p 18080:18080 argus/mock-llm:dev
+kind load docker-image argus/mock-llm:dev --name argus
 ```
 
 在 Kind 里当被测服务用时，Pod 内访问地址是

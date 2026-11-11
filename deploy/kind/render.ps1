@@ -1,29 +1,29 @@
-# TestPlane · 渲染 kind 集群配置模板
+# Argus · 渲染 kind 集群配置模板
 #
 # 为什么要有这一步：kind 的 extraMounts 里是**宿主绝对路径**，写死在仓库里就会
-# 变成"只有作者那台机器能建集群"。所以 `deploy/kind/testplane.yaml` 是模板
+# 变成"只有作者那台机器能建集群"。所以 `deploy/kind/argus.yaml` 是模板
 # （含占位符 `__STORAGE_HOST_PATH__`），由本脚本渲染成一份可直接给 kind 的清单。
 #
 # 用法（在仓库根或任意目录都行）：
 #   pwsh deploy/kind/render.ps1
-#       → 宿主路径默认 <仓库根>/.data/storage，产物 .data/kind-testplane.yaml
-#   pwsh deploy/kind/render.ps1 -StoragePath D:\data\tp-storage
+#       → 宿主路径默认 <仓库根>/.data/storage，产物 .data/kind-argus.yaml
+#   pwsh deploy/kind/render.ps1 -StoragePath D:\data\argus-storage
 #       → 换成别的盘/目录（不存在会自动创建）
 #   pwsh deploy/kind/render.ps1 -OutFile .data\my-kind.yaml
 #
 # 产物位置默认 `.data/`（已 gitignore）：渲染结果与机器相关，**不入库**。
 #
 # 接着：
-#   .\.tools\kind.exe create cluster --config .data\kind-testplane.yaml --wait 180s
+#   .\.tools\kind.exe create cluster --config .data\kind-argus.yaml --wait 180s
 #
-# 注意：改了模板或换了 -StoragePath 都必须 `kind delete cluster --name testplane` 再建，
+# 注意：改了模板或换了 -StoragePath 都必须 `kind delete cluster --name argus` 再建，
 # extraMounts 只在 create 时生效。
 [CmdletBinding()]
 param(
     # 宿主上给节点 /storage-root 用的目录。默认 <仓库根>/.data/storage。
     [string]$StoragePath,
 
-    # 渲染产物路径。默认 <仓库根>/.data/kind-testplane.yaml。
+    # 渲染产物路径。默认 <仓库根>/.data/kind-argus.yaml。
     [string]$OutFile,
 
     # 仓库根；默认按本脚本位置推（deploy/kind/..\..）
@@ -39,10 +39,10 @@ if (-not $StoragePath) {
     $StoragePath = Join-Path $RepoRoot '.data\storage'
 }
 if (-not $OutFile) {
-    $OutFile = Join-Path $RepoRoot '.data\kind-testplane.yaml'
+    $OutFile = Join-Path $RepoRoot '.data\kind-argus.yaml'
 }
 
-$template = Join-Path $PSScriptRoot 'testplane.yaml'
+$template = Join-Path $PSScriptRoot 'argus.yaml'
 if (-not (Test-Path -LiteralPath $template)) {
     throw "模板不存在: $template"
 }
@@ -81,5 +81,5 @@ Write-Host "已渲染: $OutFile"
 Write-Host "  宿主存储路径: $posix  ->  节点 /storage-root"
 Write-Host ''
 Write-Host '下一步：'
-Write-Host '  .\.tools\kind.exe create cluster --config .data\kind-testplane.yaml --wait 180s'
-Write-Host '（改过模板或路径要先删除旧集群：.\.tools\kind.exe delete cluster --name testplane）'
+Write-Host '  .\.tools\kind.exe create cluster --config .data\kind-argus.yaml --wait 180s'
+Write-Host '（改过模板或路径要先删除旧集群：.\.tools\kind.exe delete cluster --name argus）'

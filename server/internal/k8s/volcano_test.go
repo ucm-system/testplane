@@ -16,8 +16,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8stesting "k8s.io/client-go/testing"
-
-	"github.com/ucm-system/testplane/server/internal/api"
 )
 
 // ---- 测试脚手架 ----------------------------------------------------------
@@ -278,20 +276,20 @@ func TestVolcano_NamespacesListedPerNamespace(t *testing.T) {
 	dyn := fakeVolcanoClient(
 		queueObject("q", "Open", nil, nil),
 		podGroupObject("pg-a", "testplane", "q", "Pending", now.Add(-10*time.Second), "a", ""),
-		podGroupObject("pg-b", "tp-qa", "q", "Pending", now.Add(-10*time.Second), "b", ""),
-		podGroupObject("pg-c", "tp-other", "q", "Pending", now.Add(-10*time.Second), "c", ""),
+		podGroupObject("pg-b", "argus-qa", "q", "Pending", now.Add(-10*time.Second), "b", ""),
+		podGroupObject("pg-c", "argus-other", "q", "Pending", now.Add(-10*time.Second), "c", ""),
 	)
 	calls := countListCalls(dyn)
 	snap := NewVolcanoWithDynamic(dyn, VolcanoOptions{
 		Enabled:    true,
-		Namespaces: []string{"testplane", "tp-qa", "testplane"},
+		Namespaces: []string{"testplane", "argus-qa", "testplane"},
 		Now:        func() time.Time { return now },
 	}).VolcanoSnapshot(context.Background())
 	if _, pg := calls.set(); pg != 2 {
 		t.Fatalf("podgroups List 次数 = %d，期望 2（重复的 ns 去重）", pg)
 	}
 	if len(snap.Queues) != 1 || snap.Queues[0].PendingJobs != 2 {
-		t.Fatalf("只应统计 testplane + tp-qa 的 2 条，得到 %+v", snap.Queues)
+		t.Fatalf("只应统计 argus + argus-qa 的 2 条，得到 %+v", snap.Queues)
 	}
 }
 
@@ -329,12 +327,12 @@ func TestVolcano_DegradeFourStates(t *testing.T) {
 		err     error
 		want    string
 	}{
-		{"crd_missing_notfound", true, notFound, api.VolcanoCRDMissing},
-		{"crd_missing_nomatch", true, noMatch, api.VolcanoCRDMissing},
-		{"rbac_forbidden", true, forbidden, api.VolcanoRBACForbidden},
-		{"timeout", true, timeout, api.VolcanoSchedulerUnavailable},
-		{"connection_refused", true, connRefused, api.VolcanoSchedulerUnavailable},
-		{"disabled", false, nil, api.VolcanoDisabled},
+		{"crd_missing_notfound", true, notFound, VolcanoCRDMissing},
+		{"crd_missing_nomatch", true, noMatch, VolcanoCRDMissing},
+		{"rbac_forbidden", true, forbidden, VolcanoRBACForbidden},
+		{"timeout", true, timeout, VolcanoSchedulerUnavailable},
+		{"connection_refused", true, connRefused, VolcanoSchedulerUnavailable},
+		{"disabled", false, nil, VolcanoDisabled},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -366,7 +364,7 @@ func TestVolcano_PodGroupListFailureDegrades(t *testing.T) {
 		schema.GroupResource{Group: VolcanoAPIGroup, Resource: "podgroups"}, "podgroups", errors.New("no")))
 	p := NewVolcanoWithDynamic(dyn, VolcanoOptions{Enabled: true, Namespaces: []string{"testplane"}})
 	snap := p.VolcanoSnapshot(context.Background())
-	if snap.Available || snap.Detail == nil || *snap.Detail != api.VolcanoRBACForbidden {
+	if snap.Available || snap.Detail == nil || *snap.Detail != VolcanoRBACForbidden {
 		t.Fatalf("podgroups 无权限应降级 rbac_forbidden，得到 %+v", snap)
 	}
 	if len(snap.Queues) != 0 {
@@ -378,7 +376,7 @@ func TestVolcano_PodGroupListFailureDegrades(t *testing.T) {
 func TestVolcano_NilClientDegrades(t *testing.T) {
 	snap := NewVolcanoWithDynamic(nil, VolcanoOptions{Enabled: true}).
 		VolcanoSnapshot(context.Background())
-	if snap.Available || snap.Detail == nil || *snap.Detail != api.VolcanoSchedulerUnavailable {
+	if snap.Available || snap.Detail == nil || *snap.Detail != VolcanoSchedulerUnavailable {
 		t.Fatalf("nil client 应降级 scheduler_unavailable，得到 %+v", snap)
 	}
 }
@@ -422,7 +420,7 @@ func TestVolcano_StaleAfterSuccess(t *testing.T) {
 	if !snap.Stale {
 		t.Fatalf("上一次成功过，这次失败应标 stale")
 	}
-	if snap.Detail == nil || *snap.Detail != api.VolcanoSchedulerUnavailable {
+	if snap.Detail == nil || *snap.Detail != VolcanoSchedulerUnavailable {
 		t.Fatalf("detail = %v，期望 scheduler_unavailable", snap.Detail)
 	}
 	if len(snap.Queues) != 0 {
@@ -486,7 +484,7 @@ func TestVolcano_SingleFlight(t *testing.T) {
 	})
 
 	const n = 10
-	results := make([]api.VolcanoSnapshot, n)
+	results := make([]VolcanoSnapshot, n)
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
@@ -525,7 +523,7 @@ func TestVolcano_BackoffAfterFailure(t *testing.T) {
 		Now: func() time.Time { return clock },
 	})
 
-	if snap := p.VolcanoSnapshot(context.Background()); snap.Detail == nil || *snap.Detail != api.VolcanoCRDMissing {
+	if snap := p.VolcanoSnapshot(context.Background()); snap.Detail == nil || *snap.Detail != VolcanoCRDMissing {
 		t.Fatalf("首次应 crd_missing，得到 %+v", snap)
 	}
 	// 越过 15s TTL 但在 60s 退避窗口内：不打 API。

@@ -2,7 +2,7 @@
 #FROM golang:1.21-alpine AS go-deps
 
 # ============================================================================
-# ⚠️ 本地联调 patch（TestPlane infra，2026-11-05）——**仅联调用，不提交回 Genet**
+# ⚠️ 本地联调 patch（Argus infra，2026-11-05）——**仅联调用，不提交回 Genet**
 #
 # 上游 Dockerfile 依赖华为内网：基础镜像来自 registry.dev.huawei.com、
 # apk 源指向 mirrors.tools.huawei.com、GOPROXY 也走内网。本地 kind 拉不到这些，

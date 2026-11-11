@@ -1,7 +1,7 @@
 import { chromium } from '@playwright/test'
 const b = await chromium.launch({ channel: 'chrome', headless: true })
 const p = await b.newPage({ viewport: { width: 1440, height: 1100 } })
-await p.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+await p.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
 await p.goto('http://127.0.0.1:5181/runs?status=failed&page=2&page_size=10', { waitUntil: 'networkidle' })
 await p.waitForTimeout(1200)
 console.log('url:', p.url())

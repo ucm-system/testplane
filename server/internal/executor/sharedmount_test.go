@@ -11,11 +11,14 @@ import (
 // baseSpec 是最小可渲染 JobSpec（mounts/pvc 由具体用例覆盖）。
 func baseSpec() ports.JobSpec {
 	return ports.JobSpec{
-		RunID: "r-1", TaskID: "t-1", AttemptNo: 1, AttemptID: "t-1-a1",
-		TesterName: "probe", TesterVersion: "1.0.0",
-		Image: "i:1", Entry: "/tester/run.sh",
-		Namespace: "testplane", StoragePVC: "artifacts",
-		OutputDir:      "runs/r-1/tasks/t-1/attempts/1",
+		SpecVersion: ports.JobSpecVersion2,
+		TaskID:      "t-1", AttemptNo: 1, Seq: 1,
+		RunnerName: "probe", RunnerVersion: "1.0.0",
+		Role:      domain.RoleTest,
+		Image:     "i:1",
+		Command:   []string{"/runner/run.sh"},
+		Namespace: "argus", StoragePVC: "artifacts",
+		OutputDir:      "storage/t-1/attempts/1/runners/1",
 		TimeoutSeconds: 600,
 	}
 }
@@ -73,7 +76,7 @@ func TestRenderSharedMountsDisabledByProfile(t *testing.T) {
 	}
 }
 
-// 冲突：Tester mounts 与统一挂载同路径 → 渲染期也必须拒绝（双保险）。
+// 冲突：Runner mounts 与统一挂载同路径 → 渲染期也必须拒绝（双保险）。
 func TestRenderRejectsSharedMountPathConflict(t *testing.T) {
 	spec := baseSpec()
 	spec.SharedMounts = []domain.SharedMountSpec{{Name: "models", MountPath: "/models", ClaimName: "m"}}
@@ -83,7 +86,7 @@ func TestRenderRejectsSharedMountPathConflict(t *testing.T) {
 	}
 }
 
-// volume 名去重：两个 Tester mount 的 name 经 sanitize 后相同 → 必须生成唯一卷名，
+// volume 名去重：两个 Runner mount 的 name 经 sanitize 后相同 → 必须生成唯一卷名，
 // 否则 K8s 以 "Duplicate value" 拒绝整份 Pod（研究 #69 点出的既有隐患）。
 func TestRenderDedupesVolumeNames(t *testing.T) {
 	spec := baseSpec()
@@ -103,7 +106,7 @@ func TestRenderDedupesVolumeNames(t *testing.T) {
 		}
 		seen[v.Name] = v.Name
 	}
-	// 统一挂载与 Tester mount 也用同一命名空间：再加一条同名的一起渲染。
+	// 统一挂载与 Runner mount 也用同一命名空间：再加一条同名的一起渲染。
 	spec.SharedMounts = []domain.SharedMountSpec{{Name: "data", MountPath: "/models", ClaimName: "m"}}
 	job, err = Render(spec)
 	if err != nil {
@@ -118,12 +121,12 @@ func TestRenderDedupesVolumeNames(t *testing.T) {
 	}
 }
 
-// 保留路径只剩一套（#74）：/tester 在渲染期也必须被拒（以前只在提交期拒）。
-func TestRenderRejectsTesterDirMount(t *testing.T) {
+// 保留路径只剩一套（#74）：/runner 在渲染期也必须被拒（以前只在提交期拒）。
+func TestRenderRejectsRunnerDirMount(t *testing.T) {
 	spec := baseSpec()
-	spec.Mounts = []domain.MountSpec{{Name: "t", MountPath: "/tester"}}
+	spec.Mounts = []domain.MountSpec{{Name: "t", MountPath: domain.RunnerDirPath}}
 	_, err := Render(spec)
-	if err == nil || !strings.Contains(err.Error(), "/tester") {
-		t.Fatalf("err = %v, want /tester 冲突", err)
+	if err == nil || !strings.Contains(err.Error(), domain.RunnerDirPath) {
+		t.Fatalf("err = %v, want %s 冲突", err, domain.RunnerDirPath)
 	}
 }

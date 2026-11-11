@@ -51,7 +51,7 @@ func (c *Client) URL(path string) string {
 
 func (c *Client) authorize(req *http.Request) {
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "testplane-e2e/0.1")
+	req.Header.Set("User-Agent", "argus-e2e/0.2")
 	if c.cfg.NoAuth {
 		return
 	}
@@ -147,7 +147,7 @@ type ConnectError struct {
 func (e *ConnectError) Error() string {
 	return fmt.Sprintf(`无法连接控制面 %s：%v
   请先确认控制面已启动：make dev（PG + 迁移 + --role=all，监听 127.0.0.1:8080），
-  或改用 --base-url 指向实际地址。本次没有创建任何 Run。`, e.BaseURL, e.Err)
+  或改用 --base-url 指向实际地址。本次没有创建任何 Task。`, e.BaseURL, e.Err)
 }
 
 func (e *ConnectError) Unwrap() error { return e.Err }
@@ -158,7 +158,7 @@ type UsageError struct{ Msg string }
 func (e *UsageError) Error() string { return e.Msg }
 
 // APIError 是控制面返回的非 2xx 响应，错误模型见 07 §3：
-// {error:{code,message,detail,retryable,trace_id}}；也容忍扁平的 {code,message}。
+// 扁平 {code,message,detail,retryable,trace_id}；也容忍嵌套 {error:{...}} 形态读取。
 type APIError struct {
 	Status    int
 	Code      string

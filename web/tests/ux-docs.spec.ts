@@ -17,14 +17,14 @@ const OUT_DIR = join(process.cwd(), '.data', 'docs')
 test.describe.configure({ mode: 'serial' })
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('testplane:mock-role', 'admin'))
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
 })
 
 test('① 侧栏底部三条入口：展开有文字，折叠只剩图标但 aria-label/tooltip 仍可达', async ({ page }) => {
   mkdirSync(OUT_DIR, { recursive: true })
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/')
-  await expect(page.getByText('进行中 Run')).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByText('进行中 Task')).toBeVisible({ timeout: 20_000 })
 
   const footer = page.locator('[data-slot="sidebar-footer"], [data-sidebar="footer"]').first()
   const docsLink = page.getByTestId('sidebar-footer-文档')
@@ -35,7 +35,7 @@ test('① 侧栏底部三条入口：展开有文字，折叠只剩图标但 ari
   await expect(docsLink).toBeVisible()
   await expect(docsLink).toHaveText(/文档/)
   await expect(apiLink).toHaveAttribute('href', '/api')
-  await expect(ghLink).toHaveAttribute('href', 'https://github.com/ucm-system/testplane')
+  await expect(ghLink).toHaveAttribute('href', 'https://github.com/ucm-system/argus')
   await expect(ghLink).toHaveAttribute('target', '_blank')
   await expect(ghLink).toHaveAttribute('rel', /noreferrer/)
 
@@ -73,7 +73,7 @@ test('② /docs：五节真内容都在，目录锚点可跳', async ({ page }) 
 
   for (const [id, title] of [
     ['quickstart', '快速开始'],
-    ['tester-contract', 'Tester 契约'],
+    ['runner-contract', 'Runner 契约'],
     ['shared-mounts', '统一共享挂载'],
     ['status-semantics', '状态语义'],
     ['cli-ci', 'CLI 与 CI'],
@@ -84,14 +84,15 @@ test('② /docs：五节真内容都在，目录锚点可跳', async ({ page }) 
   }
 
   // 真内容（不是占位）：几个关键契约点在正文里
-  const body = page.getByTestId('doc-section-tester-contract')
-  await expect(body).toContainText('/workspace/output/result.json')
-  await expect(body).toContainText('TESTPLANE_RUN_ID')
-  await expect(body).toContainText('--key=value')
+  const body = page.getByTestId('doc-section-runner-contract')
+  await expect(body).toContainText('/workspace/output')
+  await expect(body).toContainText('result.json')
+  await expect(body).toContainText('AG_TASK_ID')
+  await expect(body).toContainText('AG_PARAMS_FILE')
   const mounts = page.getByTestId('doc-section-shared-mounts')
-  await expect(mounts).toContainText('TESTPLANE_SHARED_MOUNTS')
-  await expect(mounts).toContainText('/models')
-  await expect(mounts).toContainText('/mnt/model')
+  await expect(mounts).toContainText('runner.yaml.mounts')
+  await expect(mounts).toContainText('PVC')
+  await expect(mounts).toContainText('/admin/shared-mounts')
   await expect(mounts).toContainText('fsGroup')
 
   // 目录锚点跳转：点最后一条，URL 带 hash 且该节进入视口
@@ -105,8 +106,8 @@ test('② /docs：五节真内容都在，目录锚点可跳', async ({ page }) 
 
   // 每节都有"在仓库里看完整设计"的外链
   const designLinks = page.getByRole('link', { name: /在仓库里看完整设计/ })
-  await expect(designLinks).toHaveCount(5)
-  await expect(designLinks.first()).toHaveAttribute('href', /github\.com\/ucm-system\/testplane\/blob\/main\/design\//)
+  await expect(designLinks).toHaveCount(6)
+  await expect(designLinks.first()).toHaveAttribute('href', /github\.com\/ucm-system\/argus\/blob\/main\/design\//)
 
   await page.screenshot({ path: join(OUT_DIR, 'docs-1440.png'), fullPage: true })
 })
@@ -126,7 +127,7 @@ test('③ /api：端点来自 openapi.yaml（数量与契约一致）、搜索�
 
   // 按 tag 分组
   await expect(page.locator('[data-testid^="api-group-"]').first()).toBeVisible()
-  await expect(page.getByTestId('api-group-runs')).toBeVisible()
+  await expect(page.getByTestId('api-group-tasks')).toBeVisible()
 
   // 点一行展开 parameters / responses
   const firstRow = page.getByTestId('api-endpoint-row').first()
@@ -150,7 +151,7 @@ test('③ /api：端点来自 openapi.yaml（数量与契约一致）、搜索�
   await page.getByLabel('按路径或摘要过滤端点').fill('')
   await expect.poll(async () => rows.count()).toBe(before)
 
-  // 下载：给出的是同一份契约（yaml 文本，含 openapi 与 /runs）
+  // 下载：给出的是同一份契约（yaml 文本，含 openapi 与 /tasks）
   const [download] = await Promise.all([
     page.waitForEvent('download', { timeout: 15_000 }),
     page.getByTestId('download-openapi').click(),

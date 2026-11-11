@@ -19,7 +19,7 @@ const OUT_DIR = join(process.cwd(), '.data', 'demo')
 const STEPS = [
   '01-home',
   '02-submit',
-  '03-runs',
+  '03-tasks',
   '04-run-detail',
   '04b-run-detail-exec',
   '05-report',
@@ -32,13 +32,15 @@ const STEPS = [
 test.use({ trace: 'off' })
 test.describe.configure({ mode: 'serial' })
 
-test('演示：提交服务形态 Run → 详情 → 报告 → 集群 → 管理台 → 重试预览', async ({ page }) => {
+// TODO(e2e): 待集群联调 —— 本脚本是 v1 提交表单的全流程录屏（Task 1 参数 / 不部署 / 重试预览 Dialog），
+// v2 表单已改为嵌套 task: + runners[].input（runner 行、输入框、服务来源 部署/外接），需按 v2 UI 重写后再跑。
+test.fixme('演示：提交服务形态 Task → 详情 → 报告 → 集群 → 管理台 → 重试', async ({ page }) => {
   test.setTimeout(180_000)
   mkdirSync(OUT_DIR, { recursive: true })
 
   // 每次导航前注入角色：mock 用这个键模拟 OIDC 角色（admin 才能进管理台）
   await page.addInitScript(() => {
-    window.localStorage.setItem('testplane:mock-role', 'admin')
+    window.localStorage.setItem('argus:mock-role', 'admin')
   })
 
   const shot = async (name: string) => {
@@ -49,41 +51,41 @@ test('演示：提交服务形态 Run → 详情 → 报告 → 集群 → 管�
   /* 1) 首页概览 */
   await page.goto('/')
   await expect(page.getByRole('heading', { name: '概览' })).toBeVisible()
-  await expect(page.getByText('进行中 Run')).toBeVisible()
+  await expect(page.getByText('进行中 Task')).toBeVisible()
   await shot('01-home')
 
   /* 2) 提交一个 service 形态的 manifest（不部署，直接打已有服务） */
   await page.goto('/submit')
   const runName = `demo-service-${Date.now().toString().slice(-5)}`
-  await page.getByLabel('Run 名称').fill(runName)
+  await page.getByLabel('Task 名称').fill(runName)
   // 默认值已清空（只留 placeholder）：Task 名称要自己写，否则前端校验会拦住提交
-  await page.getByLabel('Task 1 名称').fill('accuracy-dataset-a')
-  await page.getByLabel('Task 1 参数').fill('--dataset=/data/gsm8k.jsonl --limit=200')
+  await page.getByLabel('runner 1 名称').fill('accuracy-dataset-a')
+  await page.getByLabel('runner 1 输入').fill('--dataset=/data/gsm8k.jsonl --limit=200')
   // Segmented 是 role=group 里的 button（aria-pressed），不是原生 radio
-  await page.getByRole('group', { name: '服务来源' }).getByRole('button', { name: '不部署' }).click()
+  await page.getByRole('group', { name: '服务来源' }).getByRole('button', { name: '外接' }).click()
   await expect(page.getByLabel('服务 base URL')).toBeVisible()
   await shot('02-submit')
 
   await page.getByRole('button', { name: '提交', exact: true }).click()
-  await expect(page).toHaveURL(/\/runs\/[^/]+$/, { timeout: 20_000 })
+  await expect(page).toHaveURL(/\/tasks\/[^/]+$/, { timeout: 20_000 })
   const runUrl = new URL(page.url()).pathname
 
   /* 3) 运行列表（新 Run 出现）—— 站内导航，别刷新，否则 mock 状态重置 */
   await page.getByRole('link', { name: '概览' }).click()
-  await expect(page.getByText('全部 Run')).toBeVisible()
+  await expect(page.getByText('全部 Task')).toBeVisible()
   await expect(page.getByText(runName).first()).toBeVisible({ timeout: 20_000 })
-  await shot('03-runs')
+  await shot('03-tasks')
 
   /* 4) Run 详情：等终态 → 默认就是「结果」视图（结论/counts/失败项/产物/报告） */
   await page.locator('tbody tr', { hasText: runName }).first().getByRole('link').first().click()
   await expect(page).toHaveURL(new RegExp(runUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
-  await expect(page.getByTestId('run-result-verdict')).toBeVisible({ timeout: 90_000 })
+  await expect(page.getByTestId('task-result-verdict')).toBeVisible({ timeout: 90_000 })
   await expect(page.locator('[data-testid="open-report"]')).toBeVisible()
   await shot('04-run-detail')
 
   /* 4b) 执行细节：链路 / Deploy / Task / Attempt / 日志（折叠不是隐藏） */
   await page.getByRole('tab', { name: '执行细节' }).click()
-  await expect(page.getByText('Task 列表')).toBeVisible()
+  await expect(page.getByText('runner 管道时间线')).toBeVisible()
   await page.locator('tbody tr', { hasText: 'accuracy-dataset-a' }).first().click()
   await shot('04b-run-detail-exec')
 
@@ -107,8 +109,8 @@ test('演示：提交服务形态 Run → 详情 → 报告 → 集群 → 管�
   await shot('07-admin-audit')
 
   /* 8) 重试预览 Dialog（seeded 的 completed_with_errors Run；整页刷新没关系） */
-  await page.goto('/runs/r-20261105-0003')
-  const retry = page.locator('[data-testid="retry-run"]').first()
+  await page.goto('/tasks/t-20261105-0003')
+  const retry = page.locator('[data-testid="retry-task"]').first()
   await expect(retry).toBeVisible({ timeout: 20_000 })
   await retry.click()
   await expect(page.getByText('将复用（已成功）')).toBeVisible()

@@ -1,0 +1,60 @@
+{{- include "argus.validate" . -}}
+{{- include "argus.validateTopology" . -}}
+{{- /*
+非敏感配置。键名以 server/internal/config/config.go 实际读取的为准
+（本文件与代码不一致时以代码为准——代码是契约）。
+敏感项（DB DSN / OIDC client secret / Genet token）一律走 Secret，不进这里。
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "argus.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "argus.labels" . | nindent 4 }}
+data:
+  AG_ENV: {{ .Values.config.env | quote }}
+  AG_AUTH_MODE: {{ .Values.config.authMode | quote }}
+  AG_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  AG_NAMESPACE: {{ include "argus.executorNamespace" . | quote }}
+  AG_CLUSTER_NAME: {{ .Values.config.clusterName | quote }}
+  AG_K8S_IN_CLUSTER: {{ .Values.config.inClusterK8s | quote }}
+  AG_JOB_GC_ENABLED: {{ .Values.config.jobGCEnabled | quote }}
+  AG_DB_MAX_OPEN_CONNS: {{ .Values.config.dbMaxOpenConns | quote }}
+  AG_MAX_GLOBAL_CONCURRENCY: {{ .Values.config.maxGlobalConcurrency | quote }}
+  AG_RUN_MAX_TASKS: {{ .Values.config.runMaxTasks | quote }}
+  AG_TASK_TIMEOUT: {{ .Values.config.taskTimeout | quote }}
+  AG_TASK_TIMEOUT_MAX: {{ .Values.config.taskTimeoutMax | quote }}
+  AG_DEPLOY_TIMEOUT: {{ .Values.config.deployTimeout | quote }}
+  AG_RESULT_MAX_BYTES: {{ .Values.config.resultMaxBytes | quote }}
+  AG_STORAGE_ROOT: {{ .Values.config.storageRoot | quote }}
+  AG_STORAGE_PVC: {{ default (include "argus.storageClaim" .) .Values.config.storagePVC | quote }}
+  # D-63 统一共享挂载：平台级配置（JSON 数组），全局注入所有 Runner Job。
+  # 平台只认 claimName（PVC 名），不理解 NFS 协议（ARCHITECTURE §10.4）。
+  AG_SHARED_MOUNTS: {{ toJson .Values.sharedMounts | quote }}
+  AG_DEPLOY_PROVIDER: {{ .Values.config.deployProvider | quote }}
+  AG_SSE_HEARTBEAT: {{ .Values.config.sseHeartbeat | quote }}
+  AG_SSE_REPLAY_HOURS: {{ .Values.config.sseReplayHours | quote }}
+  {{- if eq .Values.config.deployProvider "genet" }}
+  AG_GENET_BASE_URL: {{ .Values.genet.baseURL | quote }}
+  AG_GENET_INSECURE: {{ .Values.genet.insecure | quote }}
+  {{- if .Values.genet.caFile }}
+  AG_GENET_CA_FILE: {{ .Values.genet.caFile | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if eq .Values.config.authMode "oidc" }}
+  AG_OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
+  AG_OIDC_CLIENT_ID: {{ .Values.oidc.clientID | quote }}
+  AG_OIDC_REDIRECT_URL: {{ .Values.oidc.redirectURL | quote }}
+  AG_OIDC_SCOPES: {{ .Values.oidc.scopes | quote }}
+  AG_OIDC_ROLE_CLAIM: {{ .Values.oidc.roleClaim | quote }}
+  AG_OIDC_CLIENT_AUTH: {{ .Values.oidc.clientAuth | quote }}
+  AG_ROLE_MAP: {{ .Values.oidc.roleMap | quote }}
+  AG_SESSION_COOKIE: {{ .Values.session.cookie | quote }}
+  AG_SESSION_TTL: {{ .Values.session.ttl | quote }}
+  AG_SESSION_SECURE: {{ .Values.session.secure | quote }}
+  {{- end }}
+  {{- /* 任意追加/覆盖键：给"代码新增了环境变量、chart 还没跟上"留出口 */}}
+  {{- range $k, $v := .Values.config.extra }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}

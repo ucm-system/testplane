@@ -12,17 +12,17 @@
   `secret_refs.secret_name` 一致，生成脚本会做 DNS-1123 校验并在名字过长时加哈希。
 
 .EXAMPLE
-  # 本地 kind（kustomize 安装，SA = testplane）：为 mock 端点 Secret 生成并 apply
+  # 本地 kind（kustomize 安装，SA = argus）：为 mock 端点 Secret 生成并 apply
   pwsh deploy/k8s/gen-secret-rotate-role.ps1 `
-    -Namespace testplane -SecretName tp-secret-endpoint-mock `
-    -ServiceAccount testplane `
+    -Namespace argus -SecretName argus-secret-endpoint-mock `
+    -ServiceAccount argus `
     -Out deploy/k8s/rbac-secret-rotate.yaml
-  kubectl --context kind-testplane apply -f deploy/k8s/rbac-secret-rotate.yaml
+  kubectl --context kind-argus apply -f deploy/k8s/rbac-secret-rotate.yaml
 
 .EXAMPLE
   # 只打印到 stdout（生产按登记项逐个生成、走 GitOps）；注意必须显式给 -ServiceAccount
-  pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace testplane -SecretName prod-qwen-key `
-    -ServiceAccount tp-testplane
+  pwsh deploy/k8s/gen-secret-rotate-role.ps1 -Namespace argus -SecretName prod-qwen-key `
+    -ServiceAccount argus
 #>
 param(
     # Secret 所在的 namespace（等于 secret_refs.namespace）。
@@ -32,12 +32,12 @@ param(
     # 控制面 ServiceAccount 名（**必填**，不给就报错）。
     #
     # 为什么不给默认值：两种安装方式的 SA 名不同——
-    #   kustomize（deploy/k8s/serviceaccount.yaml）：testplane
-    #   Helm（deploy/charts/testplane）       ：<release>-testplane（release = helm install 的名字）
-    # 默认成 testplane 会让 Helm 装的环境"生成成功、rotate 却 403/503"（评审 #40-3）。
+    #   kustomize（deploy/k8s/serviceaccount.yaml）：argus
+    #   Helm（deploy/charts/argus）       ：<release>-argus（release = helm install 的名字）
+    # 默认成 argus 会让 Helm 装的环境"生成成功、rotate 却 403/503"（评审 #40-3）。
     [string]$ServiceAccount,
     # 控制面 ServiceAccount 所在 namespace。
-    [string]$ServiceAccountNamespace = 'testplane',
+    [string]$ServiceAccountNamespace = 'argus',
     # 输出文件；省略则打印到 stdout。
     [string]$Out
 )
@@ -55,10 +55,10 @@ function Assert-Dns1123([string]$Value, [string]$What, [int]$MaxLen) {
 if ([string]::IsNullOrWhiteSpace($ServiceAccount)) {
     throw @"
 -ServiceAccount 必填：RoleBinding 的 subject 必须与控制面实际 SA 名一致，两种安装方式不同：
-    kustomize（deploy/k8s/serviceaccount.yaml）：-ServiceAccount testplane
-    Helm（deploy/charts/testplane）          ：-ServiceAccount <release>-testplane
+    kustomize（deploy/k8s/serviceaccount.yaml）：-ServiceAccount argus
+    Helm（deploy/charts/argus）          ：-ServiceAccount <release>-argus
   Helm 装的环境按下面这条查实际名字（<release> 换成 helm install 时用的名字）：
-    kubectl -n testplane get sa -l app.kubernetes.io/instance=<release> -o name
+    kubectl -n argus get sa -l app.kubernetes.io/instance=<release> -o name
 "@
 }
 
@@ -70,9 +70,9 @@ if ($SecretName.Length -gt 253 -or $SecretName -notmatch '^[a-z0-9]([-a-z0-9.]*[
     throw "SecretName 必须是 DNS-1123 subdomain（小写字母/数字/'-'/'.'）：$SecretName"
 }
 
-# Role 名要可重复生成（确定性）：testplane-secret-rotate-<sanitized>[-<hash>]。
+# Role 名要可重复生成（确定性）：argus-secret-rotate-<sanitized>[-<hash>]。
 $slug = ($SecretName.ToLower() -replace '[^a-z0-9]+', '-').Trim('-')
-$prefix = 'testplane-secret-rotate'
+$prefix = 'argus-secret-rotate'
 $roleName = "$prefix-$slug"
 if ($roleName.Length -gt 63) {
     # 名字过长时截断 + 原始 SecretName 的短哈希，保证同一输入稳定生成同一名字。
@@ -84,9 +84,9 @@ if ($roleName.Length -gt 63) {
 }
 
 $labelBlock = @"
-    app.kubernetes.io/name: testplane
-    app.kubernetes.io/part-of: testplane
-    testplane.io/component: secret-rotate
+    app.kubernetes.io/name: argus
+    app.kubernetes.io/part-of: argus
+    argus.io/component: secret-rotate
 "@
 
 $yaml = @"

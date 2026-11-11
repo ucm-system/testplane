@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Check, Copy, Info, Plus, Trash2 } from 'lucide-react'
-import { isMap, isScalar, parse as parseYaml, parseDocument } from 'yaml'
+import { AlignLeft, Info, ListChecks, Minimize2, Plus, Trash2, Wand2 } from 'lucide-react'
+import { parse as parseYaml } from 'yaml'
 import { api, writeBlockedReason } from '@/api'
 import { toApiError } from '@/api/client'
-import type { ApiErrorBody, DeployManifest, RunManifest, ValidationIssue } from '@/api/types'
-import { TesterDrawer, TesterParamTable } from '@/components/app/TesterDrawer'
+import type { ApiErrorBody, TaskManifest, ValidationIssue } from '@/api/types'
+import { RunnerDrawer, RunnerParamTable } from '@/components/app/RunnerDrawer'
 import { Badge, Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
@@ -17,16 +17,19 @@ import { FormErrorSummary } from '@/components/app/FormErrorSummary'
 import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
 import { useIdentity } from '@/hooks/useIdentity'
+import { inputHint, inputFormatLabel } from '@/lib/runner-format'
+import { validateJsonlInput, validateYamlInput, formatJsonl, minifyJsonl, type InputIssue } from '@/lib/input-validate'
 import { cn } from '@/lib/utils'
 
 type SourceMode = 'deploy' | 'service'
 type PrecheckMode = 'auto' | 'off'
 
-interface TestDraft {
+/** runner 列表的一项草稿：**只有一个输入框**（placeholder 来自 runner.input_format 对应片段，D-67）。 */
+interface RunnerDraft {
   key: string
   name: string
-  tester: string
-  args: string
+  runner: string
+  input: string
 }
 
 interface KeyValueRow {
@@ -34,15 +37,16 @@ interface KeyValueRow {
   value: string
 }
 
-const DEFAULT_DEPLOY_YAML = `provider: genet
-parameters:
-  model: Qwen3-32B
-  replicas: 1`
+/** `deploy.spec` 是 Genet 部署描述原文（YAML 语义，平台不解析，§10.1）—— 只给示例，不预填语义。 */
+const DEFAULT_DEPLOY_SPEC = `model: Qwen3-32B
+replicas: 1
+resources:
+  gpu: 8`
 
 let draftKey = 0
 function newKey(): string {
   draftKey += 1
-  return `t${draftKey}`
+  return `r${draftKey}`
 }
 
 /** D-58：name 类字段上限按 **rune**（中文名 200 个字算 200，不是 600）。 */
@@ -59,112 +63,25 @@ function insertAt<T>(list: readonly T[], index: number, item: T): T[] {
   return next
 }
 
-/** 把片段**追加**到参数字符串末尾（不是覆盖）：已有内容时补一个空格。 */
-function appendArg(current: string, snippet: string): string {
-  const base = current.trimEnd()
-  return base ? `${base} ${snippet}` : snippet
-}
-
-/** 字符偏移 → 1-based 行列（`yaml` 的节点 `range[0]` 是偏移量，编辑器要行号）。 */
-function lineColAt(text: string, offset: number): YamlEditorError {
-  const safe = Math.max(0, Math.min(offset, text.length))
-  const before = text.slice(0, safe)
-  return { line: before.split('\n').length, col: safe - before.lastIndexOf('\n') }
-}
-
-/** 顶层某个 key 的起始位置；找不到就退回第 1 行第 1 列。 */
-function keyPos(text: string, key: string): YamlEditorError {
-  try {
-    const doc = parseDocument(text)
-    if (isMap(doc.contents)) {
-      for (const pair of doc.contents.items) {
-        const node = pair.key
-        if (isScalar(node) && node.value === key && node.range) return lineColAt(text, node.range[0])
-      }
-    }
-  } catch {
-    // 语法都坏了就没有「结构位置」可言：退回文首
-  }
-  return { line: 1, col: 1 }
-}
-
-interface DeployParse {
-  deploy: DeployManifest | null
-  /** 一行可读错误（不含「第 N 行第 M 列」前缀） */
-  error: string | null
-  /** 错误位置（语法错误来自 `YAMLParseError.linePos`，结构错误来自 key 的 range） */
-  pos: YamlEditorError | null
-  /** 结构层字段级提示（provider / parameters）；语法错误时为空 */
-  fields: Array<{ field: 'provider' | 'parameters'; message: string }>
-}
-
 /**
- * 把 YAML 文本解析成 deploy 段 —— **语法 + 结构**两层都校：
- *  - 语法：`parse` 抛错时带 `linePos`，用来在编辑器里标红；
- *  - 结构：`provider` 必须是字符串、`parameters` 必须是对象；
- *    缺字段不是「解析失败」，但同样不能提交（用户之前看到「能 parse 就算有效」就是这么来的）。
+ * 把 YAML 文本解析成 deploy.spec —— **只做语法层**校验：
+ * 平台不解析 deploy.spec 的语义（§10.1），前端也只保证"它是一段合法 YAML 映射"。
  */
-function parseDeploy(text: string): DeployParse {
-  const fail = (
-    error: string,
-    pos: YamlEditorError | null,
-    fields: DeployParse['fields'] = [],
-  ): DeployParse => ({ deploy: null, error, pos, fields })
-
-  if (!text.trim()) {
-    return fail('deploy 段不能为空', { line: 1, col: 1 }, [
-      { field: 'provider', message: 'provider 必填' },
-      { field: 'parameters', message: 'parameters 必填' },
-    ])
-  }
-
-  let parsed: unknown
+function parseDeploySpec(text: string): { error: string | null; pos: YamlEditorError | null } {
+  if (!text.trim()) return { error: null, pos: null } // 空规格交给后端必填校验（400）
   try {
-    parsed = parseYaml(text)
+    const parsed = parseYaml(text)
+    if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { error: '部署描述必须是一个 YAML 映射（model / replicas / resources…）', pos: { line: 1, col: 1 } }
+    }
+    return { error: null, pos: null }
   } catch (e) {
     // YAMLParseError 带 linePos[0] = { line, col }：编辑器靠它画红色波浪 + gutter 圆点
     const first = (e as { linePos?: Array<{ line: number; col: number }> }).linePos?.[0]
-    return fail(
-      `YAML 语法错误：${(e as Error).message}`,
-      first ? { line: first.line, col: first.col } : { line: 1, col: 1 },
-    )
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return fail('结构无效：deploy 段必须是一个对象（含 provider / parameters）', { line: 1, col: 1 }, [
-      { field: 'provider', message: 'provider 必填' },
-      { field: 'parameters', message: 'parameters 必填（对象）' },
-    ])
-  }
-
-  const rec = parsed as Record<string, unknown>
-  const provider = typeof rec['provider'] === 'string' ? rec['provider'] : ''
-  const rawParameters = rec['parameters']
-  const fields: DeployParse['fields'] = []
-
-  if (!provider) fields.push({ field: 'provider', message: 'provider 必填（平台按 provider 转交 Genet）' })
-  if (rawParameters === undefined || rawParameters === null) {
-    fields.push({ field: 'parameters', message: 'parameters 必填（必须是一个对象）' })
-  } else if (typeof rawParameters !== 'object' || Array.isArray(rawParameters)) {
-    fields.push({ field: 'parameters', message: 'parameters 必须是对象' })
-  }
-
-  if (fields.length > 0) {
-    const first = fields[0]!
-    // 标在「这段内容真正在哪」：缺 parameters 就标 provider 那行，缺 provider 就标 parameters 那行
-    const pos =
-      first.field === 'provider' && rec['parameters'] !== undefined
-        ? keyPos(text, 'parameters')
-        : first.field === 'parameters'
-          ? keyPos(text, 'parameters')
-          : keyPos(text, 'provider')
-    return fail(`结构无效：${first.message}`, pos, fields)
-  }
-
-  return {
-    deploy: { provider, parameters: rawParameters as Record<string, unknown> },
-    error: null,
-    pos: null,
-    fields: [],
+    return {
+      error: `YAML 语法错误：${(e as Error).message}`,
+      pos: first ? { line: first.line, col: first.col } : { line: 1, col: 1 },
+    }
   }
 }
 
@@ -175,27 +92,27 @@ export function SubmitPage() {
   /** viewer 只读：写按钮置灰 + title 提示（不靠后端 403 兜底） */
   const blocked = writeBlockedReason(auth)
 
-  const testers = useAsync(() => api.listTesters(), [])
-  const testerList = testers.data ?? []
-  const defaultTester = testerList.find((t) => t.role === 'test')?.name ?? ''
+  const runners = useAsync(() => api.listRunners(), [])
+  const runnerList = runners.data ?? []
+  const defaultRunner = runnerList.find((r) => r.role === 'test')?.name ?? ''
 
   /**
-   * 默认值一律留空，只给 placeholder：用户之前反馈「打开就有一堆像是已经填好的值」，
-   * 分不清哪些是自己写的、哪些是示例。空表单点提交会被**前端**拦下并给字段级错误。
+   * 默认值一律留空，只给 placeholder（§11.2：平台不渲染表单、不预填）：
+   * 空表单点提交会被**前端**拦下并给字段级错误。
    */
   const [name, setName] = useState('')
   const [mode, setMode] = useState<SourceMode>('deploy')
-  const [deployYaml, setDeployYaml] = useState(DEFAULT_DEPLOY_YAML)
-  const [serviceUrl, setServiceUrl] = useState('http://10.0.0.10:8000/v1')
-  const [modelName, setModelName] = useState('Qwen3-32B')
+  const [deploySpec, setDeploySpec] = useState(DEFAULT_DEPLOY_SPEC)
+  const [serviceUrl, setServiceUrl] = useState('')
+  const [modelName, setModelName] = useState('')
   const [modelPath, setModelPath] = useState('')
   const [precheck, setPrecheck] = useState<PrecheckMode>('auto')
-  /** 执行环境 profile：TestSpec.execution.profile 必填；MVP 没有 /profiles 端点，给可编辑默认值 */
+  /** 执行环境 profile：RunnerSpec.execution.profile 必填；MVP 没有 /profiles 端点，给可编辑默认值 */
   const [profile, setProfile] = useState('k8s-npu')
-  /** 默认 0 行：点「+ 环境变量 / + 凭据引用」才出现 */
+  /** 默认 0 行：点「+ 环境变量 / + 凭据引用」才出现（§12.4：Task 级填一次，注入全部 runner） */
   const [envRows, setEnvRows] = useState<KeyValueRow[]>([])
   const [secretRows, setSecretRows] = useState<KeyValueRow[]>([])
-  const [tests, setTests] = useState<TestDraft[]>([{ key: newKey(), name: '', tester: '', args: '' }])
+  const [runnerDrafts, setRunnerDrafts] = useState<RunnerDraft[]>([{ key: newKey(), name: '', runner: '', input: '' }])
 
   const [issues, setIssues] = useState<ValidationIssue[]>([])
   const [error, setError] = useState<ApiErrorBody | null>(null)
@@ -204,22 +121,99 @@ export function SubmitPage() {
   const [dryRunOk, setDryRunOk] = useState<boolean | null>(null)
 
   /**
-   * 右栏与「参数复制」都针对**当前 Task**：点 Task 卡片 / 选 Tester / 添加 Task 都会把它设为当前。
-   * 没点过就取第一个（提交页默认只有一个 Task）。
+   * 右栏说明针对**当前 runner**：点 runner 卡片 / 选 Runner / 添加 runner 都会把它设为当前。
    */
   const [activeKey, setActiveKey] = useState<string | null>(null)
   const activeIndex = Math.max(
     0,
-    tests.findIndex((test) => test.key === (activeKey ?? tests[0]?.key)),
+    runnerDrafts.findIndex((draft) => draft.key === (activeKey ?? runnerDrafts[0]?.key)),
   )
-  const activeTest = tests[activeIndex]
-  const activeTesterName = activeTest ? activeTest.tester || defaultTester : ''
-  const activeTester = testerList.find((tester) => tester.name === activeTesterName)
+  const activeDraft = runnerDrafts[activeIndex]
+  const activeRunnerName = activeDraft ? activeDraft.runner || defaultRunner : ''
+  const activeRunner = runnerList.find((runner) => runner.name === activeRunnerName)
 
-  /** Tester 详情抽屉（与 `/testers?open=` 同一个组件） */
-  const [detailTester, setDetailTester] = useState<string | null>(null)
+  /** Runner 详情抽屉（与 `/runners?open=` 同一个组件） */
+  const [detailRunner, setDetailRunner] = useState<string | null>(null)
 
-  const deployParse = useMemo(() => parseDeploy(deployYaml), [deployYaml])
+  /** 每个 runner 的输入框 ref（就地报错点击 → 跳到那一行） */
+  const inputRefs = useRef<Record<string, HTMLTextAreaElement | null>>({})
+
+  /**
+   * 客户端**即时校验**（dry-run 性质，不替代提交时服务端校验，D-67）：
+   *  - jsonl：按 Runner 的 parameters 逐行校验类型 + required（+ parameters 里带的 enum 提示），行号级报错；
+   *  - yaml：只做语法校验；text：不校验（语义完全归 Runner）。
+   */
+  const draftIssues = useMemo(() => {
+    const map: Record<string, InputIssue[]> = {}
+    for (const draft of runnerDrafts) {
+      const runner = runnerList.find((r) => r.name === (draft.runner || defaultRunner))
+      if (!runner) {
+        map[draft.key] = []
+        continue
+      }
+      if (runner.input_format === 'jsonl') map[draft.key] = validateJsonlInput(draft.input, runner.parameters)
+      else if (runner.input_format === 'yaml') map[draft.key] = validateYamlInput(draft.input)
+      else map[draft.key] = []
+    }
+    return map
+  }, [runnerDrafts, runnerList, defaultRunner])
+
+  /** 就地报错点击：把光标跳到那一行并选中（textarea 的行 → 字符偏移）。 */
+  const jumpToLine = (draftKey: string, line: number) => {
+    const el = inputRefs.current[draftKey]
+    if (!el) return
+    const lines = el.value.split('\n')
+    let offset = 0
+    for (let i = 0; i < Math.min(line - 1, lines.length); i += 1) offset += (lines[i]?.length ?? 0) + 1
+    const target = lines[Math.min(line - 1, lines.length - 1)] ?? ''
+    el.focus()
+    el.setSelectionRange(offset, offset + target.length)
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }
+
+  /** 「校验」按钮：滚动/聚焦第一条问题；无问题给一条成功 toast。 */
+  const validateDraftInput = (draft: RunnerDraft, issues: InputIssue[]) => {
+    if (issues.length === 0) {
+      toast({
+        title: '输入校验通过',
+        description: '与服务端 D-67 同规则（类型 + required + enum 提示）；最终以提交时校验为准',
+        tone: 'ok',
+      })
+      return
+    }
+    const first = issues[0]!
+    jumpToLine(draft.key, first.line)
+    toast({
+      title: `发现 ${issues.length} 条输入问题`,
+      description: `第 ${first.line} 行${first.field ? ` · ${first.field}` : ''}：${first.message}`,
+      tone: 'err',
+    })
+  }
+
+  /** 「填示例」：填入 runner.placeholder；已写的内容用撤销 toast 兜底（不静默丢失）。 */
+  const fillExample = (draft: RunnerDraft, placeholder: string) => {
+    const previous = draft.input
+    setRunnerDraft(draft.key, { input: placeholder })
+    toast({
+      title: '已填入示例（placeholder 来自 runner.yaml）',
+      tone: 'ok',
+      durationMs: 7000,
+      action: previous.trim() ? { label: '撤销', onClick: () => setRunnerDraft(draft.key, { input: previous }) } : undefined,
+    })
+  }
+
+  /** JSONL 逐行格式化 / 压缩（保持一条记录一行；解析失败的行原样保留并提示）。 */
+  const rewriteJsonl = (draft: RunnerDraft, mode: 'format' | 'minify') => {
+    const result = mode === 'format' ? formatJsonl(draft.input) : minifyJsonl(draft.input)
+    setRunnerDraft(draft.key, { input: result.text })
+    toast({
+      title: mode === 'format' ? '已逐行格式化' : '已逐行压缩',
+      description: result.keptInvalid > 0 ? `${result.keptInvalid} 行不是合法 JSON，已原样保留` : '全部行重排成功',
+      tone: result.keptInvalid > 0 ? 'warn' : 'ok',
+    })
+  }
+
+  const deployParse = useMemo(() => parseDeploySpec(deploySpec), [deploySpec])
 
   /**
    * 编辑器标红/滚行用**防抖后**的位置：边打字边滚会把光标甩走。
@@ -231,41 +225,41 @@ export function SubmitPage() {
     return () => window.clearTimeout(timer)
   }, [deployParse])
 
-  const testerOptions = testerList.filter((t) => t.role === 'test')
-  const precheckTester = testerList.find((t) => t.role === 'pre_check')
+  const runnerOptions = runnerList.filter((r) => r.role === 'test')
+  const precheckRunner = runnerList.find((r) => r.role === 'pre_check')
 
   const issueFor = (path: string): string | undefined => issues.find((issue) => issue.path === path)?.message
 
   /**
    * A4 / B10：两种「点下去也一定失败」的情况，直接在本页拦住（不靠后端 400）：
-   *  - 0 个测试 Task（D-57：Pre-Check 是平台注入的，不算测试）；
-   *  - 目录里没有 role=test 的 Tester（只有 pre_check 的占位）。
+   *  - 0 个 runner（D-57：至少 1 条；注入的 service-deploy / precheck / service-clean 不计入）；
+   *  - 目录里没有 role=test 的 Runner（deploy / clean 仅内置不可引用，D-70）。
    * 目录还在加载时**不算**「没有」：`loading` 期间不置灰，避免把加载中误判成空目录。
    */
-  const noTasks = tests.length === 0
-  const noTesters = !testers.loading && testerOptions.length === 0
+  const noRunners = runnerDrafts.length === 0
+  const noRunnersRegistered = !runners.loading && runnerOptions.length === 0
 
   /** C8：按 rune 计数（中文名 200 个字算 200，不是 600） */
   const nameRunes = runeLength(name)
   const nameTooLong = nameRunes > NAME_MAX_RUNES
-  const nameError = nameTooLong ? `name 超过 ${NAME_MAX_RUNES} 字符（当前 ${nameRunes}）` : issueFor('run.name')
+  const nameError = nameTooLong ? `name 超过 ${NAME_MAX_RUNES} 字符（当前 ${nameRunes}）` : issueFor('task.name')
 
   /**
-   * `run.tests` / `tests` 这类「整个 Task 列表」级的 issue：就地显示在 Task 区，
-   * 而不是只出现在顶部摘要（D-57 后端 400 的 path 就是 `run.tests`）。
+   * `task.runners` 这类「整个 runner 列表」级的 issue：就地显示在 runner 区，
+   * 而不是只出现在顶部摘要（后端 400 的 path 就是 `task.runners`）。
    */
-  const taskAreaIssues = issues.filter((issue) => /(^|\.)tests$/.test(issue.path))
+  const runnerAreaIssues = issues.filter((issue) => /(^|\.)runners$/.test(issue.path))
 
   const submitBlockers: string[] = []
   if (blocked) submitBlockers.push(blocked)
-  if (noTasks) submitBlockers.push('至少需要 1 个测试 Task（Pre-Check 由平台注入，不计入测试）')
-  if (noTesters) submitBlockers.push('当前没有可用的 Tester；只有 pre_check 角色的 Tester 不能作为测试 Task')
-  if (nameTooLong) submitBlockers.push(`Run 名称超过 ${NAME_MAX_RUNES} 字符（当前 ${nameRunes}）`)
+  if (noRunners) submitBlockers.push('至少需要 1 个 runner（service-deploy / precheck / service-clean 由平台注入，不计入）')
+  if (noRunnersRegistered) submitBlockers.push('当前没有可用的 Runner；deploy / clean 角色仅内置，不能引用')
+  if (nameTooLong) submitBlockers.push(`Task 名称超过 ${NAME_MAX_RUNES} 字符（当前 ${nameRunes}）`)
   const submitDisabled = submitBlockers.length > 0
   const submitTitle = submitDisabled ? submitBlockers.join('；') : undefined
 
   /**
-   * 字段级错误：把 `run.name` / `run.tests[0].execution.profile` 这类 path 映射到真实输入框，
+   * 字段级错误：把 `task.name` / `task.runners[0].execution.profile` 这类 path 映射到真实输入框，
    * 用于「摘要里点定位 → 滚过去并聚焦」。
    */
   const fieldRefs = useRef<Record<string, HTMLElement | null>>({})
@@ -275,33 +269,41 @@ export function SubmitPage() {
   const focusField = (path: string) => {
     const el =
       fieldRefs.current[path] ??
-      // 退一步：按前缀找（例如 `run.tests[0].tester` 找不到就落回该 Task 那块）
+      // 退一步：按前缀找（例如 `task.runners[0].runner` 找不到就落回该 runner 那块）
       Object.entries(fieldRefs.current).find(([key]) => key.startsWith(path.split('.').slice(0, 2).join('.')))?.[1]
     if (!el) return
     el.scrollIntoView({ block: 'center', behavior: 'smooth' })
     window.setTimeout(() => el.focus({ preventScroll: true }), 150)
   }
 
-  const setTest = (key: string, patch: Partial<TestDraft>) => {
-    setTests((prev) => prev.map((test) => (test.key === key ? { ...test, ...patch } : test)))
+  const setRunnerDraft = (key: string, patch: Partial<RunnerDraft>) => {
+    setRunnerDrafts((prev) => prev.map((draft) => (draft.key === key ? { ...draft, ...patch } : draft)))
   }
 
-  /** 复制/点参数：一律追加到「当前 Task」的 args，已有内容时补空格（不覆盖）。 */
-  const appendToArgs = (testKey: string | undefined, snippet: string) => {
-    if (!testKey) return
-    setTests((prev) => prev.map((test) => (test.key === testKey ? { ...test, args: appendArg(test.args, snippet) } : test)))
+  /** 复制/点参数 schema：一律追加到「当前 runner」的输入框，已有内容时换行接上（不覆盖）。 */
+  const appendToInput = (draftKey: string | undefined, snippet: string) => {
+    if (!draftKey) return
+    setRunnerDrafts((prev) =>
+      prev.map((draft) => {
+        if (draft.key !== draftKey) return draft
+        const base = draft.input.trimEnd()
+        const joined = base
+          ? `${base}\n${snippet}`
+          : snippet
+        return { ...draft, input: joined }
+      }),
+    )
   }
 
-  const addTask = () => {
+  const addRunner = () => {
     const key = newKey()
-    setTests((prev) => [...prev, { key, name: '', tester: defaultTester, args: '' }])
+    setRunnerDrafts((prev) => [...prev, { key, name: '', runner: defaultRunner, input: '' }])
     setActiveKey(key)
   }
 
   /**
    * C5：破坏性动作不弹二次确认，删掉后给一个 **undo toast**（7s）。
-   * 撤销是真的放回**原位置原值**，不是只改文案；最后一个 Task 被删时 A4 的置灰立刻生效，
-   * 撤销回来后按钮也随之恢复。
+   * 最后一个 runner 被删时 A4 的置灰立刻生效，撤销回来后按钮也随之恢复。
    */
   const removeKeyValueRow = (kind: 'env' | 'secret', index: number) => {
     const rows = kind === 'env' ? envRows : secretRows
@@ -324,24 +326,26 @@ export function SubmitPage() {
     })
   }
 
-  const removeTask = (index: number) => {
-    const removed = tests[index]
+  const removeRunner = (index: number) => {
+    const removed = runnerDrafts[index]
     if (!removed) return
-    setTests((prev) => prev.filter((item) => item.key !== removed.key))
+    setRunnerDrafts((prev) => prev.filter((item) => item.key !== removed.key))
     toast({
-      title: `已删除 Task ${removed.name.trim() || `#${index + 1}`}`,
+      title: `已删除 runner ${removed.name.trim() || `#${index + 1}`}`,
       tone: 'warn',
       durationMs: 7000,
       action: {
         label: '撤销',
         onClick: () =>
-          setTests((prev) => (prev.some((item) => item.key === removed.key) ? prev : insertAt(prev, index, removed))),
+          setRunnerDrafts((prev) =>
+            prev.some((item) => item.key === removed.key) ? prev : insertAt(prev, index, removed),
+          ),
       },
     })
   }
 
-  const buildManifest = (): RunManifest | null => {
-    if (mode === 'deploy' && !deployParse.deploy) return null
+  const buildManifest = (): TaskManifest | null => {
+    if (mode === 'deploy' && deployParse.error) return null
     const env: Record<string, string> = {}
     for (const row of envRows) {
       if (row.key.trim()) env[row.key.trim()] = row.value
@@ -352,10 +356,11 @@ export function SubmitPage() {
     }
 
     return {
-      run: {
+      task: {
         name: name.trim(),
+        // deploy XOR service（D-27）：切换形态时各自草稿保留，但只提交当前形态
         ...(mode === 'deploy'
-          ? { deploy: deployParse.deploy ?? undefined }
+          ? { deploy: { provider: 'genet', spec: deploySpec } }
           : {
               service: {
                 url: serviceUrl.trim(),
@@ -366,23 +371,23 @@ export function SubmitPage() {
         precheck,
         env,
         secrets,
-        cleanup: { policy: 'always' },
-        tests: tests.map((test) => {
-          const testerName = test.tester || defaultTester
-          const tester = testerList.find((t) => t.name === testerName)
+        runners: runnerDrafts.map((draft) => {
+          const runnerName = draft.runner || defaultRunner
+          const runner = runnerList.find((r) => r.name === runnerName)
           return {
-            name: test.name.trim(),
-            tester: testerName,
-            version: tester?.version ?? '',
+            name: draft.name.trim(),
+            runner: runnerName,
+            version: runner?.version ?? '',
             execution: { profile: profile.trim() || 'k8s-npu' },
-            args: test.args,
+            // 输入原文：按 Runner 的 input_format 原样落档（平台校验后注入 AG_PARAMS_FILE，D-66）
+            ...(draft.input.trim() ? { input: draft.input } : {}),
           }
         }),
       },
     }
   }
 
-  const runDryRun = async (manifest: RunManifest): Promise<boolean> => {
+  const runDryRun = async (manifest: TaskManifest): Promise<boolean> => {
     const result = await api.dryRun(manifest)
     setIssues(result.issues ?? [])
     setDryRunOk(result.valid)
@@ -394,35 +399,40 @@ export function SubmitPage() {
   const frontendIssues = (): ValidationIssue[] => {
     const found: ValidationIssue[] = []
     if (mode === 'deploy' && deployParse.error) {
-      found.push({ path: 'run.deploy', code: 'INVALID_YAML', message: deployParse.error })
+      found.push({ path: 'task.deploy.spec', code: 'INVALID_YAML', message: deployParse.error })
     }
-    if (!name.trim()) found.push({ path: 'run.name', code: 'REQUIRED', message: 'name 必填' })
+    if (!name.trim()) found.push({ path: 'task.name', code: 'REQUIRED', message: 'name 必填' })
     // D-58：上限 200 rune（不是字节、不是 UTF-16 单元）
     if (runeLength(name.trim()) > NAME_MAX_RUNES) {
       found.push({
-        path: 'run.name',
+        path: 'task.name',
         code: 'TOO_LONG',
         message: `name 超过 ${NAME_MAX_RUNES} 字符（当前 ${runeLength(name.trim())}）`,
       })
     }
     if (mode === 'service' && !serviceUrl.trim()) {
-      found.push({ path: 'run.service.url', code: 'REQUIRED', message: '服务 base URL 必填' })
+      found.push({ path: 'task.service.url', code: 'REQUIRED', message: '服务 base URL 必填' })
     }
     if (!profile.trim()) {
-      found.push({ path: 'run.tests[0].execution.profile', code: 'REQUIRED', message: 'execution.profile 必填' })
-    }
-    // D-57：与后端同一句口径（path=run.tests 会被映射到 Task 卡片区就地显示）
-    if (tests.length === 0) {
       found.push({
-        path: 'run.tests',
+        path: 'task.runners[0].execution.profile',
         code: 'REQUIRED',
-        message: '至少需要 1 个测试 Task（Pre-Check 由平台注入，不计入测试）',
+        message: 'execution.profile 必填',
       })
     }
-    tests.forEach((test, index) => {
-      if (!test.name.trim()) found.push({ path: `run.tests[${index}].name`, code: 'REQUIRED', message: 'Task 名称必填' })
-      if (!test.tester && !defaultTester) {
-        found.push({ path: `run.tests[${index}].tester`, code: 'REQUIRED', message: '必须选择 Tester' })
+    // D-57：与后端同一句口径（path=task.runners 会被映射到 runner 区就地显示）
+    if (runnerDrafts.length === 0) {
+      found.push({
+        path: 'task.runners',
+        code: 'REQUIRED',
+        message: '至少需要 1 个 runner（service-deploy / precheck / service-clean 由平台注入，不计入）',
+      })
+    }
+    runnerDrafts.forEach((draft, index) => {
+      if (!draft.name.trim())
+        found.push({ path: `task.runners[${index}].name`, code: 'REQUIRED', message: 'runner 名称必填' })
+      if (!draft.runner && !defaultRunner) {
+        found.push({ path: `task.runners[${index}].runner`, code: 'REQUIRED', message: '必须选择 Runner' })
       }
     })
     return found
@@ -473,32 +483,29 @@ export function SubmitPage() {
         setSubmitting(false)
         return
       }
-      const result = await api.submitRun(manifest)
+      const result = await api.submitTask(manifest)
       /**
-       * B8：提交成功**只弹一个** toast（之前是「校验通过」+「已受理」两条，用户只来得及看一半）。
-       * 里面既有结果也有下一步动作：复制 ID / 查看详情。
-       * 提交内部的 dry-run 不弹 toast —— 「校验通过」是另一件事（手动点「校验」时才有），
-       * 两条永远不同时出现。
+       * B8：提交成功**只弹一个** toast（校验通过与已受理不同时出现）。
+       * 里面既有结果也有下一步动作：复制 ID / 跳详情。
        */
-      const runId = result.run.id
-      const queued = result.tasks.length
+      const taskId = result.task.id
       toast({
-        title: `已受理 ${runId} · ${queued} 个 Task 已入队`,
+        title: `已受理 ${taskId}`,
         description: (
           <span className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              data-testid="toast-copy-run-id"
+              data-testid="toast-copy-task-id"
               className="inline-flex h-6 items-center rounded-sm bg-white/15 px-2 text-2xs text-white hover:bg-white/25"
-              onClick={() => void navigator.clipboard?.writeText(runId)}
+              onClick={() => void navigator.clipboard?.writeText(taskId)}
             >
               复制 ID
             </button>
             <button
               type="button"
-              data-testid="toast-open-run"
+              data-testid="toast-open-task"
               className="inline-flex h-6 items-center rounded-sm bg-white/15 px-2 text-2xs text-white hover:bg-white/25"
-              onClick={() => navigate(`/runs/${runId}`)}
+              onClick={() => navigate(`/tasks/${taskId}`)}
             >
               查看详情
             </button>
@@ -508,7 +515,7 @@ export function SubmitPage() {
         // ≥8000ms：两个动作都要来得及点；可手动关闭（dismissible 默认 true）
         durationMs: 9000,
       })
-      navigate(`/runs/${runId}`)
+      navigate(`/tasks/${taskId}`)
     } catch (e) {
       setError(toApiError(e))
     } finally {
@@ -516,38 +523,31 @@ export function SubmitPage() {
     }
   }
 
-  const [railCopied, setRailCopied] = useState<string | null>(null)
-  const flashRailCopied = (key: string) => {
-    setRailCopied(key)
-    window.setTimeout(() => setRailCopied((prev) => (prev === key ? null : prev)), 1500)
-  }
-
   return (
     <>
-
       {/* 提交/校验失败：表单内摘要（不自动消失、自己滚进视口并聚焦、trace_id 可复制） */}
       <FormErrorSummary error={error} issues={issues} onJumpTo={focusField} />
 
       {!error && issues.length === 0 && dryRunOk === true ? <Banner tone="info" title="dry-run 通过" /> : null}
 
       <Card>
-        <CardHeader tone="ok" title="运行" />
+        <CardHeader tone="ok" title="Task" />
         <CardBody>
           {/*
             C8：maxlength=200（后端 D-58，按 rune 上限）+ 实时计数。
             粘贴可以绕过 maxlength，所以超限时这里也会立刻报红并把「提交」置灰（不等后端 400）。
           */}
           <Field
-            label="Run 名称"
+            label="Task 名称"
             required
-            htmlFor="run-name"
-            hint="同名不合并：每次提交都创建新 Run（不做幂等）。"
+            htmlFor="task-name"
+            hint="同名不合并：每次提交都创建新 Task（不做幂等，D-37）。"
             error={nameError}
           >
-            <div id="run-name-row" className="flex items-center gap-2">
+            <div id="task-name-row" className="flex items-center gap-2">
               <Input
-                id="run-name"
-                ref={registerField('run.name')}
+                id="task-name"
+                ref={registerField('task.name')}
                 value={name}
                 maxLength={NAME_MAX_RUNES}
                 onChange={(e) => setName(e.target.value)}
@@ -556,7 +556,7 @@ export function SubmitPage() {
                 className="flex-1"
               />
               <span
-                data-testid="run-name-counter"
+                data-testid="task-name-counter"
                 aria-live="polite"
                 className={cn(
                   'shrink-0 font-mono text-2xs tabular-nums',
@@ -570,11 +570,12 @@ export function SubmitPage() {
         </CardBody>
       </Card>
 
+      {/* 服务来源：一张卡两个形态 XOR（D-27）：都填或都不填提交被拒；切换时保留各自草稿不清空 */}
       <Card>
         <CardHeader
           tone="muted"
           title="服务来源"
-          sub="一张卡两形态：部署由 Genet 拉起；不部署就直接跑已有服务"
+          sub="一张卡两形态：部署（Genet YAML，由内置 service-deploy 拉起）XOR 外接（直接给已有服务）"
           actions={
             <Segmented<SourceMode>
               ariaLabel="服务来源"
@@ -582,7 +583,7 @@ export function SubmitPage() {
               onChange={setMode}
               options={[
                 { value: 'deploy', label: '部署' },
-                { value: 'service', label: '不部署' },
+                { value: 'service', label: '外接' },
               ]}
             />
           }
@@ -590,20 +591,16 @@ export function SubmitPage() {
         <CardBody className="flex flex-col gap-2">
           {mode === 'deploy' ? (
             <>
-              {/* CodeMirror 6：真语法高亮 + 行号 + 横向滚动；语法/结构错误都按行列标行 */}
+              {/* CodeMirror 6：真语法高亮 + 行号 + 横向滚动；语法错误按行列标行 */}
               <YamlEditor
-                value={deployYaml}
-                onChange={setDeployYaml}
+                value={deploySpec}
+                onChange={setDeploySpec}
                 rows={7}
-                aria-label="deploy 段 YAML"
-                title="deploy.yaml"
-                hint="2 空格缩进 · Ctrl/⌘+Enter 提交"
+                aria-label="Genet 部署描述 YAML"
+                title="deploy.spec（Genet 部署描述原文）"
+                hint="2 空格缩进 · 平台不解析语义"
                 error={lintPos}
               />
-              {/*
-                一行可读错误：`第 N 行第 M 列：<错误>`。
-                结构（缺 provider / parameters）与语法错误走同一行，区别只在 error 文案。
-              */}
               <p
                 data-testid="deploy-yaml-error"
                 data-state={deployParse.error ? 'error' : 'ok'}
@@ -613,39 +610,33 @@ export function SubmitPage() {
               >
                 {deployParse.error
                   ? `${deployParse.pos ? `第 ${deployParse.pos.line} 行第 ${deployParse.pos.col} 列：` : ''}${deployParse.error}`
-                  : '✓ YAML 结构有效（provider + parameters）'}
+                  : '✓ YAML 语法有效（语义归 service-deploy runner，平台不解析）'}
               </p>
-              {deployParse.fields.length > 0 ? (
-                <ul
-                  data-testid="deploy-yaml-field-hint"
-                  className="flex flex-col gap-0.5 rounded-md border border-danger/25 bg-danger-weak px-3 py-2"
-                >
-                  {deployParse.fields.map((item) => (
-                    <li key={item.field} className="text-2xs leading-[16px] text-danger-text">
-                      <code className="mr-1.5 font-mono">deploy.{item.field}</code>
-                      {item.message}
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
               <p className="text-2xs leading-[16px] text-fg-3">
-                平台只校 YAML 结构并转交 Genet；部署失败会终止整个 Run，不会创建任何 Task。一个 Deploy 可能拉起多个 Pod
-                （多节点 / PD 分离），各自有日志且测试期间仍在追加。
+                这段原文会作为内置 service-deploy runner 的输入（AG_PARAMS_FILE）；namespace 由 Genet API Key 绑定，
+                请求体不能指定（D-44/D-52）。部署被阻塞会收口为 service_unavailable（D-47）。
               </p>
             </>
           ) : (
             <div className="grid gap-3 sm:grid-cols-3">
-              <Field label="服务 base URL" required error={issueFor('run.service.url')} className="sm:col-span-2">
-                <Input ref={registerField('run.service.url')} value={serviceUrl} onChange={(e) => setServiceUrl(e.target.value)} placeholder="http://10.0.0.10:8000/v1" aria-invalid={Boolean(issueFor('run.service.url'))} />
+              <Field label="服务 base URL" required error={issueFor('task.service.url')} className="sm:col-span-2">
+                <Input
+                  ref={registerField('task.service.url')}
+                  value={serviceUrl}
+                  onChange={(e) => setServiceUrl(e.target.value)}
+                  placeholder="http://10.0.0.10:8000/v1"
+                  aria-invalid={Boolean(issueFor('task.service.url'))}
+                />
               </Field>
               <Field label="模型名">
                 <Input value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder="Qwen3-32B" />
               </Field>
               <Field label="模型路径（可选）" className="sm:col-span-3">
-                <Input value={modelPath} onChange={(e) => setModelPath(e.target.value)} placeholder="/data/models/qwen3-32b" />
+                <Input value={modelPath} onChange={(e) => setModelPath(e.target.value)} placeholder="/models/Qwen3-32B" />
               </Field>
               <p className="text-2xs leading-[16px] text-fg-3 sm:col-span-3">
-                这三个字段就是平台要注入的公共参数来源：不部署时它们由你来填。
+                这三个字段就是平台要注入的公共参数来源（AG_SERVED_URL / AG_SERVED_MODEL_NAME / AG_MODEL_PATH）：
+                外接模式由你来填。
               </p>
             </div>
           )}
@@ -656,7 +647,7 @@ export function SubmitPage() {
         <CardHeader
           tone="warn"
           title="环境变量与凭据"
-          sub="Run 粒度，注入该 Run 下全部 Task"
+          sub="Task 粒度，注入该 Task 下全部 runner（§12.4）"
           actions={
             <>
               <Button
@@ -679,7 +670,7 @@ export function SubmitPage() {
           }
         />
         <CardBody className="flex flex-col gap-2">
-          {/* 默认 0 行：不预填 LOG_LEVEL=info / ENDPOINT_API_KEY（那两行是示例，不是要提交的内容） */}
+          {/* 默认 0 行：不预填示例（那是要提交的内容，不是装饰） */}
           {envRows.length === 0 && secretRows.length === 0 ? (
             <p data-testid="env-empty-hint" className="text-2xs text-fg-3">
               还没有环境变量或凭据引用。需要时点右上角「+ 环境变量 / + 凭据引用」再加一行。
@@ -733,31 +724,31 @@ export function SubmitPage() {
               </Button>
             </div>
           ))}
-          <p className="text-2xs text-fg-3">凭据只填引用，明文不会出现在 Manifest 里；env 明文可回显可编辑（不脱敏、不折叠）。</p>
+          <p className="text-2xs text-fg-3">凭据只填引用，明文不会出现在 Manifest 里（C-10）；env 明文可回显可编辑（不脱敏、不折叠）。</p>
         </CardBody>
       </Card>
 
       <Card>
         <CardHeader
           tone="primary"
-          title="Task 列表"
-          sub="每个 Task 一段参数字符串；执行环境按 Task 指定"
+          title="runner 列表"
+          sub="每个 runner 一个输入框（placeholder 按 input_format 给对应格式的片段，D-67）；严格串行执行"
           actions={
             <>
               <span className="text-2xs text-fg-3">执行环境</span>
               <Input
-                ref={registerField('run.tests[0].execution.profile')}
+                ref={registerField('task.runners[0].execution.profile')}
                 value={profile}
                 onChange={(e) => setProfile(e.target.value)}
                 aria-label="执行环境 profile"
-                aria-invalid={Boolean(issueFor('run.tests[0].execution.profile'))}
-                title={issueFor('run.tests[0].execution.profile') ?? undefined}
+                aria-invalid={Boolean(issueFor('task.runners[0].execution.profile'))}
+                title={issueFor('task.runners[0].execution.profile') ?? undefined}
                 placeholder="k8s-npu"
                 className="h-8 w-32 font-mono text-2xs"
               />
-              <span className="text-2xs text-fg-3">Pre-Check</span>
+              <span className="text-2xs text-fg-3">precheck</span>
               <Segmented<PrecheckMode>
-                ariaLabel="Pre-Check 模式"
+                ariaLabel="precheck 模式"
                 value={precheck}
                 onChange={setPrecheck}
                 options={[
@@ -765,41 +756,41 @@ export function SubmitPage() {
                   { value: 'off', label: 'off' },
                 ]}
               />
-              <Button size="sm" data-testid="add-task" icon={<Plus className="size-3" aria-hidden />} onClick={addTask}>
-                添加 Task
+              <Button size="sm" data-testid="add-runner" icon={<Plus className="size-3" aria-hidden />} onClick={addRunner}>
+                添加 runner
               </Button>
             </>
           }
         />
         <CardBody className="flex flex-col gap-3">
-          {/* A4：0 个测试 Task 时说清「为什么不能提交」，就在会被删空的那块下面 */}
-          {noTasks ? (
+          {/* A4：0 个 runner 时说清「为什么不能提交」，就在会被删空的那块下面 */}
+          {noRunners ? (
             <p
-              data-testid="task-empty-hint"
+              data-testid="runner-empty-hint"
               className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-[16px] text-warn-text"
             >
-              至少需要 1 个测试 Task（Pre-Check 由平台注入，不计入测试）
+              至少需要 1 个 runner（service-deploy / precheck / service-clean 由平台注入，不计入）
             </p>
           ) : null}
 
-          {/* B10：只有 pre_check 角色的 Tester 时，下拉里只剩一句占位，提交/校验都不该放开 */}
-          {noTesters ? (
+          {/* B10：只有内置角色时，下拉里只剩一句占位，提交/校验都不该放开 */}
+          {noRunnersRegistered ? (
             <p
-              data-testid="tester-empty-hint"
+              data-testid="runner-empty-registered"
               className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-[16px] text-warn-text"
             >
-              当前没有可用的 Tester；只有 pre_check 角色的 Tester 不能作为测试 Task
+              当前没有可用的 Runner；deploy / clean 角色仅内置（D-70），不能作为测试 runner
             </p>
           ) : null}
 
-          {/* 后端仍可能返回 `run.tests` 级的 issue（并发/边界）：就地显示在 Task 区 */}
-          {taskAreaIssues.length > 0 ? (
+          {/* 后端仍可能返回 `task.runners` 级的 issue（并发/边界）：就地显示在 runner 区 */}
+          {runnerAreaIssues.length > 0 ? (
             <div
-              data-testid="task-area-issues"
+              data-testid="runner-area-issues"
               role="alert"
               className="rounded-md border border-danger/30 bg-danger-weak px-3 py-2"
             >
-              {taskAreaIssues.map((issue, index) => (
+              {runnerAreaIssues.map((issue, index) => (
                 <p key={`${issue.path}-${index}`} className="text-2xs leading-[16px] text-danger-text">
                   <code className="mr-1.5 font-mono">{issue.path}</code>
                   {issue.message}
@@ -811,117 +802,195 @@ export function SubmitPage() {
           {precheck === 'auto' ? (
             <div className="rounded-md border border-line-soft bg-surface-2 px-3 py-2 text-2xs leading-[16px] text-fg-2">
               <span className="font-medium text-fg">auto：</span>
-              平台取注册表中唯一一个 <code className="font-mono">role=pre_check</code> 的 Tester 注入为 Task#1；0 个或多个都拒绝提交。
-              {precheckTester ? (
+              平台取注册表中唯一一个 <code className="font-mono">role=pre_check</code> 的 Runner，注入为第一个测试类
+              runner；0 个或多个都拒绝提交。
+              {precheckRunner ? (
                 <Tag mono className="ml-2">
-                  {precheckTester.name} · {precheckTester.version}
+                  {precheckRunner.name} · {precheckRunner.version}
                 </Tag>
               ) : null}
             </div>
           ) : null}
 
-          {tests.map((test, index) => {
-            const resolvedTester = testerList.find((tester) => tester.name === (test.tester || defaultTester))
-            const nameIssue = issueFor(`run.tests[${index}].name`)
+          {runnerDrafts.map((draft, index) => {
+            const resolvedRunner = runnerList.find((runner) => runner.name === (draft.runner || defaultRunner))
+            const nameIssue = issueFor(`task.runners[${index}].name`)
             return (
               <div
-                key={test.key}
-                data-testid={`task-row-${index + 1}`}
+                key={draft.key}
+                data-testid={`runner-row-${index + 1}`}
                 className={cn(
                   'rounded-md border p-3 transition-colors duration-150',
-                  activeTest?.key === test.key ? 'border-primary/40 bg-primary-weak/30' : 'border-line-soft',
+                  activeDraft?.key === draft.key ? 'border-primary/40 bg-primary-weak/30' : 'border-line-soft',
                 )}
-                onClick={() => setActiveKey(test.key)}
-                onFocusCapture={() => setActiveKey(test.key)}
+                onClick={() => setActiveKey(draft.key)}
+                onFocusCapture={() => setActiveKey(draft.key)}
               >
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="grid size-5 shrink-0 place-items-center rounded-full bg-surface-3 text-2xs text-fg-2">
                     {index + 1}
                   </span>
                   <Input
-                    value={test.name}
-                    aria-label={`Task ${index + 1} 名称`}
+                    value={draft.name}
+                    aria-label={`runner ${index + 1} 名称`}
                     aria-invalid={Boolean(nameIssue)}
                     title={nameIssue ?? undefined}
                     placeholder="如 accuracy-dataset-a"
                     className="h-8 w-56"
-                    onChange={(e) => setTest(test.key, { name: e.target.value })}
+                    onChange={(e) => setRunnerDraft(draft.key, { name: e.target.value })}
                   />
                   <Select
-                    value={test.tester || defaultTester}
-                    aria-label={`Task ${index + 1} Tester`}
+                    value={draft.runner || defaultRunner}
+                    aria-label={`runner ${index + 1} Runner`}
                     className="h-8 w-48"
                     onChange={(e) => {
-                      setActiveKey(test.key)
-                      setTest(test.key, { tester: e.target.value })
+                      setActiveKey(draft.key)
+                      setRunnerDraft(draft.key, { runner: e.target.value })
                     }}
                   >
-                    {testerOptions.length === 0 ? <option value="">（还没有 Tester）</option> : null}
-                    {testerOptions.map((tester) => (
-                      <option key={tester.name} value={tester.name}>
-                        {tester.name} v{tester.version}
+                    {runnerOptions.length === 0 ? <option value="">（还没有 Runner）</option> : null}
+                    {runnerOptions.map((runner) => (
+                      <option key={runner.name} value={runner.name}>
+                        {runner.name} v{runner.version}
                       </option>
                     ))}
                   </Select>
-                  {/* 详情：复用 `/testers?open=` 的同一个抽屉组件（不复制第二份） */}
+                  {/* 详情：复用 `/runners?open=` 的同一个抽屉组件（不复制第二份） */}
                   <Button
                     size="sm"
                     variant="ghost"
-                    data-testid="task-tester-detail"
-                    data-task-index={index + 1}
-                    disabled={!resolvedTester}
-                    title={resolvedTester ? `查看 ${resolvedTester.name} 的参数与镜像` : '还没有可选的 Tester'}
-                    aria-label={`查看 Task ${index + 1} 的 Tester 详情`}
+                    data-testid="runner-runner-detail"
+                    data-runner-index={index + 1}
+                    disabled={!resolvedRunner}
+                    title={resolvedRunner ? `查看 ${resolvedRunner.name} 的参数与镜像` : '还没有可选的 Runner'}
+                    aria-label={`查看 runner ${index + 1} 的 Runner 详情`}
                     onClick={() => {
-                      if (!resolvedTester) return
-                      setActiveKey(test.key)
-                      setDetailTester(resolvedTester.name)
+                      if (!resolvedRunner) return
+                      setActiveKey(draft.key)
+                      setDetailRunner(resolvedRunner.name)
                     }}
                   >
                     <Info className="size-3.5" aria-hidden />
                     详情
                   </Button>
-                  {resolvedTester ? (
+                  {resolvedRunner ? (
                     <span className="flex items-center gap-1">
-                      <Tag mono>{resolvedTester.version}</Tag>
-                      {resolvedTester.exclusive ? <Tag>独占</Tag> : null}
-                      <Tag>{resolvedTester.on_failure}</Tag>
+                      <Tag mono>{resolvedRunner.input_format}</Tag>
+                      {resolvedRunner.exclusive ? <Tag>独占</Tag> : null}
+                      <Tag>{resolvedRunner.on_failure}</Tag>
                     </span>
                   ) : null}
-                  {issues.some((issue) => issue.path.startsWith(`run.tests[${index}]`)) ? (
+                  {issues.some((issue) => issue.path.startsWith(`task.runners[${index}]`)) ? (
                     <Badge tone="err">有校验问题</Badge>
                   ) : null}
                   <Button
                     size="sm"
                     variant="ghost"
                     className="ml-auto"
-                    aria-label={`移除 Task ${index + 1}`}
-                    data-testid={`remove-task-${index + 1}`}
-                    onClick={() => removeTask(index)}
+                    aria-label={`移除 runner ${index + 1}`}
+                    data-testid={`remove-runner-${index + 1}`}
+                    onClick={() => removeRunner(index)}
                   >
                     移除
                   </Button>
                 </div>
                 {nameIssue ? (
-                  <p data-testid={`task-name-error-${index + 1}`} role="alert" className="mt-1.5 text-2xs text-danger-text">
+                  <p data-testid={`runner-name-error-${index + 1}`} role="alert" className="mt-1.5 text-2xs text-danger-text">
                     {nameIssue}
                   </p>
                 ) : null}
                 <div className="mt-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-2xs text-fg-3">
+                      输入{resolvedRunner ? `（${inputFormatLabel(resolvedRunner.input_format)}）` : ''}
+                    </span>
+                    {/* 就地小按钮组（校验 / 格式化 / 压缩 / 填示例）：点按就地生效、行内报错；仅客户端 dry-run，最终以提交时服务端校验为准 */}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      data-testid={`input-validate-${index + 1}`}
+                      icon={<ListChecks className="size-3" aria-hidden />}
+                      onClick={() => validateDraftInput(draft, draftIssues[draft.key] ?? [])}
+                    >
+                      校验
+                    </Button>
+                    {resolvedRunner?.input_format === 'jsonl' ? (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          data-testid={`input-format-${index + 1}`}
+                          icon={<AlignLeft className="size-3" aria-hidden />}
+                          onClick={() => rewriteJsonl(draft, 'format')}
+                        >
+                          格式化
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          data-testid={`input-minify-${index + 1}`}
+                          icon={<Minimize2 className="size-3" aria-hidden />}
+                          onClick={() => rewriteJsonl(draft, 'minify')}
+                        >
+                          压缩
+                        </Button>
+                      </>
+                    ) : null}
+                    {resolvedRunner?.placeholder ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        data-testid={`input-fill-example-${index + 1}`}
+                        icon={<Wand2 className="size-3" aria-hidden />}
+                        onClick={() => fillExample(draft, resolvedRunner.placeholder ?? '')}
+                      >
+                        填示例
+                      </Button>
+                    ) : null}
+                  </div>
                   <Field
-                    label="参数（原样填，平台只做词法切分）"
-                    error={issueFor(`run.tests[${index}].args`) ?? issueFor(`run.tests[${index}].tester`)}
+                    className="mt-1"
+                    error={issueFor(`task.runners[${index}].input`) ?? issueFor(`task.runners[${index}].runner`)}
+                    hint={resolvedRunner ? inputHint(resolvedRunner.input_format) : undefined}
                   >
                     <Textarea
-                      value={test.args}
-                      rows={2}
+                      ref={(el) => {
+                        inputRefs.current[draft.key] = el
+                      }}
+                      value={draft.input}
+                      rows={3}
                       spellCheck={false}
-                      aria-label={`Task ${index + 1} 参数`}
-                      placeholder={resolvedTester?.placeholder ?? '--dataset=/data/gsm8k.jsonl --limit=200'}
+                      aria-label={`runner ${index + 1} 输入`}
+                      aria-invalid={(draftIssues[draft.key]?.length ?? 0) > 0}
+                      placeholder={resolvedRunner?.placeholder ?? '{"dataset":"/data/gsm8k.jsonl","limit":200}'}
                       className="font-mono text-xs"
-                      onChange={(e) => setTest(test.key, { args: e.target.value })}
+                      onChange={(e) => setRunnerDraft(draft.key, { input: e.target.value })}
                     />
                   </Field>
+                  {/* 行内报错（行号 + 字段名 + 原因）：点一条跳到那一行；规则与服务端 D-67 一致 */}
+                  {(draftIssues[draft.key]?.length ?? 0) > 0 ? (
+                    <ul
+                      data-testid={`input-issues-${index + 1}`}
+                      role="alert"
+                      className="mt-1 flex flex-col gap-0.5 rounded-md border border-danger/25 bg-danger-weak px-2.5 py-1.5"
+                    >
+                      {(draftIssues[draft.key] ?? []).slice(0, 8).map((issue, issueIndex) => (
+                        <li key={`${issue.line}-${issue.field ?? issue.kind}-${issueIndex}`}>
+                          <button
+                            type="button"
+                            className="text-left text-2xs leading-[16px] text-danger-text hover:underline"
+                            onClick={() => jumpToLine(draft.key, issue.line)}
+                          >
+                            第 {issue.line} 行
+                            {issue.field ? <code className="mx-1 font-mono">{issue.field}</code> : null}· {issue.message}
+                          </button>
+                        </li>
+                      ))}
+                      {(draftIssues[draft.key] ?? []).length > 8 ? (
+                        <li className="text-2xs text-danger-text">还有 {(draftIssues[draft.key] ?? []).length - 8} 条…</li>
+                      ) : null}
+                    </ul>
+                  ) : null}
                 </div>
               </div>
             )
@@ -933,12 +1002,12 @@ export function SubmitPage() {
               ? `当前角色 ${auth.role ?? 'viewer'} 只读：${blocked}（服务端也会再判一次）`
               : submitDisabled
                 ? submitTitle
-                : '提交前会先 dry-run；校验通过才真正 POST /runs（每次提交都创建新 Run）。'}
+                : '提交前会先 dry-run；校验通过才真正 POST /tasks（每次提交都创建新 Task，不做幂等 D-37）。'}
           </span>
           <div className="ml-auto flex items-center gap-2">
             <Button
               size="sm"
-              data-testid="validate-run"
+              data-testid="validate-task"
               loading={dryRunning}
               disabled={submitDisabled}
               aria-disabled={submitDisabled}
@@ -950,7 +1019,7 @@ export function SubmitPage() {
             <Button
               size="sm"
               variant="primary"
-              data-testid="submit-run"
+              data-testid="submit-task"
               loading={submitting}
               disabled={submitDisabled}
               aria-disabled={submitDisabled}
@@ -963,100 +1032,94 @@ export function SubmitPage() {
         </CardFooter>
       </Card>
 
-      {/* 与 Tester 目录页是同一个抽屉组件：参数清单里也能直接复制进当前 Task 的 args */}
-      <TesterDrawer
-        name={detailTester}
-        onClose={() => setDetailTester(null)}
-        onCopyParam={(snippet) => appendToArgs(activeTest?.key, snippet)}
+      {/* 与 Runner 目录页是同一个抽屉组件：参数 schema 里也能直接复制进当前 runner 的输入框 */}
+      <RunnerDrawer
+        name={detailRunner}
+        onClose={() => setDetailRunner(null)}
+        onCopyParam={(snippet) => appendToInput(activeDraft?.key, snippet)}
       />
 
-      {/* 参数说明：原来在右栏，右栏取消后就地搬到主内容，默认折叠（说明性内容，不占首屏） */}
+      {/* 参数说明：就地搬到主内容，默认折叠（说明性内容，不占首屏） */}
       <details
-        data-testid="submit-tester-help"
+        data-testid="submit-runner-help"
         className="group rounded-xl border border-line bg-surface shadow-xs"
       >
         <summary className="flex cursor-pointer list-none items-center gap-2 px-5 py-3 text-base font-semibold text-fg [&::-webkit-details-marker]:hidden">
           参数说明
           <span className="text-2xs font-normal text-fg-3">
-            {activeTester ? `${activeTester.name} v${activeTester.version}` : '跟着当前 Task 选中的 Tester 走'}
+            {activeRunner ? `${activeRunner.name} v${activeRunner.version}` : '跟着当前 runner 选中的 Runner 走'}
           </span>
           <span className="ml-auto text-2xs font-normal text-fg-3 group-open:hidden">点开</span>
         </summary>
         <div className="flex flex-col gap-3 border-t border-line-soft px-5 py-4">
           <p className="rounded-md border border-line-soft bg-surface-2 p-3 text-2xs leading-[16px] text-fg-2">
-            每个 Task 只有一个「参数」输入框，照 Tester 文档写成一整串即可（平台只做切分，不校验含义）。
-            点参数旁的「复制」会把它追加到当前 Task 的参数末尾，不会覆盖已写的内容。
+            每个 runner 只有一个「输入」框：jsonl 按 Runner 声明的参数 schema 逐行写 JSON；yaml / text 原样写，
+            语义完全归 Runner（D-67）。点参数旁的「复制」会把它追加到当前 runner 的输入末尾，不会覆盖已写的内容。
           </p>
 
-          {!activeTest ? (
-            <p data-testid="rail-no-tester" className="text-2xs text-fg-3">
-              先在左侧添加一个 Task，再选 Tester。
+          {!activeDraft ? (
+            <p data-testid="rail-no-runner" className="text-2xs text-fg-3">
+              先在左侧添加一个 runner，再选 Runner。
             </p>
-          ) : !activeTester ? (
-            <p data-testid="rail-no-tester" className="text-2xs text-fg-3">
-              先在左侧选一个 Tester
+          ) : !activeRunner ? (
+            <p data-testid="rail-no-runner" className="text-2xs text-fg-3">
+              先在左侧选一个 Runner
             </p>
           ) : (
-            <div data-testid="rail-tester" data-tester={activeTester.name} className="flex flex-col gap-3">
+            <div data-testid="rail-runner" data-runner={activeRunner.name} className="flex flex-col gap-3">
               <div className="flex flex-wrap items-center gap-1.5">
-                <Tag mono>{activeTester.name}</Tag>
+                <Tag mono>{activeRunner.name}</Tag>
                 <span className="text-2xs text-fg-3">
-                  v{activeTester.version} · {activeTester.role}
+                  v{activeRunner.version} · {activeRunner.role} · {activeRunner.input_format}
                 </span>
-                {activeTester.exclusive ? <Tag>独占</Tag> : null}
-                <Tag>{activeTester.on_failure}</Tag>
-                <span className="text-2xs text-fg-3">Task {activeIndex + 1}</span>
+                {activeRunner.exclusive ? <Tag>独占</Tag> : null}
+                <Tag>{activeRunner.on_failure}</Tag>
+                <span className="text-2xs text-fg-3">runner {activeIndex + 1}</span>
               </div>
 
-              {activeTester.placeholder ? (
+              {activeRunner.placeholder ? (
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <p className="text-2xs font-medium text-fg-2">args 示例</p>
+                    <p className="text-2xs font-medium text-fg-2">输入示例（placeholder 来自 runner.yaml）</p>
                     <button
                       type="button"
                       data-testid="copy-placeholder"
-                      aria-label="复制 args 示例到参数输入框"
+                      aria-label="复制输入示例到输入框"
                       onClick={() => {
-                        appendToArgs(activeTest.key, activeTester.placeholder ?? '')
-                        flashRailCopied('placeholder')
+                        appendToInput(activeDraft.key, activeRunner.placeholder ?? '')
                       }}
                       className="inline-flex h-6 items-center gap-1 rounded-sm px-2 text-2xs text-fg-3 transition-colors hover:bg-line-soft hover:text-fg"
                     >
-                      {railCopied === 'placeholder' ? (
-                        <Check className="size-3 text-success" aria-hidden />
-                      ) : (
-                        <Copy className="size-3" aria-hidden />
-                      )}
-                      {railCopied === 'placeholder' ? '已加入参数' : '复制整段'}
+                      加入输入
                     </button>
                   </div>
                   <pre className="mt-1 overflow-x-auto rounded-md border border-line-soft bg-surface-2 px-2 py-1.5 font-mono text-2xs leading-[16px] text-fg-2">
-                    {activeTester.placeholder}
+                    {activeRunner.placeholder}
                   </pre>
                 </div>
               ) : null}
 
               <div>
-                <p className="mb-1 text-2xs font-medium text-fg-2">参数（{activeTester.parameters.length}）</p>
-                <TesterParamTable
-                  parameters={activeTester.parameters}
+                <p className="mb-1 text-2xs font-medium text-fg-2">参数 schema（{activeRunner.parameters.length}）</p>
+                <RunnerParamTable
+                  parameters={activeRunner.parameters}
                   copyTestId="copy-param"
-                  onCopy={(snippet) => {
-                    appendToArgs(activeTest.key, snippet)
-                    flashRailCopied(snippet)
-                  }}
+                  onCopy={(snippet) => appendToInput(activeDraft.key, snippet)}
                 />
               </div>
             </div>
           )}
 
           <p className="border-t border-line-soft pt-3 text-2xs leading-[16px] text-fg-3">
-            不用自己写的参数：<code className="font-mono">--url</code> / <code className="font-mono">--model_name</code> /{' '}
-            <code className="font-mono">--model_path</code> 由平台自动补在参数末尾，再写一遍会被拒绝。
+            不用自己写的公共参数：<code className="font-mono">AG_SERVED_URL</code> /{' '}
+            <code className="font-mono">AG_SERVED_MODEL_NAME</code> / <code className="font-mono">AG_MODEL_PATH</code>{' '}
+            由平台经环境变量注入（§5.4.1）；运行时的 <code className="font-mono">AG_TASK_ID</code> /{' '}
+            <code className="font-mono">AG_ATTEMPT</code> / <code className="font-mono">AG_RUNNER_SEQ</code> /{' '}
+            <code className="font-mono">AG_PARAMS_FILE</code> / <code className="font-mono">AG_OUTPUT_DIR</code>{' '}
+            也是平台注入，不要写在输入里。
           </p>
         </div>
       </details>
     </>
   )
 }
-

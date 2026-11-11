@@ -4,8 +4,11 @@
 // 不上 shared informer；因此这里只提供 clientset，不引入 informer 工厂。
 //
 // 集群内运行时优先 in-cluster（Pod 的 ServiceAccount），本地开发退回 kubeconfig：
-// TESTPLANE_KUBECONFIG → KUBECONFIG → ~/.kube/config。二者都没有时返回可读的错误，
+// AG_KUBECONFIG → KUBECONFIG → ~/.kube/config。二者都没有时返回可读的错误，
 // 由调用方决定是降级还是拒绝启动。
+//
+// v2 命名（D-66）：环境变量 AG_*，namespace 缺省 argus；TESTPLANE_* 旧名仅作
+// 兼容读取（可灰度，不再文档化）。
 package k8s
 
 import (
@@ -21,16 +24,18 @@ import (
 )
 
 const (
-	// DefaultNamespace 是 Job / PVC 所在 namespace（C-11 TESTPLANE_EXECUTOR_NAMESPACE 的默认值）。
-	DefaultNamespace = "testplane"
+	// DefaultNamespace 是 Job / PVC 所在 namespace（v2 缺省 argus，D-66）。
+	DefaultNamespace = "argus"
 
-	// EnvNamespace 是首选的环境变量名；EnvNamespaceLegacy 是 C-11 里的旧名，兼容读取。
-	EnvNamespace       = "TESTPLANE_NAMESPACE"
-	EnvNamespaceLegacy = "TESTPLANE_EXECUTOR_NAMESPACE"
+	// EnvNamespace 是首选的环境变量名；EnvNamespaceLegacy 是 v1 的旧名，兼容读取。
+	EnvNamespace       = "AG_NAMESPACE"
+	EnvNamespaceLegacy = "TESTPLANE_NAMESPACE"
 	// EnvKubeconfig 显式指定 kubeconfig 路径（本地开发用）。
-	EnvKubeconfig = "TESTPLANE_KUBECONFIG"
+	EnvKubeconfig       = "AG_KUBECONFIG"
+	EnvKubeconfigLegacy = "TESTPLANE_KUBECONFIG"
 	// EnvInCluster 显式开关 in-cluster 探测（"false" 时直接走 kubeconfig）。
-	EnvInCluster = "TESTPLANE_K8S_IN_CLUSTER"
+	EnvInCluster       = "AG_K8S_IN_CLUSTER"
+	EnvInClusterLegacy = "TESTPLANE_K8S_IN_CLUSTER"
 )
 
 var (
@@ -42,9 +47,9 @@ var (
 
 // Options 是客户端构造参数。零值即"按环境变量自动探测"。
 type Options struct {
-	// Namespace 为空时取 TESTPLANE_NAMESPACE / TESTPLANE_EXECUTOR_NAMESPACE / testplane。
+	// Namespace 为空时取 AG_NAMESPACE / TESTPLANE_NAMESPACE（旧名）/ argus。
 	Namespace string
-	// Kubeconfig 为空时按 TESTPLANE_KUBECONFIG → KUBECONFIG → ~/.kube/config 回退。
+	// Kubeconfig 为空时按 AG_KUBECONFIG → KUBECONFIG → ~/.kube/config 回退。
 	Kubeconfig string
 	// InCluster 为 nil 时自动探测；显式给出则按它走（测试与本地联调方便）。
 	InCluster *bool
@@ -55,8 +60,8 @@ type Options struct {
 	UserAgent string
 }
 
-// NamespaceFromEnv 解析 namespace：TESTPLANE_NAMESPACE 优先，其次
-// TESTPLANE_EXECUTOR_NAMESPACE（C-11 的旧名），都没有则用 DefaultNamespace。
+// NamespaceFromEnv 解析 namespace：AG_NAMESPACE 优先，其次 TESTPLANE_NAMESPACE
+// （v1 旧名，兼容读取），都没有则用 DefaultNamespace。
 func NamespaceFromEnv() string {
 	for _, key := range []string{EnvNamespace, EnvNamespaceLegacy} {
 		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
@@ -70,7 +75,7 @@ func NamespaceFromEnv() string {
 func OptionsFromEnv() Options {
 	return Options{
 		Namespace:  NamespaceFromEnv(),
-		Kubeconfig: strings.TrimSpace(os.Getenv(EnvKubeconfig)),
+		Kubeconfig: strings.TrimSpace(envFirst(EnvKubeconfig, EnvKubeconfigLegacy)),
 	}
 }
 
@@ -79,10 +84,10 @@ func (o Options) withDefaults() Options {
 		o.Namespace = NamespaceFromEnv()
 	}
 	if o.Kubeconfig == "" {
-		o.Kubeconfig = strings.TrimSpace(os.Getenv(EnvKubeconfig))
+		o.Kubeconfig = strings.TrimSpace(envFirst(EnvKubeconfig, EnvKubeconfigLegacy))
 	}
 	if o.UserAgent == "" {
-		o.UserAgent = "testplane-controller"
+		o.UserAgent = "argusd"
 	}
 	return o
 }
@@ -117,6 +122,16 @@ func New(o Options) (kubernetes.Interface, string, error) {
 	return cs, o.Namespace, nil
 }
 
+// envFirst 返回第一个非空的环境变量值（AG_* 新名优先，TESTPLANE_* 兼容）。
+func envFirst(names ...string) string {
+	for _, n := range names {
+		if v := strings.TrimSpace(os.Getenv(n)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // restConfig 决定用哪套凭据。
 func restConfig(o Options) (*rest.Config, error) {
 	if o.Kubeconfig != "" {
@@ -125,8 +140,8 @@ func restConfig(o Options) (*rest.Config, error) {
 	inCluster := true
 	if o.InCluster != nil {
 		inCluster = *o.InCluster
-	} else if v := strings.TrimSpace(os.Getenv(EnvInCluster)); v != "" {
-		// C-11: TESTPLANE_K8S_IN_CLUSTER（默认 true）。
+	} else if v := strings.TrimSpace(envFirst(EnvInCluster, EnvInClusterLegacy)); v != "" {
+		// AG_K8S_IN_CLUSTER（默认 true）。
 		inCluster = !strings.EqualFold(v, "false") && v != "0"
 	}
 	if inCluster {

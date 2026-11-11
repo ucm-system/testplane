@@ -13,18 +13,19 @@ import { logMarkerTone } from '@/lib/log-markers'
 import { cn, formatClock } from '@/lib/utils'
 
 /**
- * Deploy 日志面板（契约：`GET /runs/{id}/deploy/logs`）。
+ * Deploy Pod 日志面板（契约 v2：`GET /tasks/{id}/deploy/logs`，07 §5.1「部署 Pod 日志在 deploy 节点下按 Pod 分页签」）。
  *
- * **`?pod=` 必选**（缺了服务端 400，不存在的 pod 404），`offset` 只作用于该 Pod 的日志流，
- * `tail_lines` 与 `offset` 二选一；`pods[]` / `gaps[]` 每次返回全部 Pod（用来渲染页签）。
+ * `?pod=` 可选：单 Pod 直接服务、多 Pod 必选（缺了 409 `pod_ambiguous`，不存在的 pod 404），
+ * `offset` 只作用于该 Pod 的日志流，`tail_lines` 与 `offset` 二选一；
+ * `pods[]` / `gaps[]` 每次返回全部 Pod（用来渲染页签）。
  *
  * 三条必须守住的语义：
- *  1. 一个 Deploy 可能多个 Pod：**按 Pod 分页签，不合并**；
+ *  1. 一个部署可能多个 Pod：**按 Pod 分页签，不合并**；
  *  2. `gaps[]` 是事实缺口（Pod 重启 / 回收），要在时间轴上**显式插一条**「此处不连续」；
- *  3. `pods=[]` 时**不发日志请求**（没 pod 会 400）：排队中就说排队，已回收就说回收。
+ *  3. `pods=[]` 时**不发日志请求**：排队中就说排队，已回收 / 外接模式就说原因。
  *
- * 运行中（`live`）按 `offset` 游标轮询、**追加**新 entry；Run 终态后停止轮询并标注
- * 「Run 已结束，日志不再更新」。轮询用递归 `setTimeout`，同一时刻只有一次在飞，
+ * 运行中（`live`）按 `offset` 游标轮询、**追加**新 entry；Task 终态后停止轮询并标注
+ * 「Task 已结束，日志不再更新」。轮询用递归 `setTimeout`，同一时刻只有一次在飞，
  * 切 Pod / 切页签 / 卸载都会清掉。
  */
 
@@ -89,7 +90,7 @@ function appendEntries(previous: DeployLogEntry[], next: DeployLogEntry[]): Depl
 }
 
 interface DeployLogView {
-  run_id: string
+  task_id: string
   entries: DeployLogEntry[]
   gaps: DeployLogs['gaps']
   truncated: boolean
@@ -98,7 +99,7 @@ interface DeployLogView {
 
 function toView(data: DeployLogs): DeployLogView {
   return {
-    run_id: data.run_id,
+    task_id: data.task_id,
     entries: data.entries,
     gaps: data.gaps,
     truncated: data.truncated,
@@ -107,12 +108,14 @@ function toView(data: DeployLogs): DeployLogView {
 }
 
 export interface DeployLogsPanelProps {
-  runId: string
-  /** `GET /runs/{id}/deploy` 的 `deploy.state`：pods 为空时用它判断"排队中"还是"已回收" */
+  taskId: string
+  /** attempt 序号；缺省取最新 attempt（`?attempt=`） */
+  attempt?: number
+  /** `GET /tasks/{id}/deploy` 的 `deploy.phase`：pods 为空时用它判断"排队中"还是"已回收" */
   deployState: string | null
-  /** `GET /runs/{id}/deploy` 的 pods：有 Pod 才请求日志端点（没 pod 会 400） */
+  /** `GET /tasks/{id}/deploy` 的 pods：有 Pod 才请求日志端点 */
   pods: DeployPod[]
-  /** Run 是否仍在运行：运行中才轮询（终态停止，避免长尾请求） */
+  /** Task 是否仍在运行：运行中才轮询（终态停止，避免长尾请求） */
   live?: boolean
   /** 受控的当前 Pod（Pod 拓扑表点某一行时由外部切换） */
   pod?: string | null
@@ -121,7 +124,8 @@ export interface DeployLogsPanelProps {
 }
 
 export function DeployLogsPanel({
-  runId,
+  taskId,
+  attempt,
   deployState,
   pods,
   live = false,
@@ -158,14 +162,16 @@ export function DeployLogsPanel({
     [pods, selectedPod],
   )
 
-  /** 容器名：优先 pods.json 的 `containers[]`，拿不到就退回当前日志段里的 container */
+  /** 容器名：deploy-state.json 的 Pod 快照没有容器字段（§9.2），从日志段与 Pod 名推断 */
   const containerNames = useMemo(() => {
     const names = new Set<string>()
-    for (const item of selectedPodMeta?.containers ?? []) {
-      if (item?.name) names.add(item.name)
-    }
     for (const entry of data?.entries ?? []) {
       if (entry.pod === selectedPod && entry.container) names.add(entry.container)
+    }
+    if (names.size === 0 && selectedPodMeta) {
+      // 单容器主 Pod 常叫 main / server；PD 分离的 Pod 名自带角色段
+      const role = selectedPodMeta.role
+      names.add(role && role !== 'main' ? role : 'main')
     }
     return [...names]
   }, [selectedPodMeta, data, selectedPod])
@@ -200,7 +206,8 @@ export function DeployLogsPanel({
     setAppended(0)
     setLoading(true)
     api
-      .getDeployLogs(runId, {
+      .getTaskDeployLogs(taskId, {
+        attempt,
         pod: selectedPod,
         // tail_lines 与 offset 二选一：要看最新就不带 offset
         ...(tailLatest ? { tail_lines: 40 } : { offset: 0 }),
@@ -222,7 +229,7 @@ export function DeployLogsPanel({
     return () => {
       alive = false
     }
-  }, [runId, selectedPod, tailLatest, reloadToken])
+  }, [taskId, attempt, selectedPod, tailLatest, reloadToken])
 
   /* ------------------------------------------------------ 轮询：按游标追加 */
   useEffect(() => {
@@ -232,7 +239,7 @@ export function DeployLogsPanel({
 
     const tick = async () => {
       try {
-        const next = await api.getDeployLogs(runId, { pod: selectedPod, offset: cursorRef.current })
+        const next = await api.getTaskDeployLogs(taskId, { attempt, pod: selectedPod, offset: cursorRef.current })
         if (!alive) return
         cursorRef.current = Math.max(cursorRef.current, cursorOf(next.entries))
         setData((previous) =>
@@ -262,14 +269,14 @@ export function DeployLogsPanel({
       alive = false
       if (timer !== null) clearTimeout(timer)
     }
-  }, [runId, selectedPod, tailLatest, live, reloadToken])
+  }, [taskId, attempt, selectedPod, tailLatest, live, reloadToken])
 
   const switchPod = (next: string) => {
     setPod(next)
     onPodChange?.(next)
   }
 
-  const logFileName = `${selectedPod ?? 'pod'}${containerNames.length > 1 && selectedContainer ? `.${selectedContainer}` : ''}.log`
+  const logFileName = `${selectedPod ?? 'pod'}.log`
 
   /**
    * 下载**当前 Pod（与容器）**的落盘日志（D-59：`deploy/logs/<pod>[.<container>].log`）。
@@ -285,18 +292,17 @@ export function DeployLogsPanel({
     setDownloadNotice(null)
     setDownloadError(null)
 
-    const base = `deploy/logs/${selectedPod}`
-    const withContainer = selectedContainer ? `${base}.${selectedContainer}.log` : null
-    const candidates = [
-      ...(containerNames.length > 1 && withContainer ? [withContainer] : []),
-      `${base}.log`,
-      ...(withContainer ? [withContainer] : []),
-    ].filter((value, index, all) => all.indexOf(value) === index)
+    // v2 落盘路径：`attempts/<n>/runners/<deploy_seq>/logs/<pod>.log`（§8.6，D-26/D-59）。
+    // deploy_seq 我们不直接知道，按常见序位（1 = service-deploy）优先、再逐个 seq 兜底。
+    const deploySeqCandidates = ['1', '2']
+    const candidates = deploySeqCandidates.map(
+      (seq) => `attempts/${attempt ?? 1}/runners/${seq}/logs/${selectedPod}.log`,
+    )
 
     let lastError: unknown = null
     for (const candidate of candidates) {
       try {
-        const blob = await api.downloadFile(runId, `${runId}/${candidate}`)
+        const blob = await api.downloadFile(taskId, candidate)
         saveBlob(blob, `${selectedPod}.log`)
         setDownloadNotice(`${candidate} · ${formatBytes(blob.size)} 已开始下载`)
         setDownloading(false)
@@ -320,7 +326,7 @@ export function DeployLogsPanel({
     setLoadingMore(true)
     setMoreError(null)
     try {
-      const next = await api.getDeployLogs(runId, { pod: selectedPod, offset: cursorRef.current })
+      const next = await api.getTaskDeployLogs(taskId, { attempt, pod: selectedPod, offset: cursorRef.current })
       cursorRef.current = Math.max(cursorRef.current, cursorOf(next.entries))
       setData((previous) =>
         previous
@@ -450,7 +456,7 @@ export function DeployLogsPanel({
           icon={<Download className="size-3" aria-hidden />}
           loading={downloading}
           onClick={() => void downloadDeployLog()}
-          title={`下载 deploy/logs/${logFileName}（带鉴权，落盘文件原样下载）`}
+          title="下载该 Pod 的落盘日志（attempts/<n>/runners/<deploy_seq>/logs/<pod>.log，带鉴权原样下载）"
         >
           下载 .log
         </Button>
@@ -472,12 +478,12 @@ export function DeployLogsPanel({
       <div className="overflow-hidden rounded-lg border border-line" style={{ background: TERMINAL_BG }}>
         <div className="flex flex-wrap items-center gap-2 border-b border-white/10 px-3 py-2 text-2xs text-log-muted">
           <ScrollText className="size-3.5" aria-hidden />
-          <span className="font-mono">deploy/logs/{logFileName}</span>
+          <span className="font-mono" title={logFileName}>{logFileName}</span>
           <span className="font-mono" data-testid="deploy-log-last-updated">
             最后更新 {lastUpdatedAt == null ? '—' : formatClock(new Date(lastUpdatedAt).toISOString())}
           </span>
           {appended > 0 ? <span data-testid="deploy-log-appended">已追加 {appended} 行</span> : null}
-          {!live ? <span data-testid="deploy-log-ended">Run 已结束，日志不再更新</span> : null}
+          {!live ? <span data-testid="deploy-log-ended">Task 已结束，日志不再更新</span> : null}
           {tailLatest ? <span>先看最新一屏，已暂停自动刷新</span> : null}
           <span className="ml-auto">
             {lineCount} 行

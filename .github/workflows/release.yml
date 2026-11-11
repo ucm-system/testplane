@@ -1,4 +1,4 @@
-# 发版：多架构镜像（server / web / 各 Tester）→ GHCR
+# 发版：多架构镜像（server / web / 各 Runner）→ GHCR
 #
 # 触发：
 #   - push tag `v*`（例如 v0.2.0）→ 构建并推送 **linux/amd64 + linux/arm64** 两个平台
@@ -6,9 +6,9 @@
 #   - PR → 只构建 **amd64**、不推送（防止 Dockerfile 腐烂）
 #
 # 镜像落点（GHCR，公开仓库用 GITHUB_TOKEN 即可，无需额外 Secret）：
-#   ghcr.io/<owner>/testplane-server:<tag>  +  :sha-<12>
-#   ghcr.io/<owner>/testplane-web:<tag>     +  :sha-<12>
-#   ghcr.io/<owner>/testplane-tester-<name>:<tag> + :sha-<12>
+#   ghcr.io/<owner>/argus-server:<tag>  +  :sha-<12>
+#   ghcr.io/<owner>/argus-web:<tag>     +  :sha-<12>
+#   ghcr.io/<owner>/argus-runner-<name>:<tag> + :sha-<12>
 #
 # 需要的权限：packages: write（本文件已声明）；repository 设置里无需任何 Secret。
 name: release
@@ -42,31 +42,31 @@ env:
   OWNER: ${{ github.repository_owner }}
 
 jobs:
-  # 先枚举 testers/ 下所有 Tester，避免矩阵写死（加一个 Tester 不用改 workflow）
+  # 先枚举 runners/ 下所有 Runner，避免矩阵写死（加一个 Runner 不用改 workflow）
   discover:
-    name: 发现 Tester
+    name: 发现 Runner
     runs-on: ubuntu-latest
     outputs:
-      testers: ${{ steps.list.outputs.testers }}
-      # publish 的 matrix 直接吃这一份（server + web + testers/*），job 里不再硬编码
+      runners: ${{ steps.list.outputs.runners }}
+      # publish 的 matrix 直接吃这一份（server + web + runners/*），job 里不再硬编码
       matrix: ${{ steps.list.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
       - id: list
-        name: 生成发布矩阵（server + web + 所有 Tester，加 Tester 不用改 workflow）
+        name: 生成发布矩阵（server + web + 所有 Runner，加 Runner 不用改 workflow）
         run: |
           {
             printf '{"image":"server","dockerfile":"deploy/docker/server.Dockerfile","context":"."},'
             printf '{"image":"web","dockerfile":"deploy/docker/web.Dockerfile","context":"."}'
-            # Tester：上下文是 testers/<name>/（不是仓库根）
-            # build/Dockerfile 是该 Tester 的唯一发布镜像。若将来确有变体，可加 build/Dockerfile.<variant>，
-            # 镜像名会带后缀 tester-<name>-<variant>，不和默认镜像抢同一个 tag。
-            for d in $(ls -1 testers); do
-              if [ -f "testers/$d/build/Dockerfile" ]; then
-                printf ',{"image":"tester-%s","dockerfile":"testers/%s/build/Dockerfile","context":"testers/%s"}' "$d" "$d" "$d"
+            # Runner：上下文是 runners/<name>/（不是仓库根）
+            # build/Dockerfile 是该 Runner 的唯一发布镜像。若将来确有变体，可加 build/Dockerfile.<variant>，
+            # 镜像名会带后缀 runner-<name>-<variant>，不和默认镜像抢同一个 tag。
+            for d in $(ls -1 runners); do
+              if [ -f "runners/$d/build/Dockerfile" ]; then
+                printf ',{"image":"runner-%s","dockerfile":"runners/%s/build/Dockerfile","context":"runners/%s"}' "$d" "$d" "$d"
               fi
-              for v in $(ls -1 "testers/$d/build"/Dockerfile.* 2>/dev/null | sed 's#.*/Dockerfile\.##'); do
-                printf ',{"image":"tester-%s-%s","dockerfile":"testers/%s/build/Dockerfile.%s","context":"testers/%s"}' "$d" "$v" "$d" "$v" "$d"
+              for v in $(ls -1 "runners/$d/build"/Dockerfile.* 2>/dev/null | sed 's#.*/Dockerfile\.##'); do
+                printf ',{"image":"runner-%s-%s","dockerfile":"runners/%s/build/Dockerfile.%s","context":"runners/%s"}' "$d" "$v" "$d" "$v" "$d"
               done
             done
             echo ""
@@ -74,7 +74,7 @@ jobs:
           echo "matrix={\"include\":[$(cat /tmp/items.txt)]}" >> "$GITHUB_OUTPUT"
           echo "发布矩阵："
           cat /tmp/items.txt; echo
-          echo "Tester 数量：$(ls -1 testers | wc -l)"
+          echo "Runner 数量：$(ls -1 runners | wc -l)"
 
   # PR 上只验证 Dockerfile 还能构建（amd64，不推送）
   build-only:
@@ -126,7 +126,7 @@ jobs:
           if [ -z "$raw" ]; then raw="${GITHUB_REF_NAME}"; fi
           ver="${raw#v}"
           short="$(git rev-parse --short=12 HEAD)"
-          ref="${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}"
+          ref="${{ env.REGISTRY }}/${{ env.OWNER }}/argus-${{ matrix.image }}"
           echo "version=${ver}" >> "$GITHUB_OUTPUT"
           echo "short=${short}" >> "$GITHUB_OUTPUT"
           # :latest 只允许由 tag 触发更新；workflow_dispatch 从任意 ref 触发时绝不动 latest（W-8）
@@ -175,7 +175,7 @@ jobs:
 
       - name: 校验双架构清单
         run: |
-          ref="${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}:${{ steps.meta.outputs.version }}"
+          ref="${{ env.REGISTRY }}/${{ env.OWNER }}/argus-${{ matrix.image }}:${{ steps.meta.outputs.version }}"
           # 用人类可读输出（含 `Platform: linux/amd64` 行）；--format {{json .Manifest}} 里没有 platform 字段
           out="$(docker buildx imagetools inspect "$ref")"
           echo "$out"
@@ -191,7 +191,7 @@ jobs:
             echo ""
             echo "| 项 | 值 |"
             echo "|---|---|"
-            echo "| 镜像 | \`${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}\` |"
+            echo "| 镜像 | \`${{ env.REGISTRY }}/${{ env.OWNER }}/argus-${{ matrix.image }}\` |"
             echo "| tag | \`${{ steps.meta.outputs.version }}\` / \`sha-${{ steps.meta.outputs.short }}\` / \`latest\` |"
             echo "| 平台 | \`${{ inputs.platforms || 'linux/amd64,linux/arm64' }}\` |"
             echo "| digest | \`${{ steps.build.outputs.digest }}\` |"
@@ -199,7 +199,7 @@ jobs:
             echo '填进 Helm values：'
             echo '```yaml'
             echo "image:"
-            echo "  repository: ${{ env.REGISTRY }}/${{ env.OWNER }}/testplane-${{ matrix.image }}"
+            echo "  repository: ${{ env.REGISTRY }}/${{ env.OWNER }}/argus-${{ matrix.image }}"
             echo "  digest: ${{ steps.build.outputs.digest }}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

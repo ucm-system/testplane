@@ -1,10 +1,18 @@
-// Package registry 实现 Tester 注册表（design/impl/execution.md §10）。
+// Package registry 实现 Runner 注册表（ARCHITECTURE §5.6、design/impl/execution.md）。
 //
-// 职责：启动时扫描 testers/*/tester.yaml → 解析成 domain.TesterSpec → 校验（15 条规则的
+// 职责：启动时扫描 runners/*/runner.yaml → 解析成 domain.RunnerSpec → 校验（v2 规则的
 // 结构性部分）→ 与库同步（同 name+version 同内容 no-op，不同内容拒绝，拒绝启动）。
-// 另外对外提供 Resolve / List / Register 给 API 层，以及公共参数注入（C-8.5）。
+// 另外对外提供 Resolve / List 给 API 层，以及输入校验与 endpoint_key（C-8.4/C-8.5）。
 //
-// 边界：注册表不构建镜像、不渲染表单、不做运行时参数语义校验（§1、§5.4）。
+// 边界：注册表不构建镜像、不渲染表单、不做输入语义校验（§5.4：范围/枚举/跨字段归 Runner）。
+//
+// v2 裁决（附录 C / D-66～D-71）：
+//   - entry 是 **exec form 数组**（不经 shell、不追加 argv，§5.2）；
+//   - input_format: jsonl|yaml|text 声明校验深度（D-67）；
+//   - role 四值 test|pre_check|deploy|clean，**deploy/clean 仅内置**（§5.1，用户注册拒绝）；
+//   - on_failure 枚举 continue|abort_task；pre_check 与内置 deploy/clean 必须 abort_task（§7.3）；
+//   - parameters 仅 jsonl（yaml/text 必须 []），平台校验 type/required（D-67）；
+//   - exports/consumes 声明下游/上游 key（§5.12）。
 package registry
 
 import (
@@ -18,7 +26,6 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,15 +37,17 @@ import (
 
 // 校验错误与哨兵错误。对外 code 用 domain.Code*（附录 D）。
 var (
-	// ErrInvalid 表示 tester.yaml 没通过校验（TESTER_INVALID）。
-	ErrInvalid = errors.New("registry: invalid tester")
-	// ErrVersionPinned 表示同 name+version 内容不同（TESTER_VERSION_PINNED，K-3）。
-	ErrVersionPinned = errors.New("registry: same tester version has different content")
+	// ErrInvalid 表示 runner.yaml 没通过校验（RUNNER_INVALID）。
+	ErrInvalid = errors.New("registry: invalid runner")
+	// ErrVersionPinned 表示同 name+version 内容不同（RUNNER_VERSION_PINNED，K-3）。
+	ErrVersionPinned = errors.New("registry: same runner version has different content")
 	// ErrForbiddenField 表示出现了附录 C 明令禁止的字段。
 	ErrForbiddenField = errors.New("registry: forbidden field")
+	// ErrForbiddenRole 表示用户目录声明了 role: deploy / role: clean（§5.1 仅内置）。
+	ErrForbiddenRole = errors.New("registry: deploy/clean role is built-in only")
 )
 
-// FieldError 是字段级校验错误（§10 的"带字段路径"）。
+// FieldError 是字段级校验错误（§5.6 的"字段级错误"）。
 type FieldError struct {
 	Path    string `json:"path"`
 	Message string `json:"message"`
@@ -64,26 +73,33 @@ func (e *ValidationError) Unwrap() error { return ErrInvalid }
 
 // 校验规则常量。
 const (
-	// RequiredEntry 是 Tester 契约规定的容器内入口（§10 校验项 4）。
-	RequiredEntry = "/tester/run.sh"
-	// TesterFileName 是注册表唯一识别的文件名。
-	TesterFileName = "tester.yaml"
-	// RunScriptName 是必须存在且带可执行位的脚本（§10 校验项 14）。
-	RunScriptName = "run.sh"
+	// RunnerFileName 是注册表唯一识别的文件名（§5.5：只认 Runner 根目录下的 runner.yaml）。
+	RunnerFileName = "runner.yaml"
+	// BuiltinDeployName / BuiltinCleanName 是平台内置 service runner 的注册名（§9.1）。
+	BuiltinDeployName = "service-deploy"
+	BuiltinCleanName  = "service-clean"
+	// BuiltinPreCheckName 是内置探活 Runner（§5.1）。
+	BuiltinPreCheckName = "endpoint-probe"
 )
 
+// BuiltinRunnerNames 返回内置 Runner 名集合（随平台发版，§12.1）。
+func BuiltinRunnerNames() map[string]bool {
+	return map[string]bool{
+		BuiltinDeployName:   true,
+		BuiltinCleanName:    true,
+		BuiltinPreCheckName: true,
+	}
+}
+
 var (
-	// namePattern：小写 [a-z0-9-]，≤63（§10 校验项 1–2）。
+	// namePattern：小写 [a-z0-9-]，≤63（附录 C）。
 	namePattern = regexp.MustCompile(`^[a-z0-9-]{1,63}$`)
-	// versionPattern：语义化版本（§10 校验项 2）。
+	// versionPattern：语义化版本（附录 C）。
 	versionPattern = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
-	// 平台保留的挂载点（§10 校验项 11）。
-	//
-	// #74：这里曾经和 executor/render.go 的集合不一致（少了 /workspace/input、多了也不齐），
-	// 导致 `/tester` 提交期被拒、渲染期却放行。现在**唯一来源是 domain**；
-	// 统一共享挂载（D-63）的路径也在其中（由调用方传入 shared 列表时合入）。
+	// 平台保留的挂载点。唯一来源是 domain；统一共享挂载（D-63）的路径也在其中
+	//（由调用方传入 shared 列表时合入）。
 	reservedMountPaths = domain.ReservedMountPaths(nil)
-	// 禁止出现的 K8s 清单（§6.8、§10 校验项 15）。
+	// 禁止出现的 K8s 清单（§6.8）。
 	forbiddenManifests = map[string]struct{}{
 		"job.yaml":           {},
 		"job.yml":            {},
@@ -98,11 +114,11 @@ var (
 		"pvc.yaml":           {},
 		"networkpolicy.yaml": {},
 	}
-	// 禁止出现的 tester.yaml 顶层字段（§10 校验项 7）。
-	forbiddenFields = []string{"requires", "timeout_seconds", "outputs"}
+	// 禁止出现的 runner.yaml 顶层字段（附录 C：timeout_seconds/outputs/requires 均"禁止"）。
+	forbiddenFields = []string{"timeout_seconds", "outputs", "requires", "executors", "retry"}
 )
 
-// K8sSection 是 tester.yaml 里允许的 k8s 白名单（§10 校验项 8）。
+// K8sSection 是 runner.yaml 里允许的 k8s 白名单（§6.8 受限声明字段）。
 type K8sSection struct {
 	NodeSelector    map[string]string `yaml:"node_selector" json:"node_selector"`
 	Tolerations     []map[string]any  `yaml:"tolerations" json:"tolerations"`
@@ -112,29 +128,31 @@ type K8sSection struct {
 
 // Record 是注册表里的一行（spec + 指纹 + 来源）。
 type Record struct {
-	Spec       domain.TesterSpec `json:"spec"`
+	Spec       domain.RunnerSpec `json:"spec"`
 	ContentSHA string            `json:"content_sha"`
 	SourceFile string            `json:"source_file"`
 	Orphaned   bool              `json:"orphaned"`
 }
 
-// Store 是注册表对持久化的唯一依赖（由 backend-core 的 store 适配）。
+// Store 是注册表对持久化的唯一依赖（由 store.RunnerRegistry 适配）。
 // 实现者按 (name, version) upsert；content_sha 不同视为"同版本不同内容"。
 type Store interface {
-	// UpsertTester 在一个事务内写一行；created 表示是否新增。
-	UpsertTester(ctx context.Context, rec Record) (created bool, err error)
-	// GetTester 读一行；version 为空表示取最新。未找到返回包装 domain.ErrNotFound 的错误。
-	GetTester(ctx context.Context, name, version string) (Record, error)
-	// ListTesters 列出全部；role 为空不过滤。
-	ListTesters(ctx context.Context) ([]Record, error)
-	// MarkTesterOrphaned 把 (name, version) 标记为 retired/orphaned（**只标记，不删除**）。
+	// UpsertRunner 在一个事务内写一行；created 表示是否新增。
+	UpsertRunner(ctx context.Context, rec Record) (created bool, err error)
+	// GetRunner 读一行；version 为空表示取最高版本。未找到返回包装 domain.ErrNotFound 的错误。
+	GetRunner(ctx context.Context, name, version string) (Record, error)
+	// ListRunners 列出全部；role 为空不过滤。
+	ListRunners(ctx context.Context) ([]Record, error)
+	// MarkRunnerOrphaned 把 (name, version) 标记为 retired/orphaned（**只标记，不删除**）。
 	// 必须在 Scan 里落库：否则进程重启后从库里读回来的行 orphaned=false，
-	// `retired` 会永远为 false（票 #60 真机回归）。
-	MarkTesterOrphaned(ctx context.Context, name, version string) error
+	// `retired` 会永远为 false（§5.6.1 / 票 #60 真机回归）。
+	MarkRunnerOrphaned(ctx context.Context, name, version string) error
 }
 
 // Options 是注册表配置。
 type Options struct {
+	// Builtins 是内置 Runner 名集合（deploy/clean 仅内置，§5.1）；nil 视为全内置名单。
+	Builtins map[string]bool
 	// Now 便于测试注入时钟。
 	Now func() time.Time
 	// Logf 是可选的日志钩子（nil 即静默）。
@@ -150,10 +168,16 @@ func (o Options) withDefaults() Options {
 	if o.Logf == nil {
 		o.Logf = func(string, ...any) {}
 	}
+	if len(o.Builtins) == 0 {
+		o.Builtins = BuiltinRunnerNames()
+	}
 	return o
 }
 
-// SyncDiff 是一次扫描的结果（§10 的 SyncDiff）。
+// IsBuiltin 报告该 Runner 名是否内置（deploy/clean 角色只对内置名单放行）。
+func (o Options) IsBuiltin(name string) bool { return o.withDefaults().Builtins[name] }
+
+// SyncDiff 是一次扫描的结果。
 type SyncDiff struct {
 	Added     []string `json:"added"`
 	Unchanged []string `json:"unchanged"`
@@ -161,12 +185,12 @@ type SyncDiff struct {
 	Removed   []string `json:"removed"`
 }
 
-// Registry 是 Tester 注册表。内存快照服务于热路径（Resolve/List），
+// Registry 是 Runner 注册表。内存快照服务于热路径（Resolve/List），
 // 持久化通过 Store 完成；启动扫描失败即拒绝启动（K-3：不做运行时更新）。
 type Registry struct {
 	mu      sync.RWMutex
 	records map[string]Record // key = name@version
-	latest  map[string]string // name -> 最新 version
+	latest  map[string]string // name -> 最高 version
 	store   Store
 	opts    Options
 }
@@ -184,15 +208,15 @@ func New(store Store, opts Options) *Registry {
 // Key 返回注册表主键。
 func Key(name, version string) string { return name + "@" + version }
 
-// Scan 扫描 dir 下所有 testers/*/tester.yaml，校验并同步进注册表。
+// Scan 扫描 dir 下所有 runners/*/runner.yaml，校验并同步进注册表。
 //
 // 任何一条不合法都返回错误（调用方应当拒绝启动）。同 name+version 同内容 no-op，
-// 不同内容返回 ErrVersionPinned 并整批拒绝（§10 "拒绝整批"）。
+// 不同内容返回 ErrVersionPinned 并整批拒绝（§5.6）。role=deploy/clean 只对内置名单放行。
 func (r *Registry) Scan(ctx context.Context, dir string) (SyncDiff, error) {
 	diff := SyncDiff{}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return diff, fmt.Errorf("registry: read testers dir %q: %w", dir, err)
+		return diff, fmt.Errorf("registry: read runners dir %q: %w", dir, err)
 	}
 	found := make(map[string]Record)
 	for _, e := range entries {
@@ -200,7 +224,7 @@ func (r *Registry) Scan(ctx context.Context, dir string) (SyncDiff, error) {
 			continue
 		}
 		sub := filepath.Join(dir, e.Name())
-		rec, err := loadDir(sub)
+		rec, err := loadDir(sub, r.opts.IsBuiltin(e.Name()))
 		if err != nil {
 			return diff, err
 		}
@@ -230,12 +254,11 @@ func (r *Registry) Scan(ctx context.Context, dir string) (SyncDiff, error) {
 		}
 	}
 
-	// 目录里消失的只标记 orphaned，不自动删（§10）。
+	// 目录里消失的只标记 orphaned，不自动删（§5.6.1）。
 	//
 	// **必须落库**：只改内存的话，进程重启后从库里读回来的行 orphaned 仍是 false，
 	// `retired` 标志退化成恒 false（票 #60 真机回归）。
-	// 顺序：先写库，成功后再改内存 —— 写库失败时内存保持原样，天然不会与库分叉
-	// （等价于"回滚"，因为此时尚未改内存）。
+	// 顺序：先写库，成功后再改内存 —— 写库失败时内存保持原样，天然不会与库分叉。
 	r.mu.RLock()
 	removed := make([]Record, 0, len(r.records))
 	for k, existing := range r.records {
@@ -254,7 +277,7 @@ func (r *Registry) Scan(ctx context.Context, dir string) (SyncDiff, error) {
 	for _, rec := range removed {
 		key := Key(rec.Spec.Name, rec.Spec.Version)
 		if r.store != nil {
-			if err := r.store.MarkTesterOrphaned(ctx, rec.Spec.Name, rec.Spec.Version); err != nil {
+			if err := r.store.MarkRunnerOrphaned(ctx, rec.Spec.Name, rec.Spec.Version); err != nil {
 				// 内存一个字节都没动 → 返回错误即可，不会出现"内存说 retired、库里不是"。
 				return diff, fmt.Errorf("registry: mark orphaned %s: %w", key, err)
 			}
@@ -289,7 +312,7 @@ func (r *Registry) apply(ctx context.Context, rec Record, diff *SyncDiff) error 
 		diff.Changed = append(diff.Changed, key)
 	default:
 		if r.store != nil {
-			stored, err := r.store.GetTester(ctx, rec.Spec.Name, rec.Spec.Version)
+			stored, err := r.store.GetRunner(ctx, rec.Spec.Name, rec.Spec.Version)
 			if err == nil && stored.ContentSHA != rec.ContentSHA && !r.opts.AllowContentChange {
 				return fmt.Errorf("%w: %s (stored %s, on disk %s); bump the version",
 					ErrVersionPinned, key, stored.ContentSHA, rec.ContentSHA)
@@ -299,7 +322,7 @@ func (r *Registry) apply(ctx context.Context, rec Record, diff *SyncDiff) error 
 	}
 
 	if r.store != nil {
-		if _, err := r.store.UpsertTester(ctx, rec); err != nil {
+		if _, err := r.store.UpsertRunner(ctx, rec); err != nil {
 			return fmt.Errorf("registry: persist %s: %w", key, err)
 		}
 	}
@@ -317,17 +340,27 @@ func (r *Registry) put(rec Record) {
 	}
 }
 
-// Register 校验并注册一份上传的 tester.yaml（POST /v1/testers）。
-// 上传内容没有 run.sh，因此指纹只覆盖 yaml 本身。
-func (r *Registry) Register(ctx context.Context, raw []byte) (domain.TesterSpec, error) {
-	spec, err := Parse(raw)
+// Register 校验并注册一份上传的 runner.yaml（管理面维护路径；deploy/clean 角色拒绝）。
+// 上传内容没有 entry 文件，因此指纹只覆盖 yaml 本身。
+func (r *Registry) Register(ctx context.Context, raw []byte) (domain.RunnerSpec, error) {
+	return r.registerRaw(ctx, raw, false, "upload:")
+}
+
+// RegisterForTest 是测试用的注册入口（不走目录扫描）。
+func (r *Registry) RegisterForTest(raw []byte) (domain.RunnerSpec, error) {
+	return r.registerRaw(context.Background(), raw, false, "test:")
+}
+
+// registerRaw 解析、校验并写入注册表（幂等：同内容重复注册 no-op）。
+func (r *Registry) registerRaw(ctx context.Context, raw []byte, builtin bool, srcPrefix string) (domain.RunnerSpec, error) {
+	spec, err := parseWithBuiltin(raw, builtin)
 	if err != nil {
-		return domain.TesterSpec{}, err
+		return domain.RunnerSpec{}, err
 	}
 	rec := Record{
 		Spec:       spec,
 		ContentSHA: contentSHA(raw, nil),
-		SourceFile: "upload:" + spec.Key(),
+		SourceFile: srcPrefix + spec.Key(),
 	}
 	key := spec.Key()
 
@@ -335,15 +368,15 @@ func (r *Registry) Register(ctx context.Context, raw []byte) (domain.TesterSpec,
 	existing, ok := r.records[key]
 	r.mu.RUnlock()
 	if ok && existing.ContentSHA == rec.ContentSHA {
-		// 幂等：同内容重复上传 no-op（§10 "同步幂等"）。
+		// 幂等：同内容重复注册 no-op。
 		return existing.Spec, nil
 	}
 	if ok && existing.ContentSHA != rec.ContentSHA && !r.opts.AllowContentChange {
-		return domain.TesterSpec{}, fmt.Errorf("%w: %s; bump the version", ErrVersionPinned, key)
+		return domain.RunnerSpec{}, fmt.Errorf("%w: %s; bump the version", ErrVersionPinned, key)
 	}
 	if r.store != nil {
-		if _, err := r.store.UpsertTester(ctx, rec); err != nil {
-			return domain.TesterSpec{}, fmt.Errorf("registry: persist %s: %w", key, err)
+		if _, err := r.store.UpsertRunner(ctx, rec); err != nil {
+			return domain.RunnerSpec{}, fmt.Errorf("registry: persist %s: %w", key, err)
 		}
 	}
 	r.put(rec)
@@ -351,32 +384,32 @@ func (r *Registry) Register(ctx context.Context, raw []byte) (domain.TesterSpec,
 	return spec, nil
 }
 
-// Resolve 按 name+version 取 TesterSpec；version 为空取最新。
+// Resolve 按 name+version 取 RunnerSpec；version 为空取最高版本。
 // 找不到返回包装 domain.ErrNotFound 的错误（api 侧据此映射 404）。
-func (r *Registry) Resolve(ctx context.Context, name, version string) (domain.TesterSpec, error) {
+func (r *Registry) Resolve(ctx context.Context, name, version string) (domain.RunnerSpec, error) {
 	if name == "" {
-		return domain.TesterSpec{}, fmt.Errorf("registry: resolve: empty name: %w", domain.ErrNotFound)
+		return domain.RunnerSpec{}, fmt.Errorf("registry: resolve: empty name: %w", domain.ErrNotFound)
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if version == "" {
 		version = r.latest[name]
 		if version == "" {
-			return domain.TesterSpec{}, fmt.Errorf("registry: tester %q: %w", name, domain.ErrNotFound)
+			return domain.RunnerSpec{}, fmt.Errorf("registry: runner %q: %w", name, domain.ErrNotFound)
 		}
 	}
 	rec, ok := r.records[Key(name, version)]
 	if !ok {
-		return domain.TesterSpec{}, fmt.Errorf("registry: tester %s@%s: %w", name, version, domain.ErrNotFound)
+		return domain.RunnerSpec{}, fmt.Errorf("registry: runner %s@%s: %w", name, version, domain.ErrNotFound)
 	}
 	return rec.Spec, nil
 }
 
 // List 列出注册表；role 非空时按 role 过滤，includeOrphaned=false 时隐藏已下线版本。
-func (r *Registry) List(ctx context.Context, role string, includeOrphaned bool) ([]domain.TesterSpec, error) {
+func (r *Registry) List(ctx context.Context, role string, includeOrphaned bool) ([]domain.RunnerSpec, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]domain.TesterSpec, 0, len(r.records))
+	out := make([]domain.RunnerSpec, 0, len(r.records))
 	for _, rec := range r.records {
 		if rec.Orphaned && !includeOrphaned {
 			continue
@@ -406,11 +439,10 @@ func (r *Registry) Len() int {
 func (r *Registry) Load(ctx context.Context, dir string) (SyncDiff, error) {
 	var diff SyncDiff
 	// **先水合、再扫描**：Scan 判定"目录里已消失的版本"依赖 r.records 里已有的行。
-	// 先 Scan 再 ListTesters 的话 records 还是空的，removed 恒为空 —— 只存在于库里的
-	// 旧版本永远不会被标 orphaned/retired（真机回归：升到 0.3.0 后 0.1.0/0.2.0 的
-	// retired 一直是 false，库里 orphaned 也一直是 f）。
+	// 先 Scan 再 ListRunners 的话 records 还是空的，removed 恒为空 —— 只存在于库里的
+	// 旧版本永远不会被标 orphaned/retired（真机回归）。
 	if r.store != nil {
-		recs, err := r.store.ListTesters(ctx)
+		recs, err := r.store.ListRunners(ctx)
 		if err != nil {
 			return diff, fmt.Errorf("registry: load: %w", err)
 		}
@@ -429,11 +461,10 @@ func (r *Registry) Load(ctx context.Context, dir string) (SyncDiff, error) {
 	return diff, nil
 }
 
-// RunRescan 周期重扫目录（自发现）。interval <= 0 时只扫一次即返回。
+// RunRescan 周期重扫目录（运维兜底）。interval <= 0 时只扫一次即返回。
 //
 // 注意：K-3 的默认口径是"启动时扫描一次、不做运行时更新"；这里提供的是运维兜底，
-// 由调用方决定是否开启（例如灰度环境热更新 tester.yaml）。内容变化的判定仍走
-// Scan 的同版本拦截逻辑，不会静默覆盖。
+// 由调用方决定是否开启。内容变化的判定仍走 Scan 的同版本拦截逻辑，不会静默覆盖。
 func (r *Registry) RunRescan(ctx context.Context, dir string, interval time.Duration) error {
 	if interval <= 0 {
 		_, err := r.Scan(ctx, dir)
@@ -461,24 +492,27 @@ func (r *Registry) RunRescan(ctx context.Context, dir string, interval time.Dura
 
 // ---- 解析 ----------------------------------------------------------------
 
-// testerYAML 是 tester.yaml 的解析 DTO。容忍未知字段（yaml.v3 默认忽略），
+// runnerYAML 是 runner.yaml 的解析 DTO。容忍未知字段（yaml.v3 默认忽略），
 // 与附录 C 的字段差异不会导致注册失败。
-type testerYAML struct {
-	Name        string               `yaml:"name"`
-	Version     string               `yaml:"version"`
-	DisplayName string               `yaml:"display_name"`
-	Description string               `yaml:"description"`
-	Role        string               `yaml:"role"`
-	OnFailure   string               `yaml:"on_failure"`
-	Entry       string               `yaml:"entry"`
-	Image       string               `yaml:"image"`
-	Resources   resourcesYAML        `yaml:"resources"`
-	Concurrency concurrencyYAML      `yaml:"concurrency"`
-	Mounts      []mountYAML          `yaml:"mounts"`
-	Parameters  map[string]paramYAML `yaml:"parameters"`
-	Placeholder string               `yaml:"placeholder"`
-	Env         map[string]envYAML   `yaml:"env"`
-	K8s         *K8sSection          `yaml:"k8s"`
+type runnerYAML struct {
+	Name        string             `yaml:"name"`
+	Version     string             `yaml:"version"`
+	DisplayName string             `yaml:"display_name"`
+	Description string             `yaml:"description"`
+	Role        string             `yaml:"role"`
+	OnFailure   string             `yaml:"on_failure"`
+	Entry       []string           `yaml:"entry"`
+	InputFormat string             `yaml:"input_format"`
+	Image       string             `yaml:"image"`
+	Resources   resourcesYAML      `yaml:"resources"`
+	Concurrency concurrencyYAML    `yaml:"concurrency"`
+	Mounts      []mountYAML        `yaml:"mounts"`
+	Parameters  []paramYAML        `yaml:"parameters"`
+	Exports     []string           `yaml:"exports"`
+	Consumes    []string           `yaml:"consumes"`
+	Placeholder string             `yaml:"placeholder"`
+	Env         map[string]envYAML `yaml:"env"`
+	K8s         *K8sSection        `yaml:"k8s"`
 }
 
 type resourcesYAML struct {
@@ -496,17 +530,17 @@ type concurrencyYAML struct {
 	EndpointExclusive bool `yaml:"endpoint_exclusive"`
 }
 
-// mountYAML 同时接受 path 与 mount_path 两个键（lead 口径）。
+// mountYAML 同时接受 path 与 mount_path 两个键。
 type mountYAML struct {
 	Name      string `yaml:"name"`
 	Path      string `yaml:"path"`
 	MountPath string `yaml:"mount_path"`
 	ReadOnly  bool   `yaml:"read_only"`
 	Source    string `yaml:"source"`
-	Required  *bool  `yaml:"required"`
 }
 
 type paramYAML struct {
+	Name        string `yaml:"name"`
 	Type        string `yaml:"type"`
 	Required    bool   `yaml:"required"`
 	Default     string `yaml:"default"`
@@ -519,11 +553,20 @@ type envYAML struct {
 	Description string `yaml:"description"`
 }
 
-// Parse 解析并校验一份 tester.yaml 字节内容。
-func Parse(raw []byte) (domain.TesterSpec, error) {
-	var doc testerYAML
+// Parse 解析并校验一份 runner.yaml 字节内容（不含目录级检查：entry 文件存在性由 loadDir 做）。
+func Parse(raw []byte) (domain.RunnerSpec, error) {
+	return parseWithBuiltin(raw, false)
+}
+
+// ParseBuiltin 解析内置 Runner 的 runner.yaml（deploy/clean 角色只对内置放行）。
+func ParseBuiltin(raw []byte) (domain.RunnerSpec, error) {
+	return parseWithBuiltin(raw, true)
+}
+
+func parseWithBuiltin(raw []byte, builtin bool) (domain.RunnerSpec, error) {
+	var doc runnerYAML
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return domain.TesterSpec{}, &ValidationError{Errors: []FieldError{{Path: "", Message: "yaml: " + err.Error()}}}
+		return domain.RunnerSpec{}, &ValidationError{Errors: []FieldError{{Path: "", Message: "yaml: " + err.Error()}}}
 	}
 	// 明确拒绝附录 C 禁止字段：先按通用 map 检查一遍键。
 	var generic map[string]any
@@ -531,18 +574,19 @@ func Parse(raw []byte) (domain.TesterSpec, error) {
 	var issues []FieldError
 	for _, f := range forbiddenFields {
 		if _, ok := generic[f]; ok {
-			issues = append(issues, FieldError{Path: f, Message: "field is not allowed in tester.yaml (appendix C)"})
+			issues = append(issues, FieldError{Path: f, Message: "field is not allowed in runner.yaml (appendix C)"})
 		}
 	}
 
-	spec := domain.TesterSpec{
+	spec := domain.RunnerSpec{
 		Name:        strings.TrimSpace(doc.Name),
 		Version:     strings.TrimSpace(doc.Version),
 		DisplayName: strings.TrimSpace(doc.DisplayName),
 		Description: doc.Description,
 		Role:        strings.TrimSpace(doc.Role),
 		OnFailure:   strings.TrimSpace(doc.OnFailure),
-		Entry:       strings.TrimSpace(doc.Entry),
+		Entry:       doc.Entry,
+		InputFormat: strings.TrimSpace(doc.InputFormat),
 		Image:       strings.TrimSpace(doc.Image),
 		Placeholder: doc.Placeholder,
 		Resources: domain.ResourceRequest{
@@ -554,13 +598,25 @@ func Parse(raw []byte) (domain.TesterSpec, error) {
 			},
 		},
 		Concurrency: domain.ConcurrencyPolicy{EndpointExclusive: doc.Concurrency.EndpointExclusive},
-		Parameters:  make(map[string]domain.Param, len(doc.Parameters)),
+		Exports:     trimList(doc.Exports),
+		Consumes:    trimList(doc.Consumes),
 		Env:         make(map[string]domain.EnvVar, len(doc.Env)),
 	}
-	for name, p := range doc.Parameters {
-		spec.Parameters[name] = domain.Param{
-			Type: p.Type, Required: p.Required, Default: p.Default, Description: p.Description,
+	if spec.InputFormat == "" {
+		spec.InputFormat = domain.InputFormatJSONL // 附录 C：jsonl（默认）
+	}
+	if len(spec.Entry) == 0 {
+		if s, ok := generic["entry"]; ok && s == nil {
+			// entry 显式为空：留给 ValidateSpec 报错。
 		}
+	} else {
+		spec.Entry = trimList(doc.Entry)
+	}
+	for _, p := range doc.Parameters {
+		spec.Parameters = append(spec.Parameters, domain.Param{
+			Name: strings.TrimSpace(p.Name), Type: strings.TrimSpace(p.Type),
+			Required: p.Required, Default: p.Default, Description: p.Description,
+		})
 	}
 	for name, e := range doc.Env {
 		spec.Env[name] = domain.EnvVar{Required: e.Required, Secret: e.Secret, Description: e.Description}
@@ -575,15 +631,31 @@ func Parse(raw []byte) (domain.TesterSpec, error) {
 		})
 	}
 
-	issues = append(issues, ValidateSpec(spec, doc)...)
+	issues = append(issues, ValidateSpec(spec, doc, builtin)...)
 	if len(issues) > 0 {
-		return domain.TesterSpec{}, &ValidationError{Name: spec.Key(), Errors: issues}
+		return domain.RunnerSpec{}, &ValidationError{Name: spec.Key(), Errors: issues}
 	}
 	return spec, nil
 }
 
-// ValidateSpec 校验 §10 的业务规则（schema 之外的部分）。
-func ValidateSpec(spec domain.TesterSpec, raw testerYAML) []FieldError {
+// trimList 去除列表项首尾空白并丢弃空项。
+func trimList(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// ValidateSpec 校验 §5.6 的业务规则（schema 之外的部分）。
+// builtin=true 表示这份 yaml 来自内置 Runner 目录（deploy/clean 角色放行）。
+func ValidateSpec(spec domain.RunnerSpec, raw runnerYAML, builtin bool) []FieldError {
 	var issues []FieldError
 	add := func(path, msg string) { issues = append(issues, FieldError{Path: path, Message: msg}) }
 
@@ -596,24 +668,40 @@ func ValidateSpec(spec domain.TesterSpec, raw testerYAML) []FieldError {
 	if spec.Image == "" {
 		add("image", "is required")
 	}
-	if spec.Entry != RequiredEntry {
-		add("entry", "must be "+RequiredEntry)
+	// entry：exec form 数组，非空、每项非空（§5.2 / §5.6 步骤 2）。
+	if len(spec.Entry) == 0 {
+		add("entry", "must be a non-empty exec form array, e.g. [\"/runner/run.sh\"]")
+	} else {
+		for i, e := range spec.Entry {
+			if strings.TrimSpace(e) == "" {
+				add(fmt.Sprintf("entry[%d]", i), "must not be empty")
+			}
+		}
+		if strings.Contains(spec.EntryString(), " && ") || strings.Contains(spec.EntryString(), "|") {
+			add("entry", "must be exec form (no shell operators)")
+		}
+	}
+	if !domain.ValidInputFormat(spec.InputFormat) {
+		add("input_format", "must be jsonl|yaml|text (D-67)")
 	}
 	switch spec.Role {
-	case domain.RoleTest, domain.RolePreCheck:
+	case domain.RoleTest, domain.RolePreCheck, domain.RoleDeploy, domain.RoleClean:
 	default:
-		add("role", "must be test or pre_check")
+		add("role", "must be test|pre_check|deploy|clean")
+	}
+	// role 边界（§5.1）：deploy / clean 仅内置，用户注册一律拒绝。
+	if (spec.Role == domain.RoleDeploy || spec.Role == domain.RoleClean) && !builtin {
+		add("role", "role deploy/clean is built-in only (service-deploy / service-clean); user registration is rejected")
 	}
 	switch spec.OnFailure {
-	case domain.OnFailureContinue, domain.OnFailureAbortRun:
+	case domain.OnFailureContinue, domain.OnFailureAbortTask:
 	default:
-		add("on_failure", "must be continue or abort_run")
+		add("on_failure", "must be continue or abort_task")
 	}
-	if spec.Role == domain.RolePreCheck && spec.OnFailure != domain.OnFailureAbortRun {
-		add("on_failure", "role=pre_check must declare on_failure: abort_run")
-	}
-	if spec.Role == domain.RolePreCheck && !spec.Concurrency.EndpointExclusive {
-		add("concurrency.endpoint_exclusive", "role=pre_check must be true")
+	// §7.3：pre_check 与内置 deploy/clean 必须 abort_task（否则拒绝注册）。
+	needsAbort := spec.Role == domain.RolePreCheck || spec.Role == domain.RoleDeploy || spec.Role == domain.RoleClean
+	if needsAbort && spec.OnFailure != domain.OnFailureAbortTask {
+		add("on_failure", fmt.Sprintf("role=%s must declare on_failure: abort_task", spec.Role))
 	}
 	if spec.Resources.CPU == "" {
 		add("resources.cpu", "is required")
@@ -624,25 +712,54 @@ func ValidateSpec(spec domain.TesterSpec, raw testerYAML) []FieldError {
 	if spec.Resources.GPU.Count < 0 {
 		add("resources.gpu.count", "must be >= 0")
 	}
-	if spec.Parameters == nil {
-		add("parameters", "must be present (may be an empty object)")
+
+	// parameters：仅 jsonl（yaml/text 必须 []，附录 C）；平台校验 type/required 结构（D-67）。
+	if spec.InputFormat != domain.InputFormatJSONL {
+		if len(spec.Parameters) > 0 {
+			add("parameters", fmt.Sprintf("input_format=%s requires parameters: [] (jsonl only, D-67)", spec.InputFormat))
+		}
 	} else {
-		for name, p := range spec.Parameters {
-			if strings.TrimSpace(p.Description) == "" {
-				add("parameters."+name+".description", "is required")
+		seen := map[string]bool{}
+		for i, p := range spec.Parameters {
+			path := fmt.Sprintf("parameters[%d]", i)
+			if p.Name == "" {
+				add(path+".name", "is required")
+				continue
+			}
+			if seen[p.Name] {
+				add(path+".name", fmt.Sprintf("duplicate parameter name %q", p.Name))
+			}
+			seen[p.Name] = true
+			if !domain.ValidParamType(p.Type) {
+				add(path+".type", fmt.Sprintf("must be one of %s", strings.Join(domain.ParamTypes, "|")))
 			}
 		}
 	}
+
+	// exports / consumes（§5.12）：字符串列表，条目非空；重复 key 拒绝。
+	for _, list := range []struct {
+		path string
+		keys []string
+	}{{"exports", spec.Exports}, {"consumes", spec.Consumes}} {
+		seen := map[string]bool{}
+		for _, k := range list.keys {
+			if seen[k] {
+				add(list.path, fmt.Sprintf("duplicate key %q (combination-time duplicate keys are rejected, §5.12)", k))
+			}
+			seen[k] = true
+		}
+	}
+
 	for name, e := range spec.Env {
 		if strings.TrimSpace(e.Description) == "" {
 			add("env."+name+".description", "is required")
 		}
 	}
 
-	// 挂载：绝对路径 + 不与平台保留路径冲突 + 互不前缀重叠（§3.4、§10 校验项 11）。
+	// 挂载：绝对路径 + 不与平台保留路径冲突 + 互不前缀重叠（§3.4）。
 	seen := map[string]struct{}{}
 	for i, m := range spec.Mounts {
-		path := "mounts[" + strconv.Itoa(i) + "]"
+		path := "mounts[" + strconvItoa(i) + "]"
 		if m.MountPath == "" {
 			add(path+".mount_path", "is required")
 			continue
@@ -667,7 +784,7 @@ func ValidateSpec(spec domain.TesterSpec, raw testerYAML) []FieldError {
 		}
 	}
 
-	// k8s 白名单（§10 校验项 8）：只允许四个键，且 security_context 只允许两个键。
+	// k8s 白名单（§6.8）：只允许四个键，且 security_context 只允许两个键。
 	if raw.K8s != nil {
 		for key := range raw.K8s.SecurityContext {
 			switch key {
@@ -676,46 +793,61 @@ func ValidateSpec(spec domain.TesterSpec, raw testerYAML) []FieldError {
 				add("k8s.security_context."+key, "is not allowed")
 			}
 		}
-	}
-	var genericK8s map[string]any
-	if b, err := yaml.Marshal(raw.K8s); err == nil && len(b) > 0 {
-		_ = yaml.Unmarshal(b, &genericK8s)
-	}
-	for key := range genericK8s {
-		switch key {
-		case "node_selector", "tolerations", "annotations", "security_context":
-		default:
-			add("k8s."+key, "is not allowed (only node_selector/tolerations/annotations/security_context)")
+		var genericK8s map[string]any
+		if b, err := yaml.Marshal(raw.K8s); err == nil && len(b) > 0 {
+			_ = yaml.Unmarshal(b, &genericK8s)
+		}
+		for key := range genericK8s {
+			switch key {
+			case "node_selector", "tolerations", "annotations", "security_context":
+			default:
+				add("k8s."+key, "is not allowed (only node_selector/tolerations/annotations/security_context)")
+			}
 		}
 	}
 	return issues
 }
 
-// loadDir 读取一个 Tester 目录（tester.yaml + run.sh），做目录级校验。
-func loadDir(dir string) (Record, error) {
-	manifestPath := filepath.Join(dir, TesterFileName)
+func strconvItoa(i int) string {
+	return fmt.Sprintf("%d", i)
+}
+
+// loadDir 读取一个 Runner 目录（runner.yaml + entry 文件），做目录级校验。
+// entry 文件的存在性由本目录保证（§5.6 步骤 3：entry 文件存在且具备执行权限；
+// 镜像内检查归 CI，平台不做）。
+func loadDir(dir string, builtin bool) (Record, error) {
+	manifestPath := filepath.Join(dir, RunnerFileName)
 	raw, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return Record{}, fmt.Errorf("registry: read %s: %w", manifestPath, err)
 	}
-	spec, err := Parse(raw)
+	spec, err := parseWithBuiltin(raw, builtin)
 	if err != nil {
 		return Record{}, err
 	}
 
-	runPath := filepath.Join(dir, RunScriptName)
-	runBytes, err := os.ReadFile(runPath)
-	if err != nil {
-		return Record{}, &ValidationError{
-			Name:   spec.Key(),
-			Errors: []FieldError{{Path: RunScriptName, Message: "run.sh is required"}},
+	var entryErrs []FieldError
+	if len(spec.Entry) > 0 {
+		// entry[0] 的文件名必须存在于 Runner 根目录（exec form 数组的第一个元素是可执行文件）。
+		entryBase := filepath.Base(spec.Entry[0])
+		entryPath := filepath.Join(dir, entryBase)
+		st, statErr := os.Stat(entryPath)
+		if statErr != nil || st.IsDir() {
+			entryErrs = append(entryErrs, FieldError{
+				Path: "entry[0]", Message: fmt.Sprintf("entry file %q must exist in the runner directory", spec.Entry[0]),
+			})
+		} else if !runOnWindows() && st.Mode().Perm()&0o111 == 0 {
+			entryErrs = append(entryErrs, FieldError{
+				Path: "entry[0]", Message: fmt.Sprintf("entry file %q must be executable", spec.Entry[0]),
+			})
 		}
 	}
-	if st, statErr := os.Stat(runPath); statErr == nil && !runOnWindows() && st.Mode().Perm()&0o111 == 0 {
-		return Record{}, &ValidationError{
-			Name:   spec.Key(),
-			Errors: []FieldError{{Path: RunScriptName, Message: "run.sh must be executable"}},
-		}
+	var entryBytes []byte
+	if len(spec.Entry) > 0 {
+		entryBytes, _ = os.ReadFile(filepath.Join(dir, filepath.Base(spec.Entry[0])))
+	}
+	if len(entryErrs) > 0 {
+		return Record{}, &ValidationError{Name: spec.Key(), Errors: entryErrs}
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -729,25 +861,25 @@ func loadDir(dir string) (Record, error) {
 		if _, bad := forbiddenManifests[strings.ToLower(e.Name())]; bad {
 			return Record{}, &ValidationError{
 				Name:   spec.Key(),
-				Errors: []FieldError{{Path: e.Name(), Message: "K8s manifests must not live in a tester directory"}},
+				Errors: []FieldError{{Path: e.Name(), Message: "K8s manifests must not live in a runner directory"}},
 			}
 		}
 	}
 
 	return Record{
 		Spec:       spec,
-		ContentSHA: contentSHA(raw, runBytes),
+		ContentSHA: contentSHA(raw, entryBytes),
 		SourceFile: manifestPath,
 	}, nil
 }
 
-// contentSHA 是"规范化 tester.yaml + run.sh 字节"的指纹（§10）：行尾统一成 \n，
+// contentSHA 是"规范化 runner.yaml + entry 文件字节"的指纹（§5.6.1）：行尾统一成 \n，
 // 避免 Windows/Linux checkout 造成假变更。
-func contentSHA(manifest, runScript []byte) string {
+func contentSHA(manifest, entry []byte) string {
 	h := sha256.New()
 	h.Write([]byte(normalizeText(manifest)))
 	h.Write([]byte{0})
-	h.Write([]byte(normalizeText(runScript)))
+	h.Write([]byte(normalizeText(entry)))
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
@@ -757,10 +889,10 @@ func normalizeText(b []byte) string {
 }
 
 // runOnWindows 让"可执行位"校验在 Windows 上跳过：NTFS 不存 POSIX 执行位，
-// 镜像内是 Linux，这条校验在 Linux/CI 上才有效（§10 校验项 14）。
+// 镜像内是 Linux，这条校验在 Linux/CI 上才有效。
 func runOnWindows() bool { return runtime.GOOS == "windows" }
 
 // versionLess 比较两个语义化版本（a < b）。
 // versionLess 委托给 domain.VersionLess —— 版本比较只允许有一份实现
-// （注册表排序、/testers 的 latest 判定、tpctl 展示都用它）。
+// （注册表排序、/runners 的 latest 判定、argus CLI 展示都用它）。
 func versionLess(a, b string) bool { return domain.VersionLess(a, b) }

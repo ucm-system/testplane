@@ -12,7 +12,7 @@ import (
 )
 
 // Effects 是转移的同事务副作用（02 §3.5、domain.Effects 给出每种转移要执行哪些）。
-// 这里只做 DB 写：外部动作（删 Job、卸载 Genet、写报告文件）由 orchestrator 在事务后执行。
+// 这里只做 DB 写：外部动作（删 Job、写报告文件）由 orchestrator 在事务后执行。
 func (s *Store) applyEffects(ctx context.Context, tx pgx.Tx, tr domain.Transition,
 	from, to domain.Status, at time.Time) error {
 
@@ -34,16 +34,8 @@ func (s *Store) applyEffects(ctx context.Context, tx pgx.Tx, tr domain.Transitio
 			if err := s.effectCloseActive(ctx, tx, tr, at); err != nil {
 				return err
 			}
-		case domain.EffectScheduleRetry:
-			if err := s.effectScheduleRetry(ctx, tx, tr, at); err != nil {
-				return err
-			}
 		case domain.EffectWriteReportIntent:
 			if err := s.effectWriteReportIntent(ctx, tx, tr, at); err != nil {
-				return err
-			}
-		case domain.EffectBackfillEndpoint:
-			if err := s.effectBackfillEndpoint(ctx, tx, tr); err != nil {
 				return err
 			}
 		default:
@@ -53,231 +45,173 @@ func (s *Store) applyEffects(ctx context.Context, tx pgx.Tx, tr domain.Transitio
 	return nil
 }
 
-// effectReleaseLeases 删除端点租约（Attempt 终态时删它所属 Task 的租约）。
+// effectReleaseLeases 删除该 runner 执行记录的端点租约（仅外接模式有租约）。
 func (s *Store) effectReleaseLeases(ctx context.Context, tx pgx.Tx, tr domain.Transition) error {
-	taskID := tr.ID
-	if tr.Entity == domain.EntityAttempt {
-		var tid string
-		err := tx.QueryRow(ctx, `SELECT task_id FROM attempts WHERE id = $1`, tr.ID).Scan(&tid)
-		if err != nil {
-			return fmt.Errorf("store: effects: release leases: lookup attempt %s: %w", tr.ID, err)
-		}
-		taskID = tid
+	if tr.Entity != domain.EntityRunnerRun {
+		return nil
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM endpoint_leases WHERE task_id = $1`, taskID); err != nil {
-		return fmt.Errorf("store: effects: release leases %s: %w", taskID, err)
+	k, ok := domain.ParseRunnerKey(tr.ID)
+	if !ok {
+		return fmt.Errorf("store: effects: release leases: 非法 key %q: %w", tr.ID, domain.ErrIllegalState)
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM endpoint_leases WHERE task_id = $1 AND attempt_no = $2 AND runner_seq = $3`,
+		k.TaskID, k.AttemptNo, k.Seq); err != nil {
+		return fmt.Errorf("store: effects: release leases %s: %w", k.ID(), err)
 	}
 	return nil
 }
 
-// effectSkipUnfinished 把 Run 里未开始的 Task（pending/queued）批量置 skipped，
-// 每条 Task 转移各写一条事件（§2 规则：每次转移写一条事件）。
+// effectSkipUnfinished 把 Task 当前 attempt 里未开始的 runner（pending/queued）批量置
+// skipped，每条转移各写一条事件。**传播到 clean 为止**：role=clean 的 runner 永不被
+// SKIPPED（finally 语义，§7.3/§7.6/C-5.7）。
 func (s *Store) effectSkipUnfinished(ctx context.Context, tx pgx.Tx, tr domain.Transition, at time.Time) error {
-	if tr.Entity != domain.EntityRun {
+	if tr.Entity != domain.EntityTask {
 		return nil
 	}
-	reason := domain.SkipReasonForRunTerminal(domain.RunStatus(tr.To))
-	rows, err := tx.Query(ctx,
-		`SELECT id FROM tasks WHERE run_id = $1 AND status IN ('pending','queued') ORDER BY id`, tr.ID)
+	reason := domain.SkipReasonForTaskTerminal(domain.TaskStatus(tr.To))
+	rows, err := tx.Query(ctx, `
+		SELECT attempt_no, seq FROM task_runners
+		 WHERE task_id = $1 AND attempt_no = (SELECT current_attempt FROM tasks WHERE id = $1)
+		   AND status IN ('pending','queued') AND role <> 'clean'
+		 ORDER BY attempt_no, seq`, tr.ID)
 	if err != nil {
 		return fmt.Errorf("store: effects: skip unfinished %s: %w", tr.ID, err)
 	}
-	ids, err := collectIDs(rows)
-	if err != nil {
-		return err
+	type key struct{ no, seq int }
+	var keys []key
+	for rows.Next() {
+		var k key
+		if err := rows.Scan(&k.no, &k.seq); err != nil {
+			rows.Close()
+			return fmt.Errorf("store: effects: scan skip unfinished: %w", err)
+		}
+		keys = append(keys, k)
 	}
-	for _, id := range ids {
-		var cur domain.TaskStatus
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("store: effects: skip unfinished %s: %w", tr.ID, err)
+	}
+	for _, k := range keys {
+		var cur domain.RunnerStatus
 		err := tx.QueryRow(ctx, `
-			UPDATE tasks SET status = 'skipped', status_reason = $2, waiting_reason = NULL, updated_at = $3
-			 WHERE id = $1 AND status IN ('pending','queued')
-			 RETURNING status`, id, reason, at).Scan(&cur)
+			UPDATE task_runners
+			   SET status = 'skipped', status_reason = $4, waiting_reason = NULL, updated_at = $5
+			 WHERE task_id = $1 AND attempt_no = $2 AND seq = $3 AND status IN ('pending','queued')
+			 RETURNING status`, tr.ID, k.no, k.seq, reason, at).Scan(&cur)
 		if err != nil {
 			// 行已被并发推走：先落库者胜，跳过。
 			continue
 		}
-		taskID := id
 		seq, err := s.nextSeq(ctx, tx, tr.ID)
 		if err != nil {
 			return err
 		}
-		payload, _ := json.Marshal(map[string]any{"reason": reason, "cause": "run_" + string(tr.To)})
+		no, sq := k.no, k.seq
+		payload, _ := json.Marshal(map[string]any{"reason": reason, "cause": "task_" + string(tr.To)})
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO state_events
-			  (run_id, task_id, seq, type, from_status, to_status, reason, payload, actor, created_at)
-			VALUES ($1, $2, $3, $4, 'pending', 'skipped', $5, $6, 'system:kernel', $7)`,
-			tr.ID, taskID, seq, domain.EventTaskStateChanged, reason, payload, at); err != nil {
-			return fmt.Errorf("store: effects: skip unfinished event %s: %w", taskID, err)
+			  (task_id, attempt_no, runner_seq, seq, type, from_status, to_status, reason, payload, actor, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, 'skipped', $7, $8, 'system:kernel', $9)`,
+			tr.ID, no, sq, seq, domain.EventRunnerStateChanged, string(cur), reason, payload, at); err != nil {
+			return fmt.Errorf("store: effects: skip unfinished event %s@%d/%d: %w", tr.ID, k.no, k.seq, err)
 		}
 	}
 	return nil
 }
 
-// effectMarkCancelRequested 给进行中的 Task 置 cancel_requested（不改变状态）。
+// effectMarkCancelRequested 给进行中的 runner 置 cancel_requested（不改变状态）。
 func (s *Store) effectMarkCancelRequested(ctx context.Context, tx pgx.Tx, tr domain.Transition) error {
-	if tr.Entity != domain.EntityRun {
+	if tr.Entity != domain.EntityTask {
 		return nil
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE tasks SET cancel_requested = true
-		 WHERE run_id = $1 AND status IN ('preparing','running')`, tr.ID); err != nil {
+		UPDATE task_runners SET cancel_requested = true, updated_at = now()
+		 WHERE task_id = $1 AND attempt_no = (SELECT current_attempt FROM tasks WHERE id = $1)
+		   AND status IN ('preparing','running')`, tr.ID); err != nil {
 		return fmt.Errorf("store: effects: mark cancel requested %s: %w", tr.ID, err)
 	}
 	return nil
 }
 
-// effectCloseActive 强制收口进行中的 Task/Attempt（Run → canceled/failed）。
+// effectCloseActive 强制收口进行中的 runner（Task → canceled / failed 等终态前）。
+// 保证"Task 终态时所有 runner 终态"（02 §5）。
 func (s *Store) effectCloseActive(ctx context.Context, tx pgx.Tx, tr domain.Transition, at time.Time) error {
-	if tr.Entity != domain.EntityRun {
+	if tr.Entity != domain.EntityTask {
 		return nil
 	}
-	taskReason := domain.SkipReasonForRunTerminal(domain.RunStatus(tr.To))
-
 	rows, err := tx.Query(ctx, `
-		SELECT id FROM tasks WHERE run_id = $1 AND status IN ('preparing','running') ORDER BY id`, tr.ID)
+		SELECT attempt_no, seq FROM task_runners
+		 WHERE task_id = $1 AND attempt_no = (SELECT current_attempt FROM tasks WHERE id = $1)
+		   AND status IN ('preparing','running')
+		 ORDER BY attempt_no, seq`, tr.ID)
 	if err != nil {
 		return fmt.Errorf("store: effects: close active %s: %w", tr.ID, err)
 	}
-	ids, err := collectIDs(rows)
-	if err != nil {
-		return err
+	type key struct{ no, seq int }
+	var keys []key
+	for rows.Next() {
+		var k key
+		if err := rows.Scan(&k.no, &k.seq); err != nil {
+			rows.Close()
+			return fmt.Errorf("store: effects: scan close active: %w", err)
+		}
+		keys = append(keys, k)
 	}
-	for _, id := range ids {
-		var curTask domain.TaskStatus
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("store: effects: close active %s: %w", tr.ID, err)
+	}
+	for _, k := range keys {
+		var cur domain.RunnerStatus
 		err := tx.QueryRow(ctx, `
-			UPDATE tasks SET status = 'canceled', status_reason = $2, cancel_requested = true, waiting_reason = NULL, updated_at = $3
-			 WHERE id = $1 AND status IN ('preparing','running')
-			 RETURNING status`, id, taskReason, at).Scan(&curTask)
+			UPDATE task_runners
+			   SET status = 'canceled', status_reason = NULL, cancel_requested = true,
+			       waiting_reason = NULL, finished_at = $4, updated_at = $4
+			 WHERE task_id = $1 AND attempt_no = $2 AND seq = $3 AND status IN ('preparing','running')
+			 RETURNING status`, tr.ID, k.no, k.seq, at).Scan(&cur)
 		if err != nil {
 			continue // 竞态：先落库者胜
 		}
-		taskID := id
 		seq, err := s.nextSeq(ctx, tx, tr.ID)
 		if err != nil {
 			return err
 		}
-		payload, _ := json.Marshal(map[string]any{"reason": taskReason, "cause": "run_" + string(tr.To)})
+		no, sq := k.no, k.seq
+		payload, _ := json.Marshal(map[string]any{"cause": "task_" + string(tr.To)})
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO state_events
-			  (run_id, task_id, seq, type, from_status, to_status, reason, payload, actor, created_at)
-			VALUES ($1, $2, $3, $4, 'running', 'canceled', $5, $6, 'system:kernel', $7)`,
-			tr.ID, taskID, seq, domain.EventTaskStateChanged, taskReason, payload, at); err != nil {
-			return fmt.Errorf("store: effects: close active event %s: %w", taskID, err)
+			  (task_id, attempt_no, runner_seq, seq, type, from_status, to_status, reason, payload, actor, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, 'canceled', NULL, $7, 'system:kernel', $8)`,
+			tr.ID, no, sq, seq, domain.EventRunnerStateChanged, string(cur), payload, at); err != nil {
+			return fmt.Errorf("store: effects: close active event %s@%d/%d: %w", tr.ID, k.no, k.seq, err)
 		}
-
-		// 该 Task 的活跃 Attempt 一并收口（一个 Task 至多一个活跃 Attempt）。
-		arows, err := tx.Query(ctx, `
-			UPDATE attempts SET status = 'canceled', finished_at = $2
-			 WHERE task_id = $1 AND status IN ('preparing','running')
-			 RETURNING id`, taskID, at)
-		if err != nil {
-			return fmt.Errorf("store: effects: close attempts %s: %w", taskID, err)
-		}
-		attemptIDs, err := collectIDs(arows)
-		if err != nil {
-			return err
-		}
-		for _, aid := range attemptIDs {
-			attemptID := aid
-			aseq, err := s.nextSeq(ctx, tx, tr.ID)
-			if err != nil {
-				return err
-			}
-			apayload, _ := json.Marshal(map[string]any{"reason": taskReason})
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO state_events
-				  (run_id, task_id, attempt_id, seq, type, from_status, to_status, reason, payload, actor, created_at)
-				VALUES ($1, $2, $3, $4, $5, 'running', 'canceled', $6, $7, 'system:kernel', $8)`,
-				tr.ID, taskID, attemptID, aseq, domain.EventAttemptFinished, taskReason, apayload, at); err != nil {
-				return fmt.Errorf("store: effects: close attempt event %s: %w", attemptID, err)
-			}
-		}
-		if _, err := tx.Exec(ctx, `DELETE FROM endpoint_leases WHERE task_id = $1`, taskID); err != nil {
-			return fmt.Errorf("store: effects: release lease %s: %w", taskID, err)
+		// 租约一并释放（与状态推进同事务，避免泄漏）。
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM endpoint_leases WHERE task_id = $1 AND attempt_no = $2 AND runner_seq = $3`,
+			tr.ID, k.no, k.seq); err != nil {
+			return fmt.Errorf("store: effects: release lease %s@%d/%d: %w", tr.ID, k.no, k.seq, err)
 		}
 	}
 	return nil
 }
 
-// effectScheduleRetry 按 retry_policy.backoff_seconds 设置 available_at = at + backoff。
-//
-// 基准用**注入时钟**的 at（05 §6.5），不用 SQL now()：这样超窗/退避判定在单测里
-// 可以用可拨时钟精确验证，也不会因为应用与数据库时钟漂移产生跨秒抖动。
-func (s *Store) effectScheduleRetry(ctx context.Context, tx pgx.Tx, tr domain.Transition, at time.Time) error {
-	if _, err := tx.Exec(ctx, `
-		UPDATE tasks
-		   SET available_at = $2::timestamptz + make_interval(secs =>
-		         COALESCE((retry_policy->>'backoff_seconds')::double precision, 0)),
-		       waiting_reason = NULL,
-		       updated_at     = $2::timestamptz
-		 WHERE id = $1`, tr.ID, at); err != nil {
-		return fmt.Errorf("store: effects: schedule retry %s: %w", tr.ID, err)
-	}
-	return nil
-}
-
-// effectWriteReportIntent 写一条 report.pending 事件，报告 writer 据此生成 Task 报告。
+// effectWriteReportIntent 写一条 report.written 前置事件，报告 writer 据此生成 Task 报告。
 func (s *Store) effectWriteReportIntent(ctx context.Context, tx pgx.Tx, tr domain.Transition, at time.Time) error {
-	var runID string
-	if err := tx.QueryRow(ctx, `SELECT run_id FROM tasks WHERE id = $1`, tr.ID).Scan(&runID); err != nil {
-		return fmt.Errorf("store: effects: report intent %s: %w", tr.ID, err)
+	if tr.Entity != domain.EntityTask {
+		return nil
 	}
-	seq, err := s.nextSeq(ctx, tx, runID)
+	seq, err := s.nextSeq(ctx, tx, tr.ID)
 	if err != nil {
 		return err
 	}
-	taskID := tr.ID
-	payload, _ := json.Marshal(map[string]any{"task_id": taskID})
+	payload, _ := json.Marshal(map[string]any{"task_id": tr.ID})
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO state_events
-		  (run_id, task_id, seq, type, payload, actor, created_at)
-		VALUES ($1, $2, $3, $4, $5, 'system:kernel', $6)`,
-		runID, taskID, seq, domain.EventReportPendingIntent, payload, at); err != nil {
-		return fmt.Errorf("store: effects: report intent event %s: %w", taskID, err)
-	}
-	return nil
-}
-
-// effectBackfillEndpoint 把 endpoint_key 与注入后的公共参数回填到该 Run 的全部 Task
-// （C-5.3：回填与状态转移同事务，避免"已 testing 但 Task 还没 key"的窗口）。
-//
-// payload.print_argv 是平台注入的公共参数 token（domain.PublicParamArgv 的结果）；
-// injected_argv = args_argv || 注入 token，与提交时 domain.BuildArgv 的口径一致。
-func (s *Store) effectBackfillEndpoint(ctx context.Context, tx pgx.Tx, tr domain.Transition) error {
-	if tr.Entity != domain.EntityRun {
-		return nil
-	}
-	key := payloadString(tr.Payload, "endpoint_key")
-	if key == "" {
-		// 没有显式 key 时从 runs.endpoint->>'key' 取。
-		if err := tx.QueryRow(ctx,
-			`SELECT COALESCE(endpoint->>'key', '') FROM runs WHERE id = $1`, tr.ID).Scan(&key); err != nil {
-			return fmt.Errorf("store: effects: backfill endpoint %s: %w", tr.ID, err)
-		}
-	}
-	if key == "" {
-		return nil
-	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE tasks SET endpoint_key = $2, updated_at = now()
-		  WHERE run_id = $1 AND endpoint_key IS NULL`, tr.ID, key); err != nil {
-		return fmt.Errorf("store: effects: backfill endpoint %s: %w", tr.ID, err)
-	}
-
-	tokens := payloadStrings(tr.Payload, "print_argv")
-	if len(tokens) == 0 {
-		return nil
-	}
-	extra, err := json.Marshal(tokens)
-	if err != nil {
-		return fmt.Errorf("store: effects: marshal print_argv %s: %w", tr.ID, err)
-	}
-	// 只有"还没注入过"的 Task 才拼（injected_argv 为空数组的 deploy 模式 Task）。
-	if _, err := tx.Exec(ctx, `
-		UPDATE tasks
-		   SET injected_argv = args_argv || $2::jsonb, updated_at = now()
-		 WHERE run_id = $1 AND jsonb_array_length(injected_argv) = 0`, tr.ID, extra); err != nil {
-		return fmt.Errorf("store: effects: backfill injected_argv %s: %w", tr.ID, err)
+		  (task_id, seq, type, payload, actor, created_at)
+		VALUES ($1, $2, $3, $4, 'system:kernel', $5)`,
+		tr.ID, seq, domain.EventReportWritten, payload, at); err != nil {
+		return fmt.Errorf("store: effects: report intent event %s: %w", tr.ID, err)
 	}
 	return nil
 }

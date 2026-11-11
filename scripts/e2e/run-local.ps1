@@ -1,4 +1,4 @@
-# TestPlane · 本地 e2e 一把梭（Windows / pwsh）
+# Argus · 本地 e2e 一把梭（Windows / pwsh）
 #
 # 做三件事：
 #   1. 编译 mock-llm 与 e2e（产物放临时目录，不污染仓库）
@@ -8,11 +8,11 @@
 # 用法：
 #   pwsh scripts/e2e/run-local.ps1
 #   pwsh scripts/e2e/run-local.ps1 -BaseURL http://127.0.0.1:8080 -Expect succeeded
-#   pwsh scripts/e2e/run-local.ps1 -Mode deploy -MockURL http://mock-llm.testplane-svc.svc.cluster.local:18080/v1
+#   pwsh scripts/e2e/run-local.ps1 -Mode deploy -MockURL http://mock-llm.argus-svc.svc.cluster.local:18080/v1
 #   pwsh scripts/e2e/run-local.ps1 -KeepMock
 #
-# MockURL 不传时自动探测 kind 里的 mock-llm Service（testplane-mock / default /
-# testplane / testplane-svc），探测不到才回退本机 http://127.0.0.1:18080/v1。
+# MockURL 不传时自动探测 kind 里的 mock-llm Service（argus-mock / default /
+# argus / argus-svc），探测不到才回退本机 http://127.0.0.1:18080/v1。
 # 评审 #16 同类问题：工具默认值不该让集群场景必须带参数才通过。
 # 前置：控制面已启动（PG + 迁移 + --role=all，监听 8080；见 deploy/README 或 Lead 的启动说明），
 #       且 Registry 里能看到 endpoint-probe、存在可用的 execution profile。
@@ -40,7 +40,7 @@ if ([string]::IsNullOrWhiteSpace($MockURL)) {
     $MockURL = 'http://127.0.0.1:18080/v1'
     $kubectl = Get-Command kubectl -ErrorAction SilentlyContinue
     if ($kubectl) {
-        foreach ($ns in @('testplane-mock', 'default', 'testplane', 'testplane-svc')) {
+        foreach ($ns in @('argus-mock', 'default', 'argus', 'argus-svc')) {
             $svc = & kubectl -n $ns get svc mock-llm -o name --request-timeout=3s 2>$null
             if ($LASTEXITCODE -eq 0 -and (($svc | Out-String).Trim()) -ne '') {
                 $MockURL = "http://mock-llm.$ns.svc:18080/v1"
@@ -69,13 +69,13 @@ $e2eCode = 1
 try {
     # ---- 1. 编译 ---------------------------------------------------------
     Push-Location (Join-Path $repo 'tools\mock-llm')
-    $mockExe = Join-Path $tmp 'testplane-mock-llm.exe'
+    $mockExe = Join-Path $tmp 'argus-mock-llm.exe'
     & go build -o $mockExe .
     if ($LASTEXITCODE -ne 0) { throw 'go build mock-llm 失败' }
     Pop-Location
 
     Push-Location (Join-Path $repo 'tools\e2e')
-    $e2eExe = Join-Path $tmp 'testplane-e2e.exe'
+    $e2eExe = Join-Path $tmp 'argus-e2e.exe'
     & go build -o $e2eExe .
     if ($LASTEXITCODE -ne 0) { throw 'go build e2e 失败' }
     Pop-Location
@@ -97,7 +97,7 @@ try {
         Write-Host ""
         Write-Host "控制面不可达：$BaseURL" -ForegroundColor Red
         Write-Host "  先启动控制面（PG + 迁移 + --role=all，监听 8080），再重跑本脚本。"
-        Write-Host "  参考：scripts/e2e/README.md 的『前置』与 deploy/kind/testplane.yaml。"
+        Write-Host "  参考：scripts/e2e/README.md 的『前置』与 deploy/kind/argus.yaml。"
         exit 3
     }
 

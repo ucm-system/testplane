@@ -16,8 +16,8 @@ spec:
     spec:
       containers:
         - name: mock-llm
-          # 本地构建后 kind load docker-image testplane/mock-llm:dev --name testplane
-          image: testplane/mock-llm:dev
+          # 本地构建后 kind load docker-image argus/mock-llm:dev --name argus
+          image: argus/mock-llm:dev
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

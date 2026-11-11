@@ -4,148 +4,138 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/ucm-system/testplane/server/internal/domain"
 	"github.com/ucm-system/testplane/server/internal/store"
 )
 
-// 本文件是"库行 → API 响应"的投影。只挑对外字段，不把 last_event_seq / revision
-// 这类内部列泄出去（07 §5）。
+// 本文件是"库行 → API 响应"的投影（v2 形状对齐 openapi schemas）。只挑对外字段，
+// 不把 last_event_seq / revision 这类内部列泄出去（07 §5）。
 
-// runDTO 是 Run 详情/列表项（openapi Run）。
-type runDTO struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	Kind          string          `json:"kind"`
-	Status        string          `json:"status"`
-	CleanupPolicy string          `json:"cleanup_policy"`
-	SubmittedBy   string          `json:"submitted_by"`
-	SubmittedAt   time.Time       `json:"submitted_at"`
-	StartedAt     *time.Time      `json:"started_at"`
-	FinishedAt    *time.Time      `json:"finished_at"`
-	Endpoint      json.RawMessage `json:"endpoint"`
-	Deploy        json.RawMessage `json:"deploy"`
-	Error         json.RawMessage `json:"error"`
-	// RetryOf 是本 Run 由哪次重试产生（原 Run 的 ID）；nil 表示不是重试产生的。
-	// 与 tasks.reused_from_task_id 一起表达"跨 Run 续跑"（03 §4.1）。
-	RetryOf    *string        `json:"retry_of"`
-	Revision   int64          `json:"revision"`
-	TaskCounts *runTaskCounts `json:"task_counts,omitempty"`
-	Tasks      []taskBriefDTO `json:"tasks,omitempty"`
+// taskDTO 是 Task 列表项 / 详情的基础（openapi Task）。
+type taskDTO struct {
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Status         string          `json:"status"`
+	SubmittedBy    string          `json:"submitted_by"`
+	SubmittedAt    time.Time       `json:"submitted_at"`
+	StartedAt      *time.Time      `json:"started_at"`
+	FinishedAt     *time.Time      `json:"finished_at"`
+	Endpoint       json.RawMessage `json:"endpoint"`
+	Deploy         json.RawMessage `json:"deploy"`
+	Env            json.RawMessage `json:"env"`
+	SecretEnv      json.RawMessage `json:"secret_env"`
+	Error          json.RawMessage `json:"error"`
+	RetryOf        *string         `json:"retry_of"`
+	CurrentAttempt int             `json:"current_attempt"`
+	RunnerCounts   *runnerCounts   `json:"runner_counts,omitempty"`
+	Revision       int64           `json:"revision"`
 }
 
-// runTaskCounts 是 Run 的 Task 状态聚合（openapi Run.task_counts）。
-type runTaskCounts struct {
+// runnerCounts 是最新 attempt 的 runner 状态计数摘要（openapi Task.runner_counts）。
+type runnerCounts struct {
 	Total     int `json:"total"`
 	Pending   int `json:"pending"`
 	Running   int `json:"running"`
 	Succeeded int `json:"succeeded"`
 	Failed    int `json:"failed"`
 	Skipped   int `json:"skipped"`
+	Canceled  int `json:"canceled"`
 }
 
-// taskBriefDTO 是 Run 详情里的 Task 摘要（openapi TaskSummary，一条 JOIN 取）。
-type taskBriefDTO struct {
-	ID            string  `json:"id"`
-	Seq           int     `json:"seq"`
-	Name          string  `json:"name"`
-	Status        string  `json:"status"`
-	WaitingReason *string `json:"waiting_reason"`
-	Attempts      int     `json:"attempts"`
-	// ReusedFromTaskID 是本 Task 复用自哪个旧 Task（retry 的跨 Run 续跑，03 §4.2）；
-	// nil 表示不是复用来的。07 §4.2 要求对外可见。
-	ReusedFromTaskID *string         `json:"reused_from_task_id"`
-	Error            json.RawMessage `json:"error"`
+// attemptDTO 是 attempt 聚合行（openapi Attempt：Task 级计数与落档归组行，D-68）。
+type attemptDTO struct {
+	TaskID         string          `json:"task_id"`
+	AttemptNo      int             `json:"attempt_no"`
+	Status         string          `json:"status"`
+	Trigger        string          `json:"trigger"`
+	InputRef       *string         `json:"input_ref"`
+	ExportsRef     *string         `json:"exports_ref"`
+	DeployStateRef *string         `json:"deploy_state_ref"`
+	Error          json.RawMessage `json:"error"`
+	StartedAt      *time.Time      `json:"started_at"`
+	FinishedAt     *time.Time      `json:"finished_at"`
 }
 
-// taskDTO 是 Task 详情。
-type taskDTO struct {
-	ID                string          `json:"id"`
-	RunID             string          `json:"run_id"`
+// runnerExecDTO 是 runner 执行记录投影（openapi RunnerExecution）。
+type runnerExecDTO struct {
+	TaskID            string          `json:"task_id"`
+	AttemptNo         int             `json:"attempt_no"`
 	Seq               int             `json:"seq"`
 	Name              string          `json:"name"`
-	TesterName        string          `json:"tester_name"`
-	TesterVersion     string          `json:"tester_version"`
+	RunnerName        string          `json:"runner_name"`
+	RunnerVersion     string          `json:"runner_version"`
+	Role              string          `json:"role"`
 	ImageRef          string          `json:"image_ref"`
+	ImageDigest       *string         `json:"image_digest"`
 	Profile           string          `json:"profile"`
-	ArgsRaw           string          `json:"args_raw"`
-	ArgsArgv          json.RawMessage `json:"args_argv"`
-	InjectedArgv      json.RawMessage `json:"injected_argv"`
-	Env               json.RawMessage `json:"env"`
-	SecretEnv         json.RawMessage `json:"secret_env"`
+	InputRef          string          `json:"input_ref"`
 	OnFailure         string          `json:"on_failure"`
 	TimeoutSeconds    int             `json:"timeout_seconds"`
-	RetryPolicy       json.RawMessage `json:"retry_policy"`
 	Status            string          `json:"status"`
-	StatusReason      *string         `json:"status_reason,omitempty"`
-	WaitingReason     *string         `json:"waiting_reason,omitempty"`
-	EndpointKey       *string         `json:"endpoint_key,omitempty"`
+	StatusReason      *string         `json:"status_reason"`
+	WaitingReason     *string         `json:"waiting_reason"`
+	EndpointKey       *string         `json:"endpoint_key"`
 	EndpointExclusive bool            `json:"endpoint_exclusive"`
-	CurrentAttempt    int             `json:"current_attempt"`
-	// ReusedFromTaskID 见 taskBriefDTO（07 §4.2 / 03 §4.2）。
-	ReusedFromTaskID *string         `json:"reused_from_task_id"`
-	AvailableAt      *time.Time      `json:"available_at,omitempty"`
-	CancelRequested  bool            `json:"cancel_requested"`
-	ResultRef        *string         `json:"result_ref,omitempty"`
-	Error            json.RawMessage `json:"error"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
+	ExitCode          *int            `json:"exit_code"`
+	ErrorCode         *string         `json:"error_code"`
+	Error             json.RawMessage `json:"error"`
+	ExportsRef        *string         `json:"exports_ref"`
+	ResultRef         *string         `json:"result_ref"`
+	LogRef            *string         `json:"log_ref"`
+	StartedAt         *time.Time      `json:"started_at"`
+	FinishedAt        *time.Time      `json:"finished_at"`
+	ExecutorRef       json.RawMessage `json:"executor_ref"`
+	CancelRequested   bool            `json:"cancel_requested"`
+	Phase             *string         `json:"phase"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
-// attemptDTO 是 Attempt 详情（openapi Attempt：不暴露 job_id / job_namespace）。
-type attemptDTO struct {
-	ID          string          `json:"id"`
-	TaskID      string          `json:"task_id"`
-	Idx         int             `json:"idx"`
-	Status      string          `json:"status"`
-	Phase       *string         `json:"phase,omitempty"`
-	ExitCode    *int32          `json:"exit_code,omitempty"`
-	ImageDigest *string         `json:"image_digest,omitempty"`
-	StartedAt   *time.Time      `json:"started_at,omitempty"`
-	FinishedAt  *time.Time      `json:"finished_at,omitempty"`
-	LogRef      *string         `json:"log_ref,omitempty"`
-	ResultRef   *string         `json:"result_ref,omitempty"`
-	Error       json.RawMessage `json:"error,omitempty"`
-	ExecutorRef json.RawMessage `json:"executor_ref,omitempty"`
+// taskDetailDTO 是 openapi TaskDetail：Task 字段平铺 + attempts + 最新 attempt 的 runners。
+type taskDetailDTO struct {
+	taskDTO
+	Attempts []attemptDTO    `json:"attempts"`
+	Runners  []runnerExecDTO `json:"runners"`
 }
 
-// testerDTO 是 Tester 目录项（tester.yaml 的对外投影）。
-type testerDTO struct {
-	Name        string                   `json:"name"`
-	Version     string                   `json:"version"`
-	DisplayName string                   `json:"display_name,omitempty"`
-	Description string                   `json:"description,omitempty"`
-	Role        string                   `json:"role"`
-	OnFailure   string                   `json:"on_failure"`
-	Entry       string                   `json:"entry"`
-	Image       string                   `json:"image"`
-	Resources   domain.ResourceRequest   `json:"resources"`
-	Concurrency domain.ConcurrencyPolicy `json:"concurrency,omitempty"`
-	Mounts      []domain.MountSpec       `json:"mounts,omitempty"`
-	Parameters  map[string]domain.Param  `json:"parameters,omitempty"`
-	Env         map[string]domain.EnvVar `json:"env,omitempty"`
-	Placeholder string                   `json:"placeholder,omitempty"`
+// runnerDTO 是 Runner 目录项（openapi Runner：runner.yaml 结构 + 注册表元数据）。
+type runnerDTO struct {
+	Name        string          `json:"name"`
+	Version     string          `json:"version"`
+	DisplayName string          `json:"display_name"`
+	Description string          `json:"description"`
+	Role        string          `json:"role"`
+	Builtin     bool            `json:"builtin"`
+	OnFailure   string          `json:"on_failure"`
+	Entry       json.RawMessage `json:"entry"`
+	InputFormat string          `json:"input_format"`
+	Image       string          `json:"image"`
+	Resources   json.RawMessage `json:"resources"`
+	Concurrency json.RawMessage `json:"concurrency"`
+	Mounts      json.RawMessage `json:"mounts"`
+	Parameters  json.RawMessage `json:"parameters"`
+	Exports     json.RawMessage `json:"exports"`
+	Consumes    json.RawMessage `json:"consumes"`
+	Env         json.RawMessage `json:"env"`
+	Placeholder *string         `json:"placeholder"`
 
-	// 注册表元数据（openapi Tester 的 allOf 第二支要求）。
-	ContentSHA string `json:"content_sha,omitempty"`
-	SourceFile string `json:"source_file,omitempty"`
-	Orphaned   bool   `json:"orphaned"`
-	// Latest 表示该 (name, version) 是这个名字的**最高版本**（含 retired 行；
-	// 比较规则是 domain.VersionLess —— 唯一真源，票 #60 / D-60）。
-	Latest bool `json:"latest"`
-	// Retired 表示目录里已经不存在、只剩库里的历史版本（= testers.orphaned）。
-	// 这类行**永不删除**：历史 Run/Task 仍按 name@version 解析（ARCHITECTURE §5.6）。
+	// 注册表元数据（openapi Runner 的 allOf 第二支）。
+	ContentSHA   string     `json:"content_sha"`
+	SourceFile   string     `json:"source_file"`
+	Orphaned     bool       `json:"orphaned"`
+	Latest       bool       `json:"latest"`
 	Retired      bool       `json:"retired"`
-	RegisteredAt *time.Time `json:"registered_at,omitempty"`
-	RegisteredBy string     `json:"registered_by,omitempty"`
+	RemovedAt    *time.Time `json:"removed_at"`
+	RegisteredAt time.Time  `json:"registered_at"`
+	RegisteredBy string     `json:"registered_by"`
 }
 
 // eventDTO 是 openapi Event 的投影：时间统一 UTC（`Z`），可空字段显式 null。
 type eventDTO struct {
 	Seq       int64           `json:"seq"`
 	Type      string          `json:"type"`
-	RunID     string          `json:"run_id"`
-	TaskID    *string         `json:"task_id"`
-	AttemptID *string         `json:"attempt_id"`
+	TaskID    string          `json:"task_id"`
+	AttemptNo *int            `json:"attempt_no"`
+	RunnerSeq *int            `json:"runner_seq"`
 	At        time.Time       `json:"at"`
 	From      *string         `json:"from"`
 	To        *string         `json:"to"`
@@ -160,17 +150,49 @@ func toEventDTO(e store.Event) eventDTO {
 		payload = json.RawMessage(`{}`)
 	}
 	return eventDTO{
-		Seq: e.Seq, Type: e.Type, RunID: e.RunID,
-		TaskID: e.TaskID, AttemptID: e.AttemptID,
+		Seq: e.Seq, Type: e.Type, TaskID: e.TaskID,
+		AttemptNo: e.AttemptNo, RunnerSeq: e.RunnerSeq,
 		At: e.CreatedAt.UTC(), From: e.FromStatus, To: e.ToStatus,
 		Reason: e.Reason, Actor: e.Actor, Payload: payload,
 	}
 }
 
-// taskDetailDTO 是 openapi TaskDetail：Task 字段平铺 + attempts 数组。'
-type taskDetailDTO struct {
-	taskDTO
-	Attempts []attemptDTO `json:"attempts"`
+// artifactDTO 是 openapi Artifact 的投影。sha256 惰性：没算过就是 null（不现算，C-7.5）。
+type artifactDTO struct {
+	Path      string  `json:"path"`
+	Kind      string  `json:"kind"`
+	SizeBytes int64   `json:"size_bytes"`
+	SHA256    *string `json:"sha256"`
+	AttemptNo *int    `json:"attempt_no"`
+	RunnerSeq *int    `json:"runner_seq"`
+}
+
+// artifactListDTO 是 Task / runner 两级产物清单的共同信封（07 §5.1、§5.2）。
+type artifactListDTO struct {
+	Items          []artifactDTO            `json:"items"`
+	ByKind         map[string][]artifactDTO `json:"by_kind"`
+	TotalSizeBytes int64                    `json:"total_size_bytes"`
+}
+
+func toArtifactDTO(a store.Artifact) artifactDTO {
+	return artifactDTO{
+		Path: a.Path, Kind: a.Kind, SizeBytes: a.SizeBytes,
+		SHA256: a.SHA256, AttemptNo: a.AttemptNo, RunnerSeq: a.RunnerSeq,
+	}
+}
+
+func groupArtifacts(rows []store.Artifact) artifactListDTO {
+	out := artifactListDTO{
+		Items:  make([]artifactDTO, 0, len(rows)),
+		ByKind: map[string][]artifactDTO{},
+	}
+	for _, a := range rows {
+		dto := toArtifactDTO(a)
+		out.Items = append(out.Items, dto)
+		out.ByKind[dto.Kind] = append(out.ByKind[dto.Kind], dto)
+		out.TotalSizeBytes += dto.SizeBytes
+	}
+	return out
 }
 
 // paged 是游标分页的统一信封（07 §6 / openapi {items, next_cursor, has_more}）。
@@ -178,6 +200,17 @@ type paged[T any] struct {
 	Items      []T     `json:"items"`
 	NextCursor *string `json:"next_cursor"`
 	HasMore    bool    `json:"has_more"`
+}
+
+// taskListDTO 是 Task 列表信封（D-61：游标与 offset 两种分页互斥）。
+type taskListDTO struct {
+	Items      []taskDTO `json:"items"`
+	NextCursor *string   `json:"next_cursor"`
+	HasMore    bool      `json:"has_more"`
+	// 以下三个只在 offset 模式下非 null（游标模式为 null，避免 count 成本）。
+	Total    *int `json:"total"`
+	Page     *int `json:"page"`
+	PageSize *int `json:"page_size"`
 }
 
 // cursorPtr 把空串转成 nil（has_more=false 时 next_cursor 为 null）。
@@ -188,91 +221,107 @@ func cursorPtr(s string) *string {
 	return &s
 }
 
-func toRunDTO(r *store.Run) runDTO {
-	return runDTO{
-		ID:            r.ID,
-		Name:          r.Name,
-		Kind:          r.Kind,
-		Status:        r.Status,
-		CleanupPolicy: r.CleanupPolicy,
-		SubmittedBy:   r.SubmittedBy,
-		SubmittedAt:   r.SubmittedAt.UTC(),
-		StartedAt:     utcPtr(r.StartedAt),
-		FinishedAt:    utcPtr(r.FinishedAt),
-		Endpoint:      store.JSONOrNil(r.Endpoint),
-		Deploy:        store.JSONOrNil(r.Deploy),
-		Error:         store.JSONOrNil(r.Error),
-		RetryOf:       r.RetryOf,
-	}
-}
-
-func toRunTaskCounts(c store.RunTaskCounts) *runTaskCounts {
-	return &runTaskCounts{
-		Total: c.Total, Pending: c.Pending, Running: c.Running,
-		Succeeded: c.Succeeded, Failed: c.Failed, Skipped: c.Skipped,
-	}
-}
-
-func toTaskBriefDTO(t store.TaskSummaryRow) taskBriefDTO {
-	return taskBriefDTO{
-		ID:               t.ID,
-		Seq:              t.Seq,
-		Name:             t.Name,
-		Status:           t.Status,
-		WaitingReason:    t.WaitingReason,
-		Attempts:         t.Attempts,
-		ReusedFromTaskID: t.ReusedFromTaskID,
-		Error:            store.JSONOrNil(t.Error),
-	}
-}
+// ---- 投影函数 ------------------------------------------------------------
 
 func toTaskDTO(t *store.Task) taskDTO {
 	return taskDTO{
-		ID: t.ID, RunID: t.RunID, Seq: t.Seq, Name: t.Name,
-		TesterName: t.TesterName, TesterVersion: t.TesterVersion, ImageRef: t.ImageRef,
-		Profile: t.Profile, ArgsRaw: t.ArgsRaw,
-		ArgsArgv:          store.JSONOrNil(t.ArgsArgv),
-		InjectedArgv:      store.JSONOrNil(t.InjectedArgv),
-		Env:               store.JSONOrNil(t.Env),
-		SecretEnv:         store.JSONOrNil(t.SecretEnv),
-		OnFailure:         t.OnFailure,
-		TimeoutSeconds:    t.TimeoutSeconds,
-		RetryPolicy:       store.JSONOrNil(t.RetryPolicy),
-		Status:            t.Status,
-		StatusReason:      t.StatusReason,
-		WaitingReason:     t.WaitingReason,
-		EndpointKey:       t.EndpointKey,
-		EndpointExclusive: t.EndpointExclusive,
-		CurrentAttempt:    t.CurrentAttempt,
-		ReusedFromTaskID:  t.ReusedFromTaskID,
-		AvailableAt:       utcPtr(t.AvailableAt),
-		CancelRequested:   t.CancelRequested,
-		ResultRef:         t.ResultRef,
-		Error:             store.JSONOrNil(t.Error),
-		CreatedAt:         t.CreatedAt.UTC(),
-		UpdatedAt:         t.UpdatedAt.UTC(),
+		ID: t.ID, Name: t.Name, Status: t.Status,
+		SubmittedBy: t.SubmittedBy, SubmittedAt: t.SubmittedAt.UTC(),
+		StartedAt: utcPtr(t.StartedAt), FinishedAt: utcPtr(t.FinishedAt),
+		Endpoint:       store.JSONOrNil(t.Endpoint),
+		Deploy:         store.JSONOrNil(t.Deploy),
+		Env:            store.JSONOrNil(t.Env),
+		SecretEnv:      store.JSONOrNil(t.SecretEnv),
+		Error:          store.JSONOrNil(t.Error),
+		RetryOf:        t.RetryOf,
+		CurrentAttempt: t.CurrentAttempt,
+		Revision:       t.Revision,
 	}
 }
 
 func toAttemptDTO(a *store.Attempt) attemptDTO {
 	return attemptDTO{
-		ID: a.ID, TaskID: a.TaskID, Idx: a.Idx, Status: a.Status,
-		Phase: a.Phase, ExitCode: a.ExitCode, ImageDigest: a.ImageDigest,
+		TaskID: a.TaskID, AttemptNo: a.AttemptNo, Status: a.Status, Trigger: a.Trigger,
+		InputRef: a.InputRef, ExportsRef: a.ExportsRef, DeployStateRef: a.DeployStateRef,
+		Error:     store.JSONOrNil(a.Error),
 		StartedAt: utcPtr(a.StartedAt), FinishedAt: utcPtr(a.FinishedAt),
-		LogRef: a.LogRef, ResultRef: a.ResultRef,
-		Error:       store.JSONOrNil(a.Error),
-		ExecutorRef: store.JSONOrNil(a.ExecutorRef),
 	}
 }
 
-func toTesterDTO(s domain.TesterSpec) testerDTO {
-	return testerDTO{
-		Name: s.Name, Version: s.Version, DisplayName: s.DisplayName,
-		Description: s.Description, Role: s.Role, OnFailure: s.OnFailure,
-		Entry: s.Entry, Image: s.Image, Resources: s.Resources,
-		Concurrency: s.Concurrency, Mounts: s.Mounts, Parameters: s.Parameters,
-		Env: s.Env, Placeholder: s.Placeholder,
+func toRunnerExecDTO(rr *store.RunnerRun) runnerExecDTO {
+	return runnerExecDTO{
+		TaskID: rr.TaskID, AttemptNo: rr.AttemptNo, Seq: rr.Seq,
+		Name: rr.Name, RunnerName: rr.RunnerName, RunnerVersion: rr.RunnerVersion,
+		Role: rr.Role, ImageRef: rr.ImageRef, ImageDigest: rr.ImageDigest,
+		Profile: rr.Profile, InputRef: rr.InputRef,
+		OnFailure: rr.OnFailure, TimeoutSeconds: rr.TimeoutSeconds,
+		Status: rr.Status, StatusReason: rr.StatusReason, WaitingReason: rr.WaitingReason,
+		EndpointKey: rr.EndpointKey, EndpointExclusive: rr.EndpointExclusive,
+		ExitCode: rr.ExitCode, ErrorCode: rr.ErrorCode,
+		Error:      store.JSONOrNil(rr.Error),
+		ExportsRef: rr.ExportsRef, ResultRef: rr.ResultRef, LogRef: rr.LogRef,
+		StartedAt: utcPtr(rr.StartedAt), FinishedAt: utcPtr(rr.FinishedAt),
+		ExecutorRef:     store.JSONOrNil(rr.ExecutorRef),
+		CancelRequested: rr.CancelRequested,
+		Phase:           rr.Phase,
+		CreatedAt:       rr.CreatedAt.UTC(),
+		UpdatedAt:       rr.UpdatedAt.UTC(),
 	}
+}
+
+func runnerExecDTOs(in []store.RunnerRun) []runnerExecDTO {
+	out := make([]runnerExecDTO, 0, len(in))
+	for i := range in {
+		out = append(out, toRunnerExecDTO(&in[i]))
+	}
+	return out
+}
+
+func attemptDTOs(in []store.Attempt) []attemptDTO {
+	out := make([]attemptDTO, 0, len(in))
+	for i := range in {
+		out = append(out, toAttemptDTO(&in[i]))
+	}
+	return out
+}
+
+// toRunnerDTO 把注册表行投影成 openapi Runner（jsonb 列原样透传，不二次解析）。
+func toRunnerDTO(n *store.Runner) runnerDTO {
+	return runnerDTO{
+		Name: n.Name, Version: n.Version, DisplayName: n.DisplayName,
+		Description: n.Description, Role: n.Role, Builtin: n.Builtin,
+		OnFailure:   n.OnFailure,
+		Entry:       jsonOrArray(n.Entry),
+		InputFormat: n.InputFormat,
+		Image:       n.Image,
+		Resources:   jsonOrObject(n.Resources),
+		Concurrency: jsonOrObject(n.Concurrency),
+		Mounts:      jsonOrArray(n.Mounts),
+		Parameters:  jsonOrArray(n.Parameters),
+		Exports:     jsonOrArray(n.Exports),
+		Consumes:    jsonOrArray(n.Consumes),
+		Env:         jsonOrObject(n.EnvDecl),
+		Placeholder: n.Placeholder,
+		ContentSHA:  n.ContentSHA, SourceFile: n.SourceFile,
+		Orphaned: n.Orphaned, Retired: n.Orphaned,
+		RemovedAt:    utcPtr(n.RemovedAt),
+		RegisteredAt: n.RegisteredAt.UTC(),
+		RegisteredBy: n.RegisteredBy,
+	}
+}
+
+func jsonOrArray(b []byte) json.RawMessage {
+	if len(b) == 0 {
+		return json.RawMessage(`[]`)
+	}
+	return json.RawMessage(b)
+}
+
+func jsonOrObject(b []byte) json.RawMessage {
+	if len(b) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return json.RawMessage(b)
 }
 
 func utcPtr(t *time.Time) *time.Time {

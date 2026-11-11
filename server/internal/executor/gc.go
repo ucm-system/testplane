@@ -20,13 +20,13 @@ import (
 const (
 	// HoldUntilAnnotation 是"日志 follower 还没收尾，先别删"的守卫（execution §6.3）。
 	// 值二选一：RFC3339 时间戳，或 Unix 秒。
-	HoldUntilAnnotation = "testplane.io/hold-until"
-	// GCTerminalAge 是"终态 Job 至少留这么久"的窗口（execution §6.3「attempt 已终态且 Job 创建 > 1h」）。
-	// finalizeAttemptAsync 是异步的（先落日志再删 Job），GC 抢在前面就会丢日志。
+	HoldUntilAnnotation = "argus.io/hold-until"
+	// GCTerminalAge 是"终态 Job 至少留这么久"的窗口（execution §6.3「执行记录已终态且 Job 创建 > 1h」）。
+	// 结论落库与删 Job 是异步的（先落日志再删 Job），GC 抢在前面就会丢日志。
 	GCTerminalAge = time.Hour
 	// GCStaleRunningAge 是"运行中但明显卡死"的年龄上限（execution §6.3「运行中 > 25h」）。
 	GCStaleRunningAge = 25 * time.Hour
-	// gcOrphanGrace 是"没有 Attempt 行"时的容忍期，防 Submit 与写库的竞态。
+	// gcOrphanGrace 是"库里没有对应执行记录"时的容忍期，防 Submit 与写库的竞态。
 	gcOrphanGrace = time.Minute
 	// gcBatchLimit 是单轮 GC 处理的 Job 上限。
 	gcBatchLimit = 500
@@ -60,7 +60,7 @@ func (e *Executor) Delete(ctx context.Context, h ports.JobHandle, policy ports.D
 	return nil
 }
 
-// HoldActive 报告该 Job 的 `testplane.io/hold-until` 是否还没过期（未过期 = 不许删）。
+// HoldActive 报告该 Job 的 `argus.io/hold-until` 是否还没过期（未过期 = 不许删）。
 //
 // 编排层在"终态删 Job"之前必须看这个：日志 follower 还在读 Pod 日志时删 Job 会丢尾部日志。
 func (e *Executor) HoldActive(ctx context.Context, h ports.JobHandle) (bool, error) {
@@ -76,7 +76,7 @@ func (e *Executor) HoldActive(ctx context.Context, h ports.JobHandle) (bool, err
 	if !ok {
 		return false, nil
 	}
-	return time.Now().Before(until), nil
+	return e.now().Before(until), nil
 }
 
 // ParseHoldUntil 解析 annotation 取值：RFC3339 或 Unix 秒；非法值按"没有守卫"处理。
@@ -94,12 +94,14 @@ func ParseHoldUntil(raw string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// ManagedJob 是 GC 需要的最小 Job 视图。
+// ManagedJob 是 GC 需要的最小 Job 视图（v2：三元组定位，D-68）。
 type ManagedJob struct {
 	Namespace string
 	Name      string
-	JobID     string // label testplane.io/job-id
-	RunID     string // label testplane.io/run
+	JobID     string // label argus.io/job-id
+	TaskID    string // label argus.io/task
+	AttemptNo int    // label argus.io/attempt（解析失败为 0）
+	Seq       int    // label argus.io/runner-seq（解析失败为 0）
 	CreatedAt time.Time
 	Finished  bool // 已有 Complete/Failed 条件
 	Succeeded bool // Complete=True
@@ -113,25 +115,27 @@ type GCReport struct {
 	Errors      []string
 }
 
-// AttemptState 是某个 Job 对应 Attempt 在库里的状态。
-type AttemptState struct {
-	// Found=false 表示库里没有对应 Attempt（孤儿 Job，§6.3 第 1 条）。
+// RunnerRunState 是某个 Job 对应 runner 执行记录在库里的状态。
+type RunnerRunState struct {
+	// Found=false 表示库里没有对应执行记录（孤儿 Job，§6.3 第 1 条）。
 	Found bool
-	// Terminal=true 表示 Attempt 已终态（结论已落库，Job 可以回收）。
+	// Terminal=true 表示执行记录已终态（结论已落库，Job 可以回收）。
 	Terminal bool
 }
 
-// AttemptStatesFunc 是**批量**查询：一次拿到一批 Job 的 Attempt 状态。
+// RunnerRunStatesFunc 是**批量**查询：一次拿到一批 Job 的执行记录状态。
 //
 // 必须是批量的：单 Job 一次查询会造成 N+1（500 个 Job × 3 次查询），
 // GC 每 10 分钟一轮，慢查询会把 DB 打满（票 #20-5）。
-type AttemptStatesFunc func(ctx context.Context, jobNames []string) (map[string]AttemptState, error)
+type RunnerRunStatesFunc func(ctx context.Context, jobNames []string) (map[string]RunnerRunState, error)
 
 // GCOptions 是一次 GC 的输入。
 type GCOptions struct {
-	// AttemptStates 批量查库；nil 表示"所有 Job 都当成有 Attempt 且终态随 Job"（只做年龄与守卫判定）。
-	AttemptStates AttemptStatesFunc
-	// OnStaleRunning 在"运行中但超过 25h"的 Job 上被调用：把状态修成 FAILED(TASK_TIMEOUT)（§6.3）。
+	// RunnerRunStates 批量查库；nil 表示"所有 Job 都当成有执行记录且终态随 Job"
+	// （只做年龄与守卫判定）。
+	RunnerRunStates RunnerRunStatesFunc
+	// OnStaleRunning 在"运行中但超过 25h"的 Job 上被调用：把状态修成
+	// FAILED(RUNNER_TIMEOUT)（§6.3）。
 	OnStaleRunning func(ctx context.Context, job ManagedJob) error
 	// Now 供测试注入时钟。
 	Now func() time.Time
@@ -140,13 +144,15 @@ type GCOptions struct {
 // CollectGarbage 回收"已结束但没人删"的 Job 与孤儿 Pod（execution §6.3）。
 //
 // 判据（按顺序，全部通过才删）：
-//  1. `testplane.io/hold-until` 未过期 → 跳过（日志 follower 未收尾）；
-//  2. `managed=true` 但 DB 无对应 Attempt（超过 1 分钟容忍期）→ 立即删（孤儿）；
-//  3. Job 已终态 + 创建超过 1h + Attempt 已终态 → 删（正常路径没删干净的）；
-//  4. 运行中 + 创建超过 25h → 修状态为 FAILED(TASK_TIMEOUT) 后删；
-//  5. 裸 Pod（`tp-*` 且所属 Job 已不存在）→ 删。
+//  1. `argus.io/hold-until` 未过期 → 跳过（日志 follower 未收尾）；
+//  2. `managed=true` 但库里无对应执行记录（超过 1 分钟容忍期）→ 立即删（孤儿）；
+//  3. Job 已终态 + 创建超过 1h + 执行记录已终态 → 删（正常路径没删干净的）；
+//  4. 运行中 + 创建超过 25h → 修状态为 FAILED(RUNNER_TIMEOUT) 后删；
+//  5. 裸 Pod（所属 Job 已不存在）→ 删。
 //
-// 只删本 namespace、带平台 label 的对象；`tp-` 前缀但 label 不符的一律不动（可能是人工调试）。
+// 只删本 namespace、带平台 label 的对象；`argus-` 前缀但 label 不符的一律不动
+// （可能是人工调试）。GC 不可能级联删除 Genet 管理的资源：deploy/clean 对 Genet
+// 资源无 ownerReferences（D-72 / execution §2.3）。
 func (e *Executor) CollectGarbage(ctx context.Context, opts GCOptions) (GCReport, error) {
 	now := time.Now
 	if opts.Now != nil {
@@ -168,11 +174,11 @@ func (e *Executor) CollectGarbage(ctx context.Context, opts GCOptions) (GCReport
 	}
 
 	// 一次批量查库（票 #20-5：不要 N+1）。
-	states := map[string]AttemptState{}
-	if opts.AttemptStates != nil && len(names) > 0 {
-		states, err = opts.AttemptStates(ctx, names)
+	states := map[string]RunnerRunState{}
+	if opts.RunnerRunStates != nil && len(names) > 0 {
+		states, err = opts.RunnerRunStates(ctx, names)
 		if err != nil {
-			return report, fmt.Errorf("executor: gc attempt states: %w", err)
+			return report, fmt.Errorf("executor: gc runner-run states: %w", err)
 		}
 	}
 
@@ -194,28 +200,24 @@ func (e *Executor) CollectGarbage(ctx context.Context, opts GCOptions) (GCReport
 
 		terminal, _ := jobTerminalState(job)
 		state := states[job.Name] // 零值 = Found:false（孤儿）
-		if opts.AttemptStates == nil {
-			state = AttemptState{Found: true, Terminal: terminal}
+		if opts.RunnerRunStates == nil {
+			state = RunnerRunState{Found: true, Terminal: terminal}
 		}
 
 		switch {
-		// 规则 2：孤儿 Job（DB 里没有对应 Attempt）。
+		// 规则 2：孤儿 Job（库里没有对应执行记录）。
 		case !state.Found:
-			// Attempt 先落库再 Submit，所以"没有行"就是真孤儿；只留 1 分钟容忍期防竞态。
+			// 执行记录先落库再 Submit，所以"没有行"就是真孤儿；只留 1 分钟容忍期防竞态。
 			if age < gcOrphanGrace {
 				report.KeptJobs++
 				continue
 			}
-		// 规则 3：终态 + 超过 1h 窗口 + Attempt 已终态。
+		// 规则 3：终态 + 超过 1h 窗口 + 执行记录已终态。
 		case terminal && age >= GCTerminalAge && state.Terminal:
 		// 规则 4：运行中但超过 25h（卡死）。
 		case !terminal && age >= GCStaleRunningAge:
 			if opts.OnStaleRunning != nil {
-				if err := opts.OnStaleRunning(ctx, ManagedJob{
-					Namespace: job.Namespace, Name: job.Name,
-					JobID: job.Labels[LabelJobID], RunID: job.Labels[LabelRun],
-					CreatedAt: job.CreationTimestamp.Time, Finished: terminal,
-				}); err != nil {
+				if err := opts.OnStaleRunning(ctx, managedJobOf(job, terminal)); err != nil {
 					report.Errors = append(report.Errors, fmt.Sprintf("job %s: repair stale state: %v", job.Name, err))
 					report.KeptJobs++
 					continue
@@ -271,6 +273,27 @@ func (e *Executor) CollectGarbage(ctx context.Context, opts GCOptions) (GCReport
 	return report, nil
 }
 
+// managedJobOf 投影 GC 用的最小 Job 视图（label 解析失败不算错误，值缺省为 0/空）。
+func managedJobOf(job *batchv1.Job, terminal bool) ManagedJob {
+	return ManagedJob{
+		Namespace: job.Namespace,
+		Name:      job.Name,
+		JobID:     job.Labels[LabelJobID],
+		TaskID:    job.Labels[LabelTask],
+		AttemptNo: labelInt(job.Labels[LabelAttempt]),
+		Seq:       labelInt(job.Labels[LabelRunnerSeq]),
+		CreatedAt: job.CreationTimestamp.Time,
+		Finished:  terminal,
+		Succeeded: jobSucceeded(job),
+	}
+}
+
+// labelInt 解析数值型 label；非法值返回 0（GC 只用于展示/日志，不参与判定）。
+func labelInt(v string) int {
+	n, _ := strconv.Atoi(strings.TrimSpace(v))
+	return n
+}
+
 // ListManagedJobs 返回本 namespace 里带平台 label 的 Job（对账/GC 观测用）。
 func (e *Executor) ListManagedJobs(ctx context.Context) ([]ManagedJob, error) {
 	ns := e.namespace
@@ -279,17 +302,10 @@ func (e *Executor) ListManagedJobs(ctx context.Context) ([]ManagedJob, error) {
 		return nil, fmt.Errorf("executor: list jobs: %w", err)
 	}
 	out := make([]ManagedJob, 0, len(list.Items))
-	for _, job := range list.Items {
-		terminal, succeeded := jobTerminalState(&job)
-		out = append(out, ManagedJob{
-			Namespace: job.Namespace,
-			Name:      job.Name,
-			JobID:     job.Labels[LabelJobID],
-			RunID:     job.Labels[LabelRun],
-			CreatedAt: job.CreationTimestamp.Time,
-			Finished:  terminal,
-			Succeeded: succeeded,
-		})
+	for i := range list.Items {
+		terminal, succeeded := jobTerminalState(&list.Items[i])
+		out = append(out, managedJobOf(&list.Items[i], terminal))
+		out[len(out)-1].Succeeded = succeeded
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
@@ -309,4 +325,9 @@ func jobTerminalState(job *batchv1.Job) (terminal, succeeded bool) {
 		}
 	}
 	return false, false
+}
+
+func jobSucceeded(job *batchv1.Job) bool {
+	_, succeeded := jobTerminalState(job)
+	return succeeded
 }

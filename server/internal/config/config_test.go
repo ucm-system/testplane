@@ -6,14 +6,14 @@ import (
 	"time"
 )
 
-// clearTestplaneEnv 清掉所有 TESTPLANE_*，避免开发机环境污染测试。
-func clearTestplaneEnv(t *testing.T) {
+// clearArgusEnv 清掉所有 AG_*，避免开发机环境污染测试。
+func clearArgusEnv(t *testing.T) {
 	t.Helper()
 	for _, kv := range os.Environ() {
 		for i := 0; i < len(kv); i++ {
 			if kv[i] == '=' {
 				name := kv[:i]
-				if len(name) > len("TESTPLANE_") && name[:len("TESTPLANE_")] == "TESTPLANE_" {
+				if len(name) > len("AG_") && name[:len("AG_")] == "AG_" {
 					t.Setenv(name, "")
 					os.Unsetenv(name)
 				}
@@ -24,8 +24,8 @@ func clearTestplaneEnv(t *testing.T) {
 }
 
 func TestLoad_Defaults(t *testing.T) {
-	clearTestplaneEnv(t)
-	t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/testplane")
+	clearArgusEnv(t)
+	t.Setenv("AG_DB_DSN", "postgres://u:p@localhost:5432/argus")
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -39,14 +39,29 @@ func TestLoad_Defaults(t *testing.T) {
 	if c.Role != RoleAll {
 		t.Errorf("Role = %q, 期望 all", c.Role)
 	}
-	if c.TestersDir != "./testers" {
-		t.Errorf("TestersDir = %q", c.TestersDir)
+	if c.MaxGlobalConcurrency != 20 {
+		t.Errorf("MaxGlobalConcurrency = %d, 期望 20（§12.7）", c.MaxGlobalConcurrency)
 	}
-	if c.MaxGlobalConcurrency != 4 {
-		t.Errorf("MaxGlobalConcurrency = %d, 期望 4", c.MaxGlobalConcurrency)
+	if c.TaskMaxRunners != 200 {
+		t.Errorf("TaskMaxRunners = %d, 期望 200（§12.7）", c.TaskMaxRunners)
+	}
+	if c.AttemptMax != 3 {
+		t.Errorf("AttemptMax = %d, 期望 3（§12.7）", c.AttemptMax)
 	}
 	if c.DeployTimeout != 259200*time.Second {
 		t.Errorf("DeployTimeout = %s, 期望 72h", c.DeployTimeout)
+	}
+	if c.RunnerTimeoutDefault != 4*time.Hour || c.RunnerTimeoutMax != 24*time.Hour {
+		t.Errorf("RunnerTimeout = %s / %s, 期望 4h / 24h", c.RunnerTimeoutDefault, c.RunnerTimeoutMax)
+	}
+	if c.RetentionDays != 30 {
+		t.Errorf("RetentionDays = %d, 期望 30（D-70：保留期只由配置决定）", c.RetentionDays)
+	}
+	if c.StoragePVC != "argus-storage" {
+		t.Errorf("StoragePVC = %q, 期望 argus-storage（D-41）", c.StoragePVC)
+	}
+	if c.Namespace != "argus" {
+		t.Errorf("Namespace = %q, 期望 argus（D-66）", c.Namespace)
 	}
 	if c.APIPrefix != "/api/v1" {
 		t.Errorf("APIPrefix = %q", c.APIPrefix)
@@ -54,19 +69,24 @@ func TestLoad_Defaults(t *testing.T) {
 	if c.AuthMode != "dev" {
 		t.Errorf("AuthMode = %q, 期望 dev", c.AuthMode)
 	}
+	if c.SessionCookie != "ag_session" {
+		t.Errorf("SessionCookie = %q, 期望 ag_session", c.SessionCookie)
+	}
 }
 
 func TestLoad_Overrides(t *testing.T) {
-	clearTestplaneEnv(t)
-	t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/tp")
-	t.Setenv("TESTPLANE_HTTP_ADDR", ":9090")
-	t.Setenv("TESTPLANE_STORAGE_ROOT", `D:\tmp\storage`)
-	t.Setenv("TESTPLANE_ROLE", "controller")
-	t.Setenv("TESTPLANE_LOG_LEVEL", "debug")
-	t.Setenv("TESTPLANE_TESTERS_DIR", `D:\tmp\testers`)
-	t.Setenv("TESTPLANE_MAX_GLOBAL_CONCURRENCY", "12")
-	t.Setenv("TESTPLANE_DEPLOY_TIMEOUT_SECONDS", "3600")
-	t.Setenv("TESTPLANE_KUBECONFIG", `D:\kube.yaml`)
+	clearArgusEnv(t)
+	t.Setenv("AG_DB_DSN", "postgres://u:p@localhost:5432/argus")
+	t.Setenv("AG_LISTEN", ":9090")
+	t.Setenv("AG_STORAGE_ROOT", `D:\tmp\storage`)
+	t.Setenv("AG_ROLE", "controller")
+	t.Setenv("AG_LOG_LEVEL", "debug")
+	t.Setenv("AG_RUNNERS_DIR", `D:\tmp\runners`)
+	t.Setenv("AG_CONCURRENCY_MAX", "12")
+	t.Setenv("AG_ATTEMPT_MAX", "5")
+	t.Setenv("AG_DEPLOY_TIMEOUT", "48h")
+	t.Setenv("AG_RUNNER_TIMEOUT", "8h")
+	t.Setenv("AG_KUBECONFIG", `D:\kube.yaml`)
 
 	c, err := Load()
 	if err != nil {
@@ -81,34 +101,17 @@ func TestLoad_Overrides(t *testing.T) {
 	if c.MaxGlobalConcurrency != 12 {
 		t.Errorf("MaxGlobalConcurrency = %d", c.MaxGlobalConcurrency)
 	}
-	if c.DeployTimeout != time.Hour {
-		t.Errorf("DeployTimeout = %s", c.DeployTimeout)
-	}
-	if c.Kubeconfig != `D:\kube.yaml` {
-		t.Errorf("Kubeconfig = %q", c.Kubeconfig)
-	}
-}
-
-func TestLoad_DesignAliases(t *testing.T) {
-	clearTestplaneEnv(t)
-	t.Setenv("TESTPLANE_DB_DSN", "postgres://u:p@localhost:5432/tp")
-	t.Setenv("TESTPLANE_LISTEN", ":7070")
-	t.Setenv("TESTPLANE_CONCURRENCY_MAX", "7")
-	t.Setenv("TESTPLANE_DEPLOY_TIMEOUT", "48h")
-	t.Setenv("TESTPLANE_RESULT_MAX_BYTES", "10MiB")
-
-	c, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if c.HTTPAddr != ":7070" || c.MaxGlobalConcurrency != 7 {
-		t.Fatalf("C-11 别名未生效: %+v", c)
+	if c.AttemptMax != 5 {
+		t.Errorf("AttemptMax = %d", c.AttemptMax)
 	}
 	if c.DeployTimeout != 48*time.Hour {
 		t.Errorf("DeployTimeout = %s", c.DeployTimeout)
 	}
-	if c.ResultMaxBytes != 10<<20 {
-		t.Errorf("ResultMaxBytes = %d", c.ResultMaxBytes)
+	if c.RunnerTimeoutDefault != 8*time.Hour {
+		t.Errorf("RunnerTimeoutDefault = %s", c.RunnerTimeoutDefault)
+	}
+	if c.Kubeconfig != `D:\kube.yaml` {
+		t.Errorf("Kubeconfig = %q", c.Kubeconfig)
 	}
 }
 
@@ -117,19 +120,20 @@ func TestLoad_Invalid(t *testing.T) {
 		name string
 		env  map[string]string
 	}{
-		{"角色非法", map[string]string{"TESTPLANE_ROLE": "boss"}},
-		{"日志级别非法", map[string]string{"TESTPLANE_LOG_LEVEL": "trace"}},
-		{"并发上限为 0", map[string]string{"TESTPLANE_MAX_GLOBAL_CONCURRENCY": "0"}},
-		{"部署窗口过小", map[string]string{"TESTPLANE_DEPLOY_TIMEOUT_SECONDS": "60"}},
-		{"部署窗口过大", map[string]string{"TESTPLANE_DEPLOY_TIMEOUT_SECONDS": "1000000"}},
-		{"Task 超时过大", map[string]string{"TESTPLANE_TASK_TIMEOUT": "48h"}},
-		{"鉴权模式非法", map[string]string{"TESTPLANE_AUTH_MODE": "jwt"}},
-		{"整数非法", map[string]string{"TESTPLANE_MAX_GLOBAL_CONCURRENCY": "abc"}},
+		{"角色非法", map[string]string{"AG_ROLE": "boss"}},
+		{"日志级别非法", map[string]string{"AG_LOG_LEVEL": "trace"}},
+		{"并发上限为 0", map[string]string{"AG_CONCURRENCY_MAX": "0"}},
+		{"部署窗口过小", map[string]string{"AG_DEPLOY_TIMEOUT": "60"}},
+		{"部署窗口过大", map[string]string{"AG_DEPLOY_TIMEOUT": "1000000"}},
+		{"runner 超时过大", map[string]string{"AG_RUNNER_TIMEOUT": "48h"}},
+		{"attempt 上限为 0", map[string]string{"AG_ATTEMPT_MAX": "0"}},
+		{"鉴权模式非法", map[string]string{"AG_AUTH_MODE": "jwt"}},
+		{"整数非法", map[string]string{"AG_CONCURRENCY_MAX": "abc"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			clearTestplaneEnv(t)
-			t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/tp")
+			clearArgusEnv(t)
+			t.Setenv("AG_DB_DSN", "postgres://u:p@localhost:5432/argus")
 			for k, v := range c.env {
 				t.Setenv(k, v)
 			}
@@ -141,16 +145,16 @@ func TestLoad_Invalid(t *testing.T) {
 }
 
 func TestLoad_MissingDSN(t *testing.T) {
-	clearTestplaneEnv(t)
+	clearArgusEnv(t)
 	if _, err := Load(); err == nil {
-		t.Fatal("缺少 TESTPLANE_DATABASE_URL 时应报错")
+		t.Fatal("缺少 AG_DB_DSN 时应报错")
 	}
 }
 
-// Volcano 队列快照（E-11、C-4.8）：默认接入 + 15s TTL + podgroups namespace 口径。
+// Volcano 队列快照（C-4.8）：默认接入 + 15s TTL。
 func TestLoad_VolcanoDefaults(t *testing.T) {
-	clearTestplaneEnv(t)
-	t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/tp")
+	clearArgusEnv(t)
+	t.Setenv("AG_DB_DSN", "postgres://u:p@localhost:5432/argus")
 
 	c, err := Load()
 	if err != nil {
@@ -162,10 +166,8 @@ func TestLoad_VolcanoDefaults(t *testing.T) {
 	if c.VolcanoTTL != 15*time.Second {
 		t.Fatalf("VolcanoTTL = %s，期望 15s", c.VolcanoTTL)
 	}
-	// 未配置 TESTPLANE_VOLCANO_NAMESPACES 时默认取 profile 的 namespace
-	//（= seed 的 execution_profiles.namespace，与控制面 namespace 同值）。
-	if len(c.VolcanoNamespaces) != 1 || c.VolcanoNamespaces[0] != "testplane" {
-		t.Fatalf("VolcanoNamespaces = %v，期望 [testplane]", c.VolcanoNamespaces)
+	if len(c.VolcanoNamespaces) != 1 || c.VolcanoNamespaces[0] != "argus" {
+		t.Fatalf("VolcanoNamespaces = %v，期望 [argus]", c.VolcanoNamespaces)
 	}
 }
 
@@ -178,9 +180,9 @@ func TestLoad_VolcanoOverrides(t *testing.T) {
 		{
 			name: "关闭 + 多 ns + TTL",
 			env: map[string]string{
-				"TESTPLANE_VOLCANO_ENABLED":    "false",
-				"TESTPLANE_VOLCANO_NAMESPACES": "tp-a, tp-b",
-				"TESTPLANE_VOLCANO_TTL":        "30s",
+				"AG_VOLCANO_ENABLED":    "false",
+				"AG_VOLCANO_NAMESPACES": "ns-a, ns-b",
+				"AG_VOLCANO_TTL":        "30s",
 			},
 			check: func(t *testing.T, c *Config) {
 				if c.VolcanoEnabled {
@@ -189,34 +191,25 @@ func TestLoad_VolcanoOverrides(t *testing.T) {
 				if c.VolcanoTTL != 30*time.Second {
 					t.Fatalf("VolcanoTTL = %s", c.VolcanoTTL)
 				}
-				if len(c.VolcanoNamespaces) != 2 || c.VolcanoNamespaces[0] != "tp-a" || c.VolcanoNamespaces[1] != "tp-b" {
+				if len(c.VolcanoNamespaces) != 2 || c.VolcanoNamespaces[0] != "ns-a" || c.VolcanoNamespaces[1] != "ns-b" {
 					t.Fatalf("VolcanoNamespaces = %v", c.VolcanoNamespaces)
 				}
 			},
 		},
 		{
 			name: "全部 namespace",
-			env:  map[string]string{"TESTPLANE_VOLCANO_NAMESPACES": "*"},
+			env:  map[string]string{"AG_VOLCANO_NAMESPACES": "*"},
 			check: func(t *testing.T, c *Config) {
 				if c.VolcanoNamespaces != nil {
 					t.Fatalf("`*` 应解析为 nil（全部 ns），得到 %v", c.VolcanoNamespaces)
 				}
 			},
 		},
-		{
-			name: "默认 ns 跟随 profile 的 namespace",
-			env:  map[string]string{"TESTPLANE_NAMESPACE": "tp-custom"},
-			check: func(t *testing.T, c *Config) {
-				if len(c.VolcanoNamespaces) != 1 || c.VolcanoNamespaces[0] != "tp-custom" {
-					t.Fatalf("VolcanoNamespaces = %v，期望 [tp-custom]", c.VolcanoNamespaces)
-				}
-			},
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			clearTestplaneEnv(t)
-			t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/tp")
+			clearArgusEnv(t)
+			t.Setenv("AG_DB_DSN", "postgres://u:p@localhost:5432/argus")
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
@@ -229,16 +222,16 @@ func TestLoad_VolcanoOverrides(t *testing.T) {
 	}
 
 	// TTL 非法直接 fail fast。
-	clearTestplaneEnv(t)
-	t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/tp")
-	t.Setenv("TESTPLANE_VOLCANO_TTL", "abc")
+	clearArgusEnv(t)
+	t.Setenv("AG_DB_DSN", "postgres://u:p@localhost:5432/argus")
+	t.Setenv("AG_VOLCANO_TTL", "abc")
 	if _, err := Load(); err == nil {
-		t.Fatal("TESTPLANE_VOLCANO_TTL=abc 应报错")
+		t.Fatal("AG_VOLCANO_TTL=abc 应报错")
 	}
 }
 
 func TestRedactedDSN(t *testing.T) {
-	c := &Config{DatabaseURL: "postgres://user:secret@db:5432/testplane?sslmode=disable"}
+	c := &Config{DatabaseURL: "postgres://user:secret@db:5432/argus?sslmode=disable"}
 	got := c.RedactedDSN()
 	if got == "" || contains(got, "secret") {
 		t.Fatalf("DSN 未脱敏: %q", got)
@@ -254,63 +247,7 @@ func contains(s, sub string) bool {
 	return false
 }
 
-// Deploy 阶段配置：provider=mock 不校验 Genet 细节；provider=genet 必须给全。
-func TestLoadDeployProvider(t *testing.T) {
-	t.Run("mock 默认", func(t *testing.T) {
-		t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/db")
-		t.Setenv("TESTPLANE_DEPLOY_PROVIDER", "")
-		c, err := Load()
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		if c.DeployProvider != "mock" {
-			t.Errorf("provider = %q, want mock", c.DeployProvider)
-		}
-	})
-	t.Run("genet 缺 base url", func(t *testing.T) {
-		t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/db")
-		t.Setenv("TESTPLANE_DEPLOY_PROVIDER", "genet")
-		t.Setenv("TESTPLANE_GENET_BASE_URL", "")
-		if _, err := Load(); err == nil {
-			t.Fatal("expected error for missing TESTPLANE_GENET_BASE_URL")
-		}
-	})
-	t.Run("genet 缺 api key", func(t *testing.T) {
-		t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/db")
-		t.Setenv("TESTPLANE_DEPLOY_PROVIDER", "genet")
-		t.Setenv("TESTPLANE_GENET_BASE_URL", "https://genet.example")
-		t.Setenv("TESTPLANE_GENET_API_KEY", "")
-		if _, err := Load(); err == nil {
-			t.Fatal("expected error for missing TESTPLANE_GENET_API_KEY")
-		}
-	})
-	t.Run("genet 配置齐全", func(t *testing.T) {
-		t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/db")
-		t.Setenv("TESTPLANE_DEPLOY_PROVIDER", "genet")
-		t.Setenv("TESTPLANE_GENET_BASE_URL", "https://genet.example/")
-		t.Setenv("TESTPLANE_GENET_API_KEY", "k")
-		t.Setenv("TESTPLANE_GENET_INSECURE", "false")
-		c, err := Load()
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		if c.DeployProvider != "genet" || c.GenetBaseURL != "https://genet.example" || c.GenetAPIKey != "k" {
-			t.Errorf("config = %+v", c)
-		}
-		if c.GenetInsecure {
-			t.Errorf("insecure must default to false")
-		}
-	})
-	t.Run("非法 provider", func(t *testing.T) {
-		t.Setenv("TESTPLANE_DATABASE_URL", "postgres://u:p@localhost:5432/db")
-		t.Setenv("TESTPLANE_DEPLOY_PROVIDER", "bogus")
-		if _, err := Load(); err == nil {
-			t.Fatal("expected error for unknown provider")
-		}
-	})
-}
-
-// D-63：TESTPLANE_SHARED_MOUNTS 解析与校验。
+// D-63：AG_SHARED_MOUNTS 解析与校验。
 func TestParseSharedMounts(t *testing.T) {
 	t.Run("默认 readOnly=true", func(t *testing.T) {
 		out, err := ParseSharedMounts(`[{"name":"models","mountPath":"/models","claimName":"c1"}]`)
@@ -352,4 +289,11 @@ func TestParseSharedMounts(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestTaskStorageDir(t *testing.T) {
+	c := &Config{StorageRoot: "/storage-root"}
+	if got := c.TaskStorageDir("t-20261110-0001"); got != "/storage-root/t-20261110-0001" {
+		t.Errorf("TaskStorageDir = %q", got)
+	}
 }

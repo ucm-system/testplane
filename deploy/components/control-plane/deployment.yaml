@@ -1,7 +1,7 @@
-# TestPlane · 控制面 Deployment（`testplaned --role=all`）
+# Argus · 控制面 Deployment（`argusd --role=all`）
 #
 # ⚠️ **默认不部署**：本文件**没有**列在 deploy/k8s/kustomization.yaml 的 resources 里。
-#    原因：镜像 testplane-server:dev 要等 server/ 有 `cmd/testplaned` 才能构建。
+#    原因：镜像 argus-server:dev 要等 server/ 有 `cmd/argusd` 才能构建。
 #    启用方式见 deploy/README.md「第 6 步：把控制面放进集群」——
 #    本质就是把这行加进 kustomization：
 #        - deployment.yaml
@@ -16,15 +16,15 @@
 #   - liveness **不含 DB**：DB 抖动不该重启进程，只由 readiness 摘流（W-9）。
 #   - runAsUser 10001：/storage-root 的属主是 10001:10001（06 §3.2），
 #     控制面要往 /storage-root 预创建目录，UID 必须对得上；fsGroup 兜底。
-#   - readOnlyRootFilesystem + 只挂 /tmp emptyDir：与 Tester 同一套只读根约束。
+#   - readOnlyRootFilesystem + 只挂 /tmp emptyDir：与 Runner 同一套只读根约束。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: testplaned
-  namespace: testplane
+  name: argusd
+  namespace: argus
   labels:
-    app.kubernetes.io/name: testplaned
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argusd
+    app.kubernetes.io/part-of: argus
     app.kubernetes.io/component: control-plane
 spec:
   replicas: 1
@@ -36,20 +36,20 @@ spec:
       maxSurge: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: testplaned
-      app.kubernetes.io/part-of: testplane
+      app.kubernetes.io/name: argusd
+      app.kubernetes.io/part-of: argus
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: testplaned
-        app.kubernetes.io/part-of: testplane
+        app.kubernetes.io/name: argusd
+        app.kubernetes.io/part-of: argus
         app.kubernetes.io/component: control-plane
       annotations:
         # 原生清单没有 Helm 的 sha256sum；改 ConfigMap 后手工 rollout restart。
         # （Helm 化之后这里换成 checksum/config，见 W-9。）
-        testplane.io/config-rev: "1"
+        argus.io/config-rev: "1"
     spec:
-      serviceAccountName: testplane
+      serviceAccountName: argus
       automountServiceAccountToken: true
       enableServiceLinks: false
       terminationGracePeriodSeconds: 30
@@ -61,18 +61,18 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: testplaned
+        - name: argusd
           # ⚠️ 这里用可变标签 `:dev` **只是为了本地 kind**（kind load docker-image 灌进去）。
-          # **生产必须钉 digest**：`image: registry.internal/testplane/testplaned@sha256:<64 位>`
+          # **生产必须钉 digest**：`image: registry.internal/argus/argusd@sha256:<64 位>`
           # 或至少 `:git-<short-sha>`——`:dev`/`:latest` 这类可变标签会让"回滚到底跑了哪份代码"
           # 无从回答（W-8：tag 与 digest 二选一，release 环境强制 digest）。
           # 换 digest 的两种做法：
           #   1) 改本文件；
           #   2) 不改清单，直接打补丁验收：
-          #      kubectl -n testplane set image deploy/testplaned \
-          #        testplaned=registry.internal/testplane/testplaned@sha256:<digest>
+          #      kubectl -n argus set image deploy/argusd \
+          #        argusd=registry.internal/argus/argusd@sha256:<digest>
           # 用 digest 时记得把 imagePullPolicy 设成 IfNotPresent（digest 不可变，Always 只是多余拉取）。
-          image: testplane-server:dev
+          image: argus-server:dev
           imagePullPolicy: IfNotPresent
           args: ["--role=all"]
           ports:
@@ -81,23 +81,23 @@ spec:
               protocol: TCP
           envFrom:
             - configMapRef:
-                name: testplane-config
+                name: argus-config
           env:
             # DSN 含口令 → Secret；sslmode=disable 仅限 dev 容器 PG
-            # 键名对齐 server/internal/config/config.go（TESTPLANE_DATABASE_URL 优先，DB_DSN 是别名）
-            - name: TESTPLANE_DATABASE_URL
+            # 键名对齐 server/internal/config/config.go（AG_DB_DSN 优先，DB_DSN 是别名）
+            - name: AG_DB_DSN
               valueFrom:
                 secretKeyRef:
-                  name: testplane-db
+                  name: argus-db
                   key: dsn
                   optional: true
             # Genet Open API 的 Bearer key（deploy provider=genet 时必填）。
             # 单独走 Secret，避免 key 进 ConfigMap/日志；secret 不存在时 optional 让 Pod 仍能起
             # （provider=mock 时用不到它）。
-            - name: TESTPLANE_GENET_API_KEY
+            - name: AG_GENET_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: testplane-genet
+                  name: argus-genet
                   key: api-key
                   optional: true
           resources:
@@ -120,7 +120,7 @@ spec:
             # 多集群 kubeconfig：一集群一文件，key = <cluster-name>.kubeconfig（W-10）。
             # optional: true —— dev 未建 Secret 时 Pod 也能起（in-cluster 用 SA token）。
             - name: clusters
-              mountPath: /etc/testplane/clusters
+              mountPath: /etc/argus/clusters
               readOnly: true
           # 启动覆盖迁移等待：30×2s = 60s（W-9）
           startupProbe:
@@ -148,29 +148,29 @@ spec:
       volumes:
         - name: storage-root
           persistentVolumeClaim:
-            claimName: testplane-storage
+            claimName: argus-storage
         - name: tmp
           emptyDir:
             sizeLimit: 256Mi
         - name: clusters
           secret:
-            secretName: testplane-clusters
+            secretName: argus-clusters
             optional: true
 ---
 # 三个角色共用一个端口、一个 Service（06 §2）
 apiVersion: v1
 kind: Service
 metadata:
-  name: testplane
-  namespace: testplane
+  name: argus
+  namespace: argus
   labels:
-    app.kubernetes.io/name: testplaned
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argusd
+    app.kubernetes.io/part-of: argus
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: testplaned
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argusd
+    app.kubernetes.io/part-of: argus
   ports:
     - name: http
       port: 8080

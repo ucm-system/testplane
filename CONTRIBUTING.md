@@ -14,8 +14,9 @@ git switch -c docs/workflow main
 | 改动类型 | 自测 |
 |---|---|
 | 设计文档 | 章节号引用是否仍然成立（`§x.y`）；改裁决要按 §15 记录 |
+| 术语 | 涉及 Task / runner / Runner / attempt / `AG_*` 等术语时，先对根目录 [`GLOSSARY.md`](GLOSSARY.md) 的定义与命名消歧约定 |
 | 原型 | 双击 `design/prototype/index.html` 过一遍相关页面；**有 UI 变更就重出截图** |
-| Tester | `./run-local.sh --url … --model_name …` 能跑通，`result.json` 符合附录 A |
+| Runner | `run-local.sh`（只 run 不 build）或 `docker run 镜像 entry --params-file … --url …` 能跑通，产物三选一（产出 `result.json` 时符合附录 A schema 2.0，D-74） |
 | 仓库杂项 | 没有混入无关格式化 |
 
 ## PR 要求

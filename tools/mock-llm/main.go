@@ -1,4 +1,4 @@
-// Command mock-llm 是一个 OpenAI 兼容的假 LLM 服务，用来喂 TestPlane 的
+// Command mock-llm 是一个 OpenAI 兼容的假 LLM 服务，用来喂 Argus 的
 // endpoint-probe（真实 Tester）与 e2e 脚本：不需要真模型，就能复现
 // "就绪 / 就绪慢 / 500 / 401 / 200 包错误" 这几种现场。
 //

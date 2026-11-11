@@ -25,7 +25,7 @@ import (
 // 两条路径都只依赖同一批 SQL。
 
 // migrationLockKey 是迁移用的 advisory lock 号（任意固定 64 位整数，全平台唯一）。
-const migrationLockKey int64 = 0x7465_7374_706c_6e // "testpln"
+const migrationLockKey int64 = 0x6172_6775_7300_0001 // "argus" + 版本位（v2 新库）
 
 // MigrationInfo 是启动时可观测的迁移状态，供 /readyz 与日志使用。
 type MigrationInfo struct {

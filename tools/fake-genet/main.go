@@ -1,5 +1,5 @@
 // Command fake-genet 是一个可独立运行的假 Genet（Helm OpenAPI 子集），
-// 供 TestPlane 在本地/kind 上验证"真实 Genet 客户端"（TESTPLANE_DEPLOY_PROVIDER=genet）。
+// 供 Argus 在本地/kind 上验证"真实 Genet 客户端"（AG_DEPLOY_PROVIDER=genet）。
 //
 // 语义按 design/impl/execution.md §9 与调研（.data/research/genet-deploy-plan.md §6.2）：
 //   - POST /api/open/helm/uc-packages/{stack|pd}/releases  → helm upgrade --install（noWait，不 --wait）
@@ -29,7 +29,7 @@ import (
 func main() {
 	var (
 		addr       = flag.String("addr", ":18090", "监听地址")
-		namespace  = flag.String("namespace", "testplane-mock", "API Key 绑定的 namespace（不由请求指定）")
+		namespace  = flag.String("namespace", "argus-mock", "API Key 绑定的 namespace（不由请求指定）")
 		chartDir   = flag.String("chart", "deploy/charts/mock-llm", "mock-llm chart 目录（-helm 模式用）")
 		helmBin    = flag.String("helm-bin", ".tools/helm.exe", "helm 可执行文件")
 		kubectlBin = flag.String("kubectl", "kubectl", "kubectl 可执行文件")

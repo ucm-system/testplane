@@ -1,7 +1,7 @@
 # fake-genet
 
-可独立运行的**假 Genet**：只实现 TestPlane 的 deploy 适配层真正会调的那几条 Helm OpenAPI，
-用于在本地/kind 上验证 `internal/genet` 的**真实客户端**（`TESTPLANE_DEPLOY_PROVIDER=genet`），
+可独立运行的**假 Genet**：只实现 Argus 的 deploy 适配层真正会调的那几条 Helm OpenAPI，
+用于在本地/kind 上验证 `internal/genet` 的**真实客户端**（service-deploy runner 的 Genet 适配层，v2 平台不再直连 Genet，D-70），
 以及在没有 Genet 环境时做端到端联调。
 
 语义来源：`design/impl/execution.md §9`（Helm release 语义）+ `.data/research/genet-deploy-plan.md §6.2`。
@@ -77,30 +77,30 @@ go run ./tools/fake-genet -addr :18090
 
 ```powershell
 # 1. 把 kind 的 kubeconfig 摊平到一个文件（宿主上的假 Genet 用它调集群）
-kubectl config view --context kind-testplane --minify --flatten | Out-File -Encoding utf8 .data\kubeconfig-kind
+kubectl config view --context kind-argus --minify --flatten | Out-File -Encoding utf8 .data\kubeconfig-kind
 
 # 2. 起假 Genet（注意 KUBECONFIG 用绝对路径）
 $env:KUBECONFIG = (Resolve-Path .data\kubeconfig-kind).Path
 go run ./tools/fake-genet -addr :18090 -helm `
   -kubeconfig $env:KUBECONFIG `
   -chart deploy/charts/mock-llm `
-  -namespace testplane-mock `
+  -namespace argus-mock `
   -helm-bin .tools/helm.exe
 ```
 
 > chart 目录是相对路径，**在仓库根目录启动**；`-helm` 也可以给绝对路径。
 
-### 3) 让 TestPlane 指过来
+### 3) 让 Argus 指过来
 
 ```powershell
-$env:TESTPLANE_DEPLOY_PROVIDER = "genet"
-$env:TESTPLANE_GENET_BASE_URL   = "http://127.0.0.1:18090"
-$env:TESTPLANE_GENET_API_KEY    = "tp-local-2026"
+$env:AG_DEPLOY_PROVIDER = "genet"
+$env:AG_GENET_BASE_URL   = "http://127.0.0.1:18090"
+$env:AG_GENET_API_KEY    = "tp-local-2026"
 # 自签/本机 HTTP 不需要 CA；若目标是 https 自签，再加：
-# $env:TESTPLANE_GENET_CA_FILE  = "C:\path\to\ca.pem"
+# $env:AG_GENET_CA_FILE  = "C:\path\to\ca.pem"
 ```
 
-然后照常起 `testplaned`；`runs.deploy` 里的 `genet_release_status` / `endpoint_status`
+然后照常起 `argusd`；`GET /tasks/{id}/deploy`（deploy-state.json 快照）里的 release 状态 / endpoint 判定
 会反映假 Genet 的两根轴。
 
 ## 手工冒烟（curl）

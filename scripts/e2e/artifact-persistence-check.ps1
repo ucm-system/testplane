@@ -4,13 +4,13 @@
 #   1) 基线：service Run（2 个 test）→ succeeded；记录 /artifacts 条目数/总大小/result 数，
 #      以及 tasks/<task>/attempts/1/result.json 的字节与 sha256；
 #   2) 删除 Job/Pod 后：/artifacts 条目数/总大小/result 数/路径集合/文件 sha256 必须与基线完全一致；
-#      /tasks/{id}/attempts/1/artifacts 仍可用；/files 的 Range 仍为 206 + 10 字节；
+#      /tasks/{id}/attempts/1/runners/{seq}/artifacts 仍可用；/files 的 Range 仍为 206 + 10 字节；
 #   3) 控制面 rollout restart 后：再取 /files，sha256 仍一致。
 # 负向：不存在 path → 404；`../../etc/passwd` → 400。
 param(
     [string]$BaseUrl = 'http://127.0.0.1:8120',
     [string]$User = 'dev',
-    [string]$Namespace = 'testplane',
+    [string]$Namespace = 'argus',
     [string]$MockURL = '',
     [string]$OutDir = '',
     [int]$ForwardPort = 8120,
@@ -36,7 +36,7 @@ $delayedNamespace = ''
 if ([string]::IsNullOrWhiteSpace($MockURL)) {
     # 产物 drill 要在终态前抓住 Job 并打 hold；mock-llm 太快会秒删 Job。
     # 优先用 delayed fixture（ready-after=15s），并在下面重启它重置窗口。
-    foreach ($ns in @('testplane-mock', 'default', 'testplane', 'testplane-svc')) {
+    foreach ($ns in @('argus-mock', 'default', 'argus', 'argus-svc')) {
         $svc = & kubectl -n $ns get svc mock-llm-delayed -o name --request-timeout=3s 2>$null
         if ($LASTEXITCODE -eq 0 -and (($svc | Out-String).Trim()) -ne '') {
             $delayedNamespace = $ns
@@ -46,7 +46,7 @@ if ([string]::IsNullOrWhiteSpace($MockURL)) {
     }
     if ([string]::IsNullOrWhiteSpace($MockURL)) {
         $MockURL = 'http://mock-llm.default.svc:18080/v1'
-        foreach ($ns in @('testplane-mock', 'default', 'testplane', 'testplane-svc')) {
+        foreach ($ns in @('argus-mock', 'default', 'argus', 'argus-svc')) {
             $svc = & kubectl -n $ns get svc mock-llm -o name --request-timeout=3s 2>$null
             if ($LASTEXITCODE -eq 0 -and (($svc | Out-String).Trim()) -ne '') {
                 $MockURL = "http://mock-llm.$ns.svc:18080/v1"
@@ -60,7 +60,7 @@ function Start-ApiForward {
     param([int]$Port)
     $log = Join-Path $OutDir ("forward-$Port.log")
     $p = Start-Process -FilePath 'kubectl' `
-        -ArgumentList @('-n', $Namespace, 'port-forward', 'svc/testplane', "${Port}:8080") `
+        -ArgumentList @('-n', $Namespace, 'port-forward', 'svc/argus', "${Port}:8080") `
         -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput $log -RedirectStandardError "$log.err"
     $deadline = (Get-Date).AddSeconds(25)
@@ -111,7 +111,7 @@ function Get-FileBytes {
     param([string]$RelativePath, [hashtable]$ExtraHeaders = @{})
     $tmp = Join-Path $OutDir ("file-" + [guid]::NewGuid().ToString('N') + ".bin")
     $headers = @{ Authorization = "Bearer $User" } + $ExtraHeaders
-    $u = "$script:ApiBase/api/v1/runs/$script:RunId/files?path=" + [uri]::EscapeDataString($RelativePath)
+    $u = "$script:ApiBase/api/v1/tasks/$script:RunId/files?path=" + [uri]::EscapeDataString($RelativePath)
     $r = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -PassThru -Uri $u -Headers $headers -OutFile $tmp
     $bytes = if (Test-Path -LiteralPath $tmp) { [System.IO.File]::ReadAllBytes($tmp) } else { [byte[]]@() }
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
@@ -133,8 +133,8 @@ if ($DryRun) {
     Write-Host "artifact-persistence-check dry-run（不连后端、不删 Job、不重启）" -ForegroundColor Cyan
     Write-Host "  base=$BaseUrl mock=$MockURL"
     Write-Host "  1) 2-test service Run → 基线 artifacts/result.json sha256"
-    Write-Host "  2) 删除 Job/Pod → artifacts 条目数/大小/result 数/sha256 完全一致；attempt artifacts + Range(0-9) 可用"
-    Write-Host "  3) rollout restart testplaned → /files sha256 仍一致"
+    Write-Host "  2) 删除 runner Job/Pod → artifacts 条目数/大小/result 数/sha256 完全一致；attempt/runner artifacts + Range(0-9) 可用"
+    Write-Host "  3) rollout restart argusd → /files sha256 仍一致"
     Write-Host "  负向：不存在 path → 404；../../etc/passwd → 400"
     Write-Host (New-Manifest -Stamp (Get-Date -Format 'yyyyMMdd-HHmmss'))
     Write-Host "dry-run OK" -ForegroundColor Green
@@ -161,24 +161,28 @@ if (-not $SkipForward) {
 $null = Invoke-WebRequest -UseBasicParsing "$script:ApiBase/healthz" -TimeoutSec 5
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$submitted = Invoke-Api -Method POST -Path '/api/v1/runs' -Body (New-Manifest -Stamp $stamp)
-$script:RunId = [string]$submitted.run.id
-Write-Host "已提交 Run $($script:RunId)"
+$submitted = Invoke-Api -Method POST -Path '/api/v1/tasks' -Body (New-Manifest -Stamp $stamp)
+$script:RunId = [string]$submitted.task.id
+Write-Host "已提交 Task $($script:RunId)"
 
 # 先记录要删的对象名，并用 hold-until 保证它不会被正常终态清理提前删掉；
 # 否则“删后不见了”可能只是本来就没见过（票 #29-2）。
-$previewTask = @($submitted.tasks | Where-Object { $_.name -eq 'artifact-a' })[0]
-if (-not $previewTask) { $previewTask = @($submitted.tasks)[0] }
-$previewTaskId = [string]$previewTask.id
-$jobName = "tp-" + $previewTaskId.ToLower() + "-a1"
+$previewTask = @($submitted.task.runners | Where-Object { $_.name -eq 'artifact-a' })[0]
+if (-not $previewTask) { $previewTask = @($submitted.task.runners)[0] }
+# v2：runner 无独立 id，由 (task_id, attempt_no, seq) 定位（D-68）；seq 从 1 递增。
+$runnerSeq = if ($previewTask -and $previewTask.seq) { [int]$previewTask.seq } else { 1 }
+$taskId = [string]$script:RunId
+# v2：Job 名由 executor 渲染（附录 B：argus-t-<task>-<attempt>-<seq>），脚本按标签发现，不拼名字。
+$jobSel = "argus.io/task=$script:RunId,argus.io/runner-seq=$runnerSeq"
+$jobName = ''
 $jobQueryOK = $false
 $jobExistsBefore = $false
 $jobSw = [System.Diagnostics.Stopwatch]::StartNew()
 while ($jobSw.Elapsed.TotalSeconds -lt 60) {
     try {
-        $jobOut = Invoke-KubectlText @('-n', $Namespace, 'get', 'job', $jobName, '-o', 'name', '--ignore-not-found')
+        $jobOut = Invoke-KubectlText @('-n', $Namespace, 'get', 'jobs', '-l', $jobSel, '-o', 'name', '--ignore-not-found')
         $jobQueryOK = $true
-        if (@($jobOut).Count -gt 0) { $jobExistsBefore = $true; break }
+        if (@($jobOut).Count -gt 0) { $jobName = ([string](@($jobOut)[0])) -replace '^job/', ''; $jobExistsBefore = $true; break }
     } catch {
         $jobQueryOK = $false
         break
@@ -191,7 +195,7 @@ $podNamesBefore = @()
 if ($jobExistsBefore) {
     try {
         $holdUntil = (Get-Date).ToUniversalTime().AddMinutes(10).ToString("yyyy-MM-ddTHH:mm:ssZ")
-        $null = Invoke-KubectlText @('-n', $Namespace, 'annotate', 'job', $jobName, ("testplane.io/hold-until=" + $holdUntil), '--overwrite')
+        $null = Invoke-KubectlText @('-n', $Namespace, 'annotate', 'job', $jobName, ("argus.io/hold-until=" + $holdUntil), '--overwrite')
         Add-Check 'k8s.hold_annotate' $true ("hold-until=" + $holdUntil)
         $podSw = [System.Diagnostics.Stopwatch]::StartNew()
         while ($podSw.Elapsed.TotalSeconds -lt 60) {
@@ -208,8 +212,8 @@ if ($jobExistsBefore) {
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $run = $null
 while ($sw.Elapsed.TotalSeconds -lt $TerminalTimeoutSeconds) {
-    $run = Invoke-Api -Method GET -Path "/api/v1/runs/$script:RunId"
-    if ($run.status -in @('succeeded', 'failed', 'completed_with_errors', 'service_unavailable', 'canceled')) { break }
+    $run = Invoke-Api -Method GET -Path "/api/v1/tasks/$script:RunId"
+    if ($run.status -in @('succeeded', 'failed', 'service_unavailable', 'canceled')) { break }
     Start-Sleep -Milliseconds 500
 }
 $sw.Stop()
@@ -218,24 +222,24 @@ Write-Host ("终态：{0}，耗时 {1:N1}s" -f $run.status, $sw.Elapsed.TotalSec
 Write-Host ""
 Write-Host "基线断言：" -ForegroundColor Cyan
 Add-Check 'run.succeeded' ($run.status -eq 'succeeded') ("status=" + $run.status)
-$tasks = @((Invoke-Api -Method GET -Path "/api/v1/runs/$script:RunId/tasks?limit=50").items)
+$tasks = @((Invoke-Api -Method GET -Path "/api/v1/tasks/$script:RunId/runners?limit=50").items)
 Add-Check 'run.two_tests' ($tasks.Count -eq 2) ("tasks=" + $tasks.Count)
 Add-Check 'tasks.succeeded' (@($tasks | Where-Object { $_.status -ne 'succeeded' }).Count -eq 0) (($tasks | ForEach-Object { "$($_.name)=$($_.status)" }) -join ', ')
 $task = @($tasks | Where-Object { $_.name -eq 'artifact-a' })[0]
 if (-not $task) { $task = $tasks[0] }
 $taskId = [string]$task.id
-$fileRel = "tasks/$taskId/attempts/1/result.json"
+$fileRel = "tasks/$taskId/attempts/1/runners/$runnerSeq/result.json"   # v2 布局（D-68）
 Add-Check 'task.same_as_held_job' ($taskId -eq $previewTaskId) ("held=" + $previewTaskId + " selected=" + $taskId)
-$taskDetail = Invoke-Api -Method GET -Path "/api/v1/tasks/$taskId"
+$taskDetail = Invoke-Api -Method GET -Path "/api/v1/tasks/$taskId"   # v2：Task 详情含 runners/attempts
 $attempts = @($taskDetail.attempts)
-$attemptTerminal = $attempts.Count -gt 0 -and @($attempts | Where-Object { $_.status -notin @('succeeded', 'failed', 'canceled') }).Count -eq 0
-Add-Check 'attempt.terminal_before_delete' $attemptTerminal (($attempts | ForEach-Object { "idx=$($_.idx) status=$($_.status)" }) -join ', ')
+$attemptTerminal = $attempts.Count -gt 0 -and @($attempts | Where-Object { $_.status -notin @('succeeded', 'failed', 'service_unavailable', 'canceled') }).Count -eq 0
+Add-Check 'attempt.terminal_before_delete' $attemptTerminal (($attempts | ForEach-Object { "attempt=$($_.attempt_no) status=$($_.status)" }) -join ', ')
 
 # 产物索引是终态后异步写入；基线等它出现 result 行（最多 60s），
 # 但后面仍然严格比较条目数/大小/sha256，不放宽核心断言。
 $baseDeadline = (Get-Date).AddSeconds(60)
 while ($true) {
-    $baseArtifacts = Invoke-Api -Method GET -Path "/api/v1/runs/$script:RunId/artifacts"
+    $baseArtifacts = Invoke-Api -Method GET -Path "/api/v1/tasks/$script:RunId/artifacts"
     $baseItems = @($baseArtifacts.items)
     $baseResultCount = @($baseItems | Where-Object { $_.kind -eq 'result' }).Count
     if ($baseResultCount -gt 0 -or (Get-Date) -ge $baseDeadline) { break }
@@ -256,12 +260,12 @@ Add-Check 'baseline.prefixed_sha_same' ($basePrefixedFile.sha256 -eq $baseFile.s
 Write-Host ("基线：artifacts={0}, total={1}, result={2}, fileBytes={3}, sha={4}" -f $baseCount, $baseTotal, $baseResultCount, $baseFile.bytes.Length, $baseFile.sha256)
 
 # 确认 Attempt 已终态后删除 Job（不等 GC，加速；语义与 GC 删除后的读取一致）。
-$jobName = "tp-" + $taskId.ToLower() + "-a1"
+# v2：沿用上面按标签发现的 $jobName
 # 删前按名确认对象存在；先移除 hold-until，再删。
 $holdRemoved = $false
 if ($jobExistsBefore) {
     try {
-        $null = Invoke-KubectlText @('-n', $Namespace, 'annotate', 'job', $jobName, 'testplane.io/hold-until-')
+        $null = Invoke-KubectlText @('-n', $Namespace, 'annotate', 'job', $jobName, 'argus.io/hold-until-')
         $holdRemoved = $true
     } catch { }
 }
@@ -319,7 +323,7 @@ Add-Check 'pod.gone' ($podLabelQueryOK -and $podsByJob.Count -eq 0) $(if ($podLa
 
 Write-Host ""
 Write-Host "Pod 消失后断言：" -ForegroundColor Cyan
-$afterArtifacts = Invoke-Api -Method GET -Path "/api/v1/runs/$script:RunId/artifacts"
+$afterArtifacts = Invoke-Api -Method GET -Path "/api/v1/tasks/$script:RunId/artifacts"
 $afterItems = @($afterArtifacts.items)
 $afterPaths = @($afterItems | ForEach-Object { $_.path } | Sort-Object) -join "`n"
 $afterFile = Get-FileBytes -RelativePath $fileRel
@@ -333,7 +337,7 @@ Add-Check 'after.sha256_same' ($afterFile.sha256 -eq $baseFile.sha256) ("before=
 Add-Check 'after.prefixed_file_200' ($afterPrefixedFile.status -eq 200) ("raw artifacts.path=" + $prefixedRel + " / status=" + $afterPrefixedFile.status)
 Add-Check 'after.prefixed_sha_same' ($afterPrefixedFile.sha256 -eq $baseFile.sha256) ("relative=" + $baseFile.sha256 + " prefixed=" + $afterPrefixedFile.sha256)
 
-$attemptArtifacts = Invoke-Api -Method GET -Path "/api/v1/tasks/$taskId/attempts/1/artifacts"
+$attemptArtifacts = Invoke-Api -Method GET -Path "/api/v1/tasks/$taskId/attempts/1/runners/$runnerSeq/artifacts"
 $attemptItems = @($attemptArtifacts.items)
 Add-Check 'after.attempt_artifacts' ($attemptItems.Count -gt 0) ("items=" + $attemptItems.Count)
 $range = Get-FileBytes -RelativePath $fileRel -ExtraHeaders @{ Range = 'bytes=0-9' }
@@ -341,12 +345,12 @@ Add-Check 'after.range_206' ($range.status -eq 206) ("status=" + $range.status)
 Add-Check 'after.range_10_bytes' ($range.bytes.Length -eq 10) ("bytes=" + $range.bytes.Length)
 
 # 负向：不存在 404、路径穿越 400。
-$bad404 = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Uri ("$script:ApiBase/api/v1/runs/$script:RunId/files?path=" + [uri]::EscapeDataString("no-such-artifact-$stamp.bin")) -Headers @{ Authorization = "Bearer $User" }
+$bad404 = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Uri ("$script:ApiBase/api/v1/tasks/$script:RunId/files?path=" + [uri]::EscapeDataString("no-such-artifact-$stamp.bin")) -Headers @{ Authorization = "Bearer $User" }
 Add-Check 'negative.missing_404' ($bad404.StatusCode -eq 404) ("status=" + $bad404.StatusCode)
-$bad400 = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Uri ("$script:ApiBase/api/v1/runs/$script:RunId/files?path=" + [uri]::EscapeDataString("../../etc/passwd")) -Headers @{ Authorization = "Bearer $User" }
+$bad400 = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Uri ("$script:ApiBase/api/v1/tasks/$script:RunId/files?path=" + [uri]::EscapeDataString("../../etc/passwd")) -Headers @{ Authorization = "Bearer $User" }
 Add-Check 'negative.traversal_400' ($bad400.StatusCode -eq 400) ("status=" + $bad400.StatusCode)
 # 带 run_id 前缀的原始形态也要做穿越校验，不能因为剥前缀而绕过。
-$badPrefix400 = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Uri ("$script:ApiBase/api/v1/runs/$script:RunId/files?path=" + [uri]::EscapeDataString("$script:RunId/../../etc/passwd")) -Headers @{ Authorization = "Bearer $User" }
+$badPrefix400 = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck -Uri ("$script:ApiBase/api/v1/tasks/$script:RunId/files?path=" + [uri]::EscapeDataString("$script:RunId/../../etc/passwd")) -Headers @{ Authorization = "Bearer $User" }
 Add-Check 'negative.prefixed_traversal_400' ($badPrefix400.StatusCode -eq 400) ("status=" + $badPrefix400.StatusCode + " / path=$script:RunId/../../etc/passwd")
 
 if (-not $SkipRestart) {
@@ -354,7 +358,7 @@ if (-not $SkipRestart) {
     Write-Host "控制面重启后断言：" -ForegroundColor Cyan
     $restartOK = $true
     try {
-        $null = Invoke-KubectlText @('-n', $Namespace, 'rollout', 'restart', 'deploy/testplaned')
+        $null = Invoke-KubectlText @('-n', $Namespace, 'rollout', 'restart', 'deploy/argusd')
         Add-Check 'restart.rollout_restart' $true 'rollout restart 成功'
     } catch {
         Add-Check 'restart.rollout_restart' $false ($_.Exception.Message)
@@ -362,7 +366,7 @@ if (-not $SkipRestart) {
     }
     if ($restartOK) {
         try {
-            $null = Invoke-KubectlText @('-n', $Namespace, 'rollout', 'status', 'deploy/testplaned', "--timeout=$($RestartTimeoutSeconds)s")
+            $null = Invoke-KubectlText @('-n', $Namespace, 'rollout', 'status', 'deploy/argusd', "--timeout=$($RestartTimeoutSeconds)s")
             Add-Check 'restart.rollout_status' $true ("timeout=" + $RestartTimeoutSeconds + "s")
         } catch {
             Add-Check 'restart.rollout_status' $false ($_.Exception.Message)

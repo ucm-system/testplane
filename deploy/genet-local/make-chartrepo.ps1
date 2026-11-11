@@ -1,4 +1,4 @@
-# TestPlane infra · 一键「把我们的 chart 改名冒充成 Genet 固定 chart」并刷新 ChartMuseum
+# Argus infra · 一键「把我们的 chart 改名冒充成 Genet 固定 chart」并刷新 ChartMuseum
 #
 # 背景：真 Genet 的 Open API 不能指定任意 chart —— `POST /api/open/helm/uc-packages/{stack|pd}/releases`
 # 永远用 `backend.config.helm.ucPackages.{stack|pd}.chart`（本地是 `charts/unified-cache-stack@0.0.1`）。
@@ -61,8 +61,8 @@ Write-Host "== 2/3 打包 + 重建假 ChartMuseum =="
 if ($SkipCacheWait) { Write-Host '== 3/3 跳过等缓存（-SkipCacheWait）=='; return }
 
 Write-Host '== 3/3 重启 genet-backend 并等 Chart cache refreshed =='
-& kubectl --context kind-testplane -n genet rollout restart deploy/genet-backend | Write-Host
-& kubectl --context kind-testplane -n genet rollout status deploy/genet-backend --timeout=180s | Write-Host
+& kubectl --context kind-argus -n genet rollout restart deploy/genet-backend | Write-Host
+& kubectl --context kind-argus -n genet rollout status deploy/genet-backend --timeout=180s | Write-Host
 
 $deadline = (Get-Date).AddMinutes(3)
 $ok = $false
@@ -70,7 +70,7 @@ $ok = $false
 $want = 1 + (@(Get-ChildItem -LiteralPath (Join-Path $RepoRoot '.data\packages') -Directory -ErrorAction SilentlyContinue).Count)
 if ($want -lt 2) { $want = 2 }
 while ((Get-Date) -lt $deadline) {
-    $line = & kubectl --context kind-testplane -n genet logs -l app=genet-backend --tail=200 2>$null |
+    $line = & kubectl --context kind-argus -n genet logs -l app=genet-backend --tail=200 2>$null |
             Select-String 'Chart cache refreshed' | Select-Object -Last 1
     if ($line -and $line.Line -match '"totalChartsInCache":\s*(\d+)' -and [int]$Matches[1] -ge $want) {
         Write-Host "   $($line.Line.Trim())"
@@ -83,5 +83,5 @@ if (-not $ok) { throw "3 分钟内没等到 Chart cache refreshed（totalChartsI
 
 Write-Host ''
 Write-Host '完成。自检：'
-Write-Host "  kubectl --context kind-testplane -n genet exec deploy/genet-chartrepo -- wget -qO- http://127.0.0.1/api/chartrepo/charts/charts"
+Write-Host "  kubectl --context kind-argus -n genet exec deploy/genet-chartrepo -- wget -qO- http://127.0.0.1/api/chartrepo/charts/charts"
 Write-Host '  然后 POST /api/open/helm/uc-packages/stack/releases（values 至少给一行，如 replicaCount: 1）'

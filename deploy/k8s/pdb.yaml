@@ -1,4 +1,4 @@
-# TestPlane · PodDisruptionBudget（**默认不启用，opt-in**）
+# Argus · PodDisruptionBudget（**默认不启用，opt-in**）
 #
 # 依据 design/views/06-physical-view.md §2、§7.1。
 #
@@ -10,14 +10,14 @@
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: testplaned
-  namespace: testplane
+  name: argusd
+  namespace: argus
   labels:
-    app.kubernetes.io/name: testplaned
-    app.kubernetes.io/part-of: testplane
+    app.kubernetes.io/name: argusd
+    app.kubernetes.io/part-of: argus
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: testplaned
-      app.kubernetes.io/part-of: testplane
+      app.kubernetes.io/name: argusd
+      app.kubernetes.io/part-of: argus

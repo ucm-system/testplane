@@ -137,15 +137,15 @@ func TestRequireFieldsMeta(t *testing.T) {
 	}
 }
 
-// Tester 是 allOf（TesterSpec + 注册表元数据），required 必须把两边合并。
+// Runner 是 allOf（RunnerDefinition + 注册表元数据），required 必须把两边合并。
 func TestRequireFieldsAllOf(t *testing.T) {
 	spec := loadRealSpec(t)
-	missing := spec.requireFields("Tester", []byte(`{}`))
+	missing := spec.requireFields("Runner", []byte(`{}`))
 	if !containsString(missing, "content_sha") {
 		t.Fatalf("allOf 第二支的 required 没被合并：%v", missing)
 	}
 	if len(missing) < 8 {
-		t.Fatalf("Tester 的 required 合并结果太少：%v", missing)
+		t.Fatalf("Runner 的 required 合并结果太少：%v", missing)
 	}
 }
 
@@ -240,7 +240,7 @@ func TestValidateErrorViaSpec(t *testing.T) {
 	header := http.Header{}
 	header.Set("Content-Type", "application/json; charset=utf-8")
 	body := []byte(`{"code":"NOT_FOUND","message":"没有","retryable":false,"trace_id":"tx"}`)
-	if issues := live.validateError("getRun", 404, header, body); len(issues) != 0 {
+	if issues := live.validateError("getTask", 404, header, body); len(issues) != 0 {
 		t.Fatalf("合法 404 Error 不应报错：%v", issues)
 	}
 	// 404 未在 getMeta 的响应里声明

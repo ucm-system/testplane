@@ -3,91 +3,101 @@ package store
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/ucm-system/testplane/server/internal/domain"
 )
 
 // 本文件是表行的直接投影（03 §3.1）。列名与顺序在本包内固定，
 // 所有 SELECT 都显式列名，不用 `SELECT *`（03 §5 查询纪律）。
+//
+// v2 模型（D-66～D-68）：tasks（一次评测任务）/ task_attempts（Task 级 attempt 计数行）
+// / task_runners（runner 执行记录，(task_id, attempt_no, seq) 唯一定位）/ runners（注册表）。
 
-// Run 是 runs 表的一行。
-type Run struct {
-	ID            string     `json:"id"`
-	Name          string     `json:"name"`
-	Kind          string     `json:"kind"`
-	Status        string     `json:"status"`
-	Manifest      []byte     `json:"manifest"`
-	Resolved      []byte     `json:"resolved"`
-	Endpoint      []byte     `json:"endpoint,omitempty"`
-	Deploy        []byte     `json:"deploy,omitempty"`
-	CleanupPolicy string     `json:"cleanup_policy"`
-	SubmittedBy   string     `json:"submitted_by"`
-	SubmittedAt   time.Time  `json:"submitted_at"`
-	StartedAt     *time.Time `json:"started_at,omitempty"`
-	FinishedAt    *time.Time `json:"finished_at,omitempty"`
-	Error         []byte     `json:"error,omitempty"`
-	RetryOf       *string    `json:"retry_of,omitempty"`
-	LastEventSeq  int64      `json:"last_event_seq"`
-	Revision      int64      `json:"revision"`
+// Task 是 tasks 表的一行（v1 的 runs，D-66）。
+type Task struct {
+	ID              string     `json:"id"` // t-YYYYMMDD-XXXX
+	Name            string     `json:"name"`
+	Status          string     `json:"status"`
+	Manifest        []byte     `json:"manifest"`
+	Resolved        []byte     `json:"resolved"`
+	Endpoint        []byte     `json:"endpoint,omitempty"`
+	Deploy          []byte     `json:"deploy,omitempty"`
+	Env             []byte     `json:"env"`
+	SecretEnv       []byte     `json:"secret_env"`
+	SubmittedBy     string     `json:"submitted_by"`
+	SubmittedAt     time.Time  `json:"submitted_at"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	Error           []byte     `json:"error,omitempty"`
+	RetryOf         *string    `json:"retry_of,omitempty"`
+	CurrentAttempt  int        `json:"current_attempt"` // 0 = 尚未开始
+	CancelRequested bool       `json:"cancel_requested"`
+	LastEventSeq    int64      `json:"last_event_seq"`
+	Revision        int64      `json:"revision"`
 }
 
-// Task 是 tasks 表的一行。
-type Task struct {
-	ID                string     `json:"id"`
-	RunID             string     `json:"run_id"`
+// Attempt 是 task_attempts 表的一行（Task 级 attempt 计数与落档归组行，D-68）。
+type Attempt struct {
+	TaskID         string     `json:"task_id"`
+	AttemptNo      int        `json:"attempt_no"`
+	Status         string     `json:"status"` // running|succeeded|failed|canceled
+	Trigger        string     `json:"trigger"`
+	InputRef       *string    `json:"input_ref,omitempty"`
+	ExportsRef     *string    `json:"exports_ref,omitempty"`
+	DeployStateRef *string    `json:"deploy_state_ref,omitempty"`
+	Error          []byte     `json:"error,omitempty"`
+	StartedAt      *time.Time `json:"started_at,omitempty"`
+	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+}
+
+// RunnerRun 是 task_runners 表的一行（runner 执行记录；v1 的内层 tasks + 物理执行列，D-68）。
+type RunnerRun struct {
+	TaskID            string     `json:"task_id"`
+	AttemptNo         int        `json:"attempt_no"`
 	Seq               int        `json:"seq"`
 	Name              string     `json:"name"`
-	TesterName        string     `json:"tester_name"`
-	TesterVersion     string     `json:"tester_version"`
+	RunnerName        string     `json:"runner_name"`
+	RunnerVersion     string     `json:"runner_version"`
+	Role              string     `json:"role"`
 	ImageRef          string     `json:"image_ref"`
+	ImageDigest       *string    `json:"image_digest,omitempty"`
 	Profile           string     `json:"profile"`
-	ArgsRaw           string     `json:"args_raw"`
-	ArgsArgv          []byte     `json:"args_argv"`
-	InjectedArgv      []byte     `json:"injected_argv"`
-	Env               []byte     `json:"env"`
-	SecretEnv         []byte     `json:"secret_env"`
+	InputRef          string     `json:"input_ref"`
 	OnFailure         string     `json:"on_failure"`
 	TimeoutSeconds    int        `json:"timeout_seconds"`
-	RetryPolicy       []byte     `json:"retry_policy"`
 	Status            string     `json:"status"`
 	StatusReason      *string    `json:"status_reason,omitempty"`
 	WaitingReason     *string    `json:"waiting_reason,omitempty"`
 	EndpointKey       *string    `json:"endpoint_key,omitempty"`
 	EndpointExclusive bool       `json:"endpoint_exclusive"`
-	CurrentAttempt    int        `json:"current_attempt"`
-	AvailableAt       *time.Time `json:"available_at,omitempty"`
-	CancelRequested   bool       `json:"cancel_requested"`
-	ResultRef         *string    `json:"result_ref,omitempty"`
-	ReusedFromTaskID  *string    `json:"reused_from_task_id,omitempty"`
+	ExitCode          *int       `json:"exit_code,omitempty"`
+	ErrorCode         *string    `json:"error_code,omitempty"`
 	Error             []byte     `json:"error,omitempty"`
+	ExportsRef        *string    `json:"exports_ref,omitempty"`
+	ResultRef         *string    `json:"result_ref,omitempty"`
+	LogRef            *string    `json:"log_ref,omitempty"`
+	JobID             string     `json:"job_id"`
+	JobNamespace      *string    `json:"job_namespace,omitempty"`
+	Phase             *string    `json:"phase,omitempty"`
+	ExecutorRef       []byte     `json:"executor_ref,omitempty"`
+	CancelRequested   bool       `json:"cancel_requested"`
+	StartedAt         *time.Time `json:"started_at,omitempty"`
+	FinishedAt        *time.Time `json:"finished_at,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
-// Attempt 是 attempts 表的一行。
-type Attempt struct {
-	ID           string     `json:"id"`
-	TaskID       string     `json:"task_id"`
-	Idx          int        `json:"idx"`
-	Status       string     `json:"status"`
-	JobID        string     `json:"job_id"`
-	JobNamespace *string    `json:"job_namespace,omitempty"`
-	Phase        *string    `json:"phase,omitempty"`
-	ImageDigest  *string    `json:"image_digest,omitempty"`
-	ExitCode     *int32     `json:"exit_code,omitempty"`
-	StartedAt    *time.Time `json:"started_at,omitempty"`
-	FinishedAt   *time.Time `json:"finished_at,omitempty"`
-	LogRef       *string    `json:"log_ref,omitempty"`
-	ArtifactRef  *string    `json:"artifact_ref,omitempty"`
-	ResultRef    *string    `json:"result_ref,omitempty"`
-	Error        []byte     `json:"error,omitempty"`
-	ExecutorRef  []byte     `json:"executor_ref,omitempty"`
+// Key 返回执行记录定位三元组（D-68）。
+func (r RunnerRun) Key() domain.RunnerKey {
+	return domain.RunnerKey{TaskID: r.TaskID, AttemptNo: r.AttemptNo, Seq: r.Seq}
 }
 
 // Event 是 state_events 表的一行（append-only 事实流）。
 type Event struct {
 	ID         int64           `json:"-"`
-	RunID      string          `json:"run_id"`
-	TaskID     *string         `json:"task_id"`
-	AttemptID  *string         `json:"attempt_id"`
+	TaskID     string          `json:"task_id"`
+	AttemptNo  *int            `json:"attempt_no"`
+	RunnerSeq  *int            `json:"runner_seq"`
 	Seq        int64           `json:"seq"`
 	Type       string          `json:"type"`
 	FromStatus *string         `json:"from"`
@@ -98,29 +108,35 @@ type Event struct {
 	CreatedAt  time.Time       `json:"at"`
 }
 
-// Lease 是 endpoint_leases 表的一行。
+// Lease 是 endpoint_leases 表的一行（外接模式互斥槽位；定位 = 执行记录三元组）。
 type Lease struct {
 	TaskID      string    `json:"task_id"`
+	AttemptNo   int       `json:"attempt_no"`
+	RunnerSeq   int       `json:"runner_seq"`
 	EndpointKey string    `json:"endpoint_key"`
 	Exclusive   bool      `json:"exclusive"`
 	AcquiredAt  time.Time `json:"acquired_at"`
 }
 
-// Tester 是 testers 表的一行。
-type Tester struct {
+// Runner 是 runners 表的一行（Runner 注册表；v1 testers 表，D-66）。
+type Runner struct {
 	Name         string     `json:"name"`
 	Version      string     `json:"version"`
 	DisplayName  string     `json:"display_name"`
 	Description  string     `json:"description"`
 	Role         string     `json:"role"`
+	Builtin      bool       `json:"builtin"`
 	OnFailure    string     `json:"on_failure"`
-	Entry        string     `json:"entry"`
+	Entry        []byte     `json:"entry"` // exec form 数组（jsonb）
+	InputFormat  string     `json:"input_format"`
 	Image        string     `json:"image"`
 	Resources    []byte     `json:"resources"`
 	Concurrency  []byte     `json:"concurrency"`
 	Mounts       []byte     `json:"mounts"`
 	K8s          []byte     `json:"k8s"`
 	Parameters   []byte     `json:"parameters"`
+	Exports      []byte     `json:"exports"`
+	Consumes     []byte     `json:"consumes"`
 	EnvDecl      []byte     `json:"env_decl"`
 	Placeholder  *string    `json:"placeholder,omitempty"`
 	SourceFile   string     `json:"source_file"`

@@ -37,7 +37,7 @@ func roleRank(role string) int {
 // AtLeast 报告 role 是否达到 want。
 func AtLeast(role, want string) bool { return roleRank(role) >= roleRank(want) }
 
-// RoleMapper 把 claims 里的 groups 映射成角色（TESTPLANE_ROLE_CLAIM / TESTPLANE_ROLE_MAP）。
+// RoleMapper 把 claims 里的 groups 映射成角色（AG_OIDC_ROLE_CLAIM / AG_ROLE_MAP）。
 type RoleMapper struct {
 	Claim string
 	Map   map[string]string
@@ -86,7 +86,7 @@ type Identity struct {
 	Via string
 }
 
-// Session 是 `tp_session` Cookie 的载荷（签名后 base64url）。
+// Session 是 `ag_session` Cookie 的载荷（签名后 base64url）。
 type Session struct {
 	Sub    string   `json:"sub"`
 	Email  string   `json:"email"`

@@ -20,10 +20,10 @@ import (
 //
 // 这里只做传输与状态事实的读取，不新增状态语义；终态集合与 outcome 映射和 tools.go 共用。
 
-// RunReader 是 wait/follow 需要的最小接口。*Client（MCP）与 tpctl 的 client 都实现它。
-type RunReader interface {
-	GetRun(ctx context.Context, runID string) ([]byte, error)
-	OpenRunEvents(ctx context.Context, runID string, lastEventID int64) (io.ReadCloser, error)
+// TaskReader 是 wait/follow 需要的最小接口。*Client（MCP）与 cmd/argus 的 client 都实现它。
+type TaskReader interface {
+	GetTask(ctx context.Context, taskID string) ([]byte, error)
+	OpenTaskEvents(ctx context.Context, taskID string, lastEventID int64) (io.ReadCloser, error)
 }
 
 // SSEUnavailableError 表示事件流不可用；Wait 收到它会降级为轮询。
@@ -129,7 +129,7 @@ type WaitOptions struct {
 // WaitResult 是 Wait 的结果。Outcome 与 CLI 退出码一一对应：
 // success→0、failed→1、canceled→2、timeout→3（连不上是 error，不在这里）。
 type WaitResult struct {
-	RunJSON        []byte
+	TaskJSON       []byte
 	Status         string
 	Outcome        string
 	Mode           string // poll | sse
@@ -146,9 +146,9 @@ const (
 	finalFetchTimeout    = 3 * time.Second
 )
 
-// Wait 等到 Run 终态或超时。返回的 error 只表示**无法继续等待**（鉴权失败、连接失败、坏 JSON）；
+// Wait 等到 Task 终态或超时。返回的 error 只表示**无法继续等待**（鉴权失败、连接失败、坏 JSON）；
 // 超时不是 error，用 TimedOut 表示。
-func Wait(ctx context.Context, api RunReader, runID string, opts WaitOptions) (WaitResult, error) {
+func Wait(ctx context.Context, api TaskReader, taskID string, opts WaitOptions) (WaitResult, error) {
 	if opts.Timeout <= 0 {
 		opts.Timeout = defaultWaitTimeout
 	}
@@ -167,7 +167,7 @@ func Wait(ctx context.Context, api RunReader, runID string, opts WaitOptions) (W
 	res := WaitResult{Mode: "poll"}
 	tracker := &statusTracker{fn: opts.OnStatus}
 
-	state, err := fetchRun(ctx, api, runID, deadline)
+	state, err := fetchTask(ctx, api, taskID, deadline)
 	if err != nil {
 		if time.Now().After(deadline) || (errors.Is(err, context.DeadlineExceeded) && !time.Now().Before(deadline)) {
 			res.TimedOut = true
@@ -177,22 +177,22 @@ func Wait(ctx context.Context, api RunReader, runID string, opts WaitOptions) (W
 		}
 		return res, err
 	}
-	res.RunJSON, res.Status = state.raw, state.status
+	res.TaskJSON, res.Status = state.raw, state.status
 	tracker.update(state.status)
-	if isTerminalRunStatus(state.status) {
-		res.Outcome = runOutcome(state.status)
+	if isTerminalTaskStatus(state.status) {
+		res.Outcome = taskOutcome(state.status)
 		res.Elapsed = time.Since(started)
 		return res, nil
 	}
 
 	if opts.Follow {
-		sseRes, sseErr := waitSSE(ctx, api, runID, deadline, opts, state, tracker)
+		sseRes, sseErr := waitSSE(ctx, api, taskID, deadline, opts, state, tracker)
 		if sseErr != nil {
 			return res, sseErr
 		}
 		if sseRes.state != nil {
 			state = *sseRes.state
-			res.RunJSON, res.Status = state.raw, state.status
+			res.TaskJSON, res.Status = state.raw, state.status
 		}
 		if sseRes.fallbackReason != "" {
 			res.FallbackReason = sseRes.fallbackReason
@@ -206,12 +206,12 @@ func Wait(ctx context.Context, api RunReader, runID string, opts WaitOptions) (W
 				res.TimedOut = true
 				res.Outcome = "timeout"
 			} else {
-				res.Outcome = runOutcome(res.Status)
+				res.Outcome = taskOutcome(res.Status)
 			}
 			return res, nil
 		}
-		if isTerminalRunStatus(res.Status) {
-			res.Outcome = runOutcome(res.Status)
+		if isTerminalTaskStatus(res.Status) {
+			res.Outcome = taskOutcome(res.Status)
 			res.Elapsed = time.Since(started)
 			return res, nil
 		}
@@ -233,29 +233,29 @@ func Wait(ctx context.Context, api RunReader, runID string, opts WaitOptions) (W
 		if !time.Now().Before(deadline) {
 			break
 		}
-		state, err = fetchRun(ctx, api, runID, deadline)
+		state, err = fetchTask(ctx, api, taskID, deadline)
 		if err != nil {
 			if !time.Now().Before(deadline) {
 				break
 			}
 			return res, err
 		}
-		res.RunJSON, res.Status = state.raw, state.status
+		res.TaskJSON, res.Status = state.raw, state.status
 		tracker.update(state.status)
-		if isTerminalRunStatus(state.status) {
-			res.Outcome = runOutcome(state.status)
+		if isTerminalTaskStatus(state.status) {
+			res.Outcome = taskOutcome(state.status)
 			res.Elapsed = time.Since(started)
 			return res, nil
 		}
 	}
 
 	// 超时：再做一次 best-effort 读取，把最后状态带给调用方。
-	if last, err := fetchRun(context.Background(), api, runID, time.Now().Add(finalFetchTimeout)); err == nil {
+	if last, err := fetchTask(context.Background(), api, taskID, time.Now().Add(finalFetchTimeout)); err == nil {
 		state = last
-		res.RunJSON, res.Status = last.raw, last.status
+		res.TaskJSON, res.Status = last.raw, last.status
 		tracker.update(last.status)
-		if isTerminalRunStatus(last.status) {
-			res.Outcome = runOutcome(last.status)
+		if isTerminalTaskStatus(last.status) {
+			res.Outcome = taskOutcome(last.status)
 			res.Elapsed = time.Since(started)
 			return res, nil
 		}
@@ -267,13 +267,13 @@ func Wait(ctx context.Context, api RunReader, runID string, opts WaitOptions) (W
 }
 
 type sseWaitResult struct {
-	state          *runState
+	state          *taskState
 	fallbackReason string
 	timedOut       bool
 }
 
 // waitSSE 用事件流等终态。返回 fallbackReason 表示应继续轮询。
-func waitSSE(ctx context.Context, api RunReader, runID string, deadline time.Time, opts WaitOptions, initial runState, tracker *statusTracker) (*sseWaitResult, error) {
+func waitSSE(ctx context.Context, api TaskReader, taskID string, deadline time.Time, opts WaitOptions, initial taskState, tracker *statusTracker) (*sseWaitResult, error) {
 	last := initial
 	lastSeq := int64(0)
 	reconnects := 0
@@ -284,7 +284,7 @@ func waitSSE(ctx context.Context, api RunReader, runID string, deadline time.Tim
 		}
 
 		reqCtx, cancel := context.WithDeadline(ctx, deadline)
-		body, err := api.OpenRunEvents(reqCtx, runID, lastSeq)
+		body, err := api.OpenTaskEvents(reqCtx, taskID, lastSeq)
 		if err != nil {
 			cancel()
 			var unavailable *SSEUnavailableError
@@ -319,7 +319,7 @@ func waitSSE(ctx context.Context, api RunReader, runID string, deadline time.Tim
 				opts.OnEvent(frame)
 			}
 			switch frame.Event {
-			case "run.state_changed":
+			case "state_changed":
 				st := sseEventStatus(frame.Data)
 				if st == "" {
 					break
@@ -334,7 +334,7 @@ func waitSSE(ctx context.Context, api RunReader, runID string, deadline time.Tim
 				}
 				last.status = st
 				tracker.update(st)
-			case "run.finished":
+			case "task_finished":
 				finished = true
 				if st := sseEventStatus(frame.Data); st != "" {
 					last.status = st
@@ -352,16 +352,16 @@ func waitSSE(ctx context.Context, api RunReader, runID string, deadline time.Tim
 		cancel()
 
 		if finished {
-			if st, err := fetchRun(context.Background(), api, runID, time.Now().Add(finalFetchTimeout)); err == nil {
+			if st, err := fetchTask(context.Background(), api, taskID, time.Now().Add(finalFetchTimeout)); err == nil {
 				last = st
 			}
 			return &sseWaitResult{state: &last}, nil
 		}
 
 		// 流结束 / 读失败：先用一次 GET 校准状态。
-		if st, err := fetchRun(context.Background(), api, runID, time.Now().Add(finalFetchTimeout)); err == nil {
+		if st, err := fetchTask(context.Background(), api, taskID, time.Now().Add(finalFetchTimeout)); err == nil {
 			last = st
-			if isTerminalRunStatus(last.status) {
+			if isTerminalTaskStatus(last.status) {
 				return &sseWaitResult{state: &last}, nil
 			}
 		}
@@ -382,25 +382,25 @@ func waitSSE(ctx context.Context, api RunReader, runID string, deadline time.Tim
 	}
 }
 
-type runState struct {
+type taskState struct {
 	raw    []byte
 	status string
 }
 
-func fetchRun(ctx context.Context, api RunReader, runID string, deadline time.Time) (runState, error) {
+func fetchTask(ctx context.Context, api TaskReader, taskID string, deadline time.Time) (taskState, error) {
 	reqCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	raw, err := api.GetRun(reqCtx, runID)
+	raw, err := api.GetTask(reqCtx, taskID)
 	if err != nil {
-		return runState{}, err
+		return taskState{}, err
 	}
 	var v struct {
 		Status string `json:"status"`
 	}
 	if err := json.Unmarshal(raw, &v); err != nil {
-		return runState{}, fmt.Errorf("解析 Run 失败: %w", err)
+		return taskState{}, fmt.Errorf("解析 Task 失败: %w", err)
 	}
-	return runState{raw: raw, status: v.Status}, nil
+	return taskState{raw: raw, status: v.Status}, nil
 }
 
 type statusTracker struct {

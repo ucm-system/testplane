@@ -1,14 +1,15 @@
 package main
 
-// 实现侧校验：对运行中的控制面逐个打 MVP 的 25 个 operation，
+// 实现侧校验：对运行中的控制面逐个打 v2 的 operation（59 个），
 // 断言"端点存在 + 状态码符合 spec + 响应形状符合 schema + 错误体是 Error"。
 //
-// 关键取舍：
+// 关键取舍（v2：Task 是一等对象，没有 /runs）：
 //   - 核心只读端点要求精确的 2xx；
-//   - 状态相关端点的 404 按语义区分：/report、/report.md 未就绪只允许出现在非终态 Run，
-//     终态 Run 必须 200；/deploy 仅在 Run 没有 deploy 时允许 404；attempt result/logs 允许
-//     尚未产出的 404；404 的响应体仍必须过 Error 形状校验；
-//   - 会创建 2 个 fixture Run（A 用于读，B 用于取消），A 在结束时尽力取消。
+//   - 状态相关端点的 404 按语义区分：/report、/report.md 未就绪只允许出现在非终态 Task，
+//     终态 Task 必须 200；/deploy 仅在 Task 无部署（外接模式）时允许 404；
+//     runner 级 result/logs 允许尚未产出的 404（产物三选一 D-74）；404 的响应体仍必须过 Error 形状校验；
+//   - fixture：A（读探针，service 模式）+ B（取消）+ deploy 形态（deploy/logs）+ F（失败 → retry/clean）；
+//   - 写端点（admin）只断言校验/冲突/404 的错误契约，不创建真实资源。
 
 import (
 	"archive/zip"
@@ -72,7 +73,7 @@ func (c *liveClient) authorize(req *http.Request, accept string) {
 		accept = "application/json"
 	}
 	req.Header.Set("Accept", accept)
-	req.Header.Set("User-Agent", "testplane-contract/0.1")
+	req.Header.Set("User-Agent", "argus-contract/0.1")
 	if c.noAuth {
 		return
 	}
@@ -169,12 +170,10 @@ type Live struct {
 	warnings   []string
 	covered    map[string]bool
 	connectErr error
-	runA       string
-	taskA      string
-	runB       string
-	taskB      string
-	runF       string
-	taskF      string
+	taskA      string // 读探针 fixture（service 模式，跑到终态）
+	taskB      string // 取消 fixture
+	taskD      string // deploy 形态 fixture（deploy/logs 探针）
+	taskF      string // 失败 fixture（retry / clean 探针）
 }
 
 func NewLive(spec *Spec, opts Options) *Live {
@@ -214,16 +213,15 @@ func (l *Live) Run() ([]check, []string, error) {
 	l.probeText(ctx, "getReadyz", "/readyz", []int{200})
 	l.probeSchema(ctx, "getMeta", "/api/v1/meta", 200, "Meta")
 	l.probeSchema(ctx, "getMe", "/api/v1/me", 200, "Me")
-	l.probeSchema(ctx, "listRuns", "/api/v1/runs?limit=5", 200, "RunList")
 	l.probeSchema(ctx, "listTasks", "/api/v1/tasks?limit=5", 200, "TaskList")
-	l.probeSchema(ctx, "listTesters", "/api/v1/testers?limit=50", 200, "TesterList")
-	l.checkTesterRegistry(ctx)
-	l.probeSchema(ctx, "getTester", "/api/v1/testers/endpoint-probe", 200, "Tester")
+	l.probeSchema(ctx, "listTaskFacets", "/api/v1/tasks/facets", 200, "TaskFacets")
+	l.checkRunnerRegistry(ctx)
 	l.probeSchema(ctx, "listClusters", "/api/v1/clusters", 200, "ClusterList")
 	l.probeSchema(ctx, "getQueueStatus", "/api/v1/queue-status", 200, "QueueStatus")
 	l.checkQueueStatusVolcano(ctx)
 	l.probeSchema(ctx, "listProfiles", "/api/v1/profiles", 200, "ExecutionProfileList")
-	l.probeSchema(ctx, "getTesterVersion", "/api/v1/testers/endpoint-probe/versions/1.0.0", 200, "Tester")
+	l.probeSchema(ctx, "listSecretRefs", "/api/v1/secrets?limit=20", 200, "SecretRefList")
+	l.probeSchema(ctx, "listSharedMounts", "/api/v1/shared-mounts?limit=20", 200, "SharedMountList")
 	l.probeText(ctx, "getMetrics", "/metrics", []int{200})
 	l.probeAuthLogin(ctx)
 	l.checkAuthCallback(ctx)
@@ -232,25 +230,26 @@ func (l *Live) Run() ([]check, []string, error) {
 		return l.checks, l.warnings, l.connectErr
 	}
 
-	// ---- fixture Run --------------------------------------------------
-	l.runA, l.taskA = l.submitFixture(ctx, "A")
-	if l.runA != "" {
-		l.waitRunTerminal(ctx, l.runA, 120*time.Second)
-		l.probeRunReads(ctx)
-		l.probeRunBundle(ctx, l.runA)
+	// ---- fixture Task --------------------------------------------------
+	l.taskA = l.submitFixture(ctx, "A")
+	if l.taskA != "" {
+		l.waitTaskTerminal(ctx, l.taskA, "A", 120*time.Second)
+		l.probeTaskReads(ctx)
+		l.probeTaskBundle(ctx, l.taskA)
+		l.probeLatestRunner(ctx, l.taskA)
 	}
-	l.runB, l.taskB = l.submitFixture(ctx, "B")
-	if l.runB != "" {
+	l.taskB = l.submitFixture(ctx, "B")
+	if l.taskB != "" {
 		l.probeCancels(ctx)
 	}
-	deployRun := l.submitDeployFixture(ctx)
-	if deployRun != "" {
-		l.probeDeployLogsDeploy(ctx, deployRun)
+	l.taskD = l.submitDeployFixture(ctx)
+	if l.taskD != "" {
+		l.probeDeployLogsDeploy(ctx, l.taskD)
 	}
-	l.runF, l.taskF = l.submitFailureFixture(ctx)
-	if l.runF != "" {
-		l.waitFixtureTerminal(ctx, l.runF, "F", 120*time.Second)
-		l.probeRetry(ctx)
+	l.taskF = l.submitFailureFixture(ctx)
+	if l.taskF != "" {
+		l.waitTaskTerminal(ctx, l.taskF, "F", 120*time.Second)
+		l.probeRetryAndClean(ctx)
 	}
 
 	// ---- 错误体形状 ----------------------------------------------------
@@ -258,17 +257,17 @@ func (l *Live) Run() ([]check, []string, error) {
 	l.probeAdmin(ctx)
 
 	// ---- SSE ----------------------------------------------------------
-	if l.runA != "" {
+	if l.taskA != "" {
 		l.probeSSE(ctx)
 	}
 
 	// ---- 覆盖率 --------------------------------------------------------
 	l.checkCoverage()
 
-	// 尽力清理：取消用于读探针的 Run
-	if l.runA != "" {
+	// 尽力清理：取消用于读探针的 Task（若上一步没取消成功也无所谓）
+	if l.taskA != "" {
 		_, _, _, _ = l.client.do(ctx, http.MethodPost,
-			"/api/v1/runs/"+url.PathEscape(l.runA)+"/cancel", nil, "", nil)
+			"/api/v1/tasks/"+url.PathEscape(l.taskA)+"/cancel", nil, "", nil)
 	}
 	return l.checks, l.warnings, l.connectErr
 }
@@ -358,7 +357,7 @@ func (l *Live) checkQueueStatusVolcano(ctx context.Context) {
 
 // probeAuthLogin 按模式断言：OIDC 302（Location 非空）或 dev 模式 404（Error 形状）。
 func (l *Live) probeAuthLogin(ctx context.Context) {
-	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/auth/login?return=/runs", nil, "", nil)
+	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/auth/login?return=/tasks", nil, "", nil)
 	if err != nil {
 		l.recordErr("live.authLogin", err)
 		return
@@ -438,36 +437,45 @@ func (l *Live) checkAuthLogout(ctx context.Context) {
 	l.add("live.authLogout", true, fmt.Sprintf("HTTP 200，ok=%v", *body.OK))
 }
 
-// probeRunFileBothForms 同时探 /files 的两种 path 形态：
-//   - run 相对形态：tasks/<task>/attempts/1/result.json
-//   - 原始 artifacts 形态：<run_id>/tasks/.../result.json
-//
-// 状态 200 或 404 都按 spec 处理；两种形态必须都合法。
-func (l *Live) probeRunFileBothForms(ctx context.Context, runID string) {
-	id := url.PathEscape(runID)
-	forms := []struct {
-		name string
-		path string
-	}{
-		{"relative", "/api/v1/runs/" + id + "/files?path=report.json"},
-		{"prefixed", "/api/v1/runs/" + id + "/files?path=" + url.QueryEscape(runID+"/report.json")},
+// probeTaskFileBothForms 同时探 /files 的两种 path 形态：
+//   - Task 相对形态（契约坐标系）：attempts/1/runners/<seq>/result.json
+//   - 误用绝对形态：<task_id>/report.json —— 契约声明 path 是 Task 目录相对路径，
+//     400/404 必须是 Error 形状（不判红，但错误体要合格）。
+func (l *Live) probeTaskFileBothForms(ctx context.Context, taskID string) {
+	id := url.PathEscape(taskID)
+	// 相对形态：report.json 在终态后必然落档
+	status, hdr, raw, err := l.client.do(ctx, http.MethodGet,
+		"/api/v1/tasks/"+id+"/files?path=report.json", nil, "", nil)
+	if err != nil {
+		l.recordErr("live.downloadTaskFile", err)
+		return
 	}
-	var details []string
-	allOK := true
-	for _, f := range forms {
-		status, hdr, raw, err := l.client.do(ctx, http.MethodGet, f.path, nil, "", nil)
-		if err != nil {
-			l.recordErr("live.downloadRunFile", err)
-			return
+	l.markOp("downloadTaskFile")
+	ok, detail := l.artifactResponseCheck("downloadTaskFile", false, status, hdr, raw, "", "")
+	detail = "relative=>HTTP " + strconv.Itoa(status) + "（" + detail + "）"
+
+	// 绝对形态（历史习惯）：必须给出带 Error 形状的正确拒绝，或恰好存在的 200
+	st2, hdr2, raw2, err2 := l.client.do(ctx, http.MethodGet,
+		"/api/v1/tasks/"+id+"/files?path="+url.QueryEscape(taskID+"/report.json"), nil, "", nil)
+	form2 := "prefixed=>HTTP " + strconv.Itoa(st2)
+	switch {
+	case err2 != nil:
+		l.recordErr("live.downloadTaskFile", err2)
+		return
+	case st2 == http.StatusOK || st2 == http.StatusPartialContent:
+		// 服务端选择兼容绝对路径 → 必须是成功响应
+	case st2 == http.StatusNotFound || st2 == http.StatusBadRequest:
+		if issues := l.validateError("downloadTaskFile", st2, hdr2, raw2); len(issues) > 0 {
+			form2 += "（Error 形状不合格：" + strings.Join(issues, "；") + "）"
+			ok = false
+		} else {
+			form2 += "（Error 形状正确）"
 		}
-		ok, detail := l.artifactResponseCheck("downloadRunFile", false, status, hdr, raw, "", "")
-		if !ok {
-			allOK = false
-		}
-		details = append(details, f.name+"=>"+fmt.Sprintf("%d", status)+"（"+detail+"）")
+	default:
+		form2 += "（非契约状态码）"
+		ok = false
 	}
-	l.markOp("downloadRunFile")
-	l.add("live.downloadRunFile", allOK, strings.Join(details, "；"))
+	l.add("live.downloadTaskFile", ok, detail+"；"+form2)
 }
 
 // probeOptional 允许"spec 声明的状态依赖错误码"（如报告未生成 404）。
@@ -504,72 +512,82 @@ func (l *Live) probeOptional(ctx context.Context, opID, path string, successStat
 	}
 }
 
-// ---- 状态相关端点：404 按 Run 状态 / deploy 是否存在区分（票 #16）---------
+// ---- 状态相关端点：404 按 Task 状态 / deploy 是否存在区分 --------------------
 
-// isTerminalRunStatus 判断 Run 是否已终态。
-func isTerminalRunStatus(status string) bool {
+// isTerminalTaskStatus 判断 Task 是否已终态（v2：无 completed_with_errors，D-73）。
+func isTerminalTaskStatus(status string) bool {
 	switch status {
-	case "succeeded", "completed_with_errors", "service_unavailable", "failed", "canceled":
+	case "succeeded", "failed", "service_unavailable", "canceled":
 		return true
 	}
 	return false
 }
 
-// liveRunFacts 是判定 /report、/report.md、/deploy 语义所需的 Run 事实。
-type liveRunFacts struct {
-	Status    string
-	HasDeploy bool
+// liveTaskFacts 是判定 /report、/report.md、/deploy 语义所需的 Task 事实。
+type liveTaskFacts struct {
+	Status         string
+	HasDeploy      bool
+	CurrentAttempt int
+	RunnerSeqs     []int // 最新 attempt 的全部 runner seq
 }
 
-func (l *Live) fetchRunFacts(ctx context.Context, runID string) (liveRunFacts, error) {
-	status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID), nil, "", nil)
+func (l *Live) fetchTaskFacts(ctx context.Context, taskID string) (liveTaskFacts, error) {
+	status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(taskID), nil, "", nil)
 	if err != nil {
-		return liveRunFacts{}, err
+		return liveTaskFacts{}, err
 	}
 	if status != 200 {
-		return liveRunFacts{}, fmt.Errorf("GET /runs/%s 期望 200，实际 %d", runID, status)
+		return liveTaskFacts{}, fmt.Errorf("GET /tasks/%s 期望 200，实际 %d", taskID, status)
 	}
 	var body struct {
-		Status string          `json:"status"`
-		Deploy json.RawMessage `json:"deploy"`
+		Status         string          `json:"status"`
+		Deploy         json.RawMessage `json:"deploy"`
+		CurrentAttempt int             `json:"current_attempt"`
+		Runners        []struct {
+			Seq int `json:"seq"`
+		} `json:"runners"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
-		return liveRunFacts{}, fmt.Errorf("解析 Run 详情失败：%w", err)
+		return liveTaskFacts{}, fmt.Errorf("解析 Task 详情失败：%w", err)
 	}
 	hasDeploy := len(body.Deploy) > 0 && string(body.Deploy) != "null"
-	return liveRunFacts{Status: body.Status, HasDeploy: hasDeploy}, nil
+	facts := liveTaskFacts{Status: body.Status, HasDeploy: hasDeploy, CurrentAttempt: body.CurrentAttempt}
+	for _, r := range body.Runners {
+		facts.RunnerSeqs = append(facts.RunnerSeqs, r.Seq)
+	}
+	return facts, nil
 }
 
-// probeRunDeploy 校验 /deploy：Run 有 deploy 时必须 200；没有 deploy（service 形态）允许 404。
-func (l *Live) probeRunDeploy(ctx context.Context, runID string) {
-	facts, err := l.fetchRunFacts(ctx, runID)
+// probeTaskDeploy 校验 /deploy：Task 有 deploy 时必须 200；外接模式允许 404。
+func (l *Live) probeTaskDeploy(ctx context.Context, taskID string) {
+	facts, err := l.fetchTaskFacts(ctx, taskID)
 	if err != nil {
-		l.recordErr("live.getRunDeploy", err)
+		l.recordErr("live.getTaskDeploy", err)
 		return
 	}
-	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID)+"/deploy", nil, "", nil)
+	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(taskID)+"/deploy", nil, "", nil)
 	if err != nil {
-		l.recordErr("live.getRunDeploy", err)
+		l.recordErr("live.getTaskDeploy", err)
 		return
 	}
-	l.markOp("getRunDeploy")
-	ok, detail := l.artifactResponseCheck("getRunDeploy", facts.HasDeploy, status, hdr, raw, "DeploySnapshot", "")
+	l.markOp("getTaskDeploy")
+	ok, detail := l.artifactResponseCheck("getTaskDeploy", facts.HasDeploy, status, hdr, raw, "DeploySnapshot", "")
 	if ok && facts.HasDeploy {
-		detail = "Run 有 deploy，HTTP 200，DeploySnapshot required 齐全"
+		detail = "Task 有 deploy，HTTP 200，DeploySnapshot required 齐全"
 	}
-	l.add("live.getRunDeploy", ok, detail)
+	l.add("live.getTaskDeploy", ok, detail)
 }
 
-// probeRunReport 校验 /report 与 /report.md：
-//   - 非终态 Run 允许 404（尚未生成），但 Error 形状要正确；
-//   - 终态 Run 必须 200（C-7.2 报告在终态生成；终态 404 是真 bug）。
-func (l *Live) probeRunReport(ctx context.Context, runID, suffix, schemaName, opID string) {
-	facts, err := l.fetchRunFacts(ctx, runID)
+// probeTaskReport 校验 /report 与 /report.md：
+//   - 非终态 Task 允许 404（尚未生成），但 Error 形状要正确；
+//   - 终态 Task 必须 200（C-7.2 报告在终态生成；终态 404 是真 bug）。
+func (l *Live) probeTaskReport(ctx context.Context, taskID, suffix, schemaName, opID string) {
+	facts, err := l.fetchTaskFacts(ctx, taskID)
 	if err != nil {
 		l.recordErr("live."+opID, err)
 		return
 	}
-	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID)+suffix, nil, "", nil)
+	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(taskID)+suffix, nil, "", nil)
 	if err != nil {
 		l.recordErr("live."+opID, err)
 		return
@@ -579,10 +597,10 @@ func (l *Live) probeRunReport(ctx context.Context, runID, suffix, schemaName, op
 	if suffix == "/report.md" {
 		textCT = "text/markdown"
 	}
-	terminal := isTerminalRunStatus(facts.Status)
+	terminal := isTerminalTaskStatus(facts.Status)
 	ok, detail := l.artifactResponseCheck(opID, terminal, status, hdr, raw, schemaName, textCT)
 	if ok && terminal && status == 200 {
-		detail = fmt.Sprintf("Run 已终态（%s），HTTP 200", facts.Status)
+		detail = fmt.Sprintf("Task 已终态（%s），HTTP 200", facts.Status)
 	}
 	l.add("live."+opID, ok, detail)
 }
@@ -615,32 +633,33 @@ func (l *Live) artifactResponseCheck(opID string, require200 bool, status int, h
 	}
 }
 
-// waitRunTerminal 轮询 fixture Run 到终态；等不到就 FAIL，不允许后续 /report 探测降级成 404。
-func (l *Live) waitRunTerminal(ctx context.Context, runID string, timeout time.Duration) bool {
+// waitTaskTerminal 轮询 fixture Task 到终态；等不到就 FAIL，不允许后续 /report 探测降级成 404。
+func (l *Live) waitTaskTerminal(ctx context.Context, taskID, label string, timeout time.Duration) bool {
 	wctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	start := time.Now()
+	checkName := "live.fixture" + label + ".terminal"
 	for {
-		status, _, raw, err := l.client.do(wctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID), nil, "", nil)
+		status, _, raw, err := l.client.do(wctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(taskID), nil, "", nil)
 		if err != nil {
-			l.recordErr("live.fixtureA.terminal", err)
+			l.recordErr(checkName, err)
 			return false
 		}
 		if status != http.StatusOK {
-			l.add("live.fixtureA.terminal", false, fmt.Sprintf("GET /runs/%s 返回 %d", runID, status))
+			l.add(checkName, false, fmt.Sprintf("GET /tasks/%s 返回 %d", taskID, status))
 			return false
 		}
 		var body struct {
 			Status string `json:"status"`
 		}
 		_ = json.Unmarshal(raw, &body)
-		if isTerminalRunStatus(body.Status) {
-			l.add("live.fixtureA.terminal", true,
+		if isTerminalTaskStatus(body.Status) {
+			l.add(checkName, true,
 				fmt.Sprintf("status=%s，耗时 %.1fs", body.Status, time.Since(start).Seconds()))
 			return true
 		}
 		if wctx.Err() != nil {
-			l.add("live.fixtureA.terminal", false,
+			l.add(checkName, false,
 				fmt.Sprintf("%s 内未到终态，最后 status=%s", timeout, body.Status))
 			return false
 		}
@@ -648,11 +667,11 @@ func (l *Live) waitRunTerminal(ctx context.Context, runID string, timeout time.D
 	}
 }
 
-func (l *Live) submitFixture(ctx context.Context, label string) (runID, taskID string) {
-	name := "live.submitRun"
+func (l *Live) submitFixture(ctx context.Context, label string) string {
+	name := "live.submitTask"
 	detailPrefix := "fixture " + label
 	if label != "A" {
-		name = "live.submitRun.second"
+		name = "live.submitTask.second"
 	}
 	manifest, ct := l.manifestBytes()
 
@@ -660,50 +679,52 @@ func (l *Live) submitFixture(ctx context.Context, label string) (runID, taskID s
 		l.checkDryRun(ctx, manifest, ct)
 	}
 
-	status, hdr, raw, err := l.client.do(ctx, http.MethodPost, "/api/v1/runs", manifest, ct, nil)
+	status, hdr, raw, err := l.client.do(ctx, http.MethodPost, "/api/v1/tasks", manifest, ct, nil)
 	if err != nil {
 		l.recordErr(name, err)
-		return "", ""
+		return ""
 	}
-	l.markOp("submitRun")
+	l.markOp("submitTask")
 	if status != http.StatusAccepted {
-		l.add(name, false, fmt.Sprintf("%s：期望 HTTP 202，实际 %d：%s", detailPrefix, status, truncate(raw, 400)))
-		return "", ""
+		l.add(name, false, fmt.Sprintf("%s：期望 HTTP 202，实际 %d：%s", detailPrefix, status, truncate(raw, 500)))
+		return ""
 	}
-	issues := l.validateSuccess("submitRun", status, hdr, raw, "RunAccepted")
+	issues := l.validateSuccess("submitTask", status, hdr, raw, "TaskAccepted")
 	var accepted struct {
-		Run   map[string]any   `json:"run"`
-		Tasks []map[string]any `json:"tasks"`
+		Task    map[string]any   `json:"task"`
+		Runners []map[string]any `json:"runners"`
 	}
 	if err := json.Unmarshal(raw, &accepted); err != nil {
 		issues = append(issues, "202 响应不是 JSON 对象："+err.Error())
 	} else {
-		runID = asString(accepted.Run["id"])
-		if runID == "" {
-			issues = append(issues, "202 的 run.id 为空")
+		taskID := asString(accepted.Task["id"])
+		if taskID == "" {
+			issues = append(issues, "202 的 task.id 为空")
 		}
-		if len(accepted.Tasks) == 0 {
-			issues = append(issues, "202 的 tasks[] 为空（precheck:auto 至少应注入一个 Task）")
+		if len(accepted.Runners) == 0 {
+			issues = append(issues, "202 的 runners[] 为空（07 §4.2 应返回含注入行的最终执行序）")
 		} else {
-			taskID = asString(accepted.Tasks[0]["id"])
-			rawTask, _ := json.Marshal(accepted.Tasks[0])
-			if missing := l.spec.requireFields("AcceptedTask", rawTask); len(missing) > 0 {
-				issues = append(issues, "tasks[0] 缺字段："+strings.Join(missing, ", "))
+			rawRunner, _ := json.Marshal(accepted.Runners[0])
+			if missing := l.spec.requireFields("AcceptedRunner", rawRunner); len(missing) > 0 {
+				issues = append(issues, "runners[0] 缺字段："+strings.Join(missing, ", "))
 			}
 		}
-		if accepted.Run != nil {
-			rawRun, _ := json.Marshal(accepted.Run)
-			if missing := l.spec.requireFields("AcceptedRun", rawRun); len(missing) > 0 {
-				issues = append(issues, "run 摘要缺字段："+strings.Join(missing, ", "))
+		if accepted.Task != nil {
+			rawTask, _ := json.Marshal(accepted.Task)
+			if missing := l.spec.requireFields("AcceptedTaskRef", rawTask); len(missing) > 0 {
+				issues = append(issues, "task 摘要缺字段："+strings.Join(missing, ", "))
 			}
+		}
+		if len(issues) == 0 {
+			l.add(name, true, fmt.Sprintf("%s：HTTP 202，task_id=%s，%d 个 runner（含注入）",
+				detailPrefix, taskID, len(accepted.Runners)))
+			return taskID
 		}
 	}
 	if len(issues) > 0 {
 		l.add(name, false, detailPrefix+"："+strings.Join(issues, "；"))
-		return "", ""
 	}
-	l.add(name, true, fmt.Sprintf("%s：HTTP 202，run_id=%s，%d 个 Task", detailPrefix, runID, len(accepted.Tasks)))
-	return runID, taskID
+	return ""
 }
 
 // opIDFor 按 method+path 找 operationId，避免把新端点的 opID 写死在探针里。
@@ -716,45 +737,47 @@ func (l *Live) opIDFor(method, path string) string {
 	return ""
 }
 
-// submitDeployFixture 提交一个 deploy 形态 Run（用于验证 ?pod= 必选；成功时不额外计入检查数）。
+// submitDeployFixture 提交一个 deploy 形态 Task（用于验证 deploy/logs；不额外计入检查数）。
 func (l *Live) submitDeployFixture(ctx context.Context) string {
 	profile := l.profile()
+	slaVersion := l.runnerVersion(ctx, "aisbench-sla")
 	name := "contract-deploy-" + time.Now().Format("20060102-150405")
-	manifest := fmt.Sprintf(`{"run":{"name":%q,"deploy":{"provider":"genet","parameters":{"model_name":"mock-llm"}},"precheck":"off","cleanup":{"policy":"never"},"tests":[{"name":"probe","tester":"endpoint-probe","version":"1.0.0","execution":{"profile":%q},"args":"--wait_timeout_seconds=60"}]}}`, name, profile)
-	status, _, raw, err := l.client.do(ctx, http.MethodPost, "/api/v1/runs", []byte(manifest), "application/json", nil)
+	manifest := fmt.Sprintf(`{"task":{"name":%q,"deploy":{"provider":"genet","spec":"model: mock-llm\n"},"precheck":"off","runners":[{"name":"probe","runner":"aisbench-sla","version":%q,"execution":{"profile":%q},"input":"{\"sla\":[\"ttft.avg:999999\"],\"work_path\":\"/tmp/aisbench-ws\",\"aisbench_cmd\":\"/runner/tool/tests/stub_aisbench.py\",\"input_len\":64,\"output_len\":8,\"data_num\":4,\"start\":1,\"max\":2,\"max_probes\":2}"}]}}`,
+		name, slaVersion, profile)
+	status, _, raw, err := l.client.do(ctx, http.MethodPost, "/api/v1/tasks", []byte(manifest), "application/json", nil)
 	if err != nil {
-		l.recordErr("live.submitRun.deploy", err)
+		l.recordErr("live.submitTask.deploy", err)
 		return ""
 	}
-	l.markOp("submitRun")
+	l.markOp("submitTask")
 	if status != http.StatusAccepted {
-		l.add("live.submitRun.deploy", false, fmt.Sprintf("期望 202，实际 %d：%s", status, truncate(raw, 300)))
+		l.add("live.submitTask.deploy", false, fmt.Sprintf("期望 202，实际 %d：%s", status, truncate(raw, 500)))
 		return ""
 	}
 	var accepted struct {
-		Run map[string]any `json:"run"`
+		Task map[string]any `json:"task"`
 	}
 	_ = json.Unmarshal(raw, &accepted)
-	runID := asString(accepted.Run["id"])
-	if runID == "" {
-		l.add("live.submitRun.deploy", false, "202 缺 run.id")
+	taskID := asString(accepted.Task["id"])
+	if taskID == "" {
+		l.add("live.submitTask.deploy", false, "202 缺 task.id")
 	}
-	return runID
+	return taskID
 }
 
-// probeDeployLogsDeploy 验证 ?pod= 必选（缺失 400）与带 pod 的 200 形状。
-func (l *Live) probeDeployLogsDeploy(ctx context.Context, runID string) {
-	opID := l.opIDFor(http.MethodGet, "/api/v1/runs/{run_id}/deploy/logs")
+// probeDeployLogsDeploy 验证 deploy/logs：pod 缺省 0/1 个 Pod → 200，多 Pod → 409 pod_ambiguous；
+// 带 pod → 200 + pods/entries 数组。
+func (l *Live) probeDeployLogsDeploy(ctx context.Context, taskID string) {
+	opID := l.opIDFor(http.MethodGet, "/api/v1/tasks/{task_id}/deploy/logs")
 	if opID == "" {
-		l.add("live.getRunDeployLogs", false, "openapi 缺少 GET /runs/{run_id}/deploy/logs")
+		l.add("live.getTaskDeployLogs", false, "openapi 缺少 GET /tasks/{task_id}/deploy/logs")
 		return
 	}
-	base := "/api/v1/runs/" + url.PathEscape(runID) + "/deploy/logs"
-	// 等 deploy 快照出现（accepted/deploying/ready 均可；不要等 Pod 真正 ready）。
+	base := "/api/v1/tasks/" + url.PathEscape(taskID) + "/deploy/logs"
+	// 等 deploy 快照出现（提交冻结即有，防御性等待）。
 	deadline := time.Now().Add(90 * time.Second)
-	var deployRun map[string]any
 	for {
-		status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID), nil, "", nil)
+		status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(taskID)+"/deploy", nil, "", nil)
 		if err == nil && status == http.StatusOK {
 			var body struct {
 				Deploy json.RawMessage `json:"deploy"`
@@ -763,46 +786,43 @@ func (l *Live) probeDeployLogsDeploy(ctx context.Context, runID string) {
 			var m map[string]any
 			_ = json.Unmarshal(body.Deploy, &m)
 			if len(m) > 0 {
-				deployRun = m
 				break
 			}
 		}
 		if time.Now().After(deadline) {
-			l.add("live.getRunDeployLogs", false, "deploy fixture 90s 内没有进入 deploy 阶段")
+			l.add("live.getTaskDeployLogs", false, "deploy fixture 90s 内没有出现 deploy 快照")
 			return
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	_ = deployRun
 
-	// 1) 缺 pod：`pod` 现在**可选**（#40-5）。0 或 1 个 Pod → 200；多个 Pod → 409 `pod_ambiguous`。
+	// 1) 缺 pod：`pod` 可选。0 或 1 个 Pod → 200；多个 Pod → 409 `pod_ambiguous`。
 	st, hdr, raw, err := l.client.do(ctx, http.MethodGet, base, nil, "", nil)
 	l.markOp(opID)
 	switch {
 	case err != nil:
-		l.recordErr("live.getRunDeployLogs.no_pod", err)
+		l.recordErr("live.getTaskDeployLogs.no_pod", err)
 	case st == http.StatusOK:
 		if issues := l.validateSuccess(opID, st, hdr, raw, "DeployLogs"); len(issues) > 0 {
-			l.add("live.getRunDeployLogs.no_pod", false, strings.Join(issues, "；"))
+			l.add("live.getTaskDeployLogs.no_pod", false, strings.Join(issues, "；"))
 		} else {
-			l.add("live.getRunDeployLogs.no_pod", true, "HTTP 200（pod 缺省 = 0/1 个 Pod 时直接服务）")
+			l.add("live.getTaskDeployLogs.no_pod", true, "HTTP 200（pod 缺省 = 0/1 个 Pod 时直接服务）")
 		}
 	case st == http.StatusConflict:
-		// 多 Pod 时要求显式指定，且错误体必须是 pod_ambiguous
 		if issues := l.validateError(opID, st, hdr, raw); len(issues) > 0 {
-			l.add("live.getRunDeployLogs.no_pod", false, strings.Join(issues, "；"))
+			l.add("live.getTaskDeployLogs.no_pod", false, strings.Join(issues, "；"))
 		} else if !strings.Contains(string(raw), "pod_ambiguous") {
-			l.add("live.getRunDeployLogs.no_pod", false, "409 但 detail.reason 不是 pod_ambiguous："+truncate(raw, 200))
+			l.add("live.getTaskDeployLogs.no_pod", false, "409 但 detail.reason 不是 pod_ambiguous："+truncate(raw, 200))
 		} else {
-			l.add("live.getRunDeployLogs.no_pod", true, "HTTP 409 pod_ambiguous（多 Pod 必须显式指定）")
+			l.add("live.getTaskDeployLogs.no_pod", true, "HTTP 409 pod_ambiguous（多 Pod 必须显式指定）")
 		}
 	default:
-		l.add("live.getRunDeployLogs.no_pod", false, fmt.Sprintf("期望 200 或 409，实际 %d：%s", st, truncate(raw, 300)))
+		l.add("live.getTaskDeployLogs.no_pod", false, fmt.Sprintf("期望 200 或 409，实际 %d：%s", st, truncate(raw, 300)))
 	}
 
 	// 2) 带实际 Pod → 200 + pods/entries 数组。
 	podName := "contract-no-pod"
-	dst, _, draw, derr := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID)+"/deploy", nil, "", nil)
+	dst, _, draw, derr := l.client.do(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(taskID)+"/deploy", nil, "", nil)
 	if derr == nil && dst == http.StatusOK {
 		var d struct {
 			Pods []struct {
@@ -817,12 +837,12 @@ func (l *Live) probeDeployLogsDeploy(ctx context.Context, runID string) {
 	path := base + "?pod=" + url.QueryEscape(podName)
 	st, hdr, raw, err = l.client.do(ctx, http.MethodGet, path, nil, "", nil)
 	if err != nil {
-		l.recordErr("live.getRunDeployLogs", err)
+		l.recordErr("live.getTaskDeployLogs", err)
 		return
 	}
 	if st == http.StatusOK {
 		if issues := l.validateSuccess(opID, st, hdr, raw, "DeployLogs"); len(issues) > 0 {
-			l.add("live.getRunDeployLogs", false, strings.Join(issues, "；"))
+			l.add("live.getTaskDeployLogs", false, strings.Join(issues, "；"))
 			return
 		}
 		var body map[string]json.RawMessage
@@ -830,26 +850,26 @@ func (l *Live) probeDeployLogsDeploy(ctx context.Context, runID string) {
 		var pods, entries []any
 		_ = json.Unmarshal(body["pods"], &pods)
 		_ = json.Unmarshal(body["entries"], &entries)
-		l.add("live.getRunDeployLogs", true, fmt.Sprintf("HTTP 200，pod=%s pods=%d entries=%d", podName, len(pods), len(entries)))
+		l.add("live.getTaskDeployLogs", true, fmt.Sprintf("HTTP 200，pod=%s pods=%d entries=%d", podName, len(pods), len(entries)))
 		return
 	}
 	if st == http.StatusBadGateway {
 		// 没有 pods/log 权限是可解释的环境错误；仍证明请求形状正确。
-		l.add("live.getRunDeployLogs", true, "HTTP 502 EXECUTOR_UNAVAILABLE（缺 pods/log，端点本身可达）")
+		l.add("live.getTaskDeployLogs", true, "HTTP 502 EXECUTOR_UNAVAILABLE（缺 pods/log，端点本身可达）")
 		return
 	}
-	l.add("live.getRunDeployLogs", false, fmt.Sprintf("pod=%s 期望 200，实际 %d：%s", podName, st, truncate(raw, 300)))
+	l.add("live.getTaskDeployLogs", false, fmt.Sprintf("pod=%s 期望 200，实际 %d：%s", podName, st, truncate(raw, 300)))
 }
 
-// probeRunBundle 覆盖 GET /runs/{id}/bundle：zip 魔数 + MANIFEST.json + artifacts 计数与 /artifacts 同源。
-func (l *Live) probeRunBundle(ctx context.Context, runID string) {
-	const checkName = "live.getRunBundle"
-	opID := l.opIDFor(http.MethodGet, "/api/v1/runs/{run_id}/bundle")
+// probeTaskBundle 覆盖 GET /tasks/{id}/bundle：zip 魔数 + MANIFEST.json + counts 与 /artifacts 同源。
+func (l *Live) probeTaskBundle(ctx context.Context, taskID string) {
+	const checkName = "live.getTaskBundle"
+	opID := l.opIDFor(http.MethodGet, "/api/v1/tasks/{task_id}/bundle")
 	if opID == "" {
-		l.add(checkName, false, "openapi 缺少 GET /runs/{run_id}/bundle")
+		l.add(checkName, false, "openapi 缺少 GET /tasks/{task_id}/bundle")
 		return
 	}
-	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID)+"/bundle", nil, "", nil)
+	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(taskID)+"/bundle", nil, "", nil)
 	l.markOp(opID)
 	if err != nil {
 		l.recordErr(checkName, err)
@@ -900,11 +920,12 @@ func (l *Live) probeRunBundle(ctx context.Context, runID string) {
 		return
 	}
 	// 与 /artifacts 条数同源（D-56：MANIFEST 的 counts 必须能和清单对上，不能各算各的）
-	ast, _, araw, aerr := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID)+"/artifacts", nil, "", nil)
+	ast, _, araw, aerr := l.client.do(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(taskID)+"/artifacts", nil, "", nil)
 	if aerr != nil || ast != http.StatusOK {
 		l.add(checkName, false, "无法用 /artifacts 交叉校验 MANIFEST.counts.artifacts")
 		return
 	}
+	l.markOp("listTaskArtifacts")
 	var list struct {
 		Items []json.RawMessage `json:"items"`
 	}
@@ -916,88 +937,46 @@ func (l *Live) probeRunBundle(ctx context.Context, runID string) {
 	l.add(checkName, true, fmt.Sprintf("HTTP 200 application/zip（%d 字节），MANIFEST.json 存在，artifacts=%d 一致", len(raw), man.Counts.Artifacts))
 }
 
-// probeDeployLogs 断言 deploy 日志端点 200 + pods/entries 数组（无 Deploy 阶段也允许空数组）。
-func (l *Live) probeDeployLogs(ctx context.Context, runID, checkName string) {
-	path := "/api/v1/runs/" + url.PathEscape(runID) + "/deploy/logs?limit=10"
-	opID := l.opIDFor(http.MethodGet, "/api/v1/runs/{run_id}/deploy/logs")
-	if opID == "" {
-		l.add(checkName, false, "openapi 缺少 GET /runs/{run_id}/deploy/logs")
-		return
-	}
-	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, path, nil, "", nil)
-	l.markOp(opID)
-	if err != nil {
-		l.recordErr(checkName, err)
-		return
-	}
-	if status != http.StatusOK {
-		l.add(checkName, false, fmt.Sprintf("期望 200，实际 %d：%s", status, truncate(raw, 300)))
-		return
-	}
-	if issues := l.validateSuccess(opID, status, hdr, raw, "DeployLogs"); len(issues) > 0 {
-		l.add(checkName, false, strings.Join(issues, "；"))
-		return
-	}
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &body); err != nil {
-		l.add(checkName, false, "响应不是 JSON 对象："+err.Error())
-		return
-	}
-	for _, key := range []string{"pods", "entries", "gaps"} {
-		if _, ok := body[key]; !ok {
-			l.add(checkName, false, "缺数组字段 "+key)
-			return
-		}
-	}
-	var pods, entries []any
-	_ = json.Unmarshal(body["pods"], &pods)
-	_ = json.Unmarshal(body["entries"], &entries)
-	l.add(checkName, true, fmt.Sprintf("HTTP 200，pods=%d entries=%d", len(pods), len(entries)))
-}
-
-// submitFailureFixture 提交一个必然失败的 service Run（endpoint 不可达，precheck off），用于 retry。
-func (l *Live) submitFailureFixture(ctx context.Context) (runID, taskID string) {
+// submitFailureFixture 提交一个必然失败的 service Task（endpoint 不可达），用于 retry / clean。
+func (l *Live) submitFailureFixture(ctx context.Context) string {
 	name := "retry-" + time.Now().Format("20060102-150405")
-	manifest := fmt.Sprintf(`run:
+	manifest := fmt.Sprintf(`task:
   name: %q
   service:
     url: "http://127.0.0.1:1/v1"
     model_name: mock-llm
-  precheck: off
-  cleanup: { policy: never }
-  tests:
-    - name: retry-a
-      tester: endpoint-probe
-      version: "1.0.0"
-      execution: { profile: %q }
-      args: "--wait_timeout_seconds=2 --retry_interval_seconds=1"
-`, name, l.profile())
-	status, _, raw, err := l.client.do(ctx, http.MethodPost, "/api/v1/runs", []byte(manifest), "application/yaml", nil)
+  precheck:
+    runner: endpoint-probe
+    version: %q
+    execution: { profile: %q }
+    input: |
+      {"wait_timeout_seconds":2,"retry_interval_seconds":1}
+  runners: []
+`, name, l.runnerVersion(ctx, "endpoint-probe"), l.profile())
+	status, _, raw, err := l.client.do(ctx, http.MethodPost, "/api/v1/tasks", []byte(manifest), "application/yaml", nil)
 	if err != nil {
-		l.recordErr("live.submitRun.failure", err)
-		return "", ""
+		l.recordErr("live.submitTask.failure", err)
+		return ""
 	}
-	l.markOp("submitRun")
+	l.markOp("submitTask")
 	if status != http.StatusAccepted {
-		l.add("live.submitRun.failure", false, fmt.Sprintf("期望 202，实际 %d：%s", status, truncate(raw, 300)))
-		return "", ""
+		l.add("live.submitTask.failure", false, fmt.Sprintf("期望 202，实际 %d：%s", status, truncate(raw, 500)))
+		return ""
 	}
 	var accepted struct {
-		Run   map[string]any   `json:"run"`
-		Tasks []map[string]any `json:"tasks"`
+		Task map[string]any `json:"task"`
 	}
-	if err := json.Unmarshal(raw, &accepted); err != nil || len(accepted.Tasks) == 0 {
-		l.add("live.submitRun.failure", false, "202 响应缺 run/tasks")
-		return "", ""
+	if err := json.Unmarshal(raw, &accepted); err != nil {
+		l.add("live.submitTask.failure", false, "202 响应缺 task")
+		return ""
 	}
-	runID = asString(accepted.Run["id"])
-	taskID = asString(accepted.Tasks[0]["id"])
-	if runID == "" || taskID == "" {
-		l.add("live.submitRun.failure", false, "run.id 或 tasks[0].id 为空")
-		return "", ""
+	taskID := asString(accepted.Task["id"])
+	if taskID == "" {
+		l.add("live.submitTask.failure", false, "task.id 为空")
+		return ""
 	}
-	l.add("live.submitRun.failure", true, "HTTP 202，run_id="+runID)
-	return runID, taskID
+	l.add("live.submitTask.failure", true, "HTTP 202，task_id="+taskID)
+	return taskID
 }
 
 func (l *Live) profile() string {
@@ -1007,188 +986,107 @@ func (l *Live) profile() string {
 	return "k8s-npu"
 }
 
-// waitFixtureTerminal 是带 label 的终态等待（失败 fixture 也有自己的检查名）。
-func (l *Live) waitFixtureTerminal(ctx context.Context, runID, label string, timeout time.Duration) bool {
-	wctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	start := time.Now()
-	checkName := "live.fixture" + label + ".terminal"
-	for {
-		status, _, raw, err := l.client.do(wctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(runID), nil, "", nil)
-		if err != nil {
-			l.recordErr(checkName, err)
-			return false
-		}
-		if status != http.StatusOK {
-			l.add(checkName, false, fmt.Sprintf("GET /runs/%s 返回 %d", runID, status))
-			return false
-		}
+// runnerVersion 从注册表取该 Runner 的最新版本；取不到给占位值，让提交失败信息可读。
+func (l *Live) runnerVersion(ctx context.Context, name string) string {
+	status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runners/"+url.PathEscape(name), nil, "", nil)
+	if err == nil && status == http.StatusOK {
 		var body struct {
-			Status string `json:"status"`
+			Version string `json:"version"`
 		}
 		_ = json.Unmarshal(raw, &body)
-		if isTerminalRunStatus(body.Status) {
-			l.add(checkName, true, fmt.Sprintf("status=%s，耗时 %.1fs", body.Status, time.Since(start).Seconds()))
-			return true
+		if body.Version != "" {
+			return body.Version
 		}
-		if wctx.Err() != nil {
-			l.add(checkName, false, fmt.Sprintf("%s 内未到终态，最后 status=%s", timeout, body.Status))
-			return false
-		}
-		time.Sleep(500 * time.Millisecond)
 	}
+	return "0.0.0"
 }
 
-type retryPlanBody struct {
-	RunID          string           `json:"run_id"`
-	Retryable      *bool            `json:"retryable"`
-	Reason         string           `json:"reason"`
-	Reuse          []map[string]any `json:"reuse"`
-	Rerun          []map[string]any `json:"rerun"`
-	BlockedItems   []map[string]any `json:"blocked_items"`
-	ManifestDigest string           `json:"manifest_digest"`
-	NewRunID       string           `json:"new_run_id"`
-	RetryOf        string           `json:"retry_of"`
-}
-
-// probeRetry 覆盖 retry-plan / retry-run / retry-task，并对新 Run 再探一次 plan。
-func (l *Live) probeRetry(ctx context.Context) {
-	failID := url.PathEscape(l.runF)
-	planPath := "/api/v1/runs/" + failID + "/retry-plan"
-	planOp := l.opIDFor(http.MethodGet, "/api/v1/runs/{run_id}/retry-plan")
-	if planOp == "" {
-		l.add("live.getRunRetryPlan", false, "openapi 缺少 GET /runs/{run_id}/retry-plan")
-		return
-	}
-	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, planPath, nil, "", nil)
-	l.markOp(planOp)
-	if err != nil {
-		l.recordErr("live.getRunRetryPlan", err)
-		return
-	}
-	if status != http.StatusOK {
-		l.add("live.getRunRetryPlan", false, fmt.Sprintf("期望 200，实际 %d：%s", status, truncate(raw, 300)))
-		return
-	}
-	if issues := l.validateSuccess(planOp, status, hdr, raw, "RetryPlan"); len(issues) > 0 {
-		l.add("live.getRunRetryPlan", false, strings.Join(issues, "；"))
-		return
-	}
-	var plan retryPlanBody
-	if err := json.Unmarshal(raw, &plan); err != nil {
-		l.add("live.getRunRetryPlan", false, "响应不是 RetryPlan："+err.Error())
-		return
-	}
-	if plan.Retryable == nil || !*plan.Retryable || len(plan.Rerun) == 0 || plan.ManifestDigest == "" {
-		l.add("live.getRunRetryPlan", false, fmt.Sprintf("失败 Run 的计划应 retryable=true 且有 rerun；实际 retryable=%v rerun=%d digest=%q",
-			plan.Retryable, len(plan.Rerun), plan.ManifestDigest))
-		return
-	}
-	l.add("live.getRunRetryPlan", true, fmt.Sprintf("retryable=true，reuse=%d rerun=%d blocked=%d",
-		len(plan.Reuse), len(plan.Rerun), len(plan.BlockedItems)))
-
-	// task retry：旧失败 Task 终态可重开 Attempt。
-	taskPath := "/api/v1/tasks/" + url.PathEscape(l.taskF) + "/retry"
-	taskOp := l.opIDFor(http.MethodPost, "/api/v1/tasks/{task_id}/retry")
-	if taskOp == "" {
-		l.add("live.retryTask", false, "openapi 缺少 POST /tasks/{task_id}/retry")
-	} else {
-		st, th, tr, terr := l.client.do(ctx, http.MethodPost, taskPath, nil, "", nil)
-		l.markOp(taskOp)
-		if terr != nil {
-			l.recordErr("live.retryTask", terr)
-		} else if st != http.StatusAccepted {
-			l.add("live.retryTask", false, fmt.Sprintf("期望 202，实际 %d：%s", st, truncate(tr, 300)))
-		} else if issues := l.validateSuccess(taskOp, st, th, tr, "TaskRetryAccepted"); len(issues) > 0 {
-			l.add("live.retryTask", false, strings.Join(issues, "；"))
-		} else {
-			var body struct {
-				TaskID    string `json:"task_id"`
-				AttemptNo int    `json:"attempt_no"`
-			}
-			_ = json.Unmarshal(tr, &body)
-			ok := body.TaskID == l.taskF && body.AttemptNo >= 2
-			l.add("live.retryTask", ok, fmt.Sprintf("HTTP 202，task_id=%s attempt_no=%d", body.TaskID, body.AttemptNo))
-		}
-	}
-
-	// retry run：创建新 Run（retry_of=原 Run）。
-	retryPath := "/api/v1/runs/" + failID + "/retry"
-	retryOp := l.opIDFor(http.MethodPost, "/api/v1/runs/{run_id}/retry")
+// probeRetryAndClean 覆盖 POST /tasks/{id}/retry 与 POST /tasks/{id}/clean。
+func (l *Live) probeRetryAndClean(ctx context.Context) {
+	// retry：终态 Task → 新 attempt 全量重跑。
+	retryOp := l.opIDFor(http.MethodPost, "/api/v1/tasks/{task_id}/retry")
 	if retryOp == "" {
-		l.add("live.retryRun", false, "openapi 缺少 POST /runs/{run_id}/retry")
+		l.add("live.retryTask", false, "openapi 缺少 POST /tasks/{task_id}/retry")
 		return
 	}
+	retryPath := "/api/v1/tasks/" + url.PathEscape(l.taskF) + "/retry"
 	st, th, tr, terr := l.client.do(ctx, http.MethodPost, retryPath, nil, "", nil)
 	l.markOp(retryOp)
 	if terr != nil {
-		l.recordErr("live.retryRun", terr)
+		l.recordErr("live.retryTask", terr)
 		return
 	}
 	if st != http.StatusAccepted {
-		l.add("live.retryRun", false, fmt.Sprintf("期望 202，实际 %d：%s", st, truncate(tr, 300)))
+		l.add("live.retryTask", false, fmt.Sprintf("期望 202，实际 %d：%s", st, truncate(tr, 300)))
 		return
 	}
-	if issues := l.validateSuccess(retryOp, st, th, tr, "RetryPlan"); len(issues) > 0 {
-		l.add("live.retryRun", false, strings.Join(issues, "；"))
+	if issues := l.validateSuccess(retryOp, st, th, tr, "TaskRetryAccepted"); len(issues) > 0 {
+		l.add("live.retryTask", false, strings.Join(issues, "；"))
 		return
 	}
-	var accepted retryPlanBody
-	if err := json.Unmarshal(tr, &accepted); err != nil || accepted.NewRunID == "" {
-		l.add("live.retryRun", false, "202 响应缺 new_run_id")
-		return
+	var accepted struct {
+		TaskID    string `json:"task_id"`
+		AttemptNo int    `json:"attempt_no"`
+		Status    string `json:"status"`
 	}
-	if accepted.NewRunID == l.runF {
-		l.add("live.retryRun", false, "new_run_id 不能等于原 Run")
-		return
-	}
-	if accepted.RetryOf != l.runF {
-		l.add("live.retryRun", false, fmt.Sprintf("202 retry_of=%q，期望 %q", accepted.RetryOf, l.runF))
-		return
-	}
-	// 新 Run 的 retry_of 必须指回原 Run。
-	nst, _, nr, nerr := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+url.PathEscape(accepted.NewRunID), nil, "", nil)
-	if nerr != nil || nst != http.StatusOK {
-		l.add("live.retryRun", false, fmt.Sprintf("GET 新 Run 失败（%d）：%v", nst, nerr))
-		return
-	}
-	var newRun struct {
-		RetryOf string `json:"retry_of"`
-	}
-	_ = json.Unmarshal(nr, &newRun)
-	if newRun.RetryOf != l.runF {
-		l.add("live.retryRun", false, fmt.Sprintf("新 Run retry_of=%q，期望 %q", newRun.RetryOf, l.runF))
-		return
-	}
-	l.add("live.retryRun", true, "HTTP 202，new_run_id="+accepted.NewRunID+"，retry_of="+newRun.RetryOf)
+	_ = json.Unmarshal(tr, &accepted)
+	ok := accepted.TaskID == l.taskF && accepted.AttemptNo >= 2 && accepted.Status == "queued"
+	l.add("live.retryTask", ok, fmt.Sprintf("HTTP 202，task_id=%s attempt_no=%d status=%s",
+		accepted.TaskID, accepted.AttemptNo, accepted.Status))
 
-	// 新 Run 再取 plan：若已经 retry-in-progress / cancel 等，允许 200 retryable=false 或 409。
-	nplanPath := "/api/v1/runs/" + url.PathEscape(accepted.NewRunID) + "/retry-plan"
-	pst, ph, pr, perr := l.client.do(ctx, http.MethodGet, nplanPath, nil, "", nil)
-	if perr != nil {
-		l.recordErr("live.getRunRetryPlan.after_retry", perr)
+	// 重试落地后 Task 非终态：立刻再 retry 必须 409（非终态不可重试）。
+	st2, h2, r2, err2 := l.client.do(ctx, http.MethodPost, retryPath, nil, "", nil)
+	if err2 != nil {
+		l.recordErr("live.retryTask.non_terminal", err2)
+	} else if st2 != http.StatusConflict {
+		l.add("live.retryTask.non_terminal", false,
+			fmt.Sprintf("非终态 Task 再 retry 期望 409，实际 %d：%s", st2, truncate(r2, 300)))
+	} else if issues := l.validateError(retryOp, st2, h2, r2); len(issues) > 0 {
+		l.add("live.retryTask.non_terminal", false, strings.Join(issues, "；"))
+	} else {
+		l.add("live.retryTask.non_terminal", true, "HTTP 409（非终态拒绝重试），Error 形状正确")
+	}
+
+	// 等 attempt 2 跑完再探 clean（clean 需要 Task 终态语义）。
+	if !l.waitTaskTerminal(ctx, l.taskF, "F2", 120*time.Second) {
 		return
 	}
-	switch pst {
-	case http.StatusOK:
-		var p retryPlanBody
-		_ = json.Unmarshal(pr, &p)
-		ok := p.Retryable == nil || !*p.Retryable
-		retryable := false
-		if p.Retryable != nil {
-			retryable = *p.Retryable
+
+	// clean：fixture F 是 service 模式（无部署）→ 409 no_deploy（detail.reason），Error 形状必须正确。
+	cleanOp := l.opIDFor(http.MethodPost, "/api/v1/tasks/{task_id}/clean")
+	if cleanOp == "" {
+		l.add("live.replayTaskClean", false, "openapi 缺少 POST /tasks/{task_id}/clean")
+		return
+	}
+	cleanPath := "/api/v1/tasks/" + url.PathEscape(l.taskF) + "/clean"
+	cst, ch, cr, cerr := l.client.do(ctx, http.MethodPost, cleanPath, []byte(`{}`), "application/json", nil)
+	l.markOp(cleanOp)
+	if cerr != nil {
+		l.recordErr("live.replayTaskClean", cerr)
+		return
+	}
+	switch {
+	case cst == http.StatusAccepted:
+		if issues := l.validateSuccess(cleanOp, cst, ch, cr, "CleanReplayAccepted"); len(issues) > 0 {
+			l.add("live.replayTaskClean", false, strings.Join(issues, "；"))
+		} else {
+			l.add("live.replayTaskClean", true, "HTTP 202（clean 重放受理）")
 		}
-		l.add("live.getRunRetryPlan.after_retry", ok, fmt.Sprintf("HTTP 200，retryable=%v reason=%s", retryable, p.Reason))
-	case http.StatusConflict:
-		issues := l.validateError(planOp, pst, ph, pr)
-		l.add("live.getRunRetryPlan.after_retry", len(issues) == 0, "HTTP 409 Conflict（允许）")
+	case cst == http.StatusConflict:
+		if issues := l.validateError(cleanOp, cst, ch, cr); len(issues) > 0 {
+			l.add("live.replayTaskClean", false, strings.Join(issues, "；"))
+		} else if !strings.Contains(string(cr), "no_deploy") {
+			l.add("live.replayTaskClean", false, "409 但 detail.reason 不是 no_deploy："+truncate(cr, 200))
+		} else {
+			l.add("live.replayTaskClean", true, "HTTP 409 no_deploy（外接模式无部署可拆），Error 形状正确")
+		}
 	default:
-		l.add("live.getRunRetryPlan.after_retry", false, fmt.Sprintf("期望 200 retryable=false 或 409，实际 %d：%s", pst, truncate(pr, 300)))
+		l.add("live.replayTaskClean", false, fmt.Sprintf("期望 202 或 409，实际 %d：%s", cst, truncate(cr, 300)))
 	}
 }
 
 // probeAdmin 覆盖管理面读端点与写端点的“错误契约”：
-// 契约不创建 profile/cluster/secret（避免污染环境），写操作只断言校验/冲突/404 的 Error 形态。
+// 契约不创建 profile/cluster/secret/shared-mount（避免污染环境），写操作只断言校验/冲突/404 的 Error 形态。
 func (l *Live) probeAdmin(ctx context.Context) {
 	type op struct {
 		method, path, body string
@@ -1196,8 +1094,8 @@ func (l *Live) probeAdmin(ctx context.Context) {
 	}
 	read := []op{
 		{http.MethodGet, "/api/v1/admin/audit?limit=20", "", []int{200}},
-		{http.MethodGet, "/api/v1/secrets?limit=20", "", []int{200}},
 		{http.MethodGet, "/api/v1/admin/secrets?limit=20", "", []int{200}},
+		{http.MethodGet, "/api/v1/admin/shared-mounts?limit=20", "", []int{200}},
 	}
 	for _, o := range read {
 		base := strings.SplitN(o.path, "?", 2)[0]
@@ -1241,7 +1139,10 @@ func (l *Live) probeAdmin(ctx context.Context) {
 		{http.MethodDelete, "/api/v1/admin/clusters?name=contract-no-such", "", []int{404}},
 		{http.MethodPost, "/api/v1/admin/secrets", "{}", []int{400}},
 		{http.MethodPost, "/api/v1/admin/secrets/contract-no-such/rotate", "{}", []int{400, 404, 409}},
-		{http.MethodDelete, "/api/v1/admin/runs/r-contract-no-such/artifacts", "", []int{404}},
+		{http.MethodPost, "/api/v1/admin/shared-mounts", "{}", []int{400}},
+		{http.MethodPut, "/api/v1/admin/shared-mounts", "{}", []int{400}},
+		{http.MethodDelete, "/api/v1/admin/shared-mounts/contract-no-such", "", []int{404}},
+		{http.MethodDelete, "/api/v1/admin/tasks/t-contract-no-such/artifacts", "", []int{404}},
 	}
 	for _, o := range writes {
 		base := strings.SplitN(o.path, "?", 2)[0]
@@ -1249,8 +1150,11 @@ func (l *Live) probeAdmin(ctx context.Context) {
 		if strings.HasPrefix(base, "/api/v1/admin/secrets/") && strings.HasSuffix(base, "/rotate") {
 			template = "/api/v1/admin/secrets/{name}/rotate"
 		}
-		if strings.HasPrefix(base, "/api/v1/admin/runs/") && strings.HasSuffix(base, "/artifacts") {
-			template = "/api/v1/admin/runs/{run_id}/artifacts"
+		if strings.HasPrefix(base, "/api/v1/admin/tasks/") && strings.HasSuffix(base, "/artifacts") {
+			template = "/api/v1/admin/tasks/{task_id}/artifacts"
+		}
+		if strings.HasPrefix(base, "/api/v1/admin/shared-mounts/") {
+			template = "/api/v1/admin/shared-mounts/{name}"
 		}
 		opID := l.opIDFor(o.method, template)
 		if opID == "" {
@@ -1287,19 +1191,19 @@ func (l *Live) probeAdmin(ctx context.Context) {
 }
 
 func (l *Live) checkDryRun(ctx context.Context, manifest []byte, contentType string) {
-	status, hdr, raw, err := l.client.do(ctx, http.MethodPost, "/api/v1/runs?dry_run=true", manifest, contentType, nil)
+	status, hdr, raw, err := l.client.do(ctx, http.MethodPost, "/api/v1/tasks?dry_run=true", manifest, contentType, nil)
 	if err != nil {
-		l.recordErr("live.submitRun.dry_run", err)
+		l.recordErr("live.submitTask.dry_run", err)
 		return
 	}
-	l.markOp("submitRun")
+	l.markOp("submitTask")
 	if status != http.StatusOK {
-		l.add("live.submitRun.dry_run", false, fmt.Sprintf("期望 HTTP 200，实际 %d：%s", status, truncate(raw, 300)))
+		l.add("live.submitTask.dry_run", false, fmt.Sprintf("期望 HTTP 200，实际 %d：%s", status, truncate(raw, 300)))
 		return
 	}
-	issues := l.validateSuccess("submitRun", status, hdr, raw, "DryRunResult")
+	issues := l.validateSuccess("submitTask", status, hdr, raw, "DryRunResult")
 	if len(issues) > 0 {
-		l.add("live.submitRun.dry_run", false, strings.Join(issues, "；"))
+		l.add("live.submitTask.dry_run", false, strings.Join(issues, "；"))
 		return
 	}
 	var result struct {
@@ -1307,196 +1211,107 @@ func (l *Live) checkDryRun(ctx context.Context, manifest []byte, contentType str
 	}
 	_ = json.Unmarshal(raw, &result)
 	if result.Valid == nil {
-		l.add("live.submitRun.dry_run", false, "dry-run 响应缺 valid 字段（07 §4.1）")
+		l.add("live.submitTask.dry_run", false, "dry-run 响应缺 valid 字段（07 §4.1）")
 		return
 	}
-	l.add("live.submitRun.dry_run", true, fmt.Sprintf("valid=%v", *result.Valid))
+	l.add("live.submitTask.dry_run", true, fmt.Sprintf("valid=%v", *result.Valid))
 }
 
-func (l *Live) probeRunReads(ctx context.Context) {
-	id := url.PathEscape(l.runA)
-	l.probeSchema(ctx, "getRun", "/api/v1/runs/"+id, 200, "Run")
-	l.probeSchema(ctx, "listRunTasks", "/api/v1/runs/"+id+"/tasks?limit=50", 200, "TaskList")
-	l.checkRunTaskListComplete(ctx, l.runA)
-	l.probeSchema(ctx, "listRunEvents", "/api/v1/runs/"+id+"/events/history?since_seq=0&limit=100", 200, "EventList")
-	l.probeSchema(ctx, "getRunManifest", "/api/v1/runs/"+id+"/manifest", 200, "ManifestSnapshot")
-	l.probeSchema(ctx, "listRunArtifacts", "/api/v1/runs/"+id+"/artifacts", 200, "ArtifactList")
-	l.probeRunFileBothForms(ctx, l.runA)
-	l.probeRunDeploy(ctx, l.runA)
-	l.probeRunReport(ctx, l.runA, "/report", "Report", "getRunReport")
-	l.probeRunReport(ctx, l.runA, "/report.md", "", "getRunReportMarkdown")
-
-	if l.taskA == "" {
-		l.add("live.getTask", false, "fixture Run 没有 Task，无法校验 getTask/attempts")
-		l.add("live.listTaskAttempts", false, "fixture Run 没有 Task")
-		l.add("live.getTaskAttemptResult", false, "fixture Run 没有 Task")
-		l.add("live.getTaskAttemptLogs", false, "fixture Run 没有 Task")
-		return
-	}
-	task := url.PathEscape(l.taskA)
-	l.probeSchema(ctx, "getTask", "/api/v1/tasks/"+task, 200, "TaskDetail")
-	l.probeSchema(ctx, "listTaskAttempts", "/api/v1/tasks/"+task+"/attempts?limit=50", 200, "AttemptList")
-	l.probeSchema(ctx, "listAttemptArtifacts", "/api/v1/tasks/"+task+"/attempts/1/artifacts", 200, "ArtifactList")
-	l.probeAttemptEndpoints(ctx, l.taskA)
+func (l *Live) probeTaskReads(ctx context.Context) {
+	id := url.PathEscape(l.taskA)
+	l.probeSchema(ctx, "getTask", "/api/v1/tasks/"+id, 200, "TaskDetail")
+	l.probeSchema(ctx, "listTaskAttempts", "/api/v1/tasks/"+id+"/attempts?limit=50", 200, "AttemptList")
+	l.probeSchema(ctx, "listTaskRunners", "/api/v1/tasks/"+id+"/runners?limit=50", 200, "RunnerExecutionList")
+	l.probeSchema(ctx, "listTaskEvents", "/api/v1/tasks/"+id+"/events/history?since_seq=0&limit=100", 200, "EventList")
+	l.probeSchema(ctx, "getTaskManifest", "/api/v1/tasks/"+id+"/manifest", 200, "ManifestSnapshot")
+	l.probeTaskDeploy(ctx, l.taskA)
+	l.probeTaskReport(ctx, l.taskA, "/report", "Report", "getTaskReport")
+	l.probeTaskReport(ctx, l.taskA, "/report.md", "", "getTaskReportMarkdown")
+	l.probeTaskFileBothForms(ctx, l.taskA)
+	l.probeLatestRunner(ctx, l.taskA)
 }
 
-// probeAttemptEndpoints 按 Attempt 状态区分 result/logs 的 404：
-// 已终态（且 fixture 已成功产出）必须 200；未终态才允许 404。
-func (l *Live) probeAttemptEndpoints(ctx context.Context, taskID string) {
-	status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/tasks/"+url.PathEscape(taskID), nil, "", nil)
-	if err != nil {
-		l.recordErr("live.getTaskAttemptResult", err)
-		l.recordErr("live.getTaskAttemptLogs", err)
+// probeLatestRunner 覆盖最新 attempt 的 runner 读取端点（getTaskRunner / result / logs / artifacts）。
+func (l *Live) probeLatestRunner(ctx context.Context, taskID string) {
+	facts, err := l.fetchTaskFacts(ctx, taskID)
+	if err != nil || len(facts.RunnerSeqs) == 0 {
+		msg := "Task 详情没有 runners[]，无法校验 runner 级端点"
+		if err != nil {
+			msg = err.Error()
+		}
+		for _, n := range []string{"getTaskRunner", "getTaskRunnerResult", "getTaskRunnerLogs", "listTaskRunnerArtifacts"} {
+			l.add("live."+n, false, msg)
+		}
 		return
 	}
-	if status != http.StatusOK {
-		msg := fmt.Sprintf("GET /tasks/%s 返回 %d，无法判断 Attempt 状态", taskID, status)
-		l.add("live.getTaskAttemptResult", false, msg)
-		l.add("live.getTaskAttemptLogs", false, msg)
-		return
+	n := facts.CurrentAttempt
+	if n < 1 {
+		n = 1
 	}
-	var detail struct {
-		Attempts []struct {
-			Status string `json:"status"`
-		} `json:"attempts"`
-	}
-	_ = json.Unmarshal(raw, &detail)
-	if len(detail.Attempts) == 0 {
-		l.add("live.getTaskAttemptResult", false, "Attempt 列表为空，无法校验 result")
-		l.add("live.getTaskAttemptLogs", false, "Attempt 列表为空，无法校验 logs")
-		return
-	}
-	attemptTerminal := true
-	for _, a := range detail.Attempts {
-		switch a.Status {
-		case "succeeded", "failed", "canceled":
-		default:
-			attemptTerminal = false
-		}
-	}
-	task := url.PathEscape(taskID)
-	// 产物是否存在决定 404 是否合法：已终态 + 有 result/log 时必须 200。
-	artStatus, _, artRaw, err := l.client.do(ctx, http.MethodGet, "/api/v1/tasks/"+task+"/attempts/1/artifacts", nil, "", nil)
-	var artifactItems []struct {
-		Kind string `json:"kind"`
-	}
-	if err == nil && artStatus == http.StatusOK {
-		var list struct {
-			Items []struct {
-				Kind string `json:"kind"`
-			} `json:"items"`
-		}
-		_ = json.Unmarshal(artRaw, &list)
-		artifactItems = list.Items
-	}
-	hasResult, hasLog := false, false
-	for _, it := range artifactItems {
-		switch it.Kind {
-		case "result":
-			hasResult = true
-		case "log":
-			hasLog = true
-		}
-	}
-	if attemptTerminal && hasResult {
-		l.probeSchema(ctx, "getTaskAttemptResult", "/api/v1/tasks/"+task+"/attempts/1/result", 200, "Result")
-	} else {
-		l.probeOptional(ctx, "getTaskAttemptResult", "/api/v1/tasks/"+task+"/attempts/1/result", 200, "Result", 404, "")
-	}
-	if attemptTerminal && hasLog {
-		l.probeText(ctx, "getTaskAttemptLogs", "/api/v1/tasks/"+task+"/attempts/1/logs?stream=stdout&limit=4096", []int{200})
-	} else {
-		l.probeOptional(ctx, "getTaskAttemptLogs", "/api/v1/tasks/"+task+"/attempts/1/logs?stream=stdout&limit=4096", 200, "", 404, "text/plain")
-	}
-}
+	seq := facts.RunnerSeqs[0]
+	id := url.PathEscape(taskID)
+	attemptNo := strconv.Itoa(n)
+	seqStr := strconv.Itoa(seq)
 
-// checkRunTaskListComplete 校验 GET /runs/{id}/tasks 覆盖 Run 详情里的全部 Task。
-// 回归背景：分页实现若写成 `seq > cursor` 且空 cursor 解为 0，首屏会漏掉 seq=0 的 precheck。
-func (l *Live) checkRunTaskListComplete(ctx context.Context, runID string) {
-	id := url.PathEscape(runID)
-	_, _, runRaw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+id, nil, "", nil)
-	if err != nil {
-		l.recordErr("live.listRunTasks_complete", err)
-		return
-	}
-	_, _, listRaw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runs/"+id+"/tasks?limit=200", nil, "", nil)
-	if err != nil {
-		l.recordErr("live.listRunTasks_complete", err)
-		return
-	}
-	var detail struct {
-		Tasks []map[string]any `json:"tasks"`
-	}
-	var page struct {
-		Items []map[string]any `json:"items"`
-	}
-	if err := json.Unmarshal(runRaw, &detail); err != nil {
-		l.add("live.listRunTasks_complete", false, "Run 详情不是合法 JSON："+err.Error())
-		return
-	}
-	if err := json.Unmarshal(listRaw, &page); err != nil {
-		l.add("live.listRunTasks_complete", false, "任务列表不是合法 JSON："+err.Error())
-		return
-	}
-	seen := map[string]bool{}
-	for _, t := range page.Items {
-		seen[asString(t["id"])] = true
-	}
-	var missing []string
-	for _, t := range detail.Tasks {
-		taskID := asString(t["id"])
-		if !seen[taskID] {
-			missing = append(missing, fmt.Sprintf("seq=%v name=%v id=%v", t["seq"], t["name"], taskID))
-		}
-	}
-	l.add("live.listRunTasks_complete", len(missing) == 0,
-		firstN(missing, 5, "任务列表覆盖 Run 详情里的全部 Task（含 seq=0 precheck）"))
+	l.probeSchema(ctx, "getTaskRunner", fmt.Sprintf("/api/v1/tasks/%s/runners/%s", id, seqStr), 200, "RunnerExecution")
+	l.probeSchema(ctx, "listTaskRunnerArtifacts", fmt.Sprintf("/api/v1/tasks/%s/runners/%s/artifacts", id, seqStr), 200, "ArtifactList")
+	// result / logs 是状态相关产物：成功路径 200；只产出 html/csv 或平台准备期失败时 404（Error 形状）。
+	l.probeOptional(ctx, "getTaskRunnerResult", fmt.Sprintf("/api/v1/tasks/%s/runners/%s/result", id, seqStr), 200, "Result", 404, "")
+	l.probeOptional(ctx, "getTaskRunnerLogs", fmt.Sprintf("/api/v1/tasks/%s/runners/%s/logs?stream=stdout&limit=4096", id, seqStr), 200, "", 404, "text/plain")
+
+	// attempt 级权威形态（07 §5.2）。
+	l.probeSchema(ctx, "listAttemptRunners", fmt.Sprintf("/api/v1/tasks/%s/attempts/%s/runners", id, attemptNo), 200, "RunnerExecutionList")
+	l.probeSchema(ctx, "getAttemptRunner", fmt.Sprintf("/api/v1/tasks/%s/attempts/%s/runners/%s", id, attemptNo, seqStr), 200, "RunnerExecution")
+	l.probeSchema(ctx, "listAttemptRunnerArtifacts", fmt.Sprintf("/api/v1/tasks/%s/attempts/%s/runners/%s/artifacts", id, attemptNo, seqStr), 200, "ArtifactList")
+	l.probeOptional(ctx, "getAttemptRunnerResult", fmt.Sprintf("/api/v1/tasks/%s/attempts/%s/runners/%s/result", id, attemptNo, seqStr), 200, "Result", 404, "")
+	l.probeOptional(ctx, "getAttemptRunnerLogs", fmt.Sprintf("/api/v1/tasks/%s/attempts/%s/runners/%s/logs?stream=stdout&limit=4096", id, attemptNo, seqStr), 200, "", 404, "text/plain")
 }
 
 func (l *Live) probeCancels(ctx context.Context) {
-	// Task 取消：202 或"已在取消中"的 200
-	taskStatus, taskHdr, taskRaw, err := l.client.do(ctx, http.MethodPost,
+	cancelOp := l.opIDFor(http.MethodPost, "/api/v1/tasks/{task_id}/cancel")
+	if cancelOp == "" {
+		l.add("live.cancelTask", false, "openapi 缺少 POST /tasks/{task_id}/cancel")
+		return
+	}
+	status, hdr, raw, err := l.client.do(ctx, http.MethodPost,
 		"/api/v1/tasks/"+url.PathEscape(l.taskB)+"/cancel", nil, "", nil)
 	if err != nil {
 		l.recordErr("live.cancelTask", err)
-	} else {
-		l.markOp("cancelTask")
-		l.checkAccepted("live.cancelTask", "cancelTask", "TaskCancelAccepted", taskStatus, taskHdr, taskRaw)
-	}
-
-	runStatus, runHdr, runRaw, err := l.client.do(ctx, http.MethodPost,
-		"/api/v1/runs/"+url.PathEscape(l.runB)+"/cancel", nil, "", nil)
-	if err != nil {
-		l.recordErr("live.cancelRun", err)
 		return
 	}
-	l.markOp("cancelRun")
-	l.checkAccepted("live.cancelRun", "cancelRun", "CancelAccepted", runStatus, runHdr, runRaw)
-}
-
-func (l *Live) checkAccepted(name, opID, schemaName string, status int, hdr http.Header, raw []byte) {
-	if status != http.StatusAccepted && status != http.StatusOK {
-		l.add(name, false, fmt.Sprintf("期望 202（或幂等 200），实际 %d：%s", status, truncate(raw, 300)))
-		return
+	l.markOp(cancelOp)
+	// 取消：202（受理 cancelling）或 200（幂等 cancelling/canceled）；
+	// 409 = Task 已终态后才取消（fixture 竞态），也是 spec 声明的形态，Error 形状必须正确。
+	switch {
+	case status == http.StatusAccepted || status == http.StatusOK:
+		issues := l.validateSuccess(cancelOp, status, hdr, raw, "CancelAccepted")
+		if len(issues) > 0 {
+			l.add("live.cancelTask", false, strings.Join(issues, "；"))
+			return
+		}
+		l.add("live.cancelTask", true, fmt.Sprintf("HTTP %d，CancelAccepted required 齐全", status))
+	case status == http.StatusConflict:
+		issues := l.validateError(cancelOp, status, hdr, raw)
+		if len(issues) > 0 {
+			l.add("live.cancelTask", false, strings.Join(issues, "；"))
+			return
+		}
+		l.add("live.cancelTask", true, "HTTP 409（Task 已终态，spec 声明的取消拒绝），Error 形状正确")
+	default:
+		l.add("live.cancelTask", false, fmt.Sprintf("期望 202/200（或 409 已终态），实际 %d：%s", status, truncate(raw, 300)))
 	}
-	issues := l.validateSuccess(opID, status, hdr, raw, schemaName)
-	if len(issues) > 0 {
-		l.add(name, false, strings.Join(issues, "；"))
-		return
-	}
-	l.add(name, true, fmt.Sprintf("HTTP %d，%s required 齐全", status, schemaName))
 }
 
 // probeErrorEnvelopes 单独验证错误体形状（404 与 400）。
 func (l *Live) probeErrorEnvelopes(ctx context.Context) {
-	// 404：合法路由 + 不存在的 Run
-	path := "/api/v1/runs/r-contract-missing-0000"
+	// 404：合法路由 + 不存在的 Task
+	path := "/api/v1/tasks/t-contract-missing-0000"
 	status, hdr, raw, err := l.client.do(ctx, http.MethodGet, path, nil, "", nil)
 	if err != nil {
 		l.recordErr("live.error_envelope_404", err)
 	} else {
-		l.markOp("getRun")
-		issues := l.validateError("getRun", status, hdr, raw)
+		l.markOp("getTask")
+		issues := l.validateError("getTask", status, hdr, raw)
 		if len(issues) > 0 {
 			l.add("live.error_envelope_404", false, strings.Join(issues, "；"))
 		} else {
@@ -1506,15 +1321,15 @@ func (l *Live) probeErrorEnvelopes(ctx context.Context) {
 		}
 	}
 
-	// 400：deploy 与 service 同时出现（C-5.1 第 3 条）
-	invalid := []byte(`{"run":{"name":"contract-invalid","deploy":{"provider":"genet","parameters":{}},"service":{"url":"http://127.0.0.1:1/v1"},"tests":[]}}`)
-	status, hdr, raw, err = l.client.do(ctx, http.MethodPost, "/api/v1/runs", invalid, "application/json", nil)
+	// 400：deploy 与 service 同时出现（D-27 互斥）
+	invalid := []byte(`{"task":{"name":"contract-invalid","deploy":{"provider":"genet","spec":"x"},"service":{"url":"http://127.0.0.1:1/v1"},"runners":[]}}`)
+	status, hdr, raw, err = l.client.do(ctx, http.MethodPost, "/api/v1/tasks", invalid, "application/json", nil)
 	if err != nil {
 		l.recordErr("live.error_envelope_400", err)
 		return
 	}
-	l.markOp("submitRun")
-	issues := l.validateError("submitRun", status, hdr, raw)
+	l.markOp("submitTask")
+	issues := l.validateError("submitTask", status, hdr, raw)
 	if len(issues) > 0 {
 		l.add("live.error_envelope_400", false, strings.Join(issues, "；"))
 		return
@@ -1533,25 +1348,25 @@ func (l *Live) probeSSE(ctx context.Context) {
 	defer cancel()
 
 	status, hdr, first, err := l.client.streamFirstLine(sctx,
-		"/api/v1/runs/"+url.PathEscape(l.runA)+"/events")
+		"/api/v1/tasks/"+url.PathEscape(l.taskA)+"/events")
 	if err != nil {
-		l.recordErr("live.streamRunEvents", err)
+		l.recordErr("live.streamTaskEvents", err)
 		return
 	}
-	l.markOp("streamRunEvents")
+	l.markOp("streamTaskEvents")
 	if status != http.StatusOK {
-		l.add("live.streamRunEvents", false, fmt.Sprintf("期望 HTTP 200，实际 %d：%s", status, truncate([]byte(first), 300)))
+		l.add("live.streamTaskEvents", false, fmt.Sprintf("期望 HTTP 200，实际 %d：%s", status, truncate([]byte(first), 300)))
 		return
 	}
 	if ct := hdr.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
-		l.add("live.streamRunEvents", false, fmt.Sprintf("Content-Type=%q，期望 text/event-stream", ct))
+		l.add("live.streamTaskEvents", false, fmt.Sprintf("Content-Type=%q，期望 text/event-stream", ct))
 		return
 	}
 	if first == "" {
-		l.add("live.streamRunEvents", false, fmt.Sprintf("%s 内没有收到任何行（事件回放或心跳）", window))
+		l.add("live.streamTaskEvents", false, fmt.Sprintf("%s 内没有收到任何行（事件回放或心跳）", window))
 		return
 	}
-	l.add("live.streamRunEvents", true, fmt.Sprintf("HTTP 200 text/event-stream；首行 %q", truncate([]byte(first), 80)))
+	l.add("live.streamTaskEvents", true, fmt.Sprintf("HTTP 200 text/event-stream；首行 %q", truncate([]byte(first), 80)))
 }
 
 // ---- 校验工具 ----------------------------------------------------------
@@ -1652,16 +1467,16 @@ func contentTypeAllowed(want []string, got string) bool {
 	return false
 }
 
-// checkTesterRegistry 用 GET /testers 证明 endpoint-probe 已被扫描入库（K-3：无运行时注册）。
-func (l *Live) checkTesterRegistry(ctx context.Context) {
-	status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/testers?limit=100", nil, "", nil)
+// checkRunnerRegistry 用 GET /runners 证明 endpoint-probe 已被扫描入库（K-3：无运行时注册）。
+func (l *Live) checkRunnerRegistry(ctx context.Context) {
+	status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/runners?limit=100", nil, "", nil)
 	if err != nil {
 		l.recordErr("live.registry.endpoint_probe", err)
 		return
 	}
-	l.markOp("listTesters")
+	l.markOp("listRunners")
 	if status != http.StatusOK {
-		l.add("live.registry.endpoint_probe", false, fmt.Sprintf("GET /testers 返回 %d", status))
+		l.add("live.registry.endpoint_probe", false, fmt.Sprintf("GET /runners 返回 %d", status))
 		return
 	}
 	var list struct {
@@ -1676,10 +1491,14 @@ func (l *Live) checkTesterRegistry(ctx context.Context) {
 		}
 	}
 	if !found {
-		l.add("live.registry.endpoint_probe", false, "GET /testers 里没有 endpoint-probe（K-3：镜像内 Tester 应被扫描入库）")
+		l.add("live.registry.endpoint_probe", false, "GET /runners 里没有 endpoint-probe（K-3：镜像内 Runner 应被扫描入库）")
 		return
 	}
-	l.add("live.registry.endpoint_probe", true, fmt.Sprintf("%d 个 Tester，含 endpoint-probe", len(list.Items)))
+	l.add("live.registry.endpoint_probe", true, fmt.Sprintf("%d 个 Runner，含 endpoint-probe", len(list.Items)))
+
+	// getRunner 与 getRunnerVersion：注册表只读投影（附录 C）。
+	l.probeSchema(ctx, "getRunner", "/api/v1/runners/endpoint-probe", 200, "Runner")
+	l.probeSchema(ctx, "getRunnerVersion", "/api/v1/runners/endpoint-probe/versions/1.0.0", 200, "Runner")
 
 	if status, _, raw, err := l.client.do(ctx, http.MethodGet, "/api/v1/clusters", nil, "", nil); err == nil && status == http.StatusOK {
 		var clusters struct {
@@ -1732,23 +1551,27 @@ func (l *Live) manifestBytes() ([]byte, string) {
 	if profile == "" {
 		profile = "k8s-npu"
 	}
-	manifest := fmt.Sprintf(`run:
+	manifest := fmt.Sprintf(`task:
   name: %q
   service:
     url: %s
     model_name: mock-llm
   precheck:
-    tester: endpoint-probe
-    version: "1.0.0"
-    args: "--wait_timeout_seconds=5 --retry_interval_seconds=1"
-  cleanup: { policy: never }
-  tests:
+    runner: endpoint-probe
+    version: %q
+    execution: { profile: %s }
+    input: |
+      {"wait_timeout_seconds":5,"retry_interval_seconds":1}
+  runners:
     - name: contract-a
-      tester: endpoint-probe
-      version: "1.0.0"
+      runner: aisbench-sla
+      version: %q
       execution: { profile: %s }
-      args: "--wait_timeout_seconds=5 --retry_interval_seconds=1"
-`, name, l.opts.MockURL, profile)
+      timeout_seconds: 600
+      input: |
+        {"sla":["ttft.avg:999999"],"work_path":"/tmp/aisbench-ws","aisbench_cmd":"/runner/tool/tests/stub_aisbench.py","input_len":64,"output_len":8,"data_num":4,"start":1,"max":2,"max_probes":2}
+`, name, l.opts.MockURL, l.runnerVersion(context.Background(), "endpoint-probe"), profile,
+		l.runnerVersion(context.Background(), "aisbench-sla"), profile)
 	return []byte(manifest), "application/yaml"
 }
 

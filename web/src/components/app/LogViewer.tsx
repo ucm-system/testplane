@@ -42,7 +42,7 @@ function clockOf(timestamp: number | null | undefined): string {
  * 行首时间变暗；`--- [container restarted` 琥珀；`--- [log gap:` 红虚线；ERROR/Traceback 红。
  *
  * 运行中的面板由调用方的 `useLogTail` 按游标**追加**文本（不是整块替换）；
- * 这里只负责：跟随最新 / 上滚暂停 / 状态行（最后更新、已追加行数、Run 已结束）。
+ * 这里只负责：跟随最新 / 上滚暂停 / 状态行（最后更新、已追加行数、Task 已结束）。
  * 不在这里做虚拟滚动（P0 单次 ≤64KiB）；10k 行以上再上 Virtualizer。
  */
 export function LogViewer({
@@ -63,9 +63,9 @@ export function LogViewer({
   loading?: boolean
   error?: ApiErrorBody | null
   coverage?: string | null
-  /** 正在追加（Attempt / Run 都还没结束） */
+  /** 正在追加（attempt / Task 都还没结束） */
   live?: boolean
-  /** Run 已到终态：明确告诉用户日志不再更新 */
+  /** Task 已到终态：明确告诉用户日志不再更新 */
   ended?: boolean
   lastUpdatedAt?: number | null
   appended?: number
@@ -93,7 +93,7 @@ export function LogViewer({
             追加中
           </span>
         ) : null}
-        {ended ? <span data-testid={`${testIdPrefix}-ended`}>Run 已结束，日志不再更新</span> : null}
+        {ended ? <span data-testid={`${testIdPrefix}-ended`}>Task 已结束，日志不再更新</span> : null}
         {coverage ? <span className="font-mono">覆盖区间 {coverage}</span> : null}
         {hint ? <span>{hint}</span> : null}
         <span data-testid={`${testIdPrefix}-last-updated`} className="font-mono">

@@ -3,25 +3,26 @@ import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft, Download, FileWarning, RefreshCw } from 'lucide-react'
 import { api } from '@/api'
 import { toApiError } from '@/api/client'
-import type { ApiErrorBody, Result, ResultMetric } from '@/api/types'
+import type { Result, ResultMetric } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
 import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
-import { TaskStatusBadge } from '@/components/app/StatusBadge'
+import { RunnerStatusBadge } from '@/components/app/StatusBadge'
 import { useAsync } from '@/hooks/useAsync'
 import { MarkdownView } from '@/components/ui/markdown-view'
 import { formatBytes, saveBlob } from '@/lib/download'
 import { formatDuration } from '@/lib/utils'
 
 /**
- * Run 报告页（`GET /runs/{id}/report` + `/report.md`）。
+ * Task 报告页（`GET /tasks/{id}/report` + `/report.md`，默认最后一个 attempt，§7.2）。
  *
- * 契约要点（control-plane §8.4）：report.json **只做组织与索引、不做指标聚合**（不求和、不求平均），
- * 所以指标表是 UI 侧按 `tasks[].result_ref` 逐个拉 `GET /tasks/{id}/attempts/{idx}/result` 聚合的。
- * 文件尚未生成时后端返回 404 + Retry-After：这里只给**一个**空状态 + 按秒倒计时的重试，
- * 不把 404 的直译分别渲染到计数卡和 report.md 卡两份。
+ * 契约要点（§8.4）：report.json **只做组织与索引、不做指标聚合**（不求和、不求平均），
+ * 所以指标表是 UI 侧按 `runners[].result_ref` 逐个拉
+ * `GET /tasks/{id}/runners/{seq}/result`（附录 A schema 2.0）聚合的。
+ * 产物三选一（D-74）：只产出 html / csv 的 runner 没有 result.json —— 指标区直说"非 JSON 结果"。
+ * 文件尚未生成时后端返回 404 + Retry-After：这里只给**一个**空状态 + 按秒倒计时的重试。
  */
 /** 报告页固定提供这四个文件（report.md 也在里面，不再只给 md） */
 const FILES = [
@@ -31,24 +32,15 @@ const FILES = [
   { name: 'events.jsonl', label: 'events.jsonl' },
 ] as const
 
-/** 产物类型的中文标签（与结果视图同一套语义） */
-
 /** 后端没给 `Retry-After` 时的兜底秒数（与报告异步生成的节奏一致） */
 const FALLBACK_RETRY_AFTER = 5
 
 /** `Retry-After` 已由 api/client.ts 折进 `detail.retry_after_seconds` */
-function retryAfterSeconds(error: ApiErrorBody | null): number {
+function retryAfterSeconds(error: { detail?: Record<string, unknown> } | null): number {
   const raw = error?.detail?.['retry_after_seconds']
   const value = typeof raw === 'number' ? raw : Number(raw)
   if (!Number.isFinite(value) || value <= 0) return FALLBACK_RETRY_AFTER
   return Math.min(60, Math.max(1, Math.round(value)))
-}
-
-/** `report.json.tasks[].result_ref`（`…/attempts/<idx>/result.json`）→ Attempt 序号 */
-function attemptIdxOfResultRef(resultRef: string | null | undefined, fallback: number): number {
-  const hit = resultRef ? /attempts\/(\d+)\//.exec(resultRef) : null
-  const idx = hit ? Number(hit[1]) : fallback
-  return Number.isFinite(idx) && idx > 0 ? idx : 1
 }
 
 function formatMetricValue(value: number | null): string {
@@ -60,20 +52,23 @@ function formatMetricValue(value: number | null): string {
 }
 
 interface MetricGroup {
-  labels: Record<string, string>
+  labels: Array<[string, string]>
   metrics: ResultMetric[]
 }
 
-/** 按 `labels` 分组（同组参数的指标排在一起，列里不重复贴标签） */
+/** 按 `labels` 分组（同组参数的指标排在一起，列里不重复贴标签；labels 值允许非字符串） */
 function groupByLabels(metrics: ResultMetric[]): MetricGroup[] {
   const groups = new Map<string, MetricGroup>()
   const order: string[] = []
   for (const metric of metrics) {
-    const labels = metric.labels ?? {}
-    const key = JSON.stringify(Object.keys(labels).sort().map((name) => [name, labels[name]]))
+    const raw = metric.labels ?? {}
+    const pairs: Array<[string, string]> = Object.keys(raw)
+      .sort()
+      .map((name) => [name, String(raw[name])])
+    const key = JSON.stringify(pairs)
     let group = groups.get(key)
     if (!group) {
-      group = { labels, metrics: [] }
+      group = { labels: pairs, metrics: [] }
       groups.set(key, group)
       order.push(key)
     }
@@ -82,13 +77,13 @@ function groupByLabels(metrics: ResultMetric[]): MetricGroup[] {
   return order.map((key) => groups.get(key)!).filter(Boolean)
 }
 
-/** 一张指标表：列 = labels 键 + 指标名 + 值 + 单位 */
+/** 一张指标表：列 = labels 键 + 指标名 + 统计口径 + 值 + 单位 */
 function MetricsTable({ result }: { result: Result }) {
   const groups = useMemo(() => groupByLabels(result.metrics), [result.metrics])
   const labelKeys = useMemo(() => {
     const keys: string[] = []
     for (const group of groups) {
-      for (const key of Object.keys(group.labels)) if (!keys.includes(key)) keys.push(key)
+      for (const [key] of group.labels) if (!keys.includes(key)) keys.push(key)
     }
     return keys
   }, [groups])
@@ -114,13 +109,13 @@ function MetricsTable({ result }: { result: Result }) {
                 {group.metrics.map((metric, index) => (
                   <TR key={`${groupKey}-${metric.name}-${metric.statistic}-${index}`}>
                     {index === 0
-                      ? labelKeys.map((labelKey) => (
+                      ? group.labels.map(([labelKey, labelValue]) => (
                           <TD
                             key={labelKey}
                             rowSpan={group.metrics.length}
                             className="align-top font-mono text-2xs text-fg-2"
                           >
-                            {group.labels[labelKey] ?? '—'}
+                            {labelValue}
                           </TD>
                         ))
                       : null}
@@ -142,12 +137,12 @@ function MetricsTable({ result }: { result: Result }) {
 }
 
 export function ReportPage() {
-  const { runId = '' } = useParams<{ runId: string }>()
-  const report = useAsync(() => api.getReport(runId), [runId])
-  const markdown = useAsync(() => api.getReportMd(runId), [runId])
+  const { taskId = '' } = useParams<{ taskId: string }>()
+  const report = useAsync(() => api.getTaskReport(taskId), [taskId])
+  const markdown = useAsync(() => api.getTaskReportMd(taskId), [taskId])
   const [downloading, setDownloading] = useState<string | null>(null)
   const [downloadNotice, setDownloadNotice] = useState<string | null>(null)
-  const [downloadError, setDownloadError] = useState<ApiErrorBody | null>(null)
+  const [downloadError, setDownloadError] = useState<Error['message'] | null>(null)
 
   const data = report.data
 
@@ -184,16 +179,16 @@ export function ReportPage() {
   const [hasScrolled, setHasScrolled] = useState(false)
   const metricsCardRef = useRef<HTMLDivElement | null>(null)
   const fetchedForRef = useRef<string | null>(null)
-  const [results, setResults] = useState<Record<string, Result | null>>({})
-  const [resultErrors, setResultErrors] = useState<Record<string, string | null>>({})
+  const [results, setResults] = useState<Record<number, Result | null>>({})
+  const [resultErrors, setResultErrors] = useState<Record<number, string | null>>({})
   const [metricsLoading, setMetricsLoading] = useState(false)
 
-  const tasksWithResult = useMemo(
-    () => (data?.tasks ?? []).filter((task) => Boolean(task.result_ref)),
+  const runnersWithResult = useMemo(
+    () => (data?.runners ?? []).filter((runner) => Boolean(runner.result_ref)),
     [data],
   )
 
-  // 换 Run 时重置（同一路由组件可能复用）
+  // 换 Task 时重置（同一路由组件可能复用）
   useEffect(() => {
     setMetricsRequested(false)
     setHasScrolled(false)
@@ -201,7 +196,7 @@ export function ReportPage() {
     setResults({})
     setResultErrors({})
     setMetricsLoading(false)
-  }, [runId])
+  }, [taskId])
 
   useEffect(() => {
     const onScroll = () => setHasScrolled(true)
@@ -226,11 +221,11 @@ export function ReportPage() {
 
   useEffect(() => {
     if (!metricsRequested || !data) return
-    const cacheKey = `${runId}:${data.status}:${data.tasks.length}`
+    const cacheKey = `${taskId}:${data.attempt_no}:${data.runners.length}`
     if (fetchedForRef.current === cacheKey) return
     fetchedForRef.current = cacheKey
 
-    const targets = data.tasks.filter((task) => Boolean(task.result_ref))
+    const targets = data.runners.filter((runner) => Boolean(runner.result_ref))
     if (targets.length === 0) {
       setResults({})
       setResultErrors({})
@@ -241,22 +236,25 @@ export function ReportPage() {
     let alive = true
     setMetricsLoading(true)
     void Promise.all(
-      targets.map(async (task) => {
-        const idx = attemptIdxOfResultRef(task.result_ref, task.attempts || 1)
+      targets.map(async (runner) => {
         try {
-          return { taskId: task.task_id, result: await api.getAttemptResult(task.task_id, idx), error: null }
+          return {
+            seq: runner.seq,
+            result: await api.getRunnerResult(taskId, runner.seq, { attempt: data.attempt_no }),
+            error: null,
+          }
         } catch (e) {
           const error = toApiError(e)
-          return { taskId: task.task_id, result: null, error: `${error.code}：${error.message}` }
+          return { seq: runner.seq, result: null, error: `${error.code}：${error.message}` }
         }
       }),
     ).then((rows) => {
       if (!alive) return
-      const nextResults: Record<string, Result | null> = {}
-      const nextErrors: Record<string, string | null> = {}
+      const nextResults: Record<number, Result | null> = {}
+      const nextErrors: Record<number, string | null> = {}
       for (const row of rows) {
-        nextResults[row.taskId] = row.result
-        nextErrors[row.taskId] = row.error
+        nextResults[row.seq] = row.result
+        nextErrors[row.seq] = row.error
       }
       setResults(nextResults)
       setResultErrors(nextErrors)
@@ -266,7 +264,7 @@ export function ReportPage() {
     return () => {
       alive = false
     }
-  }, [metricsRequested, data, runId])
+  }, [metricsRequested, data, taskId])
 
   /**
    * 下载：`bundle` 走整包 zip，其余走单文件；两条都必须带鉴权（dev 是 Bearer、OIDC 是 Cookie），
@@ -278,26 +276,23 @@ export function ReportPage() {
     setDownloadNotice(null)
     try {
       const blob =
-        file === 'bundle' ? await api.downloadBundle(runId) : await api.downloadFile(runId, `${runId}/${file}`)
-      const name = file === 'bundle' ? `${runId}.zip` : file
+        file === 'bundle' ? await api.downloadBundle(taskId) : await api.downloadFile(taskId, file)
+      const name = file === 'bundle' ? `${taskId}.zip` : file
       saveBlob(blob, name)
       setDownloadNotice(`${name} · ${formatBytes(blob.size)} 已开始下载`)
     } catch (e) {
-      setDownloadError(toApiError(e))
+      setDownloadError(e instanceof Error ? e.message : String(e))
     } finally {
       setDownloading(null)
     }
   }
 
-  /** 产物逐条下载（同样带鉴权 fetch → Blob，不裸 href） */
-
   return (
     <>
-
       <div className="flex flex-wrap items-center gap-2">
-        <Link to={`/runs/${runId}`}>
+        <Link to={`/tasks/${taskId}`}>
           <Button size="sm" icon={<ArrowLeft className="size-3" aria-hidden />}>
-            返回 Run 详情
+            返回 Task 详情
           </Button>
         </Link>
 
@@ -331,14 +326,13 @@ export function ReportPage() {
           </>
         ) : null}
 
-        {data ? <Badge tone="muted" className="font-mono">{data.run_id}</Badge> : null}
+        {data ? <Badge tone="muted" className="font-mono">{data.task_id}</Badge> : null}
+        {data ? <Badge tone="info">attempt #{data.attempt_no}</Badge> : null}
         {data?.truncated ? <Badge tone="warn">摘要版（{data.report_ref ?? 'report.full.json'}）</Badge> : null}
         {downloadNotice ? <span className="text-2xs text-fg-3">{downloadNotice}</span> : null}
       </div>
 
-      {downloadError ? (
-        <ErrorState error={downloadError} compact onRetry={() => void download('bundle')} />
-      ) : null}
+      {downloadError ? <ErrorState error={{ code: 'INTERNAL_ERROR', message: downloadError, retryable: false }} compact /> : null}
 
       {reportMissing ? (
         /* 唯一空状态：说人话（不出现 404 / Retry-After 这类实现细节），保留倒计时重试 */
@@ -346,7 +340,7 @@ export function ReportPage() {
           <EmptyState
             icon={<FileWarning className="size-4" />}
             title="报告尚未生成"
-            description="报告还没生成，可能是这个 Run 还没结束；我们会每隔几秒自动重试一次。"
+            description="报告还没生成，可能是这个 Task 还没结束；我们会每隔几秒自动重试一次。"
             action={
               <div className="flex flex-col items-center gap-2">
                 <Button
@@ -376,7 +370,7 @@ export function ReportPage() {
       ) : data ? (
         <>
           <Card>
-            <CardHeader tone="primary" title="计数" sub="成功 / 失败 / 跳过 / 取消 各多少条" />
+            <CardHeader tone="primary" title="计数" sub={`attempt #${data.attempt_no} · 成功 / 失败 / 跳过 / 取消 各多少条`} />
             <CardBody>
               <dl className="grid grid-cols-2 gap-3 sm:grid-cols-5">
                 {[
@@ -395,18 +389,23 @@ export function ReportPage() {
                   </div>
                 ))}
               </dl>
+              {data.cleanup_failed ? (
+                <p className="mt-3 rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs text-warn-text">
+                  service-clean 失败（只打 cleanup_failed 事件，不影响 Task 终态；进重放清单 §9.3）。
+                </p>
+              ) : null}
             </CardBody>
           </Card>
 
-          {/* 指标：懒加载 + 按 labels 分组；没有 result/json 就直说，不编数据 */}
+          {/* 指标：懒加载 + 按 labels 分组；没有 result.json 就直说，不编数据 */}
           <Card data-testid="metrics-card">
             <CardHeader
               tone="info"
               title="指标"
-              sub="按 labels 分组 · 指标取自每个 Task 自己上报的结果"
+              sub="按 labels 分组 · 指标取自每个 runner 自己上报的 result.json（schema 2.0）"
               actions={
                 metricsRequested ? (
-                  <Badge tone="muted">{tasksWithResult.length} 个 Task 有结果</Badge>
+                  <Badge tone="muted">{runnersWithResult.length} 个 runner 有结果</Badge>
                 ) : (
                   <Button
                     size="sm"
@@ -427,32 +426,38 @@ export function ReportPage() {
                 </p>
               </CardBody>
             ) : metricsLoading ? (
-              <LoadingBlock label="读取各 Task 的指标…" />
+              <LoadingBlock label="读取各 runner 的指标…" />
             ) : (
               <div className="flex flex-col">
-                {data.tasks.map((task) => {
-                  const result = results[task.task_id] ?? null
-                  const error = resultErrors[task.task_id] ?? null
-                  const noMetrics = !task.result_ref || Boolean(error) || !result || result.metrics.length === 0
+                {data.runners.map((runner) => {
+                  const result = results[runner.seq] ?? null
+                  const error = resultErrors[runner.seq] ?? null
+                  const noMetrics = !runner.result_ref || Boolean(error) || !result || result.metrics.length === 0
                   return (
                     <section
-                      key={task.task_id}
-                      data-testid="metrics-task"
+                      key={runner.seq}
+                      data-testid="metrics-runner"
                       className="border-t border-line-soft px-5 py-4 first:border-t-0"
                     >
                       <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="text-sm font-semibold text-fg">{task.name}</h3>
-                        <TaskStatusBadge status={task.status} />
-                        <span className="font-mono text-2xs text-fg-3">{task.task_id}</span>
+                        <h3 className="text-sm font-semibold text-fg">
+                          seq #{runner.seq} · {runner.name}
+                        </h3>
+                        <RunnerStatusBadge status={runner.status} />
+                        <Badge tone="muted">{runner.role}</Badge>
                         {result ? (
                           <span className="ml-auto text-2xs text-fg-3">
-                            {result.tester?.name} v{result.tester?.version}
+                            {result.runner?.name} v{result.runner?.version}
                           </span>
                         ) : null}
                       </div>
                       {noMetrics ? (
                         <p data-testid="metrics-empty" className="mt-2 text-xs text-fg-3">
-                          该 Tester 未上报指标
+                          {runner.result_ref
+                            ? '该 runner 未上报指标'
+                            : runner.role === 'deploy' || runner.role === 'clean'
+                              ? 'deploy / clean 角色没有 result.json（产物只看日志与 exports）'
+                              : '该 runner 产出非 JSON 结果（html / csv），或三选一产物缺失 —— 以产物预览/下载为主（D-74）'}
                           {error ? <span className="ml-2 font-mono text-2xs">（{error}）</span> : null}
                         </p>
                       ) : (
@@ -461,53 +466,55 @@ export function ReportPage() {
                     </section>
                   )
                 })}
-                {data.tasks.length === 0 ? (
+                {data.runners.length === 0 ? (
                   <CardBody>
-                    <p className="text-xs text-fg-3">报告里没有 Task，自然也没有指标。</p>
+                    <p className="text-xs text-fg-3">报告里没有 runner，自然也没有指标。</p>
                   </CardBody>
                 ) : null}
               </div>
             )}
             <CardFooter>
-              <span>同一组参数的指标靠 labels 区分；没有结果文件时显示「该 Tester 未上报指标」，不补假值。</span>
+              <span>同一组参数的指标靠 labels 区分；没有 result.json 时显示占位说明，不补假值。</span>
             </CardFooter>
           </Card>
 
           <Card>
-            <CardHeader tone="muted" title="Task 明细" sub="每个 Task 的状态、尝试次数与耗时" />
+            <CardHeader tone="muted" title="runner 明细" sub={`attempt #${data.attempt_no} · 每个 runner 的状态与耗时（含注入的 deploy / clean）`} />
             <TableWrap>
               <Table>
                 <THead>
                   <TR className="hover:bg-transparent">
-                    <TH>任务 ID</TH>
+                    <TH>seq</TH>
                     <TH>名称</TH>
+                    <TH>角色</TH>
                     <TH>状态</TH>
-                    <TH>尝试次数</TH>
                     <TH>耗时</TH>
-                    <TH>结果文件</TH>
+                    <TH>result.json</TH>
                   </TR>
                 </THead>
                 <TBody>
-                  {data.tasks.map((task) => (
-                    <TR key={task.task_id}>
-                      <TD className="font-mono text-2xs text-fg-3">{task.task_id}</TD>
-                      <TD className="max-w-[18rem] truncate text-fg" title={task.name}>
-                        {task.name}
+                  {data.runners.map((runner) => (
+                    <TR key={runner.seq}>
+                      <TD className="tabular-nums text-2xs text-fg-3">#{runner.seq}</TD>
+                      <TD className="max-w-[18rem] truncate text-fg" title={runner.name}>
+                        {runner.name}
                       </TD>
                       <TD>
-                        <TaskStatusBadge status={task.status} />
+                        <Badge tone="muted">{runner.role}</Badge>
                       </TD>
-                      <TD className="tabular-nums">{task.attempts}</TD>
+                      <TD>
+                        <RunnerStatusBadge status={runner.status} />
+                      </TD>
                       <TD className="tabular-nums">
-                        {task.duration_ms == null ? '—' : formatDuration(task.duration_ms / 1000)}
+                        {runner.duration_ms == null ? '—' : formatDuration(runner.duration_ms / 1000)}
                       </TD>
-                      <TD className="break-all font-mono text-2xs text-fg-3">{task.result_ref ?? '—'}</TD>
+                      <TD className="break-all font-mono text-2xs text-fg-3">{runner.result_ref ?? '—'}</TD>
                     </TR>
                   ))}
-                  {data.tasks.length === 0 ? (
+                  {data.runners.length === 0 ? (
                     <TR>
                       <TD colSpan={6} className="text-fg-3">
-                        报告里没有 Task。
+                        报告里没有 runner。
                       </TD>
                     </TR>
                   ) : null}
@@ -517,7 +524,7 @@ export function ReportPage() {
           </Card>
 
           <Card>
-            <CardHeader tone="err" title="失败清单" sub="失败原因与错误码" />
+            <CardHeader tone="err" title="失败清单" sub="失败原因与错误码（附录 D v2）" />
             {data.failures.length === 0 ? (
               <CardBody>
                 <p className="text-xs text-fg-3">没有失败。这是演示里最想看到的一行。</p>
@@ -527,24 +534,22 @@ export function ReportPage() {
                 <Table>
                   <THead>
                     <TR className="hover:bg-transparent">
-                      <TH>任务 ID</TH>
+                      <TH>seq</TH>
+                      <TH>runner</TH>
                       <TH>原因</TH>
                       <TH>错误码</TH>
                     </TR>
                   </THead>
                   <TBody>
                     {data.failures.map((failure) => (
-                      <TR key={`${failure.task_id}-${failure.error_code ?? 'x'}`}>
-                        <TD className="font-mono text-2xs text-fg-3">{failure.task_id}</TD>
-                        <TD className="text-fg">{failure.reason}</TD>
+                      <TR key={`${failure.seq}-${failure.error_code}`}>
+                        <TD className="tabular-nums text-2xs text-fg-3">#{failure.seq}</TD>
+                        <TD className="text-fg">{failure.name}</TD>
+                        <TD className="text-fg-2">{failure.reason ?? '—'}</TD>
                         <TD>
-                          {failure.error_code ? (
-                            <Badge tone="err" className="font-mono">
-                              {failure.error_code}
-                            </Badge>
-                          ) : (
-                            <span className="text-fg-3">—</span>
-                          )}
+                          <Badge tone="err" className="font-mono">
+                            {failure.error_code}
+                          </Badge>
                         </TD>
                       </TR>
                     ))}
@@ -553,7 +558,7 @@ export function ReportPage() {
               </TableWrap>
             )}
             <CardFooter>
-              <span>失败清单来自报告；单个 Task 的完整结果见「指标」卡里那一节。</span>
+              <span>失败清单来自报告；单个 runner 的完整结果见「指标」卡里那一节。</span>
             </CardFooter>
           </Card>
 

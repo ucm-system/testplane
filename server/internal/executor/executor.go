@@ -92,17 +92,18 @@ func New(client kubernetes.Interface, opts Options) *Executor {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
+	o := opts.withDefaults()
 	return &Executor{
 		client:    client,
-		namespace: "testplane",
-		opts:      opts.withDefaults(),
-		clock:     opts.withDefaults().Clock,
-		now:       opts.withDefaults().Clock.Now,
+		namespace: DefaultNamespace,
+		opts:      o,
+		clock:     o.Clock,
+		now:       o.Clock.Now,
 		logf:      logf,
 	}
 }
 
-// NewWithNamespace 显式指定 namespace（为空则用 testplane）。
+// NewWithNamespace 显式指定 namespace（为空则用 argus）。
 func NewWithNamespace(client kubernetes.Interface, namespace string, opts Options) *Executor {
 	e := New(client, opts)
 	if namespace != "" {
@@ -112,6 +113,7 @@ func NewWithNamespace(client kubernetes.Interface, namespace string, opts Option
 }
 
 // Submit 创建 Job（幂等：同名同 spec-hash 视为成功，见 execution §2.3）。
+// 幂等键 = (task_id, attempt_no, seq) 的派生（附录 B / D-68）。
 func (e *Executor) Submit(ctx context.Context, spec ports.JobSpec) (ports.JobHandle, error) {
 	job, warnings, err := RenderWithWarnings(spec)
 	if err != nil {
@@ -147,7 +149,7 @@ func (e *Executor) Submit(ctx context.Context, spec ports.JobSpec) (ports.JobHan
 }
 
 // handleForExisting 处理"同名 Job 已存在"：指纹一致直接复用，不一致报冲突。
-// 指纹缺失（人工创建的 tp- 前缀 Job）也按冲突处理——宁可人工介入，不要悄悄混用。
+// 指纹缺失（人工创建的同前缀 Job）也按冲突处理——宁可人工介入，不要悄悄混用。
 func (e *Executor) handleForExisting(ctx context.Context, job *batchv1.Job, want string) (ports.JobHandle, error) {
 	got := job.Annotations[AnnSpecHash]
 	if got != want {
@@ -326,7 +328,7 @@ func (e *Executor) forceDeletePods(ctx context.Context, ns string, h ports.JobHa
 	return firstErr
 }
 
-// Logs 返回 Tester 的 stdout/stderr 流（明文、不脱敏，K-5）。
+// Logs 返回 runner 的 stdout/stderr 流（明文、不脱敏，K-5）。
 func (e *Executor) Logs(ctx context.Context, h ports.JobHandle) (io.ReadCloser, error) {
 	ns := e.namespaceOf(h)
 	pod := h.PodName
@@ -337,7 +339,7 @@ func (e *Executor) Logs(ctx context.Context, h ports.JobHandle) (io.ReadCloser, 
 		return nil, fmt.Errorf("%w: no pod for job %s/%s", ErrJobNotFound, ns, h.JobName)
 	}
 	req := e.client.CoreV1().Pods(ns).GetLogs(pod, &corev1.PodLogOptions{
-		Container: TesterContainerName,
+		Container: RunnerContainerName,
 		Follow:    true,
 	})
 	stream, err := req.Stream(ctx)

@@ -1,23 +1,23 @@
-# TestPlane · 失败注入（经平台，Windows / pwsh）
+# Argus · 失败注入（经平台，Windows / pwsh）
 #
-# 前置：控制面可用（8080）、kind 集群里能跑 Tester Pod、mock-llm 镜像已 load。
-# 会创建 5 个 fixture Run，并部署 4 个 mock-llm 故障变体（default ns，可 -Cleanup 清掉）。
+# 前置：控制面可用（8080）、kind 集群里能跑 Runner Pod、mock-llm 镜像已 load。
+# 会创建 5 个 fixture Task，并部署 4 个 mock-llm 故障变体（default ns，可 -Cleanup 清掉）。
 #
 # 场景与设计预期（C-5.8 终态判定优先级，Lead 2026-11-05 已拍板）：
 #   success       mock-llm（正常）            -> Run succeeded
 #   fail-500      持续 500（可重试）          -> service_unavailable，precheck failed(retryable=true)，其余 skipped(upstream_abort)
-#   fail-401      401（不可重试）             -> completed_with_errors，precheck failed(retryable=false)，其余 skipped(upstream_abort)
-#   error-in-200  200 + 错误对象（不可重试）  -> completed_with_errors，同上
+#   fail-401      401（不可重试）             -> failed，precheck failed(retryable=false)，其余 skipped(upstream_abort)
+#   error-in-200  200 + 错误对象（不可重试）  -> failed，同上
 #   slow-ready    窗口内永不就绪（可重试）    -> service_unavailable，retryable=true，耗满 precheck 窗口
 #
 # 判定口径（C-5.8 #4 / #6）：
 #   - precheck 失败且 retryable=true（窗口耗尽的 PRECHECK_FAILED / ENDPOINT_UNREACHABLE）→ service_unavailable；
-#   - precheck 失败且 retryable=false（401/403、200 包错误、DNS/TLS）→ completed_with_errors，
+#   - precheck 失败且 retryable=false（401/403、200 包错误、DNS/TLS）→ failed，
 #     precheck Task 是 failed（不是 skipped），其余 Task skipped(upstream_abort)。
 #   若实测与这条不一致，是后端 bug；脚本会判红并把实际终态打出来。
 #
-# 平台错误（如 Job 创建失败）预期 completed_with_errors 而不是 failed。
-# 已知证据：executor job-spec 失败时 Run 终态就是 completed_with_errors（ticket #3 comment 的
+# 平台错误（如 Job 创建失败）预期 failed 而不是 failed。
+# 已知证据：executor job-spec 失败时 Run 终态就是 failed（ticket #3 comment 的
 # r-20261105-G3K3 / Z6TJ）。需要自动化时可临时移除 Role 的 jobs:create 权限，
 # 脚本不默认做（会影响共享集群）。
 #
@@ -34,7 +34,7 @@ param(
     [string]$BaseURL = 'http://127.0.0.1:8080',
     [string]$Namespace = 'default',
     [string]$Profile = 'k8s-npu',
-    [string]$MockImage = 'testplane/mock-llm:dev',
+    [string]$MockImage = 'argus/mock-llm:dev',
     [string]$OutDir = '',
     [string[]]$Only = @(),
     [switch]$SkipApply,
@@ -73,7 +73,7 @@ if (-not $SkipApply -and -not $DryRun) {
 
 # ---- 2. 构建 e2e -----------------------------------------------------------
 Push-Location (Join-Path $repo 'tools\e2e')
-$e2eExe = Join-Path $tmp 'testplane-e2e.exe'
+$e2eExe = Join-Path $tmp 'argus-e2e.exe'
 & go build -o $e2eExe .
 Pop-Location
 if ($LASTEXITCODE -ne 0) {
@@ -85,8 +85,8 @@ if ($LASTEXITCODE -ne 0) {
 $allScenarios = @(
     @{ Name = 'success';      Service = 'mock-llm';          Expect = 'succeeded';                                       TaskErr = '';                Retryable = '';      MaxSeconds = 300; Note = '' }
     @{ Name = 'fail-500';     Service = 'mock-llm-500';      Expect = 'service_unavailable';                             TaskErr = 'PRECHECK_FAILED'; Retryable = 'true';  MaxSeconds = 180; Note = '可重试' }
-    @{ Name = 'fail-401';     Service = 'mock-llm-401';      Expect = 'completed_with_errors';                            TaskErr = 'PRECHECK_FAILED'; Retryable = 'false'; MaxSeconds = 120; Note = '不可重试 → completed_with_errors' }
-    @{ Name = 'error-in-200'; Service = 'mock-llm-error200'; Expect = 'completed_with_errors';                            TaskErr = 'PRECHECK_FAILED'; Retryable = 'false'; MaxSeconds = 120; Note = '不可重试 → completed_with_errors' }
+    @{ Name = 'fail-401';     Service = 'mock-llm-401';      Expect = 'failed';                            TaskErr = 'PRECHECK_FAILED'; Retryable = 'false'; MaxSeconds = 120; Note = '不可重试 → failed' }
+    @{ Name = 'error-in-200'; Service = 'mock-llm-error200'; Expect = 'failed';                            TaskErr = 'PRECHECK_FAILED'; Retryable = 'false'; MaxSeconds = 120; Note = '不可重试 → failed' }
     @{ Name = 'slow-ready';   Service = 'mock-llm-slow';     Expect = 'service_unavailable';                             TaskErr = 'PRECHECK_FAILED'; Retryable = 'true';  MaxSeconds = 180; Note = '窗口内不可就绪' }
 )
 $scenarios = $allScenarios
@@ -106,23 +106,23 @@ function New-FixtureManifest {
     $url = "http://$($Scenario.Service).$Namespace.svc.cluster.local:18080/v1"
     return @"
 # 由 scripts/e2e/failure-injection.ps1 生成：$($Scenario.Name)
-run:
+task:
   name: "fi-$($Scenario.Name)-$stamp"
   service:
     url: $url
     model_name: mock-llm
-  precheck:
-    tester: endpoint-probe
+  precheck:                   # v2：显式对象（§10.1）——注入的 pre_check runner + 输入文件
+    runner: endpoint-probe
     version: "1.0.0"
     execution: { profile: $Profile }
-    args: "--wait_timeout_seconds=8 --retry_interval_seconds=1"
-  cleanup: { policy: never }
-  tests:
+    input: '{"wait_timeout_seconds":8,"retry_interval_seconds":1}'
+  runners:
     - name: probe-a
-      tester: endpoint-probe
+      runner: endpoint-probe
       version: "1.0.0"
       execution: { profile: $Profile }
-      args: "--wait_timeout_seconds=8 --retry_interval_seconds=1"
+      input: '{"wait_timeout_seconds":8,"retry_interval_seconds":1}'
+      on_failure: continue
 "@
 }
 
