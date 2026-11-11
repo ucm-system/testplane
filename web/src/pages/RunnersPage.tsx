@@ -118,7 +118,7 @@ export function RunnersPage() {
           actions={
             <Segmented<'all' | RunnerRole>
               ariaLabel="按角色筛选"
-              data-testid="runner-role-filter"
+              testId="runner-role-filter"
               value={roleFilter}
               onChange={setRoleFilter}
               options={ROLE_FILTERS}

@@ -92,4 +92,33 @@ spec:
   selector:
     {{- include "argus.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: mock-llm
+---
+# control-plane namespace 的 default-deny 会拒绝所有 ingress：显式放行 runner Job
+# （argus.io/managed=true）与控制面对 mock-llm 的 18080 访问（D-75）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "argus.fullname" . }}-mock-llm-allow-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "argus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-llm
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "argus.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mock-llm
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              argus.io/managed: "true"
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: argusd
+      ports:
+        - port: 18080
+          protocol: TCP
 {{- end }}

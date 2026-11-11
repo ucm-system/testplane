@@ -228,7 +228,8 @@ export function RunnerResultPanel({
     }
   }
 
-  const isTestRole = runner.role === 'test'
+  // 测试类 runner（test + pre_check，§7.3）产出三选一；deploy/clean 只看日志与 exports
+  const isTestRole = runner.role === 'test' || runner.role === 'pre_check'
 
   return (
     <div data-testid={`runner-result-${runner.seq}`} className="border-t border-line-soft first:border-t-0">

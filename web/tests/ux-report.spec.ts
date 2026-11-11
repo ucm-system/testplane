@@ -70,11 +70,18 @@ test('③ 测试结果内联渲染 result.json 指标（不编数据；deploy/cl
   const render = page.getByTestId('task-result-render')
   await expect(render).toBeVisible()
 
-  // 成功 runner 默认折叠：展开第一个，看内联指标表（labels 分组 + accuracy）
-  const first = render.locator('[data-testid^="runner-result-"]').first()
-  await first.locator('button[aria-expanded]').click()
-  await expect(first.getByTestId('metrics-table')).toBeVisible({ timeout: 10_000 })
-  await expect(first.getByTestId('metrics-table')).toContainText('accuracy')
+  // 成功 runner 默认折叠：全部展开（第一个可能是 pre_check 探针，指标为空属正常），断言任一指标表有 accuracy
+  const panels = render.locator('[data-testid^="runner-result-"]')
+  const count = await panels.count()
+  for (let i = 0; i < count; i += 1) {
+    const panel = panels.nth(i)
+    if ((await panel.locator('button[aria-expanded="true"]').count()) === 0) {
+      await panel.locator('button[aria-expanded]').click()
+    }
+  }
+  const metrics = render.getByTestId('metrics-table').first()
+  await expect(metrics).toBeVisible({ timeout: 10_000 })
+  await expect(metrics).toContainText('accuracy')
 
   // deploy/clean 角色不进测试结果卡（它们没有 result.json，§9.1）
   await expect(render).not.toContainText('service-deploy')

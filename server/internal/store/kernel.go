@@ -255,8 +255,10 @@ func (s *Store) applyRunnerRun(ctx context.Context, tx pgx.Tx, tr domain.Transit
 		   SET status          = $2,
 		       status_reason   = NULLIF($3, ''),
 		       waiting_reason  = CASE WHEN $2 = 'queued' OR $2 = ANY($8) THEN NULL ELSE waiting_reason END,
-		       error_code      = COALESCE(NULLIF($4, ''), error_code),
-		       error           = COALESCE($5, error),
+		       error_code      = CASE WHEN $2 = 'succeeded' THEN NULL
+		                              ELSE COALESCE(NULLIF($4, ''), error_code) END,
+		       error           = CASE WHEN $2 = 'succeeded' THEN NULL
+		                              ELSE COALESCE($5, error) END,
 		       started_at      = CASE WHEN $6 THEN COALESCE(started_at, $9) ELSE started_at END,
 		       finished_at     = CASE WHEN $7 THEN $9 ELSE finished_at END,
 		       updated_at      = $9

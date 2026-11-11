@@ -127,7 +127,9 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
   // 分组只影响展示：部署日志 / runner 日志 / 报告与数据，三组都渲染，文件一个不少。
   const groups = groupArtifacts(currentItems)
   const runners = task.runners ?? []
-  const testRunners = runners.filter((r) => r.role === 'test')
+  // 测试类 runner（§7.3）：test + 显式 pre_check —— endpoint-probe 这类探针也产出
+  // result.json（指标常为空数组 + notes），应进「测试结果」卡而不是消失
+  const testRunners = runners.filter((r) => r.role === 'test' || r.role === 'pre_check')
 
   return (
     <>
@@ -235,11 +237,11 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
         <CardHeader
           tone="info"
           title="测试结果"
-          sub="每个测试 runner 的 result.json（指标表）/ result.html（sandbox）/ result.csv（表格）三选一内联渲染（D-74）"
+          sub="每个测试类 runner（test / pre_check）的 result.json（指标表）/ result.html（sandbox）/ result.csv（表格）三选一内联渲染（D-74）"
         />
         {testRunners.length === 0 ? (
           <CardBody>
-            <p className="text-xs text-fg-3">这次 Task 没有 role=test 的 runner（可能没跑完或全是登记类）。</p>
+            <p className="text-xs text-fg-3">这次 Task 没有测试类 runner（test / pre_check，可能没跑完或全是登记类）。</p>
           </CardBody>
         ) : artifacts.error ? (
           <CardBody>
