@@ -231,6 +231,18 @@ export function RunnerResultPanel({
 
   // 测试类 runner（test + pre_check，§7.3）产出三选一；deploy/clean 只看日志与 exports
   const isTestRole = runner.role === 'test' || runner.role === 'pre_check'
+  /** deploy/clean 的详情产物：本 runner 目录下非日志文件（deploy-state.json / exports.env …） */
+  const roleArtifacts = useMemo(
+    () =>
+      artifacts.filter(
+        (item) =>
+          item.runner_seq === runner.seq &&
+          !item.path.endsWith('/stdout.log') &&
+          !item.path.endsWith('/exports.env') &&
+          item.kind !== 'log',
+      ),
+    [artifacts, runner.seq],
+  )
 
   return (
     <div data-testid={`runner-result-${runner.seq}`} className="border-t border-line-soft first:border-t-0">
@@ -258,6 +270,8 @@ export function RunnerResultPanel({
           <Badge tone="info">result.csv</Badge>
         ) : runner.result_ref ? (
           <Badge tone="ok">result.json</Badge>
+        ) : roleArtifacts.length > 0 ? (
+          <Badge tone="muted">产物 {roleArtifacts.length} 份</Badge>
         ) : (
           <Badge tone="muted">无结果文件</Badge>
         )}
@@ -285,12 +299,63 @@ export function RunnerResultPanel({
             <CsvResultBody taskId={taskId} artifact={found.csv} />
           ) : runner.result_ref ? (
             <JsonResultBody taskId={taskId} runner={runner} attemptNo={attemptNo} />
-          ) : (
+          ) : isTestRole ? (
             <p className="text-2xs leading-[16px] text-fg-3">
-              {isTestRole
-                ? '该 runner 没有产出 result.html / csv / json 三选一中的任何一份（D-74）；以日志与产物清单为准。'
-                : 'deploy / clean 角色没有 result.json（产物只看日志与 exports，§9.1）。'}
+              该 runner 没有产出 result.html / csv / json 三选一中的任何一份（D-74）；以日志与产物清单为准。
             </p>
+          ) : (
+            <dl className="grid gap-x-8 gap-y-2 rounded-md border border-line-soft bg-surface-2 px-3 py-2 text-2xs sm:grid-cols-2">
+              <div className="flex gap-2">
+                <dt className="shrink-0 text-fg-3">输入落档</dt>
+                <dd className="min-w-0 break-all font-mono text-fg-2">
+                  {runner.input_ref ? (
+                    <Link
+                      to={`/tasks/${encodeURIComponent(taskId)}/file?path=${encodeURIComponent(runner.input_ref)}&attempt=${attemptNo}&seq=${runner.seq}`}
+                      className="hover:underline"
+                    >
+                      {runner.input_ref}
+                    </Link>
+                  ) : (
+                    '—'
+                  )}
+                </dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="shrink-0 text-fg-3">exports 落档</dt>
+                <dd className="min-w-0 break-all font-mono text-fg-2">
+                  {runner.exports_ref ? (
+                    <Link
+                      to={`/tasks/${encodeURIComponent(taskId)}/file?path=${encodeURIComponent(runner.exports_ref)}&attempt=${attemptNo}&seq=${runner.seq}`}
+                      className="hover:underline"
+                    >
+                      {runner.exports_ref}
+                    </Link>
+                  ) : (
+                    '—'
+                  )}
+                </dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="shrink-0 text-fg-3">退出码</dt>
+                <dd className="font-mono text-fg-2">{runner.exit_code ?? '—'}</dd>
+              </div>
+              {roleArtifacts.length > 0 ? (
+                <div className="flex gap-2 sm:col-span-2">
+                  <dt className="shrink-0 text-fg-3">产物</dt>
+                  <dd className="flex min-w-0 flex-wrap items-center gap-2">
+                    {roleArtifacts.map((item) => (
+                      <Link
+                        key={item.path}
+                        to={`/tasks/${encodeURIComponent(taskId)}/file?path=${encodeURIComponent(item.path)}&attempt=${attemptNo}&seq=${runner.seq}`}
+                        className="break-all font-mono text-primary-text hover:underline"
+                      >
+                        {item.path}
+                      </Link>
+                    ))}
+                  </dd>
+                </div>
+              ) : null}
+            </dl>
           )}
 
           <div className="flex flex-wrap items-center gap-2">

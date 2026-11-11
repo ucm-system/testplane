@@ -87,8 +87,8 @@ test('③ 测试结果内联渲染 result.json 指标（不编数据；deploy/cl
   await expect(metrics).toBeVisible({ timeout: 30_000 })
   await expect(metrics).toContainText('accuracy')
 
-  // deploy/clean 角色不进测试结果卡（它们没有 result.json，§9.1）
-  await expect(render).not.toContainText('service-deploy')
+  // deploy 也有详情面板（用户 2026-11-11：deploy/precheck 都要能看）
+  await expect(render).toContainText('service-deploy')
 })
 
 test('C6 0 失败：结论全绿，测试结果/产物下载照常', async ({ page }) => {
