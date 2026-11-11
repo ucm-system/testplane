@@ -1,0 +1,83 @@
+name: mock-deploy
+version: 1.0.0
+display_name: 服务部署·mock 薄壳（内置）
+description: |
+  内置 deploy Runner 的 mock 薄壳：**与 genet-deploy 完全同一份脚本**（run.sh 原样复制，
+  OpenAPI 契约一致、零行为分叉），唯一差异是接入点声明——env 的 AG_GENET_BASE_URL 带
+  default 指向 fake-genet（联调接入点），平台按 runner.yaml env 声明注入；Task 级 env
+  可覆盖（先到者胜）。行为契约与 genet-deploy 相同：读取部署描述（params.yaml，语义原样
+  透传），经 Genet OpenAPI 以确定性 releaseName 幂等拉起 Helm release（noWait=true），
+  轮询状态并周期原子改写 $AG_OUTPUT_DIR/deploy-state.json，就绪后导出四件套。
+  平台不感知 "mock" 这个名字：选择本 Runner 即等价于 "genet-deploy + 接入点指向
+  fake-genet"（deploy/clean 解耦裁决）。clean 配对同 genet-deploy（clean_runner 声明）。
+
+role: deploy                    # 仅内置：用户目录声明 role: deploy 一律拒绝注册（§5.1）
+clean_runner: genet-clean       # clean 配对由本 Runner 自己声明（与 genet-deploy 相同）
+on_failure: abort_task          # 内置 deploy 必须声明（§7.3 / 注册校验强制）
+
+entry: ["/runner/run.sh"]       # exec form 数组；平台 exec 该数组、不经 shell、不追加 argv（§5.2）
+input_format: yaml              # 部署描述原文落盘 params.yaml；平台只做语法级校验（§5.4）
+
+# 镜像由 CI 构建产出（build/Dockerfile，构建配方与 genet-deploy 相同；§6.2）。
+# 本地联调 tag：argus-mock-deploy:dev（见 build/Dockerfile 构建节）。
+image: registry.dev.huawei.com/argus/mock-deploy:1.0.0
+
+resources:
+  cpu: "1"                      # 只调 fake-genet OpenAPI 轮询，不消耗加速卡
+  memory: "256Mi"
+  gpu: { resource: nvidia.com/gpu, count: 0 }
+
+# deploy 阶段被测服务尚不存在，无从独占（§6.7；endpoint_exclusive 仅外接模式有效）。
+concurrency:
+  endpoint_exclusive: false
+
+mounts: []
+
+# 内置导出契约（§5.12）：deploy runner 必须导出四件套（与 genet-deploy 相同）。
+exports: [AG_SERVED_URL, AG_SERVED_MODEL_NAME, AG_MODEL_PATH, AG_DEPLOY_REF]
+consumes: []
+
+# input_format: yaml → parameters 必须为 []（附录 C / 注册校验 #12）；部署描述语义完全归本 Runner 与 fake-genet。
+parameters: []
+
+# 与 input_format 同格式的合法片段（§5.4），UI 输入框占位（同 genet-deploy）。
+placeholder: |
+  # Genet 部署描述（原文透传为 UcStackInstallRequest.values；values 不能全空）
+  replicaCount: 1
+  model: Qwen3-32B
+  model_path: /models/Qwen3-32B
+  package_type: stack        # stack | pd（缺省 stack，D-53：本地/CI 一律 stack）
+  # template_path: charts/xxx  # 可选；values / templatePath / templateId 不能全空
+
+# 运行期读取的环境变量（§12.4）。AG_GENET_BASE_URL 的取值优先级（先到者胜）：
+# Task 级 env > 上游 exports > 本声明 default（fake-genet）> 平台配置注入。
+env:
+  AG_GENET_BASE_URL:
+    required: false
+    secret: false
+    default: "http://host.docker.internal:18091"
+    description: "Genet OpenAPI 基地址。mock 薄壳缺省指向 fake-genet 联调接入点（与 AG_MOCK_GENET_BASE_URL 平台配置同值）；需要别的接入点时用 Task env 覆盖。缺失且无 default 时本 Runner 以退出码 2 失败。"
+  GENET_API_KEY:
+    required: false
+    secret: true
+    description: "Genet Open API Key（Bearer，scope read/write）。fake-genet 不校验取值；打真 Genet 时必须给（Task 级 secrets 注入；Runner 只读不打印，§12.4）。"
+  AG_DEPLOY_TIMEOUT:
+    required: false
+    secret: false
+    description: "部署总窗口（秒），缺省 259200（72h，K-6）。排队计入窗口；超窗写 failure{code:DEPLOY_FAILED, reason:timeout} 并退出 1。"
+  AG_DEPLOY_POLL_FAST_INTERVAL:
+    required: false
+    secret: false
+    description: "快速轮询间隔（秒），缺省 2。"
+  AG_DEPLOY_POLL_FAST_WINDOW:
+    required: false
+    secret: false
+    description: "快速轮询窗口（秒），缺省 30；之后按指数退避到 AG_DEPLOY_POLL_SLOW_INTERVAL。"
+  AG_DEPLOY_POLL_SLOW_INTERVAL:
+    required: false
+    secret: false
+    description: "退避间隔上限（秒），缺省 15。"
+  AG_DEPLOY_POLL_NOTFOUND_GRACE:
+    required: false
+    secret: false
+    description: "POST 受理后 GET 404 的宽限窗（秒），缺省 180（release 异步 apply 未可见，execution §9.2）。"

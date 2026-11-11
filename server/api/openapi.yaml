@@ -621,7 +621,8 @@ paths:
         前置条件（不满足 → 409 `CONFLICT`，`detail.reason` 区分）：
 
         - 目标 attempt **含部署**（存在 service-deploy runner 且导出了 `AG_DEPLOY_REF`）；
-          外接模式（无部署）→ `no_deploy`；
+          外接模式（无部署）→ `no_deploy`；`deploy.provider=existing`（已有服务登记，无可拆除
+          对象，clean 未注入）→ `nothing_to_clean`；
         - 该 attempt **无成功的 clean 记录**（service-clean 未 `succeeded`）；
           已有成功记录且未显式 `force=true` → `clean_already_verified`；
         - Task **非终态**（仍在执行）→ `task_running`（避免与管道内的正常 clean 竞争）；
@@ -668,8 +669,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           description: |
-            状态冲突（`CONFLICT`）：`detail.reason ∈ {no_deploy, clean_already_verified,
-            task_running, clean_replay_in_progress}`（见上方前置条件）。
+            状态冲突（`CONFLICT`）：`detail.reason ∈ {no_deploy, nothing_to_clean,
+            clean_already_verified, task_running, clean_replay_in_progress}`（见上方前置条件）。
           headers:
             X-Request-Id:
               $ref: '#/components/headers/X-Request-Id'
@@ -4089,21 +4090,26 @@ components:
       type: object
       description: |
         `deploy`：交给内置 service-deploy runner 的参数（D-70）。`spec` 是 Genet 部署描述原文
-        （YAML 语义，平台不解析，§10.1）；与 `service` 互斥（D-27）。
+        （YAML 语义，平台不解析，§10.1）；与顶层 `service` 互斥（D-27）。
+        v2 provider 组合化：`genet`/`mock` → genet-deploy（mock 接入点指向 fake-genet，
+        `AG_MOCK_GENET_BASE_URL`）；`existing` → existing-deploy（已有服务登记，读 `service`
+        三元组原样导出，无 clean 阶段）。
       required: [provider]
       additionalProperties: true
       properties:
         provider:
           type: string
-          description: 部署提供方；恒 `genet`
+          description: 部署提供方：`genet`（真 Genet）| `mock`（fake-genet 联调）| `existing`（已有服务登记）；缺省 genet
           example: genet
         spec:
           type: string
-          description: Genet 部署描述原文（service-deploy 的输入文件内容，平台不解析语义）
+          description: Genet 部署描述原文（service-deploy 的输入文件内容，平台不解析语义）；genet / mock 形态用
           example: |
             model: Qwen3-32B
             replicas: 1
             resources: { gpu: 8 }
+        service:
+          $ref: '#/components/schemas/ServiceManifest'
 
     ServiceManifest:
       type: object

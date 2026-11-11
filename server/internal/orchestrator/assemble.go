@@ -36,8 +36,9 @@ import (
 
 // 平台注入的 runner 名（与 03 §3.1 一致；泄漏重放为 service-clean-replay）。
 const (
-	InjectedDeployName   = "service-deploy"
-	InjectedCleanName    = "service-clean"
+	InjectedDeployName   = "genet-deploy"    // genet | mock 共用（mock = 接入点指向 fake-genet）
+	InjectedCleanName    = "genet-clean"     // genet | mock 共用
+	InjectedExistingName = "existing-deploy" // existing 变体（已有服务登记，无 clean 阶段）
 	InjectedPrecheckName = "precheck"
 )
 
@@ -59,8 +60,9 @@ type TaskBody struct {
 
 // DeployManifest 是部署模式的提交（交给内置 service-deploy 的参数，D-70）。
 type DeployManifest struct {
-	Provider string `json:"provider"`
-	Spec     string `json:"spec,omitempty"`
+	Provider string                  `json:"provider"`
+	Spec     string                  `json:"spec,omitempty"`
+	Service  *domain.ExistingService `json:"service,omitempty"` // existing 变体：三元组
 }
 
 // ServiceManifest 是外接模式（"序号 0 的导出"，§10.3）。
@@ -615,16 +617,51 @@ func (a *Assembler) buildPipeline(ctx context.Context, m *Manifest, users []reso
 		})
 	}
 
-	// 1. 有部署 → 注入 service-deploy（role=deploy；输入 = deploy 描述原文，C-5.3.1）。
+	deployCleanable := true // existing 变体无可拆除对象 → false（clean 不注入）
+
+	// 1. 有部署 → 按 provider 注入 deploy runner（C-5.3.1）。
+	//    genet/mock → genet-deploy（mock = 接入点指向 fake-genet，同一 OpenAPI 契约）；
+	//    existing   → existing-deploy（已有服务登记：读三元组、原样导出、0 秒完成，无 clean 阶段）。
 	if m.Task.Deploy != nil {
-		spec, err := a.Catalog.Resolve(ctx, InjectedDeployName, "")
+		provider := firstNonEmpty(m.Task.Deploy.Provider, "genet")
+		deployName := InjectedDeployName
+		switch provider {
+		case "genet", "mock":
+			deployName = InjectedDeployName
+		case "existing":
+			deployName = InjectedExistingName
+		default:
+			return nil, domain.NewFailureError(domain.CodeValidationError,
+				fmt.Sprintf("deploy.provider 不支持: %s（可选 genet | mock | existing）", provider),
+				map[string]any{"path": "deploy.provider"})
+		}
+		spec, err := a.Catalog.Resolve(ctx, deployName, "")
 		if err != nil {
 			return nil, domain.NewFailureError(domain.CodeRunnerInvalid,
-				"内置 service-deploy 不在注册表中（检查 AG_RUNNERS_DIR 扫描）", nil)
+				fmt.Sprintf("内置 %s 不在注册表中（检查 AG_RUNNERS_DIR 扫描）", deployName), nil)
 		}
-		addRow(InjectedDeployName, spec, firstUserProfile(m), true, injectedTimeout, domain.OnFailureAbortTask)
-		inputs = append(inputs, InputFile{Seq: 1, Name: InjectedDeployName,
-			Format: domain.InputFormatYAML, Content: m.Task.Deploy.Spec})
+		inputFormat := domain.InputFormatYAML
+		if provider == "existing" {
+			// existing 变体：service 三元组以 JSONL 传入（runner.yaml parameters 校验）。
+			svc := m.Task.Deploy.Service
+			if svc == nil || svc.URL == "" || svc.ModelName == "" {
+				return nil, domain.NewFailureError(domain.CodeValidationError,
+					"provider=existing 需要 deploy.service 三元组（url/model_name 必填）",
+					map[string]any{"path": "deploy.service"})
+			}
+			inputFormat = domain.InputFormatJSONL
+			addRow(deployName, spec, firstUserProfile(m), true, injectedTimeout, domain.OnFailureAbortTask)
+			inputs = append(inputs, InputFile{Seq: len(rows), Name: deployName,
+				Format: inputFormat, Content: fmt.Sprintf(
+					`{"url":%q,"model_name":%q,"model_path":%q}`+"\n",
+					svc.URL, svc.ModelName, svc.ModelPath)})
+			// existing 无可拆除对象：跳过 clean 注入（第 4 步按 DeployCleanable 跳过）。
+			deployCleanable = false
+		} else {
+			addRow(deployName, spec, firstUserProfile(m), true, injectedTimeout, domain.OnFailureAbortTask)
+			inputs = append(inputs, InputFile{Seq: len(rows), Name: deployName,
+				Format: inputFormat, Content: m.Task.Deploy.Spec})
+		}
 	}
 
 	// 2. precheck 注入（auto：注册表唯一 pre_check；显式对象；off 不注入）。
@@ -659,8 +696,8 @@ func (a *Assembler) buildPipeline(ctx context.Context, m *Manifest, users []reso
 			Format: firstNonEmpty(u.spec.InputFormat, domain.InputFormatJSONL), Content: u.in.Input})
 	}
 
-	// 4. 有部署 → 追加 service-clean（finally，C-5.7；成功/失败/取消/超时四路径都执行）。
-	if m.Task.Deploy != nil {
+	// 4. 有可拆除部署 → 追加 genet-clean（finally，C-5.7；existing 变体跳过）。
+	if m.Task.Deploy != nil && deployCleanable {
 		spec, err := a.Catalog.Resolve(ctx, InjectedCleanName, "")
 		if err != nil {
 			return nil, domain.NewFailureError(domain.CodeRunnerInvalid,

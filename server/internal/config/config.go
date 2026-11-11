@@ -90,6 +90,10 @@ type Config struct {
 	// GenetBaseURL 是 Genet OpenAPI 接入点（AG_GENET_BASE_URL），仅注入
 	// role=deploy/clean 的 runner Job（§9.1、§12.4）；平台自身不直连 Genet（D-70）。
 	GenetBaseURL string
+	// MockGenetBaseURL 是 fake-genet 联调接入点（AG_MOCK_GENET_BASE_URL，默认
+	// http://host.docker.internal:18091）。deploy.provider=mock 的 Task 渲染 Job 时
+	// 注入本接入点（genet-deploy/genet-clean 与真 Genet 同一 OpenAPI 契约，零新增 runner）。
+	MockGenetBaseURL string
 	// RetentionDays 是产物保留期（AG_RETENTION_DAYS，默认 30；v2 cleanup.policy
 	// 取消，保留期只由本配置决定，D-70/D-33）。
 	RetentionDays int
@@ -180,6 +184,7 @@ func Load() (*Config, error) {
 		RunnerTimeoutMax:     24 * time.Hour,
 		DeployTimeout:        72 * time.Hour,
 		GenetBaseURL:         env("AG_GENET_BASE_URL", ""),
+		MockGenetBaseURL:     env("AG_MOCK_GENET_BASE_URL", "http://host.docker.internal:18091"),
 		RetentionDays:        30,
 		ResultMaxBytes:       100 << 20,
 		ArtifactMaxBytes:     10 << 30,

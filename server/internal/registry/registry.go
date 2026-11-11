@@ -76,18 +76,23 @@ const (
 	// RunnerFileName 是注册表唯一识别的文件名（§5.5：只认 Runner 根目录下的 runner.yaml）。
 	RunnerFileName = "runner.yaml"
 	// BuiltinDeployName / BuiltinCleanName 是平台内置 service runner 的注册名（§9.1）。
-	BuiltinDeployName = "service-deploy"
-	BuiltinCleanName  = "service-clean"
+	BuiltinDeployName = "genet-deploy"
+	// BuiltinExistingDeployName 是 existing 变体（已有服务登记，无外部调用）。
+	BuiltinCleanName = "genet-clean"
+	// existing-deploy 同为内置 deploy 变体（无可拆除对象）。
 	// BuiltinPreCheckName 是内置探活 Runner（§5.1）。
 	BuiltinPreCheckName = "endpoint-probe"
 )
 
 // BuiltinRunnerNames 返回内置 Runner 名集合（随平台发版，§12.1）。
+// deploy 变体：genet-deploy（Genet/fake-genet）与 existing-deploy（已有服务登记）；
+// clean 变体：genet-clean（existing 变体无可拆除对象，不注入 clean）。
 func BuiltinRunnerNames() map[string]bool {
 	return map[string]bool{
-		BuiltinDeployName:   true,
-		BuiltinCleanName:    true,
+		BuiltinDeployName:   true, // genet-deploy
+		BuiltinCleanName:    true, // genet-clean
 		BuiltinPreCheckName: true,
+		"existing-deploy":   true,
 	}
 }
 

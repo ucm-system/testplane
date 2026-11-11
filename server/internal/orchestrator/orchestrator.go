@@ -68,6 +68,9 @@ type Config struct {
 	// GenetBaseURL 是 Genet OpenAPI 接入点（AG_GENET_BASE_URL），仅注入
 	// role=deploy/clean 的 runner Job（§9.1、§12.4；D-70 平台不直连）。
 	GenetBaseURL string
+	// MockGenetBaseURL 是 fake-genet 联调接入点（AG_MOCK_GENET_BASE_URL）：deploy.provider=mock
+	// 的 Task 渲染 deploy/clean Job 时注入本值（与 genet 同一 OpenAPI 契约，见 job.go）。
+	MockGenetBaseURL string
 	// StoragePVC 是产物 RWX PVC 名（Job 渲染挂 /workspace/output）。
 	StoragePVC string
 	// ServiceAccount 为空则不渲染（runner 不调 K8s API）。
@@ -594,7 +597,7 @@ func (s *Scheduler) finishSucceeded(ctx context.Context, rr *store.RunnerRun, o 
 			s.logf("orchestrator: WARN exports_harvested event %s: %v", k.ID(), err)
 		}
 		// service-deploy 的四件套回填 tasks.Endpoint（§5.12 / 03 §4.3）。
-		if rr.RunnerName == "service-deploy" {
+		if rr.Role == domain.RoleDeploy {
 			s.backfillDeployEndpoint(ctx, k, harvestKeys(kvs))
 		}
 	}
@@ -635,7 +638,7 @@ func (s *Scheduler) postFinish(ctx context.Context, k domain.RunnerKey, out *sto
 	// deploy runner 终态时补一次 deploy-state.json 归档（终态快照）：
 	// 周期对账（30s tick）只采样 RUNNING 状态，短部署（数十秒）会整段错过，
 	// 不补归档则 /deploy 的状态轨迹与 Pod 快照为空（deploy-check 断言依赖）。
-	if rr != nil && rr.RunnerName == "service-deploy" {
+	if rr != nil && rr.Role == domain.RoleDeploy {
 		s.archiveOneDeployState(ctx, rr)
 	}
 	if out.AbortTriggered {
@@ -812,7 +815,7 @@ func (s *Scheduler) archiveDeployStates(ctx context.Context) {
 	}
 	for i := range active {
 		rr := &active[i]
-		if rr.RunnerName != "service-deploy" || rr.Status != string(domain.RunnerRunning) {
+		if rr.Role != domain.RoleDeploy || rr.Status != string(domain.RunnerRunning) {
 			continue
 		}
 		s.archiveOneDeployState(ctx, rr)
@@ -996,12 +999,16 @@ func (s *Scheduler) RetryTask(ctx context.Context, taskID, actor, role string) (
 
 // ---- 泄漏重放（§9.3 / D-72）------------------------------------------------
 
-// Clean replay 的四个 409 原因（openapi replayTaskClean.detail.reason）。
+// Clean replay 的 409 原因（openapi replayTaskClean.detail.reason）。
 const (
 	ReplayReasonNoDeploy             = "no_deploy"
 	ReplayReasonCleanAlreadyVerified = "clean_already_verified"
 	ReplayReasonTaskRunning          = "task_running"
 	ReplayReasonReplayInProgress     = "clean_replay_in_progress"
+	// ReplayReasonNothingToClean 是 deploy.provider=existing 的拒绝原因：existing-deploy
+	// 只做已有服务登记（读三元组、原样导出），没有任何平台可拆除对象，clean 不注入，
+	// 重放也无从谈起（§9.1）。
+	ReplayReasonNothingToClean = "nothing_to_clean"
 )
 
 // ReplayCleanResult 是泄漏重放的受理结果。
@@ -1030,6 +1037,12 @@ func (s *Scheduler) ReplayClean(ctx context.Context, taskID string, attemptNo in
 	if err != nil {
 		return nil, err
 	}
+	// existing 变体入口即拒绝：无可拆除对象（existing-deploy 原样导出三元组，无 clean 阶段）。
+	if deployProviderOf(t) == "existing" {
+		return nil, &ErrCleanReplayConflict{Reason: ReplayReasonNothingToClean,
+			Detail: map[string]any{"reason": ReplayReasonNothingToClean, "task_id": taskID,
+				"provider": "existing", "detail": "provider=existing 只做已有服务登记，没有任何可拆除对象"}}
+	}
 	if !domain.TaskStatus(t.Status).IsTerminal() {
 		return nil, &ErrCleanReplayConflict{Reason: ReplayReasonTaskRunning,
 			Detail: map[string]any{"reason": ReplayReasonTaskRunning, "task_id": taskID, "status": t.Status}}
@@ -1053,9 +1066,9 @@ func (s *Scheduler) ReplayClean(ctx context.Context, taskID string, attemptNo in
 			maxSeq = rr.Seq
 		}
 		switch {
-		case rr.RunnerName == "service-deploy":
+		case rr.Role == domain.RoleDeploy:
 			deployRow = rr
-		case rr.RunnerName == "service-clean" && rr.Name == "service-clean":
+		case rr.Role == domain.RoleClean:
 			cleanRow = rr
 		case rr.Name == "service-clean-replay":
 			replayRow = rr

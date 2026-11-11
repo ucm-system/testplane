@@ -103,14 +103,14 @@ export function AppSidebar() {
                   展开态显示完整 lockup，折叠成 icon rail 时只剩图形。
                 */}
                 <span data-testid="sidebar-brand" className="group-data-[collapsible=icon]:hidden">
-                  <Wordmark height={26} />
+                  <Wordmark height={30} variant="horizontal" />
                 </span>
                 <span
                   data-testid="sidebar-brand-icon"
                   aria-hidden
                   className="hidden h-6 shrink-0 items-center group-data-[collapsible=icon]:flex"
                 >
-                  <Wordmark height={20} />
+                  <Wordmark height={28} variant="icon" />
                 </span>
               </Link>
             </SidebarMenuButton>

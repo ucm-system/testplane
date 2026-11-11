@@ -704,9 +704,12 @@ export interface Meta {
 
 /** `DeployManifest` schema：交给内置 service-deploy runner 的参数（D-70）。 */
 export interface DeployManifest {
+  /** 部署提供方：`genet`（真 Genet）| `mock`（fake-genet 联调）| `existing`（已有服务登记） */
   provider: string
-  /** Genet 部署描述原文（YAML 语义，平台不解析，§10.1） */
+  /** Genet 部署描述原文（YAML 语义，平台不解析，§10.1）；genet / mock 形态用 */
   spec?: string
+  /** existing 变体的已有服务三元组（provider=existing 必填，url / model_name 必填） */
+  service?: ServiceManifest
 }
 
 /** `ServiceManifest` schema：外接模式，直接给已有服务（`AG_SERVED_URL` 等的来源）。 */

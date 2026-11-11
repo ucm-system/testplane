@@ -283,13 +283,43 @@ func (s *Scheduler) renderRunnerEnv(ctx context.Context, t *store.Task, rr *stor
 
 	// 6. Genet 接入点：仅 deploy / clean 角色注入（§9.1、§12.4）。平台自身不直连
 	//    Genet（D-70），这里只是把平台配置的接入点透传给内置 runner。
+	//    接入点按 deploy.provider 选（v2 provider 组合化，assemble.go 路由）：
+	//      genet / existing → AG_GENET_BASE_URL（平台配置的真 Genet；existing 用不到但透传无害）；
+	//      mock             → AG_MOCK_GENET_BASE_URL（fake-genet 联调接入点）+ AG_GENET_BASE_URL
+	//                         同值注入 —— runner 契约只读 AG_GENET_BASE_URL（"mock = genet-deploy +
+	//                         接入点指向 fake-genet"，零 runner 改动）；专键保留联调语义，便于区分来源。
 	if rr.Role == domain.RoleDeploy || rr.Role == domain.RoleClean {
-		if s.cfg.GenetBaseURL != "" {
-			put("AG_GENET_BASE_URL", s.cfg.GenetBaseURL)
+		provider := deployProviderOf(t)
+		switch provider {
+		case "mock":
+			if s.cfg.MockGenetBaseURL != "" {
+				put("AG_MOCK_GENET_BASE_URL", s.cfg.MockGenetBaseURL)
+				put("AG_GENET_BASE_URL", s.cfg.MockGenetBaseURL)
+			}
+		default:
+			if s.cfg.GenetBaseURL != "" {
+				put("AG_GENET_BASE_URL", s.cfg.GenetBaseURL)
+			}
 		}
 	}
 
 	return env, secretEnv, nil
+}
+
+// deployProviderOf 从 tasks.deploy jsonb 取 deploy.provider（genet | mock | existing）；
+// 缺省 genet（提交冻结时由 assemble 写入，历史行缺键按 genet 处理，与 assemble 一致）。
+func deployProviderOf(t *store.Task) string {
+	if len(t.Deploy) == 0 {
+		return ""
+	}
+	var doc domain.DeployDoc
+	if err := json.Unmarshal(t.Deploy, &doc); err != nil {
+		return ""
+	}
+	if doc.Provider == "" {
+		return "genet"
+	}
+	return doc.Provider
 }
 
 // ---- 文件小工具（temp + rename 原子落盘）----------------------------------

@@ -429,7 +429,7 @@ data: {"seq":43,"type":"runner_finished","task_id":"t-20261110-0001","attempt_no
 |---|---|---|---|
 | `cancel task` | 非终态 | 202 + `{task_id,status:"cancelling"}` | 已是 `cancelling/canceled` 返回 200 同状态 |
 | `retry task` | Task 终态且未达 attempt 上限 | 202 + `{task_id, attempt_no, status:"queued"}`（新 attempt 全量重跑含 fresh deploy） | attempt 达上限 → 409 `ATTEMPT_EXHAUSTED`；已在执行 → 409 `CONFLICT` |
-| `replay clean`（`POST /tasks/{id}/clean`） | 目标 attempt 含部署、无成功 clean 记录（或显式 `force`）、Task 终态 | 202 + `{task_id, attempt_no, runner:{seq,name,status}}`（重放执行定位） | 无部署 `no_deploy` / 已有成功记录 `clean_already_verified`（未 force）/ 非终态 `task_running` / 重放进行中 `clean_replay_in_progress` → 409 `CONFLICT`；重放失败不改终态，可再次重放 |
+| `replay clean`（`POST /tasks/{id}/clean`） | 目标 attempt 含部署、无成功 clean 记录（或显式 `force`）、Task 终态 | 202 + `{task_id, attempt_no, runner:{seq,name,status}}`（重放执行定位） | 无部署 `no_deploy` / `provider=existing`（无可拆除对象）`nothing_to_clean` / 已有成功记录 `clean_already_verified`（未 force）/ 非终态 `task_running` / 重放进行中 `clean_replay_in_progress` → 409 `CONFLICT`；重放失败不改终态，可再次重放 |
 
 取消与自然结束竞态：服务端以先落库状态为准，客户端以 SSE 推送为最终结果（不做乐观更新）。
 

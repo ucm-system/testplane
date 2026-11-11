@@ -21,8 +21,18 @@ import { inputHint, inputFormatLabel } from '@/lib/runner-format'
 import { validateJsonlInput, validateYamlInput, formatJsonl, minifyJsonl, type InputIssue } from '@/lib/input-validate'
 import { cn } from '@/lib/utils'
 
-type SourceMode = 'deploy' | 'service'
+/**
+ * 服务来源 provider 四选（v2 provider 组合化）：
+ *  - genet    真 Genet 部署（Genet YAML 文本框）；
+ *  - mock     fake-genet 联调（同一 Genet YAML 文本框，平台把接入点切到 fake-genet）；
+ *  - existing 已有服务登记（url / model_name / model_path 三元组，经 existing-deploy 原样导出）；
+ *  - none     不部署·直接注入（同三元组 = 原"外接"模式，作为静态导出注入全部 runner）。
+ */
+type DeployProvider = 'genet' | 'mock' | 'existing' | 'none'
 type PrecheckMode = 'auto' | 'off'
+
+/** 提交体形态：genet/mock 走 deploy.spec，existing 走 deploy.service，none 走顶层 service。 */
+const DEPLOY_SPEC_PROVIDERS: DeployProvider[] = ['genet', 'mock']
 
 /** runner 列表的一项草稿：**只有一个输入框**（placeholder 来自 runner.input_format 对应片段，D-67）。 */
 interface RunnerDraft {
@@ -101,7 +111,7 @@ export function SubmitPage() {
    * 空表单点提交会被**前端**拦下并给字段级错误。
    */
   const [name, setName] = useState('')
-  const [mode, setMode] = useState<SourceMode>('deploy')
+  const [provider, setProvider] = useState<DeployProvider>('genet')
   const [deploySpec, setDeploySpec] = useState(DEFAULT_DEPLOY_SPEC)
   const [serviceUrl, setServiceUrl] = useState('')
   const [modelName, setModelName] = useState('')
@@ -345,7 +355,7 @@ export function SubmitPage() {
   }
 
   const buildManifest = (): TaskManifest | null => {
-    if (mode === 'deploy' && deployParse.error) return null
+    if (DEPLOY_SPEC_PROVIDERS.includes(provider) && deployParse.error) return null
     const env: Record<string, string> = {}
     for (const row of envRows) {
       if (row.key.trim()) env[row.key.trim()] = row.value
@@ -354,20 +364,25 @@ export function SubmitPage() {
     for (const row of secretRows) {
       if (row.key.trim() && row.value.trim()) secrets[row.key.trim()] = row.value.trim()
     }
+    // 三元组：existing / none 两种形态共用（url 必填，model_name / model_path 给了才带）
+    const serviceTriple = () => ({
+      url: serviceUrl.trim(),
+      ...(modelName.trim() ? { model_name: modelName.trim() } : {}),
+      ...(modelPath.trim() ? { model_path: modelPath.trim() } : {}),
+    })
 
     return {
       task: {
         name: name.trim(),
-        // deploy XOR service（D-27）：切换形态时各自草稿保留，但只提交当前形态
-        ...(mode === 'deploy'
-          ? { deploy: { provider: 'genet', spec: deploySpec } }
-          : {
-              service: {
-                url: serviceUrl.trim(),
-                ...(modelName.trim() ? { model_name: modelName.trim() } : {}),
-                ...(modelPath.trim() ? { model_path: modelPath.trim() } : {}),
-              },
-            }),
+        // provider 四选的提交体映射（deploy XOR service 由 assemble 校验，§10.1）：
+        //   genet/mock → deploy:{provider,spec}；existing → deploy:{provider:"existing",service}；
+        //   none → service:{...}（原"外接"模式，顶层 service = "序号 0 的导出"）。
+        // 切 provider 时各自草稿保留，只提交当前形态。
+        ...(DEPLOY_SPEC_PROVIDERS.includes(provider)
+          ? { deploy: { provider, spec: deploySpec } }
+          : provider === 'existing'
+            ? { deploy: { provider: 'existing', service: serviceTriple() } }
+            : { service: serviceTriple() }),
         precheck,
         env,
         secrets,
@@ -398,7 +413,7 @@ export function SubmitPage() {
   /** 前端校验：同样产出 path 化的 issues，与后端 400 共用一套渲染 */
   const frontendIssues = (): ValidationIssue[] => {
     const found: ValidationIssue[] = []
-    if (mode === 'deploy' && deployParse.error) {
+    if (DEPLOY_SPEC_PROVIDERS.includes(provider) && deployParse.error) {
       found.push({ path: 'task.deploy.spec', code: 'INVALID_YAML', message: deployParse.error })
     }
     if (!name.trim()) found.push({ path: 'task.name', code: 'REQUIRED', message: 'name 必填' })
@@ -410,8 +425,13 @@ export function SubmitPage() {
         message: `name 超过 ${NAME_MAX_RUNES} 字符（当前 ${runeLength(name.trim())}）`,
       })
     }
-    if (mode === 'service' && !serviceUrl.trim()) {
-      found.push({ path: 'task.service.url', code: 'REQUIRED', message: '服务 base URL 必填' })
+    // existing / none 共用三元组；issue.path 跟提交体形态走（后端按同 path 回错）
+    if ((provider === 'existing' || provider === 'none') && !serviceUrl.trim()) {
+      found.push({
+        path: provider === 'existing' ? 'task.deploy.service.url' : 'task.service.url',
+        code: 'REQUIRED',
+        message: '服务 base URL 必填',
+      })
     }
     if (!profile.trim()) {
       found.push({
@@ -570,26 +590,30 @@ export function SubmitPage() {
         </CardBody>
       </Card>
 
-      {/* 服务来源：一张卡两个形态 XOR（D-27）：都填或都不填提交被拒；切换时保留各自草稿不清空 */}
+      {/* 服务来源：provider 四选下拉（v2 组合化收尾）。genet/mock 用 Genet YAML；
+          existing/none 用同一个三元组表单，只差提交体落点（deploy.service XOR service）。 */}
       <Card>
         <CardHeader
           tone="muted"
           title="服务来源"
-          sub="一张卡两形态：部署（Genet YAML，由内置 service-deploy 拉起）XOR 外接（直接给已有服务）"
+          sub="provider 四选：genet / mock（Genet YAML 部署）· existing（已有服务登记）· none（不部署直接注入）；deploy XOR service 由提交校验把关"
           actions={
-            <Segmented<SourceMode>
-              ariaLabel="服务来源"
-              value={mode}
-              onChange={setMode}
-              options={[
-                { value: 'deploy', label: '部署' },
-                { value: 'service', label: '外接' },
-              ]}
-            />
+            <Select
+              aria-label="部署提供方 provider"
+              data-testid="deploy-provider"
+              value={provider}
+              onChange={(e) => setProvider(e.target.value as DeployProvider)}
+              className="h-8 w-52 text-xs"
+            >
+              <option value="genet">genet · 真 Genet 部署</option>
+              <option value="mock">mock · fake-genet 联调</option>
+              <option value="existing">existing · 已有服务登记</option>
+              <option value="none">none · 不部署·直接注入</option>
+            </Select>
           }
         />
         <CardBody className="flex flex-col gap-2">
-          {mode === 'deploy' ? (
+          {DEPLOY_SPEC_PROVIDERS.includes(provider) ? (
             <>
               {/* CodeMirror 6：真语法高亮 + 行号 + 横向滚动；语法错误按行列标行 */}
               <YamlEditor
@@ -612,6 +636,15 @@ export function SubmitPage() {
                   ? `${deployParse.pos ? `第 ${deployParse.pos.line} 行第 ${deployParse.pos.col} 列：` : ''}${deployParse.error}`
                   : '✓ YAML 语法有效（语义归 service-deploy runner，平台不解析）'}
               </p>
+              {provider === 'mock' ? (
+                <p
+                  data-testid="deploy-mock-hint"
+                  className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-[16px] text-warn-text"
+                >
+                  联调环境：provider=mock 走同一份 genet-deploy runner，接入点由平台切到 fake-genet
+                  （AG_MOCK_GENET_BASE_URL）；OpenAPI 契约与真 Genet 一致，不占用真 Genet 配额。
+                </p>
+              ) : null}
               <p className="text-2xs leading-[16px] text-fg-3">
                 这段原文会作为内置 service-deploy runner 的输入（AG_PARAMS_FILE）；namespace 由 Genet API Key 绑定，
                 请求体不能指定（D-44/D-52）。部署被阻塞会收口为 service_unavailable（D-47）。
@@ -619,13 +652,20 @@ export function SubmitPage() {
             </>
           ) : (
             <div className="grid gap-3 sm:grid-cols-3">
-              <Field label="服务 base URL" required error={issueFor('task.service.url')} className="sm:col-span-2">
+              <Field
+                label="服务 base URL"
+                required
+                error={issueFor(provider === 'existing' ? 'task.deploy.service.url' : 'task.service.url')}
+                className="sm:col-span-2"
+              >
                 <Input
-                  ref={registerField('task.service.url')}
+                  ref={registerField(provider === 'existing' ? 'task.deploy.service.url' : 'task.service.url')}
                   value={serviceUrl}
                   onChange={(e) => setServiceUrl(e.target.value)}
                   placeholder="http://10.0.0.10:8000/v1"
-                  aria-invalid={Boolean(issueFor('task.service.url'))}
+                  aria-invalid={Boolean(
+                    issueFor(provider === 'existing' ? 'task.deploy.service.url' : 'task.service.url'),
+                  )}
                 />
               </Field>
               <Field label="模型名">
@@ -634,10 +674,17 @@ export function SubmitPage() {
               <Field label="模型路径（可选）" className="sm:col-span-3">
                 <Input value={modelPath} onChange={(e) => setModelPath(e.target.value)} placeholder="/models/Qwen3-32B" />
               </Field>
-              <p className="text-2xs leading-[16px] text-fg-3 sm:col-span-3">
-                这三个字段就是平台要注入的公共参数来源（AG_SERVED_URL / AG_SERVED_MODEL_NAME / AG_MODEL_PATH）：
-                外接模式由你来填。
-              </p>
+              {provider === 'existing' ? (
+                <p className="text-2xs leading-[16px] text-fg-3 sm:col-span-3">
+                  已有服务登记：三元组会交给内置 existing-deploy runner 原样导出（0 秒完成、无 clean 阶段），
+                  与 Genet 部署共用同一条管道形状；仍会先跑 pre_check 探活。
+                </p>
+              ) : (
+                <p className="text-2xs leading-[16px] text-fg-3 sm:col-span-3">
+                  这三个字段就是平台要注入的公共参数来源（AG_SERVED_URL / AG_SERVED_MODEL_NAME / AG_MODEL_PATH）：
+                  不部署、不拉服务，由你来填。
+                </p>
+              )}
             </div>
           )}
         </CardBody>

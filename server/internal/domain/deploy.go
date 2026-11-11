@@ -13,10 +13,12 @@ import "time"
 // 之后每次归档只带"本次变化的键"，整段覆盖会把冻结信息冲掉。
 type DeployDoc struct {
 	// ---- 提交冻结（service-deploy 的输入，平台不解析语义）----
-	Provider    string `json:"provider,omitempty"` // genet
-	Spec        string `json:"spec,omitempty"`     // 部署描述原文（落档 attempts/<n>/input/）
-	SpecDigest  string `json:"spec_digest,omitempty"`
-	PackageType string `json:"package_type,omitempty"` // stack | pd
+	Provider string `json:"provider,omitempty"` // genet | mock | existing
+	Spec     string `json:"spec,omitempty"`     // 部署描述原文（落档 attempts/<n>/input/；existing 时为空）
+	// Service 是 existing 变体的输入：已有服务的三元组（不落 deploy.spec）。
+	Service     *ExistingService `json:"service,omitempty"`
+	SpecDigest  string           `json:"spec_digest,omitempty"`
+	PackageType string           `json:"package_type,omitempty"` // stack | pd
 
 	// ---- 定位（平台派生，D-44）----
 	Namespace   string `json:"namespace,omitempty"`    // Genet API Key 绑定，调用方不能指定
@@ -60,3 +62,10 @@ var DeployStatePhase = []string{"queued", "accepted", "deploying", "ready", "blo
 
 // EventDeployStateChanged 是部署状态归档的事件类型（state_events.type）。
 const EventDeployStateChanged = "deploy.state_changed"
+
+// ExistingService 是 existing-deploy 变体的输入三元组（provider=existing 时必填）。
+type ExistingService struct {
+	URL       string `json:"url"`
+	ModelName string `json:"model_name"`
+	ModelPath string `json:"model_path,omitempty"`
+}

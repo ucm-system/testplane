@@ -373,6 +373,10 @@ type CleanupRequiredTask struct {
 // ListCleanupRequired 扫描「Task 已终态 + tasks.deploy 非空 + 当前 attempt 没有
 // succeeded 的 clean 记录」的行（§9.3：deploy 泄漏候选）。
 //
+// provider=existing 不进清单：existing-deploy 只做"已有服务登记"（读三元组、原样导出、
+// 0 秒完成），没有任何平台可拆除对象，clean 也不会注入（assemble deployCleanable=false）——
+// 它出现在重放清单里只会是误报。
+//
 // 排除已写过 cleanup_required 事件（task 级 state_changed + payload.reason）的
 // (task, attempt)，扫描可周期重跑而不重复告警。**只读出口**：不自动重放 clean
 // （§14.2 P1），重放只走 POST /tasks/{id}/clean。
@@ -382,6 +386,7 @@ func (r *TaskRepo) ListCleanupRequired(ctx context.Context, tx pgx.Tx, limit int
 		  FROM tasks t
 		 WHERE t.status = ANY($1)
 		   AND t.deploy IS NOT NULL
+		   AND t.deploy->>'provider' NOT IN ('existing')
 		   AND NOT EXISTS (
 		        SELECT 1 FROM task_runners rr
 		         WHERE rr.task_id = t.id
