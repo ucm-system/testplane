@@ -79,7 +79,8 @@ test('③ 测试结果内联渲染 result.json 指标（不编数据；deploy/cl
     }
   }
   const metrics = render.getByTestId('metrics-table').first()
-  await expect(metrics).toBeVisible({ timeout: 10_000 })
+  // CI 机器慢：5 个面板逐个展开 + 每个 result 一次 mock fetch（120ms/个），10s 偶发不够
+  await expect(metrics).toBeVisible({ timeout: 30_000 })
   await expect(metrics).toContainText('accuracy')
 
   // deploy/clean 角色不进测试结果卡（它们没有 result.json，§9.1）
