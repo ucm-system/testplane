@@ -139,6 +139,7 @@ type Runner struct {
 	Consumes     []byte     `json:"consumes"`
 	EnvDecl      []byte     `json:"env_decl"`
 	Placeholder  *string    `json:"placeholder,omitempty"`
+	CleanRunner  *string    `json:"clean_runner,omitempty"` // deploy 声明式 clean 配对（D-70）；空 = 无 clean 阶段
 	SourceFile   string     `json:"source_file"`
 	ContentSHA   string     `json:"content_sha"`
 	Orphaned     bool       `json:"orphaned"`

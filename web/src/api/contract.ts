@@ -16,6 +16,7 @@ import type {
   ExecutionProfile,
   Identity,
   LogChunk,
+  ManifestSnapshot,
   Meta,
   Page,
   ProfileWrite,
@@ -114,6 +115,12 @@ export interface Api {
   /* Runner 目录：只读（注册靠目录扫描，没有运行时管理端点） */
   listRunners(query?: RunnerListQuery): Promise<Runner[]>
   getRunner(name: string): Promise<Runner>
+
+  /**
+   * `GET /tasks/{id}/manifest`（C-8.2）：提交原文 + 冻结解析快照。
+   * 「重试 = 带参重新提交」（D-76）：把 manifest 回填进提交页，可改后提交为新 Task（新 ID）。
+   */
+  getTaskManifest(taskId: string): Promise<ManifestSnapshot>
 
   /* 集群与队列（只读） */
   listClusters(): Promise<Cluster[]>

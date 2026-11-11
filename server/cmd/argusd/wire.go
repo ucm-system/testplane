@@ -43,6 +43,9 @@ func runnerToRecord(n *store.Runner) registry.Record {
 	if n.Placeholder != nil {
 		rec.Spec.Placeholder = *n.Placeholder
 	}
+	if n.CleanRunner != nil {
+		rec.Spec.CleanRunner = *n.CleanRunner
+	}
 	_ = unmarshalInto(n.Entry, &rec.Spec.Entry)
 	_ = unmarshalInto(n.Resources, &rec.Spec.Resources)
 	_ = unmarshalInto(n.Concurrency, &rec.Spec.Concurrency)
@@ -68,6 +71,14 @@ func recordToRunner(rec registry.Record) *store.Runner {
 		ContentSHA:   rec.ContentSHA,
 		Orphaned:     rec.Orphaned,
 		RegisteredBy: "registry",
+	}
+	if rec.Spec.CleanRunner != "" {
+		clean := rec.Spec.CleanRunner
+		n.CleanRunner = &clean
+	}
+	if rec.Spec.Placeholder != "" {
+		ph := rec.Spec.Placeholder
+		n.Placeholder = &ph
 	}
 	n.Entry = mustMarshal(rec.Spec.Entry)
 	n.Resources = mustMarshal(rec.Spec.Resources)

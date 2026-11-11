@@ -3,18 +3,17 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
- * Run 详情的信息架构（v2：报告成为主体）：
- *  - 终态 Task 默认进「报告」页签；页签顺序 报告 → 执行细节 → 事件 → 结果（产物清单留在结果）；
- *  - 「结果」页签里是 结论 / counts / 失败项 / 产物下载 / 报告入口；
- *  - 执行链路、Task、Attempt、日志折到「执行细节」（**折叠不是隐藏**，一键展开）。
- * 运行中的 Task 没有结果页签。
+ * Run 详情的信息架构（用户 2026-11-11 裁决后的 v2）：
+ *  - 终态 Task 默认进「结果」页签：结论 / runner 明细（谁成功谁失败）/ 测试结果（三选一内联渲染）/ 产物下载；
+ *  - 「执行细节」页签：管道时间线、runner 详情（日志）、deploy、**执行事件**（事件并入执行细节，不再单独页签）；
+ *  - 「报告」页签取消（report.json 只是平台产物之一，D-74）；运行中的 Task 只有「执行细节」页签。
  */
 
 const OUT_DIR = join(process.cwd(), '.data', 'layout')
 
 test.describe.configure({ mode: 'serial' })
 
-test('终态 Task：默认报告页签；结果页签有结论/失败项/产物/报告，执行细节一键展开', async ({ page }) => {
+test('终态 Task：默认结果页签（结论/runner 明细/测试结果/产物），执行细节含事件', async ({ page }) => {
   test.setTimeout(120_000)
   mkdirSync(OUT_DIR, { recursive: true })
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
@@ -23,21 +22,18 @@ test('终态 Task：默认报告页签；结果页签有结论/失败项/产物/
   // mock 里这条是 completed_with_errors（部分失败），有失败项也有各 Attempt 日志
   await page.goto('/tasks/t-20261105-0003')
 
-  // v2：默认落在「报告」页签（报告内容与 /tasks/:id/report 共用同一个视图）
-  await expect(page.getByTestId('task-report-panel')).toBeVisible({ timeout: 20_000 })
+  // v2：默认落在「结果」页签（结论 + 三选一渲染 + 产物，用户只要这三样）
+  await expect(page.getByTestId('task-result-panel')).toBeVisible({ timeout: 20_000 })
 
-  // 结果块在「结果」页签里（终态才有这个页签），切过去
-  await page.getByRole('tab', { name: '结果' }).click()
-
-  // 结果视图的四个块
+  // 结果视图的四个块：结论 / runner 明细（谁成功谁失败）/ 测试结果（三选一）/ 产物下载
   await expect(page.getByTestId('task-result-verdict')).toBeVisible({ timeout: 20_000 })
-  await expect(page.getByTestId('task-result-failures')).toBeVisible()
+  await expect(page.getByTestId('task-result-runners')).toBeVisible()
+  await expect(page.getByTestId('task-result-render')).toBeVisible()
   await expect(page.getByTestId('task-result-artifacts')).toBeVisible()
-  await expect(page.getByTestId('task-result-report')).toBeVisible()
 
-  // 结论里要看得到"为什么失败"
+  // 结论里要看得到"为什么失败"；runner 明细里给错误码
   await expect(page.getByTestId('task-result-verdict')).toContainText('失败')
-  await expect(page.getByTestId('task-result-failures')).toContainText('RUNNER_NONZERO_EXIT')
+  await expect(page.getByTestId('task-result-runners')).toContainText('RUNNER_NONZERO_EXIT')
 
   // 产物分组默认折叠（用户 2026-11-09）：先断言收起，再点开断言文件显式列全
   for (const key of ['deploy', 'tests', 'reports']) {
@@ -60,27 +56,28 @@ test('终态 Task：默认报告页签；结果页签有结论/失败项/产物/
   await page.waitForTimeout(400)
   await page.screenshot({ path: join(OUT_DIR, '08-run-result-1440.png'), fullPage: true })
 
-  // 折叠不是隐藏：切到「执行细节」能拿回链路/Task/Attempt
+  // 折叠不是隐藏：切到「执行细节」能拿回链路 / Task / Attempt / 事件
   await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByText('runner 管道时间线')).toBeVisible()
   await expect(page.getByText('Deploy 日志', { exact: false }).first()).toBeVisible()
+  await expect(page.getByTestId('task-events-panel')).toBeVisible()
+  await expect(page.getByTestId('task-events-panel')).toContainText('执行事件')
 
   // 切回结果
   await page.getByRole('tab', { name: '结果' }).click()
   await expect(page.getByTestId('task-result-verdict')).toBeVisible()
 })
 
-test('运行中的 Task：默认报告页签，没有结果页签；时间线在执行细节里', async ({ page }) => {
+test('运行中的 Task：只有「执行细节」页签（时间线与事件都在里面）', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'admin'))
   await page.goto('/tasks/t-20261105-0005') // deploying，非终态
-  // v2：默认「报告」（运行中先看"报告尚未生成"的空态）；结果页签只有终态才有
-  await expect(page.getByTestId('task-report-panel')).toBeVisible({ timeout: 20_000 })
+  // v2：运行中只有「执行细节」页签（默认选中）；结果页签只有终态才有
+  await expect(page.getByText('runner 管道时间线')).toBeVisible({ timeout: 20_000 })
   await expect(page.getByTestId('task-result-verdict')).toHaveCount(0)
   await expect(page.getByRole('tab', { name: '结果' })).toHaveCount(0)
 
-  // 管道时间线折叠进「执行细节」（折叠不是隐藏）
-  await page.getByRole('tab', { name: '执行细节' }).click()
-  await expect(page.getByText('runner 管道时间线')).toBeVisible({ timeout: 20_000 })
+  // 事件就在执行细节页签里（不再单独页签）
+  await expect(page.getByTestId('task-events-panel')).toBeVisible()
 })
 
 /**

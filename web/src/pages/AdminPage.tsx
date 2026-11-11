@@ -581,6 +581,8 @@ function MountsTab() {
   const [pendingDelete, setPendingDelete] = useState<SharedMount | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [toggling, setToggling] = useState<string | null>(null)
+  /** NFS/PVC 说明弹窗（用户 2026-11-11：大段解释收成按钮 + 弹窗，不占页面篇幅） */
+  const [helpOpen, setHelpOpen] = useState(false)
 
   const openCreate = () => {
     setEditing(null)
@@ -692,20 +694,45 @@ function MountsTab() {
 
   return (
     <div className="flex flex-col gap-4">
-      {/* 页内说明：这段是用户最容易被误导的地方，必须写在表格上面 */}
-      <Card data-testid="mounts-explainer">
-        <CardHeader
-          tone="warn"
-          title="Pod 里不能直接填 NFS 地址"
-          sub="restricted PodSecurity 会以 restricted volume type “nfs” 拒绝建 Pod —— 这里只填集群里已存在的 PVC 名"
-          actions={
+      {/* 页内说明压成一行（用户 2026-11-11：解释与 YAML 收进弹窗，不占页面篇幅） */}
+      <div
+        data-testid="mounts-explainer"
+        className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2"
+      >
+        <span className="text-2xs leading-[16px] text-fg-2">
+          平台只把 <code className="font-mono">claim_name</code> 渲染成 PVC 卷挂进 runner Job；
+          PV/PVC（含 NFS）要先在集群里建好 —— 建法和常见误区看弹窗。
+        </span>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="ml-auto"
+          data-testid="mounts-help-open"
+          onClick={() => setHelpOpen(true)}
+        >
+          NFS / PVC 怎么填？
+        </Button>
+      </div>
+
+      {/* NFS/PVC 说明弹窗：PV+PVC YAML（NFS 示例）+ 为什么不能直接填 NFS 地址 */}
+      <Dialog
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        title="Pod 里不能直接填 NFS 地址"
+        description="restricted PodSecurity 会以 restricted volume type “nfs” 拒绝建 Pod —— 这里只填集群里已存在的 PVC 名"
+        footer={
+          <>
             <Button size="sm" variant="ghost" data-testid="copy-pv-pvc" onClick={() => void copyYaml()}>
               复制 PV + PVC YAML
             </Button>
-          }
-        />
-        <CardBody className="flex flex-col gap-2">
-          <p className="text-xs leading-relaxed text-fg-2">
+            <Button size="sm" onClick={() => setHelpOpen(false)}>
+              知道了
+            </Button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-3 text-xs">
+          <p className="leading-relaxed text-fg-2">
             平台不创建 PV/PVC，也不解析 NFS / CephFS / CSI 的协议字段：它只把 claim_name 渲染成
             volumes[].persistentVolumeClaim，挂进所有 runner Job（含 pre_check）。
             改完保存就生效，不需要重启，也不用 helm upgrade。
@@ -716,9 +743,11 @@ function MountsTab() {
           >
             {PV_PVC_YAML}
           </pre>
-          <p className="text-2xs text-fg-3">在集群里 <code className="font-mono">kubectl apply</code> 之后，这里填 PVC 名即可。</p>
-        </CardBody>
-      </Card>
+          <p className="text-2xs text-fg-3">
+            在集群里 <code className="font-mono">kubectl apply</code> 之后，回来填 PVC 名即可。
+          </p>
+        </div>
+      </Dialog>
 
       <Card>
         <CardHeader

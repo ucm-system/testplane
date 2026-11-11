@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mock-llm
+  namespace: argus    # mock-deploy 的 runner.yaml env default 按 mock-llm.argus.svc 探测（D-75）
   labels:
     app: mock-llm
 spec:
@@ -14,8 +15,18 @@ spec:
       labels:
         app: mock-llm
     spec:
+      # argus ns 开着 PSA restricted（与生产一致）：mock-llm 也要过 PodSecurity
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: mock-llm
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            readOnlyRootFilesystem: true
           # 本地构建后 kind load docker-image argus/mock-llm:dev --name argus
           image: argus/mock-llm:dev
           imagePullPolicy: IfNotPresent
@@ -40,6 +51,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: mock-llm
+  namespace: argus
 spec:
   selector:
     app: mock-llm
@@ -47,3 +59,30 @@ spec:
     - name: http
       port: 18080
       targetPort: 18080
+---
+# argus ns 的 argus-default-deny（空 selector）拒绝所有 ingress：mock-llm 必须显式放行
+# 来自 runner Job（argus.io/managed=true）与控制面的 18080 访问。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mock-llm-allow-ingress
+  namespace: argus
+  labels:
+    app: mock-llm
+spec:
+  podSelector:
+    matchLabels:
+      app: mock-llm
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              argus.io/managed: "true"
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: argusd
+      ports:
+        - port: 18080
+          protocol: TCP

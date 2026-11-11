@@ -37,6 +37,7 @@ import type {
   SharedMount,
   SharedMountPatch,
   SharedMountWrite,
+  ManifestSnapshot,
   SubmitResult,
   Task,
   TaskDetail,
@@ -226,6 +227,10 @@ export const realApi: Api = {
 
   async getRunner(name: string): Promise<Runner> {
     return normalizeRunner(await request<unknown>(`/runners/${encodeURIComponent(name)}`))
+  },
+
+  async getTaskManifest(taskId: string): Promise<ManifestSnapshot> {
+    return request<ManifestSnapshot>(`/tasks/${encodeURIComponent(taskId)}/manifest`)
   },
 
   async listClusters(): Promise<Cluster[]> {

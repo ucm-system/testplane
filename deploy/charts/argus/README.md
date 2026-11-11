@@ -69,7 +69,8 @@ Chart 会在**渲染期**直接失败并给出中文原因，不会让你部署�
 | `image.digest` / `image.tag` | `""` / `0.1.0` | **生产用 digest**（`deploy/docker/build-push.ps1` 会打印）；tag 与 digest 二选一 |
 | `replicaCount` / `role` | `1` / `all` | **controller 必须单活**（无 leader election）：`role=all\|controller` 且副本 >1 渲染期直接失败；要水平扩只能拆 `role=api`（多副本）+ 独立 `controller`（1 副本） |
 | `config.env` / `config.authMode` | `prod` / `oidc` | 生产别用 dev |
-| `config.deployProvider` | `genet` | `mock` 只用于本地（进程内假 Genet） |
+| `config.deployProvider` | `genet` | `mock` 只用于本地（进程内假 Genet，genet-deploy 的联调接入点；与 mock-deploy 无关） |
+| `mockLlm.enabled` | `false` | 内置 mock LLM 服务（tools/mock-llm，OpenAI 兼容假服务）：mock-deploy runner 与本地 e2e 的缺省接入点；生产必须关闭（D-75）。Service 名固定 `mock-llm`（release namespace 内，:18080） |
 | `config.deployTimeout` | `72h` | 部署总窗口，取值 `1h..7d`（`K-6`） |
 | `config.maxGlobalConcurrency` | `20` | 全局并发 Task 上限（超出排队，不拒绝） |
 | `persistence.existingClaim` | `""` | 生产建议给（NFS/CSI 的 RWX claim） |

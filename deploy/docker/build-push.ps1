@@ -106,8 +106,14 @@ switch -Regex ($ComponentSpec) {
         $BuildContext = $runnerDir          # <-- 与 server/web 不同：上下文 = Runner 根目录
         $DefaultImage = "argus-$runnerName"
     }
+    '^mockllm$' {
+        # tools/mock-llm（OpenAI 兼容假服务，D-75）：不是 runner，但走同一套 kind-local 流
+        $Dockerfile = Join-Path $RepoRoot 'tools/mock-llm/Dockerfile'
+        $BuildContext = Join-Path $RepoRoot 'tools/mock-llm'
+        $DefaultImage = 'argus-mock-llm'
+    }
     default {
-        throw "-Component 只能是 server | web | runner:<name>（收到 '$Component'）"
+        throw "-Component 只能是 server | web | runner:<name> | mockllm（收到 '$Component'）"
     }
 }
 if (-not $Image) { $Image = $DefaultImage }

@@ -227,11 +227,19 @@ func (s *Store) FinishRunnerRun(ctx context.Context, in RunnerFinish) (*RunnerFi
 		if in.ExitCode != nil {
 			payload["exit_code"] = *in.ExitCode
 		}
+		// 失败默认码只对真失败成立：成功收口不得带 INTERNAL_ERROR（历史 bug：成功行
+		// 也被写入 error_code=INTERNAL_ERROR，结果视图把它当错误码展示）。
 		failure := domain.NewFailure(domain.CodeInternalError, "执行失败", nil)
 		if in.Failure != nil {
 			failure = *in.Failure
 		}
-		payload["error_code"] = failure.Code
+		succeededClean := in.Succeeded && in.Failure == nil
+		if succeededClean {
+			// 空串 → kernel 里 NULLIF($4,'') → NULL：清掉历史上可能残留的 error_code
+			payload["error_code"] = ""
+		} else {
+			payload["error_code"] = failure.Code
+		}
 		if !in.Succeeded || failure.Code != domain.CodeInternalError {
 			payload["error"] = failure
 		}
@@ -248,11 +256,15 @@ func (s *Store) FinishRunnerRun(ctx context.Context, in RunnerFinish) (*RunnerFi
 		if in.Succeeded {
 			to = domain.RunnerSucceeded
 		}
+		finishReason := failure.Code
+		if succeededClean {
+			finishReason = "succeeded"
+		}
 		applied, err := s.Apply(ctx, tx, domain.Transition{
 			Entity: domain.EntityRunnerRun, ID: in.Key.ID(),
 			From:    []domain.Status{domain.RunnerPreparing.Status(), domain.RunnerRunning.Status()},
 			To:      to.Status(),
-			Command: "finish", Reason: failure.Code, Actor: "system:executor",
+			Command: "finish", Reason: finishReason, Actor: "system:executor",
 			Payload: payload, At: in.FinishedAt,
 		})
 		if err != nil {
@@ -263,8 +275,12 @@ func (s *Store) FinishRunnerRun(ctx context.Context, in RunnerFinish) (*RunnerFi
 		}
 		out.RunnerApplied = applied
 
-		// 物理事实：退出码 / digest（不参与状态判定）。
-		facts := PhysicalFacts{ExitCode: in.ExitCode, ErrorCode: &failure.Code}
+		// 物理事实：退出码 / digest（不参与状态判定）。成功收口不带错误码（nil → COALESCE 不覆盖，
+		// kernel CAS 已把 error_code 清空）。
+		facts := PhysicalFacts{ExitCode: in.ExitCode}
+		if !succeededClean {
+			facts.ErrorCode = &failure.Code
+		}
 		if in.ImageDigest != "" {
 			d := in.ImageDigest
 			facts.ImageDigest = &d

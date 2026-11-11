@@ -63,50 +63,39 @@ test('B 全站无右栏（D-62）：所有页面都是两列，概览把队列�
   expect(m.mainRight).toBe(m.vw - 8)
 })
 
-test('B Run 详情：事件流在「事件」页签里，切页签不重连（SSE 只挂一次）', async ({ page }) => {
+test('B Run 详情：事件流并入「执行细节」页签，切页签不重连（SSE 只挂一次）', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/tasks/t-20261105-0003')
 
-  // 终态 Run：结果 / 执行细节 / 事件 三个页签
-  const eventTab = page.getByRole('tab', { name: '事件' })
-  await expect(eventTab).toBeVisible({ timeout: 20_000 })
-  await expect(page.getByRole('tab', { name: '结果' })).toBeVisible()
+  // 终态 Run：结果 / 执行细节 两个页签（事件不再是独立页签）
+  await expect(page.getByRole('tab', { name: '结果' })).toBeVisible({ timeout: 20_000 })
   await expect(page.getByRole('tab', { name: '执行细节' })).toBeVisible()
+  await expect(page.getByRole('tab', { name: '事件' })).toHaveCount(0)
 
-  // 默认在结果视图：事件面板不渲染（页签语义：只有选中页签挂 panel）
+  // 默认在结果视图：事件卡不渲染（页签语义：只有选中页签挂 panel）
   await expect(page.getByTestId('task-events-panel')).toHaveCount(0)
 
-  await eventTab.click()
+  await page.getByRole('tab', { name: '执行细节' }).click()
   const panel = page.getByTestId('task-events-panel')
   await expect(panel).toBeVisible()
-  await expect(panel).toContainText('共')
-  await expect(panel).toContainText('历史回放')
+  await expect(panel).toContainText('执行事件')
+  await expect(panel).toContainText('历史事件')
 
-  // tabpanel 语义：id / role / aria-labelledby 对得上
-  const panelId = await panel.getAttribute('id')
-  expect(panelId).toBe('task-view-panel-events')
-  await expect(panel).toHaveAttribute('role', 'tabpanel')
-  await expect(panel).toHaveAttribute('aria-labelledby', 'task-view-tab-events')
-  await expect(eventTab).toHaveAttribute('aria-controls', 'task-view-panel-events')
-  await expect(eventTab).toHaveAttribute('aria-selected', 'true')
-
-  // 切回执行细节再切回事件：事件条数与第一次一致（没有因为重连而清空/重复）
+  // 切到结果再切回：事件条数与第一次一致（没有因为重连而清空/重复）
   const firstCount = await panel.locator('li').count()
-  await page.getByRole('tab', { name: '执行细节' }).click()
+  await page.getByRole('tab', { name: '结果' }).click()
   await expect(panel).toHaveCount(0)
-  await page.getByRole('tab', { name: '事件' }).click()
+  await page.getByRole('tab', { name: '执行细节' }).click()
   await expect(page.getByTestId('task-events-panel').locator('li')).toHaveCount(firstCount)
 })
 
-test('B 运行中的 Run 也有「事件」页签（v2 默认停在报告，时间线在执行细节）', async ({ page }) => {
+test('B 运行中的 Run：事件就在执行细节里（无独立页签）', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/tasks/t-20261105-0005') // deploying
-  // v2：默认「报告」页签；管道时间线折进「执行细节」
-  await page.getByRole('tab', { name: '执行细节' }).click()
+  // v2：运行中默认就是「执行细节」页签；事件并入其中
   await expect(page.getByText('runner 管道时间线')).toBeVisible({ timeout: 20_000 })
-  await expect(page.getByRole('tab', { name: '事件' })).toBeVisible()
+  await expect(page.getByRole('tab', { name: '事件' })).toHaveCount(0)
   await expect(page.getByRole('tab', { name: '结果' })).toHaveCount(0)
-  await page.getByRole('tab', { name: '事件' }).click()
   await expect(page.getByTestId('task-events-panel')).toBeVisible()
 })
 

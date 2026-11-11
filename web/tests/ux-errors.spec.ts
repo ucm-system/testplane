@@ -77,20 +77,23 @@ test('① 校验（dry_run）用同一套呈现：问题清单可见，不再是
   await expect(summary).toBeVisible()
 })
 
-test('② 报告页打包下载：触发 .zip 下载，且 Blob 是 application/zip', async ({ page }) => {
+test('② 结果视图打包下载：触发 .zip 下载，产物清单里 report.json 也在', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
-  await page.goto('/tasks/t-20261105-0003/report')
+  await page.goto('/tasks/t-20261105-0003')
 
+  await expect(page.getByTestId('task-result-artifacts')).toBeVisible({ timeout: 20_000 })
   const [download] = await Promise.all([
     page.waitForEvent('download', { timeout: 15_000 }),
     page.getByTestId('download-bundle').click(),
   ])
   expect(download.suggestedFilename()).toMatch(/\.zip$/)
 
-  // 四个直链也都要在（不能只给 md）
-  for (const id of ['download-report-json', 'download-report-md', 'download-metadata-json', 'download-events-jsonl']) {
-    await expect(page.getByTestId(id)).toBeVisible()
+  // 产物清单里 report.json 也在（「查看」走整页查看器，下载走清单链接）
+  for (const key of ['deploy', 'tests', 'reports']) {
+    await page.getByTestId(`artifact-group-${key}`).locator('summary').click()
   }
+  await expect(page.locator('[data-testid="artifact-download"]').first()).toBeVisible()
+  await expect(page.getByText('report.json', { exact: false }).first()).toBeVisible()
 })
 
 test('③ toast（sonner）仍保留 role=status 无障碍语义', async ({ page }) => {

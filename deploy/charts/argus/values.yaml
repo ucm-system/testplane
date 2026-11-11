@@ -280,3 +280,23 @@ sharedMountsDisabledProfiles: []
 #       accessModes: [ReadOnlyMany]
 #       resources: {requests: {storage: 100Gi}}
 extraObjects: []
+# ---- 内置 mock LLM 服务（tools/mock-llm，D-75）----
+# OpenAI 兼容假服务：给 mock-deploy runner、endpoint-probe 与本地 e2e 喂数据。
+# 生产必须关闭（被测服务永远是真的；mock 只属于联调环境）。
+# Service 名固定 mock-llm（release namespace 内），mock-deploy 的 env default 按它探测。
+mockLlm:
+  enabled: false
+  image:
+    repository: registry.dev.huawei.com/argus/mock-llm
+    tag: "0.1.0"
+    digest: ""          # 本地 kind 镜像没有 digest，置空走 tag
+    pullPolicy: IfNotPresent
+  # 传给 mock-llm 的额外参数（如 ["-ready-after=30s"]：启动后 30s 内 /v1/models 503）
+  extraArgs: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi

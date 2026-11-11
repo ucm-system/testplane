@@ -79,7 +79,7 @@ $manifest = @'
 task:
   name: smoke
   service:
-    url: http://mock-llm.default.svc:18080/v1
+    url: http://mock-llm.argus.svc:18080/v1
     model_name: mock-llm
     model_path: /models/mock-llm
   precheck: auto

@@ -18,7 +18,7 @@ async function openSubmit(page: Page): Promise<void> {
 
 /** 把 YAML 编辑器内容整体换掉（CodeMirror 是 contenteditable，不能直接 fill 语义） */
 async function replaceYaml(page: Page, text: string): Promise<void> {
-  const editor = page.getByLabel('Genet 部署描述 YAML')
+  const editor = page.getByLabel('部署描述 YAML')
   await editor.click()
   await page.keyboard.press('ControlOrMeta+A')
   await page.keyboard.insertText(text)

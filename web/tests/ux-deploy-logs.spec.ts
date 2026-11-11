@@ -143,10 +143,11 @@ test('④ 产物分组：三个组都在，文件一个不少（数量 = /artifa
   // v2 落盘没有 deploy/pods.json（拓扑在 deploy-state.json，不进产物组）
   await expect(groups.tests).toContainText('stdout.log')
 
-  // 报告页不再放产物详情（用户 2026-11-09 / D-64）：产物只在结果页，报告页只有计数/指标/Task/失败清单/report.md
+  // 旧报告链接现在重定向回详情（「报告」页签已取消，D-74）；产物只在结果页
   await page.goto(`/tasks/${DONE_RUN}/report`)
+  await expect(page).toHaveURL(new RegExp(`/tasks/${DONE_RUN}$`))
+  await expect(page.getByTestId('task-result-artifacts')).toBeVisible({ timeout: 20_000 })
   await expect(page.getByTestId('report-artifacts')).toHaveCount(0)
-  await expect(page.getByTestId('report-md')).toBeVisible({ timeout: 20_000 })
 })
 
 test('⑤ 落盘缺失：下载 404 显示「还没落盘」，不弹红色错误', async ({ page }) => {

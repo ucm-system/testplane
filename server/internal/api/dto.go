@@ -117,6 +117,7 @@ type runnerDTO struct {
 	Consumes    json.RawMessage `json:"consumes"`
 	Env         json.RawMessage `json:"env"`
 	Placeholder *string         `json:"placeholder"`
+	CleanRunner *string         `json:"clean_runner"`
 
 	// 注册表元数据（openapi Runner 的 allOf 第二支）。
 	ContentSHA   string     `json:"content_sha"`
@@ -302,6 +303,7 @@ func toRunnerDTO(n *store.Runner) runnerDTO {
 		Consumes:    jsonOrArray(n.Consumes),
 		Env:         jsonOrObject(n.EnvDecl),
 		Placeholder: n.Placeholder,
+		CleanRunner: n.CleanRunner,
 		ContentSHA:  n.ContentSHA, SourceFile: n.SourceFile,
 		Orphaned: n.Orphaned, Retired: n.Orphaned,
 		RemovedAt:    utcPtr(n.RemovedAt),

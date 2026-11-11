@@ -69,18 +69,24 @@ test('① 页签可切换 + 空态文案 + 页内说明（不能填 NFS 地址 /
   await expect(empty).toContainText('还没有挂载点')
   await expect(empty).toContainText('未配置时不会阻断 Pod')
 
-  // 页内说明：Pod 里不能直接填 NFS 地址（用户最容易误解的地方）
+  // 页内说明压成一行（用户 2026-11-11）：解释与 YAML 收进弹窗，点按钮才展开
   const explainer = page.getByTestId('mounts-explainer')
-  await expect(explainer).toContainText('Pod 里不能直接填 NFS 地址')
-  await expect(explainer).toContainText('restricted')
+  await expect(explainer).toContainText('claim_name')
+  await expect(explainer).not.toContainText('kind: PersistentVolume')
 
-  // 可复制的 PV + PVC YAML：NFS 示例三要素都在
+  // 弹窗：Pod 里不能直接填 NFS 地址（用户最容易误解的地方）+ 可复制的 PV + PVC YAML
+  await page.getByTestId('mounts-help-open').click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toContainText('Pod 里不能直接填 NFS 地址')
+  await expect(dialog).toContainText('restricted')
   const yaml = page.getByTestId('pv-pvc-yaml')
   await expect(yaml).toContainText('kind: PersistentVolume')
   await expect(yaml).toContainText('ReadOnlyMany')
   await expect(yaml).toContainText('persistentVolumeReclaimPolicy: Retain')
   await expect(yaml).toContainText('server: 10.0.0.10')
-  await expect(page.getByTestId('copy-pv-pvc')).toBeVisible()
+  await expect(dialog.getByTestId('copy-pv-pvc')).toBeVisible()
+  await dialog.getByRole('button', { name: '知道了' }).click()
+  await expect(page.getByTestId('pv-pvc-yaml')).toHaveCount(0)
 
   // 其它 tab 仍可用（同一套 Tabs）
   await page.getByRole('tab', { name: 'Profiles' }).click()

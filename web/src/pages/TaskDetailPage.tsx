@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { api, writeBlockedReason } from '@/api'
 import { toApiError } from '@/api/client'
@@ -7,6 +7,7 @@ import type { ApiErrorBody, Deploy, RunnerExecution, TaskDetail } from '@/api/ty
 import { EventTimeline, CONNECTION_LABEL, connectionStateOf } from '@/components/app/EventTimeline'
 import { LogViewer } from '@/components/app/LogViewer'
 import { TaskResultView } from '@/components/app/TaskResultView'
+import { InputExample } from '@/components/app/InputExample'
 import { DeployStateBadge, RunnerStatusBadge, TaskStatusBadge, WaitingReasonTag } from '@/components/app/StatusBadge'
 import { Badge, Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -21,7 +22,6 @@ import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
 import { DeployLogsPanel } from '@/components/app/DeployLogsPanel'
 import { NotFoundPage } from '@/pages/NotFoundPage'
-import { TaskReportView } from '@/pages/ReportPage'
 import { useIdentity } from '@/hooks/useIdentity'
 import { useLogTail } from '@/hooks/useLogTail'
 import { useTaskEvents } from '@/hooks/useTaskEvents'
@@ -214,7 +214,7 @@ function DeploySection({
         {deploy.input ? (
           <details className="rounded-md border border-line-soft bg-surface-2 px-3 py-2" open>
             <summary className="flex h-6 cursor-pointer items-center text-2xs text-fg-2">
-              Genet 部署描述原文（提交冻结，平台不解析语义）
+              部署描述原文（deploy.input，提交冻结；平台不解析语义）
             </summary>
             <pre className="mt-2 overflow-x-auto font-mono text-2xs leading-[16px] text-fg-2">{deploy.input}</pre>
           </details>
@@ -337,6 +337,8 @@ function RunnerDetailPanel({
     live: live && runner.status === 'running',
     load: (offset) => api.getRunnerLogs(task.id, runner.seq, { attempt: attemptNo, offset }),
   })
+  /** Runner 目录里的输入示例（placeholder）：详情页也能「看示例 / 复制」（用户 2026-11-11） */
+  const catalogRunner = useAsync(() => api.getRunner(runner.runner_name), [runner.runner_name])
 
   return (
     <div className="flex flex-col gap-3 border-t border-line-soft px-5 py-4">
@@ -380,7 +382,7 @@ function RunnerDetailPanel({
             <code className="break-all font-mono text-2xs text-fg-3">{runner.result_ref}</code>
           </KV>
         ) : (
-          <KV label="result.json">—（产物三选一：可能只产出 html / csv，见产物区，D-74）</KV>
+          <KV label="result.json">—（产物三选一：可能只产出 html / csv，见结果视图，D-74）</KV>
         )}
         {runner.status_reason ? <KV label="跳过原因">{runner.status_reason}</KV> : null}
       </dl>
@@ -393,6 +395,14 @@ function RunnerDetailPanel({
           <span className="text-fg">{runner.error.message}</span>
           {runner.error.retryable ? <Badge tone="warn">可重试</Badge> : null}
         </div>
+      ) : null}
+
+      {catalogRunner.data?.placeholder ? (
+        <InputExample
+          example={catalogRunner.data.placeholder}
+          testIdPrefix="runner-detail"
+          title={`${runner.runner_name} 的输入示例（只读；本次执行的实际输入在落档文件里）`}
+        />
       ) : null}
 
       <LogViewer
@@ -414,30 +424,28 @@ function RunnerDetailPanel({
 
 /* ---------------------------------------------------------------- 页面 */
 
-/** v1 的『重试部分失败』语义已取消：v2 重试 = 整 Task 新 attempt 全量重跑（§7.8 / D-69），Task 终态即可。 */
-const RETRY_CONFIRM_DEPLOY = '将重新部署并全量重跑（fresh deploy，不复用已部署服务）'
-const RETRY_CONFIRM_SERVICE = '将全量重跑（外接模式，无重新部署）'
-/** attempt 上限（AG_ATTEMPT_MAX 默认 3，§12.7）；超限后端回 409 ATTEMPT_EXHAUSTED，前端置灰兜底。 */
-const ATTEMPT_MAX_DEFAULT = 3
-
+/**
+ * 重试 = 带参重新提交（D-76，用户 2026-11-11 裁决）：跳到提交页把提交原文回填，可改后
+ * 生成**新 Task（新 ID）**——这才符合「重试」的直觉；attempt 级重放（§7.8）仍保留在 API/CLI。
+ */
 export function TaskDetailPage() {
   const { taskId = '' } = useParams<{ taskId: string }>()
+  const navigate = useNavigate()
   // 终态 Task 不再订阅事件（只补历史）：live 在拿到详情后翻转
   const [live, setLive] = useState(true)
   const { events, status, version, resyncToken, reconnect } = useTaskEvents(taskId, { live })
   // 连接态唯一来源：事件区小字、页内横幅都从这一个值派生（B5）
   const connection = connectionStateOf(status)
   const toast = useToast()
-  // v2：报告为主体 —— Tab 顺序 报告 → 执行细节 → 事件 → 结果（产物清单留在结果 Tab），
-  // 报告内容与 /tasks/:id/report 整页共用同一个 TaskReportView；运行中先看"报告尚未生成"的空态。
-  const [view, setView] = useState<'report' | 'detail' | 'events' | 'result'>('report')
+  /**
+   * v2 页签（用户 2026-11-11）：终态默认「结果」（结论 + 三选一渲染 + 产物），运行中只有
+   * 「执行细节」（管道时间线 / runner 详情 / deploy / 事件都在这里）。「报告」页签取消
+   * （report.json 只是平台产物之一，不再强制依赖，D-74）；「事件」并入执行细节（不再单独页签）。
+   */
+  const [view, setView] = useState<'result' | 'detail'>('detail')
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [actionError, setActionError] = useState<ApiErrorBody | null>(null)
-  // 重试：整 Task 新 attempt（二次确认"将重新部署并全量重跑"）
-  const [retryOpen, setRetryOpen] = useState(false)
-  const [retrying, setRetrying] = useState(false)
-  const [retryExhausted, setRetryExhausted] = useState(false)
   // 选中的 attempt（?attempt 语义在组件内；重试只追加不覆盖，历史 attempt 只读）
   const [attemptNo, setAttemptNo] = useState<number | null>(null)
 
@@ -458,7 +466,8 @@ export function TaskDetailPage() {
     const prev = lastStatusRef.current
     const firstLoad = prev === null
     const justFinished = prev !== null && !isTerminalTask(prev) && done
-    if (firstLoad || justFinished) setView('report')
+    if (firstLoad) setView(done ? 'result' : 'detail')
+    if (justFinished) setView('result')
     lastStatusRef.current = status
   }, [task.data])
 
@@ -489,7 +498,6 @@ export function TaskDetailPage() {
 
   useEffect(() => {
     setSelectedSeq(null)
-    setRetryExhausted(false)
   }, [taskId, activeAttemptNo])
 
   const cancel = async () => {
@@ -512,41 +520,9 @@ export function TaskDetailPage() {
     }
   }
 
-  const confirmRetry = async () => {
-    setRetrying(true)
-    setRetryExhausted(false)
-    try {
-      const accepted = await api.retryTask(taskId)
-      setRetryOpen(false)
-      toast({
-        title: `已提交重试：attempt #${accepted.attempt_no}`,
-        description: '整 Task 全量重跑含重新部署（fresh deploy）；历史 attempt 保留只读',
-        tone: 'ok',
-      })
-      setAttemptNo(accepted.attempt_no)
-      task.reload()
-    } catch (e) {
-      const error = toApiError(e)
-      if (error.code === 'ATTEMPT_EXHAUSTED') {
-        // 409 ATTEMPT_EXHAUSTED：按钮置灰 + 提示上限（默认 3，§12.7）
-        setRetryExhausted(true)
-        setRetryOpen(false)
-        toast({
-          title: '已达到 attempt 上限',
-          description: `${error.code}：${error.message}（默认上限 3）`,
-          tone: 'err',
-        })
-      } else {
-        toast({
-          title: error.code === 'CONFLICT' ? 'Task 还在执行，不能重试' : '重试失败',
-          description: `${error.code}：${error.message}`,
-          tone: 'err',
-        })
-        setRetryOpen(false)
-      }
-    } finally {
-      setRetrying(false)
-    }
+  const confirmRetry = () => {
+    // D-76：重试 = 带参重新提交。跳到提交页（提交原文回填、可改、提交后生成新 Task）
+    void navigate(`/submit?retry=${encodeURIComponent(taskId)}`)
   }
 
   if (task.error) {
@@ -579,7 +555,7 @@ export function TaskDetailPage() {
 
   const terminal = detail ? isTerminalTask(detail.status) : false
   const counts = detail?.runner_counts
-  const retryBlocked = blocked ?? (retryExhausted ? '已达到 attempt 上限（默认 3），不能再次重试' : null)
+  const retryBlocked = blocked
 
   return (
     <>
@@ -606,16 +582,11 @@ export function TaskDetailPage() {
             size="sm"
             data-testid="retry-task"
             disabled={Boolean(retryBlocked)}
-            title={retryBlocked ?? '整 Task 新 attempt 全量重跑（含重新部署）'}
-            onClick={() => setRetryOpen(true)}
+            title={retryBlocked ?? '把这次 Task 的参数带回提交页，可修改后重新提交（生成新 Task）'}
+            onClick={confirmRetry}
           >
-            重试（新 attempt）
+            重试
           </Button>
-        ) : null}
-        {terminal ? (
-          <Link to={`/tasks/${encodeURIComponent(taskId)}/report`} data-testid="open-report">
-            <Button size="sm">查看报告</Button>
-          </Link>
         ) : null}
         <span className="ml-auto font-mono text-2xs text-fg-3">{taskId}</span>
       </div>
@@ -653,54 +624,22 @@ export function TaskDetailPage() {
           ariaLabel="Task 详情视图"
           idBase="task-view"
           value={view}
-          onChange={(next: string) => setView(next as 'report' | 'detail' | 'events' | 'result')}
-          items={[
-            { value: 'report', label: '报告' },
-            { value: 'detail', label: '执行细节' },
-            { value: 'events', label: '事件' },
-            ...(terminal ? [{ value: 'result', label: '结果' }] : []),
-          ]}
+          onChange={(next: string) => setView(next as 'result' | 'detail')}
+          items={
+            terminal
+              ? [
+                  { value: 'result', label: '结果' },
+                  { value: 'detail', label: '执行细节' },
+                ]
+              : [{ value: 'detail', label: '执行细节' }]
+          }
           className="rounded-xl border border-line bg-surface px-3 pt-1 shadow-xs"
         />
       ) : null}
 
-      {/* 报告页签（默认）：与 /tasks/:id/report 整页共用同一个内容区；产物清单留在「结果」Tab */}
-      {detail && view === 'report' ? (
-        <section {...tabPanelProps('task-view', 'report')} data-testid="task-report-panel" className="flex flex-col gap-4">
-          <TaskReportView taskId={taskId} />
-        </section>
-      ) : null}
-
-      {/* 事件页签：右栏取消后搬进主内容的第三个页签（折叠 ≠ 隐藏） */}
-      {detail && view === 'events' ? (
-        <section {...tabPanelProps('task-view', 'events')} data-testid="task-events-panel" className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-base font-semibold text-fg">事件</h2>
-            <span className="text-2xs text-fg-3">
-              {terminal
-                ? 'Task 已结束 · 下面是历史事件'
-                : connection === 'live'
-                  ? '实时更新中 · 断开后会自动重连'
-                  : CONNECTION_LABEL[connection]}
-            </span>
-            <span className="ml-auto text-2xs text-fg-3">共 {events.length} 条</span>
-          </div>
-          <Card>
-            <CardBody>
-              <EventTimeline events={events} connection={connection} ended={terminal} />
-            </CardBody>
-            <CardFooter>
-              <span>
-                页面上的状态跟着服务端推送走，不会先替你改成「已完成」；日志不在事件流里 —— 点开某个 runner 才读它那一次的日志。
-              </span>
-            </CardFooter>
-          </Card>
-        </section>
-      ) : null}
-
-      {/* 页签与面板配对：role=tabpanel + id / aria-controls / aria-labelledby（B7） */}
+      {/* 结果页签（终态默认）：结论 + 三选一渲染 + 产物下载（D-74；「报告」页签已取消） */}
       {detail && terminal && view === 'result' ? (
-        <section {...tabPanelProps('task-view', 'result')} className="flex flex-col gap-4">
+        <section {...tabPanelProps('task-view', 'result')} data-testid="task-result-panel" className="flex flex-col gap-4">
           <TaskResultView task={detail} />
         </section>
       ) : null}
@@ -862,10 +801,23 @@ export function TaskDetailPage() {
             </Card>
           ) : null}
 
-          <Card>
+          {/* 事件（用户 2026-11-11：事件是执行细节的一部分，不再单独页签） */}
+          <Card data-testid="task-events-panel">
+            <CardHeader
+              tone="muted"
+              title="执行事件"
+              sub={
+                terminal
+                  ? `Task 已结束 · 历史事件共 ${events.length} 条`
+                  : `${connection === 'live' ? '实时更新中 · 断开后会自动重连' : CONNECTION_LABEL[connection]} · 共 ${events.length} 条`
+              }
+            />
+            <CardBody>
+              <EventTimeline events={events} connection={connection} ended={terminal} />
+            </CardBody>
             <CardFooter>
               <span>
-                事件共 {events.length} 条 · {terminal ? 'Task 已结束，显示历史事件' : CONNECTION_LABEL[connection]}
+                页面上的状态跟着服务端推送走，不会先替你改成「已完成」；日志不在事件流里 —— 点开某个 runner 才读它那一次的日志。
               </span>
             </CardFooter>
           </Card>
@@ -904,50 +856,6 @@ export function TaskDetailPage() {
               拆除已部署资源（finally 语义）；clean 完成才落终态，可能不是即时生效。
             </Banner>
           ) : null}
-        </div>
-      </Dialog>
-
-      {/* 重试确认：整 Task 新 attempt 全量重跑（§7.8 / D-69）——没有"只重跑失败的"这种选项 */}
-      <Dialog
-        open={retryOpen}
-        onClose={() => setRetryOpen(false)}
-        title="重试这个 Task？"
-        description="重试 = 新 attempt 全量重跑：重新生成全部 runner 执行记录，历史 attempt 保留只读。"
-        footer={
-          <>
-            <Button onClick={() => setRetryOpen(false)}>取消</Button>
-            <Button
-              variant="primary"
-              data-testid="retry-confirm"
-              loading={retrying}
-              onClick={() => void confirmRetry()}
-            >
-              确认重试
-            </Button>
-          </>
-        }
-      >
-        <div className="flex flex-col gap-3 text-xs">
-          <Banner role="alert" tone={detail?.deploy ? 'warn' : 'info'} title={`attempt #${(detail?.current_attempt ?? 0) + 1}`}>
-            {detail?.deploy ? RETRY_CONFIRM_DEPLOY : RETRY_CONFIRM_SERVICE}
-          </Banner>
-          <ul className="flex flex-col gap-1.5 rounded-md border border-line-soft bg-surface-2 p-3 text-2xs leading-[16px] text-fg-2">
-            <li>
-              新 attempt：<span className="font-mono">#{(detail?.current_attempt ?? 0) + 1}</span>
-              ，历史 attempt（共 {detail?.attempts.length ?? 0} 个）保留只读。
-            </li>
-            {detail?.deploy ? (
-              <li>
-                fresh deploy：release 名按 <span className="font-mono">(task_id, attempt_no)</span> 重新派生，
-                <strong>不复用</strong>上一次已部署的服务（避免 warm cache 污染测量，§7.8）。
-              </li>
-            ) : null}
-            <li>输入快照原样重用；Runner / 镜像引用按提交冻结的 resolved 重放。</li>
-            <li>
-              attempt 上限 {ATTEMPT_MAX_DEFAULT} 个（§12.7）；达到上限时服务端返回{' '}
-              <span className="font-mono">409 ATTEMPT_EXHAUSTED</span>。
-            </li>
-          </ul>
         </div>
       </Dialog>
     </>

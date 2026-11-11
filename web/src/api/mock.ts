@@ -57,6 +57,7 @@ import type {
   SharedMount,
   SharedMountPatch,
   SharedMountWrite,
+  ManifestSnapshot,
   SubmitResult,
   Task,
   TaskDetail,
@@ -267,18 +268,23 @@ const RUNNERS: RunnerWire[] = [
   }),
   runnerWire({
     name: 'mock-deploy',
-    version: '1.0.0',
-    display_name: '服务部署·mock 薄壳（内置）',
-    description: '与 genet-deploy 同一脚本的薄壳；接入点 env default 指向 fake-genet（Task env 可覆盖）。',
+    version: '1.1.0',
+    display_name: 'Mock 服务接入（内置）',
+    description:
+      '与 Genet 完全解耦（D-75）：不做部署动作，只接入一个 OpenAI 兼容 mock 服务并等它就绪；缺省接 chart 内置 mock-llm。不声明 clean_runner → 无 clean 阶段。',
     role: 'deploy',
     on_failure: 'abort_task',
     exclusive: false,
-    input_format: 'yaml',
-    placeholder: 'model: Qwen3-32B\nreplicas: 1\nresources:\n  gpu: 8',
-    parameters: [],
+    input_format: 'jsonl',
+    placeholder: '{"base_url":"http://mock-llm.argus.svc.cluster.local:18080/v1","model_name":"mock-llm"}',
+    parameters: [
+      { name: 'base_url', type: 'string', required: false, description: 'OpenAI 兼容基地址；缺省用 AG_MOCK_BASE_URL 的 default（chart 内置 mock-llm）' },
+      { name: 'model_name', type: 'string', required: false, description: '服务端模型名；缺省 mock-llm' },
+      { name: 'model_path', type: 'string', required: false, description: '容器内模型权重路径；mock 服务无权重，一般不填' },
+      { name: 'ready_timeout_seconds', type: 'integer', required: false, description: '就绪探测总窗口（秒），缺省 120；超窗 DEPLOY_BLOCKED(reason=timeout)' },
+    ],
     exports: ['AG_SERVED_URL', 'AG_SERVED_MODEL_NAME', 'AG_MODEL_PATH', 'AG_DEPLOY_REF'],
     consumes: [],
-    clean_runner: 'genet-clean',
   }),
   runnerWire({
     name: 'genet-clean',
@@ -412,6 +418,8 @@ interface MockState {
   events: Record<string, TaskEvent[]>
   seq: Record<string, number>
   runners: RunnerWire[]
+  /** `${taskId}` → 提交原文快照（C-8.2 / D-76 重试回填用） */
+  manifests: Record<string, TaskManifest>
   clusters: Cluster[]
   /** `/admin/*` 的数据（P1） */
   profiles: ExecutionProfile[]
@@ -435,6 +443,7 @@ const state: MockState = {
   events: {},
   seq: {},
   runners: clone(RUNNERS),
+  manifests: {},
   clusters: [],
   profiles: [],
   adminClusters: [],
@@ -705,6 +714,27 @@ function seedTask(seed: TaskSeed): TaskDetail {
   }
   state.tasks[taskId] = detail
   state.attemptRunners[`${taskId}:${attemptNo}`] = runners
+  // 种子任务的提交原文快照（getTaskManifest / 重试回填用）：从 seed 反推一份合理的 manifest
+  state.manifests[taskId] = {
+    task: {
+      name: seed.name,
+      ...(seed.deploySpec ? { deploy: { runner: 'genet-deploy', version: '1.0.0', input: seed.deploySpec } } : {}),
+      ...(seed.service ? { service: seed.service } : {}),
+      precheck: 'auto',
+      env: seed.env ?? {},
+      secrets: seed.secrets ?? {},
+      runners: seed.runners
+        // 注入行（precheck / deploy / clean）不进 runners[]：deploy 由提交体 deploy 块表达，D-70
+        .filter((r) => r.runner !== 'endpoint-probe' && r.role !== 'deploy' && r.role !== 'clean')
+        .map((r) => ({
+          name: r.name,
+          runner: r.runner,
+          version: '1.0.0',
+          execution: { profile: 'k8s-npu' },
+          ...(r.input ? { input: r.input } : {}),
+        })),
+    },
+  }
   for (const runner of runners) {
     const seedForLog = seed.runners[runner.seq - 1]
     if (seedForLog) state.logs[`${taskId}:${attemptNo}:${runner.seq}`] = runnerLog(seedForLog, runner.started_at)
@@ -1682,6 +1712,16 @@ export const mockApi: Api = {
     return clone(findTask(id))
   },
 
+  /** 提交原文快照（C-8.2）：mock 在 submitTask / 种子任务构造时留存一份 */
+  async getTaskManifest(id: string): Promise<ManifestSnapshot> {
+    await delay()
+    const manifest = state.manifests[id]
+    if (!manifest) {
+      throw new ApiClientError(404, { code: 'NOT_FOUND', message: 'Task 不存在或快照缺失', retryable: false })
+    }
+    return { task_id: id, manifest: clone(manifest), resolved: null }
+  },
+
   async cancelTask(id: string): Promise<CancelResult> {
     await delay()
     const task = findTask(id)
@@ -2282,6 +2322,7 @@ export const mockApi: Api = {
 
     const body = manifest.task
     const taskId = nextTaskId()
+    state.manifests[taskId] = clone(manifest)
     const seeds = resolveRunnerSeeds(manifest)
     const attemptNo = 1
     const runners = buildRunners(taskId, attemptNo, seeds)

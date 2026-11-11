@@ -17,7 +17,7 @@ type RunnerRepo struct{ s *Store }
 
 const runnerCols = `name, version, display_name, description, role, builtin, on_failure, entry,
 	input_format, image, resources, concurrency, mounts, k8s, parameters, exports, consumes,
-	env_decl, placeholder, source_file, content_sha, orphaned, removed_at,
+	env_decl, placeholder, clean_runner, source_file, content_sha, orphaned, removed_at,
 	registered_at, registered_by`
 
 func scanRunner(row pgx.Row) (*Runner, error) {
@@ -25,7 +25,7 @@ func scanRunner(row pgx.Row) (*Runner, error) {
 	err := row.Scan(&r.Name, &r.Version, &r.DisplayName, &r.Description, &r.Role, &r.Builtin,
 		&r.OnFailure, &r.Entry, &r.InputFormat, &r.Image, &r.Resources, &r.Concurrency,
 		&r.Mounts, &r.K8s, &r.Parameters, &r.Exports, &r.Consumes, &r.EnvDecl,
-		&r.Placeholder, &r.SourceFile, &r.ContentSHA, &r.Orphaned, &r.RemovedAt,
+		&r.Placeholder, &r.CleanRunner, &r.SourceFile, &r.ContentSHA, &r.Orphaned, &r.RemovedAt,
 		&r.RegisteredAt, &r.RegisteredBy)
 	if err != nil {
 		return nil, err
@@ -38,9 +38,9 @@ func (r *RunnerRepo) Upsert(ctx context.Context, tx pgx.Tx, n *Runner) error {
 	_, err := r.s.db(tx).Exec(ctx, `
 		INSERT INTO runners (name, version, display_name, description, role, builtin, on_failure,
 		                     entry, input_format, image, resources, concurrency, mounts, k8s,
-		                     parameters, exports, consumes, env_decl, placeholder,
+		                     parameters, exports, consumes, env_decl, placeholder, clean_runner,
 		                     source_file, content_sha, orphaned, removed_at, registered_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
 		ON CONFLICT (name, version) DO UPDATE
 		   SET display_name = EXCLUDED.display_name,
 		       description  = EXCLUDED.description,
@@ -59,6 +59,7 @@ func (r *RunnerRepo) Upsert(ctx context.Context, tx pgx.Tx, n *Runner) error {
 		       consumes     = EXCLUDED.consumes,
 		       env_decl     = EXCLUDED.env_decl,
 		       placeholder  = EXCLUDED.placeholder,
+		       clean_runner = EXCLUDED.clean_runner,
 		       source_file  = EXCLUDED.source_file,
 		       content_sha  = EXCLUDED.content_sha,
 		       orphaned     = false,
@@ -68,7 +69,7 @@ func (r *RunnerRepo) Upsert(ctx context.Context, tx pgx.Tx, n *Runner) error {
 		jsonOrEmptyObject(n.Resources), jsonOrEmptyObject(n.Concurrency), jsonOrEmptyArray(n.Mounts),
 		jsonOrEmptyObject(n.K8s), jsonOrEmptyArray(n.Parameters), jsonOrEmptyArray(n.Exports),
 		jsonOrEmptyArray(n.Consumes), jsonOrEmptyObject(n.EnvDecl),
-		n.Placeholder, n.SourceFile, n.ContentSHA, n.Orphaned, n.RemovedAt, n.RegisteredBy)
+		n.Placeholder, n.CleanRunner, n.SourceFile, n.ContentSHA, n.Orphaned, n.RemovedAt, n.RegisteredBy)
 	if err != nil {
 		return fmt.Errorf("store: upsert runner %s@%s: %w", n.Name, n.Version, err)
 	}
