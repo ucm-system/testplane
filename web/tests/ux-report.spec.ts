@@ -34,10 +34,9 @@ test('② 结果视图：结论 + runner 明细 + 测试结果（三选一渲染
   await expect(page.getByTestId('task-result-panel')).toBeVisible({ timeout: 20_000 })
   await expect(page.getByTestId('task-result-verdict')).toContainText('失败')
 
-  // runner 明细表：谁成功谁失败 + 错误码就地可见
-  const runnersTable = page.getByTestId('task-result-runners')
-  await expect(runnersTable).toContainText('RUNNER_NONZERO_EXIT')
-  await expect(runnersTable.locator('tbody tr')).toHaveCount(6)
+  // 结论：谁成功谁失败在结论一句话里（明细卡已删——与结论重复，用户 2026-11-11）
+  await expect(page.getByTestId('task-result-verdict')).toContainText('个 runner 失败')
+  await expect(page.getByTestId('task-result-runners')).toHaveCount(0)
 
   // 测试结果：失败 runner 默认展开（内联渲染），成功 runner 折叠
   const render = page.getByTestId('task-result-render')
@@ -87,14 +86,14 @@ test('③ 测试结果内联渲染 result.json 指标（不编数据；deploy/cl
   await expect(render).not.toContainText('service-deploy')
 })
 
-test('C6 0 失败：runner 明细全绿（无错误码徽章），产物下载照常', async ({ page }) => {
+test('C6 0 失败：结论全绿，测试结果/产物下载照常', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/tasks/t-20261105-0006')
 
   await expect(page.getByTestId('task-result-panel')).toBeVisible({ timeout: 20_000 })
   await expect(page.getByTestId('task-result-verdict')).toContainText('全部')
-  // 没有任何错误码徽章（明细表失败码列都是 —）
-  await expect(page.getByTestId('task-result-runners').getByRole('button', { name: /^RUNNER_/ })).toHaveCount(0)
+  // 全部通过：结论里没有失败名单
+  await expect(page.getByTestId('task-result-verdict')).not.toContainText('失败：')
   await expect(page.getByTestId('task-result-artifacts')).toBeVisible()
 })
 
