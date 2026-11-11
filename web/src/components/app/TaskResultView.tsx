@@ -126,9 +126,6 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
   // 分组只影响展示：部署日志 / runner 日志 / 报告与数据，三组都渲染，文件一个不少。
   const groups = groupArtifacts(currentItems)
   const runners = task.runners ?? []
-  // 测试类 runner（§7.3）：test + 显式 pre_check —— endpoint-probe 这类探针也产出
-  // result.json（指标常为空数组 + notes），应进「测试结果」卡而不是消失
-  const testRunners = runners.filter((r) => r.role === 'test' || r.role === 'pre_check')
 
   return (
     <>
@@ -162,16 +159,17 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
         </CardBody>
       </Card>
 
-      {/* 2) 测试结果（三选一内联渲染）：只列 role=test 的 runner；0 个测试 runner 时压成一行 */}
+      {/* 2) runner 结果（用户 2026-11-11：deploy/precheck 也要有详情）：全部 runner 一个面板——
+          测试类内联渲染三选一（D-74），deploy/clean 给输入落档 / exports / 部署产物链接 */}
       <Card data-testid="task-result-render">
         <CardHeader
           tone="info"
-          title="测试结果"
-          sub="每个测试类 runner（test / pre_check）的 result.json（指标表）/ result.html（sandbox）/ result.csv（表格）三选一内联渲染（D-74）"
+          title="runner 结果"
+          sub="每个 runner 一个详情面板：测试类（test / pre_check）内联渲染 result.html（sandbox）/ result.csv（表格）/ result.json（指标表）三选一（D-74）；deploy/clean 看输入落档、exports 与部署产物"
         />
-        {testRunners.length === 0 ? (
+        {runners.length === 0 ? (
           <CardBody>
-            <p className="text-xs text-fg-3">这次 Task 没有测试类 runner（test / pre_check，可能没跑完或全是登记类）。</p>
+            <p className="text-xs text-fg-3">还没有 runner 执行记录。</p>
           </CardBody>
         ) : artifacts.error ? (
           <CardBody>
@@ -181,13 +179,13 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
           <LoadingBlock label="加载产物清单…" />
         ) : (
           <div className="flex flex-col px-5 py-1">
-            {testRunners.map((runner) => (
+            {runners.map((runner) => (
               <RunnerResultPanel key={runner.seq} taskId={taskId} runner={runner} attemptNo={task.current_attempt} artifacts={currentItems} />
             ))}
           </div>
         )}
         <CardFooter>
-          <span>展开看指标/表格/HTML；失败 runner 默认展开。「查看」进整页查看器，URL 可收藏。</span>
+          <span>展开看指标/表格/HTML 或 deploy 的落档与产物；失败 runner 默认展开。「查看」进整页查看器，URL 可收藏。</span>
         </CardFooter>
       </Card>
 
