@@ -233,11 +233,11 @@ type Endpoint struct {
 
 // RunnerSpec 是 runner.yaml 解析后的不可变元数据。镜像内自带，平台只读不写（K-3）。
 type RunnerSpec struct {
-	Name        string            `json:"name" yaml:"name"`
-	Version     string            `json:"version" yaml:"version"`
-	DisplayName string            `json:"display_name,omitempty" yaml:"display_name"`
-	Description string            `json:"description,omitempty" yaml:"description"`
-	Role        string            `json:"role" yaml:"role"` // test | pre_check | deploy | clean
+	Name        string `json:"name" yaml:"name"`
+	Version     string `json:"version" yaml:"version"`
+	DisplayName string `json:"display_name,omitempty" yaml:"display_name"`
+	Description string `json:"description,omitempty" yaml:"description"`
+	Role        string `json:"role" yaml:"role"` // test | pre_check | deploy | clean
 	// CleanRunner 是 deploy 角色对配对 clean runner 的声明（可选；仅 role=deploy 有效）。
 	// 非空时必须是注册表中 role=clean 的 runner 名——提交时按它注入 clean 行
 	//（无声明 = 无 clean 阶段，如 existing-deploy）；clean 配对由 runner 自己声明，

@@ -64,9 +64,9 @@ type TaskBody struct {
 // 裁决）。平台按 runner+version 从注册表解析出 role=deploy 的 Runner 注入为 seq=1；
 // clean 是否注入由该 runner runner.yaml 的 clean_runner 声明决定，提交体不出现 clean。
 type DeployManifest struct {
-	Runner  string `json:"runner"`           // deploy 角色的 runner 名（如 genet-deploy / mock-deploy / existing-deploy）
-	Version string `json:"version"`          // 语义化版本（与 tests[] 同构，必填）
-	Input   string `json:"input,omitempty"`  // 该 runner 的输入原文（yaml/jsonl 按 runner.yaml input_format）
+	Runner  string `json:"runner"`          // deploy 角色的 runner 名（如 genet-deploy / mock-deploy / existing-deploy）
+	Version string `json:"version"`         // 语义化版本（与 tests[] 同构，必填）
+	Input   string `json:"input,omitempty"` // 该 runner 的输入原文（yaml/jsonl 按 runner.yaml input_format）
 }
 
 // ServiceManifest 是外接模式（"序号 0 的导出"，§10.3）。

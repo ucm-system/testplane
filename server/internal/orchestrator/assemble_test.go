@@ -175,7 +175,7 @@ func TestAssembleDeployModeInjectsDeployAndClean(t *testing.T) {
 func TestAssembleDeployWithoutCleanDeclaration(t *testing.T) {
 	c := catalogWithBuiltin()
 	m := &Manifest{Task: TaskBody{
-		Name:   "existing",
+		Name: "existing",
 		Deploy: &DeployManifest{Runner: existingDeployName, Version: "1.0.0",
 			Input: `{"url":"http://10.0.0.10:8000/v1","model_name":"Qwen3-32B"}`},
 		Runners: []RunnerInput{
