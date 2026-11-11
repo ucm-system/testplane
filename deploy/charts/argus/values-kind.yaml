@@ -45,3 +45,12 @@ resources:
   limits:
     cpu: "2"
     memory: 2Gi
+
+# 本地 kind：内置 mock LLM（mock-deploy 缺省接入点；与进程内假 Genet 无关）
+mockLlm:
+  enabled: true
+  image:
+    repository: ghcr.io/ucm-system/argus-mock-llm
+    tag: kind-local
+    digest: ""
+    pullPolicy: IfNotPresent

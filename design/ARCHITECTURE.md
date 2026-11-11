@@ -69,6 +69,7 @@ Argus 是**对内工具**，以下事项已由团队裁决，本文按结论描�
 |---|---|---|
 | 0.1–0.11 | 2026-11-03 ~ 11-05 | v1 全部历史变更见附录 E（D-01～D-65），术语为 v1（Run/Task/Tester） |
 | **2.0** | 2026-11-10 | **Argus 更名与 Runner 化改造**：① 平台更名 Argus，术语对调（§0.2）；② 业务输入从 argv 改为输入文件（`AG_PARAMS_FILE`），entry 由 yaml 声明，推翻 D-20/D-21 的 argv-only 契约；③ 平台对 jsonl 输入做结构级校验（类型 + required）；④ 新增 `input_format: jsonl/yaml/text`；⑤ deploy/clean 以内置 runner 承载，取消平台 Deploy/Cleanup 阶段与 `cleanup.policy`，clean 为 finally 语义；⑥ **runner 级重试取消**，attempt 上移为 Task 级计数，重试 = 全量重跑含 fresh deploy；⑦ Task 内 runner **严格串行**，取代 D-32 的门控+并发模型；⑧ 新增 exports 机制（§5.12）与 `exports`/`consumes` 组合期校验；⑨ `endpoint_exclusive` 收窄为仅外接模式有效；⑩ 契约附录 A/B/C 升 schema 2.0，API 路径 `/runs→/tasks`、`/testers→/runners`；⑪ **产物契约改为三选一**（`result.json`/`result.html`/`result.csv` 至少其一，不强求 `result.json`；D-74），`RESULT_MISSING` 语义重定义为"三选一全部缺失" |
+| **2.0.1** | 2026-11-11 | **UX 收口与 mock 解耦（D-75/D-76）**：① mock-deploy 独立化——探测内置 mock-llm（chart 组件）导出四件套，不再复用 genet-deploy/fake-genet；② `runners.clean_runner` 落库并经 `GET /runners` 回显；③ 详情页「报告」页签取消，终态默认「结果」视图（结论 / runner 明细 / result.json·html·csv 三选一内联渲染 / 产物下载），事件并入「执行细节」；④ UI 重试 = 带参重新提交（`/submit?retry=`），attempt 重放保留在 API；⑤ 提交页服务来源并入 runner 管道卡（第 0 步），provider 卡片化，每行示例可查看/复制/填入；⑥ 管理台 NFS 说明收为按钮+弹窗 |
 
 ---
 
@@ -995,7 +996,7 @@ Manifest 只描述评测意图、输入和执行环境。**不允许在 Manifest
 | 字段 | 说明 |
 |---|---|
 | `task.name` | Task 名称，用于展示，不参与复用判定；上限 200 字符（D-58） |
-| `deploy` | 与 `service` 二选一；内容为 Genet 部署描述（YAML 语义，平台不解析），作为 service-deploy 的输入传入 |
+| `deploy` | 与 `service` 二选一；**runner 引用**（`runner`/`version`/`input`，与 `runners[]` 同构）：role=deploy 的内置 Runner 任选（genet-deploy / mock-deploy / existing-deploy…，平台不感知具体名字）；`input` 为该 Runner 的输入原文（YAML / JSONL 按 `input_format`，平台不解析）；clean 是否注入由该 Runner 的 `clean_runner` 声明决定（D-70/D-75） |
 | `service` | 与 `deploy` 二选一；外接模式直接给出 `url` / `model_name` / `model_path`，平台作为静态导出注入全部 runner |
 | `precheck` | `auto`（默认）/ `off` / 显式对象。`auto`：平台取注册表里**唯一**一个 `role: pre_check` 的 Runner（0 个或多个都拒绝提交），插入测试类 runner 最前面；execution profile 复用首个 test runner 的 profile |
 | `env` | Task 级环境变量，明文，注入该 Task 全部 runner（§12.4） |
@@ -1713,4 +1714,11 @@ placeholder: |
 | **D-72** | **泄漏兜底 = 重放内置 clean**：`argus clean --task <id> [--attempt <n>]` 用落档导出重拉 service-clean Job；不做平台 GC；**硬规则：禁止对 Genet 资源设置指向 runner Job 的 ownerReferences**（进程生命周期 ≠ 资源生命周期）；runner 一律不绑 K8s ServiceAccount，Genet 凭据走 Task 级 secret | §9.3、§12.2 |
 | **D-73** | **API 与契约同步更名**：路径 `/runs`→`/tasks`、`/testers`→`/runners`、`/runs/{id}/tasks/{tid}`→`/tasks/{id}/runners/{seq}`；`POST /tasks/{id}/retry` 语义改为整 Task 新 attempt（上限 `ATTEMPT_EXHAUSTED`）；附录 A/B 升 schema `2.0`（`result.json` 字段 `task_id/attempt_no/runner_seq/runner{}`；Job Spec `args` 恒空、env 全 `AG_*`、mounts 增加 input）；附录 D 错误码 `TESTER_*`→`RUNNER_*`、`TASK_TIMEOUT`→`RUNNER_TIMEOUT`、`RUN_TOO_LARGE`→`TASK_TOO_LARGE`，新增 `EXPORT_INVALID`/`ATTEMPT_EXHAUSTED`；Task 终态取消 `COMPLETED_WITH_ERRORS`（并入 `failed`） | views/07、openapi.yaml、附录 A/D |
 | **D-74** | **产物契约改为三选一**：test / pre_check 的 runner 产出 `result.json` / `result.html` / `result.csv` **至少其一**，由 Runner 决定，**不强求 `result.json`**（取代 v1 §5.3 与本版初稿的"result.json 必产"）；`RESULT_MISSING` 重定义为"三选一全部缺失"，`RESULT_INVALID` 仅在 `result.json` 产出但不合法时适用；`result.html` / `result.csv` 为前端通用展示（iframe / 通用表格），平台不解析内容；失败时推荐仍产出 `result.json`（带 error）但为软要求 | §4.1、§5.3、§5.9、§7.1、§8.2、§8.5、附录 A/D |
+
+**v2 后续裁决（2026-11-11，UX 与 mock 解耦收口）：**
+
+| ID | 决策 | 影响段落 |
+|---|---|---|
+| **D-75** | **mock 提供方与 Genet 完全解耦**：mock-deploy 从「genet-deploy 薄壳（env default 指向 fake-genet）」改为独立内置 deploy runner——不做任何部署动作，只探测一个已存在的 OpenAI 兼容 mock 服务（联调环境为 chart 内置 `mock-llm` 组件，`mockLlm.enabled`，tools/mock-llm）并导出四件套；`base_url` 参数可指向任何 OpenAI 兼容端点；超窗收口 `DEPLOY_BLOCKED(reason=timeout)`；不声明 `clean_runner`（常驻共享服务，无可拆除物，与 existing-deploy 同理）。mock-llm 属联调环境组件，生产关闭 | §9.1、§10.1 |
+| **D-76** | **UI 重试 = 带参重新提交**：详情页「重试」跳转 `/submit?retry=<task_id>`，用 `GET /tasks/{id}/manifest` 的提交原文回填表单（可修改），提交生成**新 Task（新 ID）**，原 Task 保留不动；attempt 级重放（§7.8）仍保留在 API/CLI（`POST /tasks/{id}/retry`），UI 不再暴露。配套：详情页取消「报告」页签（report.json 只是产物之一，D-74），终态默认「结果」视图（结论 + runner 明细 + 三选一内联渲染 + 产物下载），「事件」并入「执行细节」；`runners.clean_runner` 落库并在 `GET /runners` 回显 | views/07、openapi.yaml |
 

@@ -112,7 +112,7 @@ test('⑦ /testers?open= 直接打开抽屉，关闭后 URL 去掉该参数', as
   await expect(page).not.toHaveURL(/open=/)
 })
 
-test('⑧ 900px 宽：没有右栏了，事件流在「事件」页签里照样可达', async ({ page }) => {
+test('⑧ 900px 宽：没有右栏了，事件流在「执行细节」页签里照样可达', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 900 })
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/tasks/t-20261105-0003')
@@ -120,8 +120,8 @@ test('⑧ 900px 宽：没有右栏了，事件流在「事件」页签里照样�
   // 右栏只在概览页存在：Run 详情页压根没有 aside[aria-label="辅助信息"]
   await expect(page.locator('aside[aria-label="辅助信息"]')).toHaveCount(0)
 
-  // 事件流搬进主内容的第三个页签（折叠 ≠ 隐藏）
-  await page.getByRole('tab', { name: '事件' }).click()
+  // 事件流并入「执行细节」页签（折叠 ≠ 隐藏，用户 2026-11-11）
+  await page.getByRole('tab', { name: '执行细节' }).click()
   const panel = page.getByTestId('task-events-panel')
   await expect(panel).toBeVisible({ timeout: 20_000 })
   await expect(panel).toContainText(/共 \d+ 条/)

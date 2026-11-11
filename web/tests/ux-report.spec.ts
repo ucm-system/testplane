@@ -1,119 +1,94 @@
 import { expect, test } from '@playwright/test'
 
 /**
- * 报告页的 UX 收口回归（B1 / B2 / B3 / C6 / C7 与两处顺带修掉的入口）：
- *  ① 页头标题是「报告」而不是「Task 详情」，副标题带 report.json 与产物；
- *  ② 报告 404（未终态）只出现**一个**空状态，带 Retry-After 倒计时重试，且不再渲染 Task/失败清单空壳；
- *  ③ 指标表懒加载、按 labels 分组；没有 result 的 Task 明确显示「该 Tester 未上报指标」（不编数据）；
- *  C6 结果视图 0 失败时压成一行绿字；
- *  C7 报告页右栏不再有「原始文件」卡；
- *  C2 集群页表头「入队时间」+「等待时长」两列；
+ * Task 详情「结果」视图的回归（用户 2026-11-11 裁决：跑完点进来只要三样东西）：
+ *  ① 旧报告链接 `/tasks/:id/report` 重定向回详情（「报告」页签已取消，D-74）；
+ *  ② 结果视图：结论 / runner 明细（谁成功谁失败）/ 测试结果三选一内联渲染 / 产物下载；
+ *  ③ 测试结果内联渲染 result.json 指标（不编数据；deploy/clean 不进该卡）；
+ *  C6 0 失败：runner 明细全绿，无错误码；
  *  B12 概览有「新建 Task」入口。
  */
 
 test.describe.configure({ mode: 'serial' })
 
-test('① 报告页页头：标题「报告」（副标题已删：面包屑足够说明位置）', async ({ page }) => {
+test('① 旧报告链接重定向回 Task 详情（终态默认「结果」页签）', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/tasks/t-20261105-0003/report')
 
-  const appHeader = page.locator('header').first()
-  await expect(appHeader.locator('h1')).toHaveText('报告')
-  // 页头只留面包屑 + 当前页名（用户 2026-11-09：『集群忙不忙、谁在排队……』这类副标题删掉）
-  await expect(appHeader).not.toContainText('report.json 与产物')
-  await expect(appHeader.locator('h1')).toHaveCount(1)
-
-  // C7：右栏的「原始文件」卡已删除（直链在页头就有）
-  await expect(page.getByText('原始文件')).toHaveCount(0)
-  // 报告本身还在（标题不是 Task 详情，但内容照常）
-  await expect(page.getByText('计数')).toBeVisible()
+  // 重定向：URL 不再是 /report，页面是详情的「结果」视图
+  await expect(page).toHaveURL(/\/tasks\/t-20261105-0003$/, { timeout: 15_000 })
+  await expect(page.getByTestId('task-result-panel')).toBeVisible({ timeout: 20_000 })
+  // 「报告」页签与整页报告标题都不存在了
+  await expect(page.getByRole('tab', { name: '报告' })).toHaveCount(0)
+  await expect(page.locator('header h1')).not.toHaveText('报告')
 })
 
-test('② 报告 404：只出现一个空状态 + 倒计时重试，不渲染 Task/失败清单空壳', async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
-  // mock 里这条是 testing（非终态）：报告接口按契约回 404 + Retry-After
-  await page.goto('/tasks/t-20261105-0004/report')
-
-  const empty = page.getByTestId('report-not-generated')
-  await expect(empty).toHaveCount(1)
-  await expect(empty).toContainText('报告尚未生成')
-  // 说人话：空态里不能再出现 404 / Retry-After 这类实现细节（P2）
-  await expect(empty).toContainText('报告还没生成，可能是这个 Task 还没结束；我们会每隔几秒自动重试一次。')
-  expect(await empty.innerText()).not.toContain('404')
-  expect(await empty.innerText()).not.toContain('Retry-After')
-
-  // 倒计时重试：按钮先禁用并显示秒数，或倒计时结束后可点
-  const retry = page.getByTestId('retry-report')
-  await expect(retry).toBeVisible()
-  await expect(retry).toContainText(/秒后可重试|立即重试/)
-  await expect(page.getByText('每 5 秒自动再试一次')).toBeVisible()
-
-  // 唯一性：错误不再各渲染一遍（计数卡 + report.md 卡），也没有 Task/失败清单空壳
-  await expect(page.getByTestId('report-not-generated')).toHaveCount(1)
-  await expect(page.getByText('报告尚未生成')).toHaveCount(1)
-  await expect(page.getByText('NOT_FOUND')).toHaveCount(0)
-  await expect(page.getByText('Task 明细')).toHaveCount(0)
-  await expect(page.getByText('失败清单')).toHaveCount(0)
-  await expect(page.getByTestId('report-artifacts')).toHaveCount(0)
-})
-
-test('③ 指标表懒加载 + 按 labels 分组 + 无结果时的空态文案', async ({ page }) => {
+test('② 结果视图：结论 + runner 明细 + 测试结果（三选一渲染）+ 产物下载', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
-  await page.goto('/tasks/t-20261105-0006/report')
+  // mock 里这条是 completed_with_errors（部分失败）
+  await page.goto('/tasks/t-20261105-0003')
 
-  await expect(page.getByText('计数')).toBeVisible()
-  // 懒加载：还没点/滚之前不请求、不出表
-  await expect(page.getByTestId('metrics-table')).toHaveCount(0)
-  await expect(page.getByText('指标按需加载', { exact: false })).toBeVisible()
+  // 默认就在「结果」页签
+  await expect(page.getByTestId('task-result-panel')).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByTestId('task-result-verdict')).toContainText('失败')
 
-  await page.getByTestId('toggle-metrics').click()
+  // runner 明细表：谁成功谁失败 + 错误码就地可见
+  const runnersTable = page.getByTestId('task-result-runners')
+  await expect(runnersTable).toContainText('RUNNER_NONZERO_EXIT')
+  await expect(runnersTable.locator('tbody tr')).toHaveCount(6)
 
-  const table = page.getByTestId('metrics-table').first()
-  await expect(table).toBeVisible()
-  // 列 = labels 键 + 指标名 + 值 + 单位
-  await expect(table).toContainText('dataset')
-  await expect(table).toContainText('accuracy')
-  await expect(table).toContainText('score')
-  await expect(table.locator('tbody')).toContainText('gsm8k')
+  // 测试结果：失败 runner 默认展开（内联渲染），成功 runner 折叠
+  const render = page.getByTestId('task-result-render')
+  await expect(render).toBeVisible()
+  // 展开一个折叠着的 runner 看内联结果（不是只有下载；失败的可能已经默认展开）
+  const first = render.locator('[data-testid^="runner-result-"]').first()
+  const expandedState = await first.locator('button[aria-expanded]').getAttribute('aria-expanded')
+  if (expandedState === 'false') await first.locator('button[aria-expanded]').click()
+  await expect(first.locator('button[aria-expanded="true"]')).toBeVisible()
 
-  // 探测类 Tester 的 result 里 metrics 是空数组 → 直说没上报，不补假值
-  await expect(page.getByTestId('metrics-empty').first()).toContainText('deploy / clean 角色没有 result.json')
+  // 产物下载：显式列全（report.json / metadata.json / events.jsonl / stdout.log）
+  for (const key of ['deploy', 'tests', 'reports']) {
+    await page.getByTestId(`artifact-group-${key}`).locator('summary').click()
+  }
+  const downloads = page.locator('[data-testid="artifact-download"]')
+  expect(await downloads.count()).toBeGreaterThan(3)
+  await expect(page.getByText('report.json', { exact: false }).first()).toBeVisible()
 
-  // 没有任何 result_ref 的 Task：整页指标都是空态
-  await page.goto('/tasks/t-20261105-0002/report')
-  await page.getByTestId('toggle-metrics').click()
-  await expect(page.getByTestId('metrics-table')).toHaveCount(0)
-  await expect(page.getByTestId('metrics-empty').first()).toContainText('deploy / clean 角色没有 result.json')
+  // 产物的「查看」进整页查看器（不再弹窗、不再裸链 API URL）
+  await page.locator('[data-testid="artifact-view"]').first().click()
+  await expect(page).toHaveURL(/\/file\?path=/, { timeout: 15_000 })
 })
 
-test('C6 结果视图 0 失败：压成一行绿字「无失败项」，产物下载照常', async ({ page }) => {
+test('③ 测试结果内联渲染 result.json 指标（不编数据；deploy/clean 不进该卡）', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
+  await page.goto('/tasks/t-20261105-0006') // 全部成功
+
+  await expect(page.getByTestId('task-result-panel')).toBeVisible({ timeout: 20_000 })
+  const render = page.getByTestId('task-result-render')
+  await expect(render).toBeVisible()
+
+  // 成功 runner 默认折叠：展开第一个，看内联指标表（labels 分组 + accuracy）
+  const first = render.locator('[data-testid^="runner-result-"]').first()
+  await first.locator('button[aria-expanded]').click()
+  await expect(first.getByTestId('metrics-table')).toBeVisible({ timeout: 10_000 })
+  await expect(first.getByTestId('metrics-table')).toContainText('accuracy')
+
+  // deploy/clean 角色不进测试结果卡（它们没有 result.json，§9.1）
+  await expect(render).not.toContainText('service-deploy')
+})
+
+test('C6 0 失败：runner 明细全绿（无错误码徽章），产物下载照常', async ({ page }) => {
   await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
   await page.goto('/tasks/t-20261105-0006')
-  // v2：默认「报告」页签，结果块在「结果」页签里
-  await page.getByRole('tab', { name: '结果' }).click()
 
-  await expect(page.getByTestId('task-result-verdict')).toBeVisible({ timeout: 20_000 })
-  const none = page.getByTestId('task-result-no-failures')
-  await expect(none).toBeVisible()
-  await expect(none).toHaveText('无失败项')
-  // 0 失败时不再整块红色卡片
-  await expect(page.getByTestId('task-result-failures')).toHaveCount(0)
-  // 产物下载还在（且排在失败项后面紧接的位置）
+  await expect(page.getByTestId('task-result-panel')).toBeVisible({ timeout: 20_000 })
+  await expect(page.getByTestId('task-result-verdict')).toContainText('全部')
+  // 没有任何错误码徽章（明细表失败码列都是 —）
+  await expect(page.getByTestId('task-result-runners').getByRole('button', { name: /^RUNNER_/ })).toHaveCount(0)
   await expect(page.getByTestId('task-result-artifacts')).toBeVisible()
-})
-
-// TODO(e2e): 待集群联调 —— v2 集群页队列表是「队列/状态/排队 Job/最长等待」列（无 v1 的入队时间/等待时长），
-// 本用例断言的列名已不存在；按 v2 列清单重写后再跑。
-test.fixme('C2 集群页：表头是「入队时间」，并补了「等待时长」列', async ({ page }) => {
-  await page.addInitScript(() => window.localStorage.setItem('argus:mock-role', 'operator'))
-  await page.goto('/clusters')
-  await expect(page.getByRole('heading', { name: '排队中的 runner' })).toBeVisible({ timeout: 20_000 })
-
-  await expect(page.getByRole('columnheader', { name: /入队/ })).toBeVisible({ timeout: 20_000 })
-  await expect(page.getByRole('columnheader', { name: '等待时长' })).toBeVisible()
-  await expect(page.getByRole('columnheader', { name: '自', exact: true })).toHaveCount(0)
 })
 
 test('B12 概览有「新建 Task」入口，点了去 /submit', async ({ page }) => {

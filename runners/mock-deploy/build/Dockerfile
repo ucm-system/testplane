@@ -1,14 +1,12 @@
-# Argus 内置 Runner: mock-deploy —— mock 部署薄壳的镜像构建定义
+# Argus 内置 Runner: mock-deploy —— mock 服务接入的镜像构建定义
 #
-# 与 genet-deploy **同一份 run.sh / 同一构建配方**（薄壳裁决：mock = genet-deploy +
-# 接入点指向 fake-genet，OpenAPI 契约一致，零行为分叉）。差异只有两点：
-#   1. runner.yaml 的 name/image 不同；
-#   2. runner.yaml 的 env 为 AG_GENET_BASE_URL 声明了 default（fake-genet 接入点），
-#      平台按 runner.yaml env 声明注入，不再按 provider 特判（deploy/clean 解耦）。
+# v1.1.0 起与 genet-deploy 分道（D-75）：独立 run.sh（只做 mock 服务就绪探测 +
+# 四件套导出，不调 Genet OpenAPI、不创建集群对象）。构建配方与 genet-deploy 相同
+# （alpine + bash/curl/jq，非 root）。
 #
 # 构建上下文 = Runner 目录（不是本文件所在目录）：
 #   cd runners/mock-deploy
-#   TAG=1.0.0
+#   TAG=1.1.0
 #   docker build -f build/Dockerfile -t registry.dev.huawei.com/argus/mock-deploy:${TAG} .
 #   docker push registry.dev.huawei.com/argus/mock-deploy:${TAG}
 # 本地联调 tag：docker build -f build/Dockerfile -t argus-mock-deploy:dev .

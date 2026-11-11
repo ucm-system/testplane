@@ -309,14 +309,20 @@ test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 T
   await page.setViewportSize({ width: 1440, height: 1100 })
   await page.goto('/submit')
 
-  // 服务来源卡片：标题 + 一句"一张卡两形态"的说明
-  await expect(page.getByText('服务来源')).toBeVisible()
-  await expect(page.getByText('一张卡两形态', { exact: false })).toBeVisible()
+  // 服务来源：runner 管道卡里的第 0 步；provider 卡片一眼可见（genet/existing/mock/外接）
+  await expect(page.getByText('服务来源', { exact: false }).first()).toBeVisible()
+  await expect(page.getByTestId('provider-card-genet-deploy')).toBeVisible()
+  await expect(page.getByTestId('provider-card-mock-deploy')).toBeVisible()
+  await expect(page.getByTestId('provider-card-existing-deploy')).toBeVisible()
+  await expect(page.getByTestId('provider-card-service')).toBeVisible()
 
-  // 部署形态：CodeMirror 编辑器在，且真做了语法高亮（key / 字符串至少两种颜色）+ 行号
-  const editor = page.getByLabel('Genet 部署描述 YAML')
+  // 部署形态（默认选第一个 yaml 格式的 deploy runner）：CodeMirror 编辑器在，且真做了语法高亮 + 行号
+  const editor = page.getByLabel('部署描述 YAML')
   await expect(editor).toBeVisible()
   await expect(page.getByTestId('yaml-editor')).toBeVisible()
+  // v2 编辑器默认空（不预填，§11.2）：先敲一段 YAML 再量高亮
+  await editor.click()
+  await page.keyboard.type('model: Qwen3-32B\nresources:\n  gpu: 8')
   const highlight = await page.evaluate(() => {
     const content = document.querySelector('.cm-content')
     if (!content) return null
@@ -350,9 +356,9 @@ test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 T
   await page.waitForTimeout(400)
   await page.screenshot({ path: join(OUT_DIR, '09-submit-yaml-highlight.png'), fullPage: true })
 
-  // 切到「外接」：同一张卡里换成服务字段
-  await page.getByRole('group', { name: '服务来源' }).getByRole('button', { name: '外接' }).click()
+  // 切到「外接」：同一个卡里换成服务三元组字段
+  await page.getByTestId('provider-card-service').click()
   await expect(page.getByLabel('服务 base URL')).toBeVisible()
   await expect(page.getByText('模型路径（可选）')).toBeVisible()
-  await expect(page.getByLabel('Genet 部署描述 YAML')).toHaveCount(0)
+  await expect(page.getByLabel('部署描述 YAML')).toHaveCount(0)
 })

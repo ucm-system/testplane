@@ -2,11 +2,12 @@ import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { ChevronDown } from 'lucide-react'
 import { api } from '@/api'
-import type { Runner } from '@/api/types'
+import type { Runner, RunnerRole } from '@/api/types'
 import { RunnerDrawer } from '@/components/app/RunnerDrawer'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/card'
+import { Segmented } from '@/components/ui/segmented'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
@@ -25,6 +26,25 @@ function compareVersion(a: string, b: string): number {
   return 0
 }
 
+/**
+ * 角色徽章配色（用户 2026-11-11：deploy 也是 runner，目录里按角色一眼分清）：
+ * deploy=info（服务来源卡的可选项）、clean=warn（自动注入）、pre_check=primary、test=muted。
+ */
+const ROLE_TONE: Record<RunnerRole, 'primary' | 'info' | 'warn' | 'muted'> = {
+  deploy: 'info',
+  clean: 'warn',
+  pre_check: 'primary',
+  test: 'muted',
+}
+
+const ROLE_FILTERS: Array<{ value: 'all' | RunnerRole; label: string }> = [
+  { value: 'all', label: '全部' },
+  { value: 'test', label: 'test' },
+  { value: 'deploy', label: 'deploy' },
+  { value: 'clean', label: 'clean' },
+  { value: 'pre_check', label: 'pre_check' },
+]
+
 interface RunnerGroup {
   name: string
   /** 目录里的当前版本（后端默认只回最新；`latest` 缺省时按版本号取最大） */
@@ -34,11 +54,11 @@ interface RunnerGroup {
 }
 
 /**
- * Runner 目录：**按 name 聚合**，一行一个 name。
+ * Runner 目录：**按 name 聚合**，一行一个 name；deploy / clean 与 test/pre_check 在同一个列表里
+ * （v2：deploy 也是 runner，D-70/D-75 —— 角色徽章区分，role 筛选器过滤）。
  *
  * 票 #60 / D-60：`GET /runners` 会同时回 `aisbench-sla@0.1.0` 与 `@0.2.0`，并列展示时用户以为重复。
- * 主行只显示最新版本，历史版本收进「另有 N 个历史版本」——展开才看得到，
- * 并标 `已退役`（"目录里已移除；历史 Task 仍按 name@version 引用"）。
+ * 主行只显示最新版本，历史版本收进「另有 N 个历史版本」——展开才看得到，并标 `已退役`。
  *
  * 历史 Task 的报告/详情里显示的 `name@version` **不改**：那是当时跑的版本，是对的。
  */
@@ -50,6 +70,7 @@ export function RunnersPage() {
   const [params, setParams] = useSearchParams()
   const openName = params.get('open')
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [roleFilter, setRoleFilter] = useState<'all' | RunnerRole>('all')
 
   const setOpenName = (name: string | null) => {
     const next = new URLSearchParams(params)
@@ -66,7 +87,7 @@ export function RunnersPage() {
     for (const runner of list) {
       byName.set(runner.name, [...(byName.get(runner.name) ?? []), runner])
     }
-    return [...byName.entries()]
+    const all = [...byName.entries()]
       .map(([name, versions]) => {
         const sorted = [...versions].sort((a, b) => compareVersion(a.version, b.version))
         const latest = sorted.find((item) => item.latest) ?? sorted.find((item) => !item.retired) ?? sorted[0]!
@@ -77,20 +98,32 @@ export function RunnersPage() {
         }
       })
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [list])
+    return roleFilter === 'all' ? all : all.filter((group) => group.latest.role === roleFilter)
+  }, [list, roleFilter])
 
   return (
     <>
       <p className="text-2xs leading-[16px] text-fg-3">
         Runner 随平台发版走目录扫描自动注册（附录 C v2）；参数 schema 是平台提交期校验的依据（类型 + required，
-        D-67），范围与枚举仍归 Runner。deploy / clean 角色仅内置，用户注册直接拒绝。
+        D-67），范围与枚举仍归 Runner。<strong>deploy / clean 也是 Runner</strong>（D-70）：deploy 角色是提交页
+        「服务来源」的可选项（genet-deploy / mock-deploy / existing-deploy…），clean 角色由 deploy runner 的
+        clean_runner 声明自动注入 —— 两类都仅内置，用户目录声明会被拒绝。
       </p>
 
       <Card>
         <CardHeader
           tone="primary"
           title="已注册 Runner"
-          sub={`${groups.length} 个名字 · 注册表只读，没有运行时管理端点`}
+          sub={`${groups.length} 个名字${roleFilter === 'all' ? '' : ` · 已按 ${roleFilter} 过滤`} · 注册表只读，没有运行时管理端点`}
+          actions={
+            <Segmented<'all' | RunnerRole>
+              ariaLabel="按角色筛选"
+              data-testid="runner-role-filter"
+              value={roleFilter}
+              onChange={setRoleFilter}
+              options={ROLE_FILTERS}
+            />
+          }
         />
         {runners.error ? (
           <div className="p-4">
@@ -100,8 +133,12 @@ export function RunnersPage() {
           <TableSkeleton rows={4} cols={8} />
         ) : groups.length === 0 ? (
           <EmptyState
-            title="目录里还没有 Runner"
-            description="把 runner.yaml + entry 文件放进 runners/<name>/，平台重启后会自动发现。"
+            title={roleFilter === 'all' ? '目录里还没有 Runner' : `没有 ${roleFilter} 角色的 Runner`}
+            description={
+              roleFilter === 'all'
+                ? '把 runner.yaml + entry 文件放进 runners/<name>/，平台重启后会自动发现。'
+                : '换一个角色筛选项看看；deploy / clean 角色只随平台内置。'
+            }
           />
         ) : (
           <TableWrap>
@@ -137,7 +174,14 @@ export function RunnersPage() {
                         {runner.retired ? <Badge tone="muted" className="ml-1.5">已退役</Badge> : null}
                       </TD>
                       <TD>
-                        <Badge tone={runner.role === 'pre_check' ? 'primary' : 'muted'}>{runner.role}</Badge>
+                        <Badge tone={ROLE_TONE[runner.role]} data-testid="runner-role">
+                          {runner.role}
+                        </Badge>
+                        {runner.clean_runner ? (
+                          <Badge tone="muted" className="ml-1.5" data-testid="runner-clean-pair">
+                            clean: {runner.clean_runner}
+                          </Badge>
+                        ) : null}
                       </TD>
                       <TD>
                         <Badge tone={runner.on_failure === 'abort_task' ? 'warn' : 'muted'}>{runner.on_failure}</Badge>
@@ -184,7 +228,7 @@ export function RunnersPage() {
                               </Badge>
                             </TD>
                             <TD>
-                              <Badge tone="muted">{old.role}</Badge>
+                              <Badge tone={ROLE_TONE[old.role]}>{old.role}</Badge>
                             </TD>
                             <TD>
                               <Badge tone={old.on_failure === 'abort_task' ? 'warn' : 'muted'}>{old.on_failure}</Badge>

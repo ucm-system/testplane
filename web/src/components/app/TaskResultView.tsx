@@ -1,9 +1,11 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { ArrowUpRight, Check, ChevronRight, Download, FileText } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { ChevronRight, Download } from 'lucide-react'
 import { API_BASE, api } from '@/api'
 import { toApiError } from '@/api/client'
-import type { ApiErrorBody, Artifact, Report, TaskDetail } from '@/api/types'
+import type { ApiErrorBody, Artifact, TaskDetail } from '@/api/types'
+import { RunnerResultPanel } from '@/components/app/RunnerResultPanel'
+import { RunnerStatusBadge } from '@/components/app/StatusBadge'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonClassName } from '@/components/ui/button'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
@@ -13,16 +15,19 @@ import { TaskStatusBadge } from '@/components/app/StatusBadge'
 import { useAsync } from '@/hooks/useAsync'
 import { ARTIFACT_GROUPS, groupArtifacts, relativeArtifactPath } from '@/lib/artifact-groups'
 import { artifactViewKindOf } from '@/components/app/ArtifactViewer'
-import { formatBytes, saveBlob } from '@/lib/download'
-import { cn, formatDateTime, formatDuration } from '@/lib/utils'
+import { formatBytes } from '@/lib/download'
+import { formatDateTime, formatDuration, runDuration } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 
 /**
- * 终态 Task 的「结果」视图（用户原话：跑完了点进去，只想拿测试结果）。
+ * 终态 Task 的「结果」视图（用户 2026-11-11：跑完了点进去只要三样东西）：
  *
- * 只放 4 个块：**结论 / 失败项 / 产物 / 报告**；runner 管道时间线、attempt、日志全部在
- * 「执行细节」页签里（二级）。产物下载按契约走 `GET /tasks/{id}/files?path=`，
- * 清单来自 `GET /tasks/{id}/artifacts`（前端**显式列全**，不只给 report.md）。
- * 「查看」不再弹窗：导航到整页查看器 `/tasks/{id}/file?path=…`（v2，URL 可收藏可分享）。
+ *  1) **结论**：成功/失败一句话 + 计数 + 每个 runner 谁成功谁失败（runner 明细表，含错误码）；
+ *  2) **结果渲染**：每个测试 runner 的 result.json / result.html / result.csv 三选一内联渲染（D-74）；
+ *  3) **产物下载**：清单显式列全，「查看」进整页查看器（v2 不再弹窗、不再裸链 API URL）。
+ *
+ * v2 取消了独立的「报告」页签（report.json 只是平台产物之一，不再强制依赖，D-74）；
+ * runner 管道时间线、attempt、日志、事件全部在「执行细节」页签（二级）。
  */
 
 const KIND_LABEL: Record<Artifact['kind'], string> = {
@@ -48,25 +53,23 @@ function fileUrl(taskId: string, path: string): string {
   return `${API_BASE}/tasks/${encodeURIComponent(taskId)}/files?path=${encodeURIComponent(path)}`
 }
 
-/** 一句结论：成功就是成功，失败要说清"为什么" */
-function conclusion(
-  task: TaskDetail,
-  report: Report | null,
-): { tone: 'ok' | 'warn' | 'err' | 'muted'; text: string } {
+/** 一句结论：成功就是成功，失败要说清"为什么"（直接从 runner 执行记录推导，不依赖 report.json） */
+function conclusion(task: TaskDetail): { tone: 'ok' | 'warn' | 'err' | 'muted'; text: string } {
   const counts = task.runner_counts
+  const failedNames = (task.runners ?? []).filter((r) => r.status === 'failed').map((r) => r.name)
   switch (task.status) {
     case 'succeeded':
       return {
         tone: 'ok',
-        text: `全部 ${counts?.total ?? report?.counts.total ?? 0} 个 runner 通过（attempt #${task.current_attempt}），可以出报告。`,
+        text: `全部 ${counts?.total ?? 0} 个 runner 通过（attempt #${task.current_attempt}），可以出报告。`,
       }
     case 'failed':
       return {
         tone: 'err',
         text: task.error
           ? `${task.error.code}：${task.error.message}`
-          : report && report.failures.length > 0
-            ? `${report.failures.length} 个 runner 失败：${report.failures.map((f) => f.name).join('、')}`
+          : failedNames.length > 0
+            ? `${failedNames.length} 个 runner 失败：${failedNames.join('、')}`
             : 'runner 管道有失败（原「部分失败」语义已并入 failed，D-73）。',
       }
     case 'service_unavailable':
@@ -82,12 +85,10 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
   const taskId = task.id
   const navigate = useNavigate()
   const artifacts = useAsync(() => api.listTaskArtifacts(taskId), [taskId])
-  const report = useAsync(() => api.getTaskReport(taskId), [taskId])
-  const [downloading, setDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<ApiErrorBody | null>(null)
   const [downloadNotice, setDownloadNotice] = useState<string | null>(null)
 
-  /** 「查看」= 整页查看器（v2 不再弹窗）：path 必带，attempt / seq 用于定位与展示。 */
+  /** 「查看」= 整页查看器（v2 不再弹窗、不再裸链 API URL）：path 必带，attempt / seq 用于定位。 */
   const openViewer = (item: Artifact) => {
     const params = new URLSearchParams()
     params.set('path', item.path)
@@ -97,43 +98,45 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
   }
 
   /**
-   * 打包下载：与报告页同一套逻辑（带鉴权 fetch → Blob → a[download]），
-   * 不是裸 `<a href>` 直链 —— dev/OIDC 下裸链会 401，用户只会看到一段 JSON。
+   * 打包下载：带鉴权 fetch → Blob → a[download]，不是裸 `<a href>` 直链 ——
+   * dev/OIDC 下裸链会 401，用户只会看到一段 JSON。
    */
   const downloadBundle = async () => {
-    setDownloading(true)
     setDownloadError(null)
     setDownloadNotice(null)
     try {
       const blob = await api.downloadBundle(taskId)
       const name = `${taskId}.zip`
-      saveBlob(blob, name)
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = name
+      anchor.click()
+      URL.revokeObjectURL(url)
       setDownloadNotice(`${name} · ${formatBytes(blob.size)} 已开始下载`)
     } catch (e) {
       setDownloadError(toApiError(e))
-    } finally {
-      setDownloading(false)
     }
   }
 
   const counts = task.runner_counts
-  const verdict = conclusion(task, report.data ?? null)
+  const verdict = conclusion(task)
   const items = artifacts.data?.items ?? []
+  // 当前 attempt 的产物（重试后历史 attempt 的文件按 attempt_no 过滤掉，只展示最新一次）
+  const currentItems = items.filter((item) => item.attempt_no == null || item.attempt_no === task.current_attempt)
   // 分组只影响展示：部署日志 / runner 日志 / 报告与数据，三组都渲染，文件一个不少。
-  const groups = groupArtifacts(items)
+  const groups = groupArtifacts(currentItems)
+  const runners = task.runners ?? []
+  const testRunners = runners.filter((r) => r.role === 'test')
 
   return (
     <>
-      {/* 1) 结论：成功 / 失败 / 为什么失败 + 计数 */}
+      {/* 1) 结论：一句话 + 计数 */}
       <Card data-testid="task-result-verdict">
         <CardHeader
           tone={verdict.tone === 'ok' ? 'ok' : verdict.tone === 'err' ? 'err' : 'warn'}
           title="结论"
-          sub={`attempt #${report.data?.attempt_no ?? task.current_attempt} · ${formatDuration(
-            task.started_at && task.finished_at
-              ? Math.round((new Date(task.finished_at).getTime() - new Date(task.started_at).getTime()) / 1000)
-              : null,
-          )} · ${formatDateTime(task.finished_at)}`}
+          sub={`attempt #${task.current_attempt} · ${formatDuration(runDuration(task))} · ${formatDateTime(task.finished_at)}`}
           actions={<TaskStatusBadge status={task.status} />}
         />
         <CardBody className="flex flex-col gap-4">
@@ -158,84 +161,120 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
         </CardBody>
       </Card>
 
-      {/* 2) 失败项：只列失败的，给错误码与原因；0 失败时压成一行中性提示（C6） */}
-      {report.data && report.data.failures.length === 0 ? (
-        <p
-          data-testid="task-result-no-failures"
-          role="status"
-          className="flex items-center gap-2 rounded-xl border border-line bg-transparent px-4 py-2.5 text-xs font-medium text-fg-2"
-        >
-          <span className="size-1.5 shrink-0 rounded-full bg-success" aria-hidden />
-          <Check className="size-3.5 text-success-text" aria-hidden />
-          无失败项
-        </p>
-      ) : (
-        <Card data-testid="task-result-failures">
-          <CardHeader tone="err" title="失败项" sub={report.data ? `${report.data.failures.length} 条` : undefined} />
-          {report.error ? (
-            <CardBody>
-              <ErrorState error={report.error} onRetry={report.reload} compact />
-            </CardBody>
-          ) : report.loading && !report.data ? (
-            <LoadingBlock label="加载失败清单…" />
-          ) : (
-            <TableWrap>
-              <Table>
-                <THead>
-                  <TR className="hover:bg-transparent">
-                    <TH>seq</TH>
-                    <TH>runner</TH>
-                    <TH>原因</TH>
-                    <TH>错误码</TH>
-                  </TR>
-                </THead>
-                <TBody>
-                  {report.data!.failures.map((failure) => (
-                    <TR key={`${failure.seq}-${failure.error_code}`}>
-                      <TD className="tabular-nums text-2xs text-fg-3">#{failure.seq}</TD>
-                      <TD className="text-fg">{failure.name}</TD>
-                      <TD className="text-fg-2">{failure.reason ?? '—'}</TD>
-                      <TD>
+      {/* 1b) 谁成功、谁失败：runner 明细（含注入的 deploy / precheck / clean；错误码就地给） */}
+      <Card data-testid="task-result-runners">
+        <CardHeader tone="muted" title="runner 明细" sub={`attempt #${task.current_attempt} · 每个 runner 的状态与耗时`} />
+        {runners.length === 0 ? (
+          <CardBody>
+            <p className="text-xs text-fg-3">还没有 runner 执行记录。</p>
+          </CardBody>
+        ) : (
+          <TableWrap>
+            <Table>
+              <THead>
+                <TR className="hover:bg-transparent">
+                  <TH>seq</TH>
+                  <TH>名称</TH>
+                  <TH>角色</TH>
+                  <TH>状态</TH>
+                  <TH>耗时</TH>
+                  <TH>错误码</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {runners.map((runner) => (
+                  <TR key={runner.seq}>
+                    <TD className="tabular-nums text-2xs text-fg-3">#{runner.seq}</TD>
+                    <TD className="max-w-[18rem] truncate text-fg" title={runner.name}>
+                      {runner.name}
+                    </TD>
+                    <TD>
+                      <Badge tone="muted">{runner.role}</Badge>
+                    </TD>
+                    <TD>
+                      <RunnerStatusBadge status={runner.status} />
+                    </TD>
+                    <TD className="tabular-nums">
+                      {runner.started_at
+                        ? formatDuration(
+                            Math.max(
+                              0,
+                              Math.round(
+                                ((runner.finished_at ? new Date(runner.finished_at).getTime() : Date.now()) -
+                                  new Date(runner.started_at).getTime()) /
+                                  1000,
+                              ),
+                            ),
+                          )
+                        : '—'}
+                    </TD>
+                    <TD>
+                      {runner.error ? (
                         <Badge tone="err" className="font-mono">
-                          {failure.error_code}
+                          {runner.error.code}
                         </Badge>
-                      </TD>
-                    </TR>
-                  ))}
-                </TBody>
-              </Table>
-            </TableWrap>
-          )}
-        </Card>
-      )}
+                      ) : runner.status_reason ? (
+                        <span className="text-2xs text-fg-3">{runner.status_reason}</span>
+                      ) : (
+                        <span className="text-fg-3">—</span>
+                      )}
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          </TableWrap>
+        )}
+        <CardFooter>
+          <span>失败原因与可重试标记在「执行细节」里对应 runner 的详情面板（含日志）。</span>
+        </CardFooter>
+      </Card>
 
-      {/* 3) 产物：显式列全（report.json / report.md / metadata.json / events.jsonl / 各 runner 的日志与 result.json / 部署 Pod 日志） */}
+      {/* 2) 测试结果（三选一内联渲染）：只列 role=test 的 runner；0 个测试 runner 时压成一行 */}
+      <Card data-testid="task-result-render">
+        <CardHeader
+          tone="info"
+          title="测试结果"
+          sub="每个测试 runner 的 result.json（指标表）/ result.html（sandbox）/ result.csv（表格）三选一内联渲染（D-74）"
+        />
+        {testRunners.length === 0 ? (
+          <CardBody>
+            <p className="text-xs text-fg-3">这次 Task 没有 role=test 的 runner（可能没跑完或全是登记类）。</p>
+          </CardBody>
+        ) : artifacts.error ? (
+          <CardBody>
+            <ErrorState error={artifacts.error} onRetry={artifacts.reload} compact />
+          </CardBody>
+        ) : artifacts.loading && !artifacts.data ? (
+          <LoadingBlock label="加载产物清单…" />
+        ) : (
+          <div className="flex flex-col px-5 py-1">
+            {testRunners.map((runner) => (
+              <RunnerResultPanel key={runner.seq} taskId={taskId} runner={runner} attemptNo={task.current_attempt} artifacts={currentItems} />
+            ))}
+          </div>
+        )}
+        <CardFooter>
+          <span>展开看指标/表格/HTML；失败 runner 默认展开。「查看」进整页查看器，URL 可收藏。</span>
+        </CardFooter>
+      </Card>
+
+      {/* 3) 产物下载：显式列全（report.json / report.md / metadata.json / events.jsonl / 各 runner 日志与 exports / 部署 Pod 日志） */}
       <Card data-testid="task-result-artifacts">
         <CardHeader
           tone="info"
           title="产物下载"
-          sub={artifacts.data ? `${items.length} 个文件 · 共 ${formatBytes(artifacts.data.total_size_bytes ?? 0)}` : undefined}
+          sub={artifacts.data ? `${currentItems.length} 个文件 · 共 ${formatBytes(artifacts.data.total_size_bytes ?? 0)}` : undefined}
           actions={
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              <Button
-                size="sm"
-                variant="primary"
-                data-testid="download-bundle"
-                icon={<Download className="size-3" aria-hidden />}
-                loading={downloading}
-                onClick={() => void downloadBundle()}
-              >
-                {downloading ? '打包中…' : '打包下载 .zip'}
-              </Button>
-              <a
-                className={buttonClassName({ size: 'sm', variant: 'ghost' })}
-                href={`${API_BASE}/tasks/${encodeURIComponent(taskId)}/report.md`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                report.md <ArrowUpRight className="size-3" aria-hidden />
-              </a>
-            </div>
+            <Button
+              size="sm"
+              variant="primary"
+              data-testid="download-bundle"
+              icon={<Download className="size-3" aria-hidden />}
+              onClick={() => void downloadBundle()}
+            >
+              打包下载 .zip
+            </Button>
           }
         />
         {downloadError ? (
@@ -254,7 +293,7 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
           </CardBody>
         ) : artifacts.loading && !artifacts.data ? (
           <LoadingBlock label="加载产物清单…" />
-        ) : items.length === 0 ? (
+        ) : currentItems.length === 0 ? (
           <CardBody>
             <EmptyState title="还没有产物" description="产物在 Task 结束后写出；存储未接线时这里会是空的。" />
           </CardBody>
@@ -262,8 +301,7 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
           <div className="flex flex-col gap-2 px-5 py-3" data-testid="artifact-groups">
             {ARTIFACT_GROUPS.map((group) => {
               const rows = groups[group.key]
-              // 默认折叠（用户 2026-11-09）：三组加起来动辄十几个文件，展开会把下面内容全推下去；
-              // 折叠后只留「组名 + 数量 + 说明」，点开才看文件表，数量仍然一眼可见。
+              // 默认折叠：三组加起来动辄十几个文件，展开会把下面内容全推下去
               return (
                 <details
                   key={group.key}
@@ -300,7 +338,7 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
                               </TD>
                               <TD className="tabular-nums text-2xs">{formatBytes(item.size_bytes)}</TD>
                               <TD className="text-right">
-                                {/* 整页查看（v2 不再弹窗）：json 树 / csv 表 / html sandbox / 文本（≤2MB）；二进制不提供预览 */}
+                                {/* 整页查看（v2 不再弹窗/裸链）：json 树 / csv 表 / html sandbox / 文本（≤2MB） */}
                                 {artifactViewKindOf(item.path) !== 'binary' ? (
                                   <button
                                     type="button"
@@ -333,34 +371,6 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
         <CardFooter>
           <span>这些都是这次 Task 落下的文件；「查看」进整页查看器（URL 可收藏），下载直接开始。</span>
         </CardFooter>
-      </Card>
-
-      {/* 4) 报告入口 */}
-      <Card data-testid="task-result-report">
-        <CardHeader tone="muted" title="报告" sub="report.json 组织与索引（不做指标聚合，默认最后一个 attempt）" />
-        <CardBody className="flex flex-wrap items-center gap-2">
-          <Link to={`/tasks/${encodeURIComponent(taskId)}/report`}>
-            <Button size="sm" variant="primary" icon={<FileText className="size-3" aria-hidden />}>
-              打开报告页
-            </Button>
-          </Link>
-          <a
-            className={buttonClassName({ size: 'sm' })}
-            href={fileUrl(taskId, 'report.json')}
-            target="_blank"
-            rel="noreferrer"
-          >
-            report.json
-          </a>
-          <a
-            className={buttonClassName({ size: 'sm' })}
-            href={fileUrl(taskId, 'report.md')}
-            target="_blank"
-            rel="noreferrer"
-          >
-            report.md
-          </a>
-        </CardBody>
       </Card>
     </>
   )

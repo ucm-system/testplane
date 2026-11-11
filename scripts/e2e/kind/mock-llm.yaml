@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mock-llm
+  namespace: argus    # mock-deploy 的 runner.yaml env default 按 mock-llm.argus.svc 探测（D-75）
   labels:
     app: mock-llm
 spec:
@@ -40,6 +41,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: mock-llm
+  namespace: argus
 spec:
   selector:
     app: mock-llm

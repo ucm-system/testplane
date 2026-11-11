@@ -13,6 +13,8 @@ export interface SegmentedProps<T extends string> {
   className?: string
   ariaLabel?: string
   disabled?: boolean
+  /** 外层轨道的 data-testid（测试定位用；按钮本身不另设） */
+  testId?: string
 }
 
 /**
@@ -29,11 +31,13 @@ export function Segmented<T extends string>({
   className,
   ariaLabel,
   disabled,
+  testId,
 }: SegmentedProps<T>) {
   return (
     <div
       role="group"
       aria-label={ariaLabel}
+      data-testid={testId}
       className={cn('inline-flex rounded-lg bg-surface-3 p-1', disabled && 'opacity-50', className)}
     >
       {options.map((option) => {

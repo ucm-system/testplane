@@ -1,0 +1,95 @@
+{{- /*
+内置 mock LLM 服务（tools/mock-llm）：OpenAI 兼容假服务，给 mock-deploy runner、
+endpoint-probe 与本地 e2e 喂数据。生产关闭（被测服务永远是真的，D-75：mock 只属于
+联调环境）。Service 名固定 mock-llm —— mock-deploy 的 runner.yaml env default 与
+e2e 脚本都按 <release namespace> 内的 mock-llm DNS 探测。
+*/}}
+{{- if .Values.mockLlm.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "argus.fullname" . }}-mock-llm
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "argus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-llm
+spec:
+  replicas: 1
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "argus.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mock-llm
+  template:
+    metadata:
+      labels:
+        {{- include "argus.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mock-llm
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: mock-llm
+          # mock-llm 的版本节奏与控制面无关，镜像值独立在 mockLlm.image 下；
+          # 有 digest 用 digest（不可变），否则回 tag（本地 kind 镜像没有 digest）。
+          {{- if .Values.mockLlm.image.digest }}
+          image: "{{ .Values.mockLlm.image.repository }}@{{ .Values.mockLlm.image.digest }}"
+          {{- else }}
+          image: "{{ .Values.mockLlm.image.repository }}:{{ .Values.mockLlm.image.tag }}"
+          {{- end }}
+          imagePullPolicy: {{ .Values.mockLlm.image.pullPolicy }}
+          {{- with .Values.mockLlm.extraArgs }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 18080
+          # /healthz 永远 200（不受 ready_after 故障注入影响）——活/就绪探针都用它，
+          # 「还没就绪」的业务语义由 mock-llm 自己在 /v1/models 上 503 表达。
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.mockLlm.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-llm
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "argus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-llm
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 18080
+      targetPort: http
+  selector:
+    {{- include "argus.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mock-llm
+{{- end }}

@@ -779,6 +779,16 @@ export interface TaskManifest {
   task: TaskBody
 }
 
+/**
+ * `ManifestSnapshot` schema（`GET /tasks/{id}/manifest`，C-8.2）：提交原文 + 冻结解析结果。
+ * 两者落库后不再变 —— 本应答回答的是「当时提交了什么」，供「重试=带参重新提交」（D-76）与事后核对。
+ */
+export interface ManifestSnapshot {
+  task_id: string
+  manifest: TaskManifest
+  resolved?: Record<string, unknown> | null
+}
+
 /** `DryRunResult` schema（`?dry_run=true`，200）。 */
 export interface DryRunResult {
   valid: boolean

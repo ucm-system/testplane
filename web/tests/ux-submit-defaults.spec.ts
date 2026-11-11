@@ -26,7 +26,7 @@ async function openSubmit(page: Page): Promise<void> {
 
 /** 把 YAML 编辑器内容整体换掉（CodeMirror 是 contenteditable，不能直接 fill） */
 async function replaceYaml(page: Page, text: string): Promise<void> {
-  const editor = page.getByLabel('Genet 部署描述 YAML')
+  const editor = page.getByLabel('部署描述 YAML')
   await editor.click()
   await page.keyboard.press('ControlOrMeta+A')
   await page.keyboard.insertText(text)
@@ -89,49 +89,55 @@ test('② 空表单点提交：前端拦下并给字段级错误，不发请求�
   await expect(page).toHaveURL(/\/submit$/)
 })
 
-/* ============================================================ 3. 参数说明只显示选中的 Tester（原右栏，已搬进主内容折叠卡） */
+/* ============================================================ 3. 每个 runner 行有可见示例（可查看 / 复制 / 填入） */
 
-test('③ 参数说明只显示当前 Task 选中的 Tester，换 Tester 跟着换', async ({ page }) => {
+test('③ runner 行的示例块：点开看全文，「填入输入框」覆盖输入且可撤销', async ({ page }) => {
   await openSubmit(page)
-
-  // 右栏已经取消：说明搬进主内容里的 <details>，默认折叠，点开才看
-  await page.getByTestId('submit-runner-help').locator('summary').click()
-
-  const rail = page.getByTestId('rail-runner')
-  await expect(rail).toBeVisible()
-  await expect(rail).toHaveAttribute('data-runner', 'aisbench-acc')
-  // 只有选中的这一个：别的 Tester 的参数不该出现
-  await expect(rail).toContainText('dataset')
-  await expect(page.getByTestId('rail-runner')).toContainText('limit')
-  await expect(page.getByText('input_lens')).toHaveCount(0)
-  await expect(page.getByText('subset', { exact: true })).toHaveCount(0)
-
-  // 换 Tester：右栏跟着换，旧 Tester 的参数消失
-  await page.getByLabel('runner 1 Runner').selectOption('aisbench-perf')
-  await expect(page.getByTestId('rail-runner')).toHaveAttribute('data-runner', 'aisbench-perf')
-  await expect(page.getByTestId('rail-runner')).toContainText('input_len')
-  await expect(page.getByTestId('rail-runner')).not.toContainText('dataset')
-})
-
-test('③ 参数旁「复制」把 jsonl 片段追加进输入框（不覆盖），输入示例整段同样追加', async ({ page }) => {
-  await openSubmit(page)
-  // 参数说明默认折叠：先展开再点复制
-  await page.getByTestId('submit-runner-help').locator('summary').click()
 
   const args = page.getByLabel('runner 1 输入')
   await expect(args).toHaveValue('')
 
-  // v2：点参数复制追加 jsonl 片段 `"name": <default|示例值>`（没有默认值按类型给示例）
-  await page.locator('[data-testid="copy-param"][data-param="limit"]').click()
+  // 示例块跟当前 Runner 走：默认折叠，点开看全文（用户 2026-11-11：示例要能查看、能复制）
+  const example = page.getByTestId('input-1-example')
+  await expect(example).toBeVisible()
+  await expect(example).not.toHaveAttribute('open', '')
+  await example.locator('summary').click()
+  await expect(example).toContainText('"dataset":"/data/gsm8k.jsonl"')
+
+  // 填入输入框：覆盖当前输入（不是追加）
+  await example.getByTestId('input-1-fill-example').click()
+  await expect(args).toHaveValue(/"dataset"/)
+
+  // 已有内容被覆盖要可撤销（不静默丢失）：先写点内容，再填入一次，撤销回刚才的内容
+  await args.fill('{"dataset":"/data/other.jsonl","limit":1}')
+  await example.getByTestId('input-1-fill-example').click()
+  await expect(args).toHaveValue(/gsm8k/)
+  const toast = page.locator('[data-sonner-toaster]')
+  await expect(toast).toContainText('已填入示例')
+  await toast.getByRole('button', { name: '撤销' }).click()
+  await expect(args).toHaveValue('{"dataset":"/data/other.jsonl","limit":1}')
+})
+
+test('③ Runner 详情抽屉里点参数「复制」把 jsonl 片段追加进当前 runner 的输入框（不覆盖）', async ({ page }) => {
+  await openSubmit(page)
+
+  const args = page.getByLabel('runner 1 输入')
+  await expect(args).toHaveValue('')
+
+  // 抽屉里点参数复制：追加 jsonl 片段 `"name": <default|按类型的示例值>`
+  await page.locator('[data-testid="runner-runner-detail"]').first().click()
+  const drawer = page.getByRole('dialog')
+  await expect(drawer).toBeVisible()
+  await page.locator('[data-testid="drawer-copy-param"][data-param="limit"]').click()
+  await page.getByRole('button', { name: '关闭' }).click()
+  await expect(drawer).toBeHidden()
   await expect(args).toHaveValue('"limit": 1')
 
-  // 再点 dataset：追加，不覆盖（换行接上）
-  await page.locator('[data-testid="copy-param"][data-param="dataset"]').click()
+  // 再开抽屉点 dataset：追加，不覆盖（换行接上）
+  await page.locator('[data-testid="runner-runner-detail"]').first().click()
+  await page.locator('[data-testid="drawer-copy-param"][data-param="dataset"]').click()
+  await page.getByRole('button', { name: '关闭' }).click()
   await expect(args).toHaveValue('"limit": 1\n"dataset": "value"')
-
-  // 输入示例（placeholder）整段一键复制：也走追加
-  await page.getByTestId('copy-placeholder').click()
-  await expect(args).toHaveValue('"limit": 1\n"dataset": "value"\n{"dataset":"/data/gsm8k.jsonl","limit":200}')
 })
 
 /* ============================================================ 4. Task 行 Tester 详情 */

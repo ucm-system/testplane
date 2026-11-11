@@ -4704,6 +4704,12 @@ components:
         placeholder:
           type: string
           description: 与 `input_format` 同格式的合法片段（JSONL 片段 / YAML 片段），UI 输入框占位；平台不解析
+        clean_runner:
+          type: string
+          description: |
+            deploy 角色声明的配对 clean runner 名（runner.yaml `clean_runner`，D-70 声明式配对）；
+            未声明 / null = 无 clean 阶段（如 existing-deploy / mock-deploy）。平台不感知具体名字，
+            提交体不出现 clean —— assemble 期按本声明注入。
 
     Runner:
       description: |
