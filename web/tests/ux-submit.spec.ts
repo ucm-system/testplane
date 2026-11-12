@@ -181,7 +181,7 @@ test('⑥ YAML 长值（超长 model 名）横向滚动看全', async ({ page })
 
 
 
-test('⑧ 跨行美化 JSON 粘贴：一条可操作错误（点压缩压成一行后恢复可提交）', async ({ page }) => {
+test('⑧ 跨行美化 JSON 粘贴：一条可操作错误（点格式化压成一行后恢复可提交）', async ({ page }) => {
   await openSubmit(page)
 
   // 把美化打印的 JSON 直接贴进 jsonl 输入框（最常见的 JSONL 误写）
@@ -193,13 +193,13 @@ test('⑧ 跨行美化 JSON 粘贴：一条可操作错误（点压缩压成一�
   const issues = page.getByTestId('input-issues-1')
   await expect(issues).toBeVisible()
   await expect(issues).toContainText('跨行的单个 JSON 对象')
-  await expect(issues).toContainText('压缩')
+  await expect(issues).toContainText('格式化')
   // 只有这一条：不再出现逐行 JSON 语法错误的噪音
   await expect(issues.locator('li')).toHaveCount(1)
 
   // 一键救回：点「压缩」→ 单行合法 JSONL，错误清空
-  await page.getByTestId('input-minify-1').click()
-  await expect(args).toHaveValue('{"dataset":"/data/gsm8k.jsonl","sla":["ttft.avg:1200"],"input_len":2048,"limit":1}')
+  await page.getByTestId('input-format-1').click()
+  await expect(args).toHaveValue('{"dataset": "/data/gsm8k.jsonl", "sla": ["ttft.avg:1200"], "input_len": 2048, "limit": 1}')
   await expect(page.getByTestId('input-issues-1')).toHaveCount(0)
 })
 

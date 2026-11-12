@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { AlignLeft, ListChecks, Minimize2, Plus, Trash2 } from 'lucide-react'
+import { AlignLeft, ListChecks, Plus, Trash2 } from 'lucide-react'
 import { parse as parseYaml } from 'yaml'
 import { api, writeBlockedReason } from '@/api'
 import { toApiError } from '@/api/client'
@@ -19,7 +19,7 @@ import { useToast } from '@/components/ui/toast'
 import { useAsync } from '@/hooks/useAsync'
 import { useIdentity } from '@/hooks/useIdentity'
 import { inputHint, inputFormatLabel } from '@/lib/runner-format'
-import { validateJsonlInput, validateYamlInput, formatJsonl, minifyJsonl, type InputIssue } from '@/lib/input-validate'
+import { validateJsonlInput, validateYamlInput, formatJsonl, type InputIssue } from '@/lib/input-validate'
 import { cn } from '@/lib/utils'
 
 /**
@@ -277,11 +277,11 @@ export function SubmitPage() {
   }
 
   /** JSONL 逐行格式化 / 压缩（保持一条记录一行；解析失败的行原样保留并提示）。 */
-  const rewriteJsonl = (draft: RunnerDraft, mode: 'format' | 'minify') => {
-    const result = mode === 'format' ? formatJsonl(draft.input) : minifyJsonl(draft.input)
+  const rewriteJsonl = (draft: RunnerDraft) => {
+    const result = formatJsonl(draft.input)
     setRunnerDraft(draft.key, { input: result.text })
     toast({
-      title: mode === 'format' ? '已逐行格式化' : '已逐行压缩',
+      title: '已逐行格式化',
       description: result.keptInvalid > 0 ? `${result.keptInvalid} 行不是合法 JSON，已原样保留` : '全部行重排成功',
       tone: result.keptInvalid > 0 ? 'warn' : 'ok',
     })
@@ -1188,18 +1188,9 @@ export function SubmitPage() {
                           variant="ghost"
                           data-testid={`input-format-${index + 1}`}
                           icon={<AlignLeft className="size-3" aria-hidden />}
-                          onClick={() => rewriteJsonl(draft, 'format')}
+                          onClick={() => rewriteJsonl(draft)}
                         >
                           格式化
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          data-testid={`input-minify-${index + 1}`}
-                          icon={<Minimize2 className="size-3" aria-hidden />}
-                          onClick={() => rewriteJsonl(draft, 'minify')}
-                        >
-                          压缩
                         </Button>
                       </>
                     ) : null}
