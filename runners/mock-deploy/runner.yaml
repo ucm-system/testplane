@@ -1,5 +1,5 @@
 name: mock-deploy
-version: 1.1.1
+version: 1.1.2
 display_name: Mock 服务部署（内置）
 description: |
   内置 deploy Runner（mock 变体，D-75）：**与 Genet 完全解耦**——不做任何部署动作，
@@ -55,11 +55,11 @@ parameters:
     required: false
     description: "就绪探测总窗口（秒），缺省 120；超窗 DEPLOY_BLOCKED(reason=timeout)。"
 
-# 与 input_format 同格式的合法片段（§5.4），UI 输入框占位。空行 = 全缺省接入内置 mock-llm。
-placeholder: |
-  {"base_url":"http://mock-llm.argus.svc.cluster.local:18080/v1","model_name":"mock-llm"}
-  base_url / model_name 都可省略：省略 = 接入 chart 内置 mock-llm（联调缺省）；
-  ready_timeout_seconds 缺省 120。就绪探测打 {base_url}/models，2xx 即就绪。
+# placeholder 必须与 input_format 同格式（D-67）：jsonl = 单行完整 JSON 对象（可为空行 = 全缺省）。
+# 输入要点见 description：base_url / model_name 可省略（缺省接 chart 内置 mock-llm）；
+# ready_timeout_seconds 缺省 120；就绪探测打 {base_url}/models，2xx 即就绪。
+placeholder: '{"base_url":"http://mock-llm.argus.svc.cluster.local:18080/v1","model_name":"mock-llm"}'
+# 也可整行留空：参数全走缺省。
 
 # 运行期读取的环境变量（§12.4）。这里是声明，不是绑定：值由平台注入
 # （Task 级 env > 上游 exports > 本声明 default）。

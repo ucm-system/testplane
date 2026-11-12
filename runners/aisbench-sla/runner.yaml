@@ -1,5 +1,5 @@
 name: aisbench-sla
-version: 0.5.0
+version: 0.5.1
 display_name: AISBench 前缀缓存 SLA 搜索
 description: |
   用前缀缓存 SLA 搜索找出「满足延迟约束的最大并发」与「最高输出吞吐」。
@@ -12,6 +12,13 @@ description: |
   （`aisbench_cmd=/runner/tool/tests/stub_aisbench.py`）。
   0.4.0 起 `sla_max_concurrency` 只取**实测并发达到目标 80%** 的 PASS 点：压不满的点标
   degraded、不参与取值；`ENDPOINT_API_KEY` 只走环境变量（不进 argv、不落日志、不留临时配置）。
+
+  输入要点：url / model_name / model_path 不在输入文件里——由平台以 AG_SERVED_URL /
+  AG_SERVED_MODEL_NAME / AG_MODEL_PATH 注入，服务根地址由本 Runner 自行处理（去掉末尾
+  /v1 再交给工具）。work_path **不要**写 /benchmark：平台 Job 的根文件系统只读，
+  /benchmark 属 root 不可写；run.sh 会用 AIS_BENCH_DATASETS_CACHE + --config-dir 把
+  /tmp 下的影子源码根接给 ais_bench。
+  0.5.1 起 placeholder 收敛为单行合法 JSONL（跨行美化 JSON 复制/填示例即报行号错误，D-67）。
 
 role: test
 
@@ -60,15 +67,9 @@ consumes: [AG_SERVED_URL, AG_SERVED_MODEL_NAME]
 # 走 AG_SERVED_URL / AG_SERVED_MODEL_NAME / AG_MODEL_PATH 环境变量，**不进参数文件**。
 # 本 Runner 不声明超时与产物：超时由平台/调用方决定；产物契约三选一（D-74：result.json/html/csv 至少其一，本 Runner 产出 result.json），全局统一见 §5.3、§6.6。
 
-placeholder: |
-  {"sla":["ttft.avg:1200","tpot.avg:30"],"input_len":2048,"output_len":32,"data_num":160,
-   "start":8,"max":256,"max_probes":12,"request_rate":0,"dataset_type":"prefix_cache",
-   "prefix_num":1,"repeat_rate":"90%","work_path":"/tmp/aisbench-ws",
-   "dataset_path":"/workspace/output/sla_out/datasets"}
-  url / model_name / model_path 不在输入文件里：由平台以 AG_SERVED_URL / AG_SERVED_MODEL_NAME /
-  AG_MODEL_PATH 注入。服务根地址由 Runner 自行处理（去掉末尾 /v1 再交给工具）。
-  work_path **不要**写 /benchmark：平台 Job 的根文件系统只读，/benchmark 属 root 不可写；
-  run.sh 会用 AIS_BENCH_DATASETS_CACHE + --config-dir 把 /tmp 下的影子源码根接给 ais_bench。
+# placeholder 必须与 input_format 同格式（D-67）：jsonl = 单行完整 JSON 对象。
+# 输入要点见 description（url/model_name 注入、work_path 禁写 /benchmark）。
+placeholder: '{"sla":["ttft.avg:1200","tpot.avg:30"],"input_len":2048,"output_len":32,"data_num":160,"start":8,"max":256,"max_probes":12,"request_rate":0,"dataset_type":"prefix_cache","prefix_num":1,"repeat_rate":"90%","work_path":"/tmp/aisbench-ws","dataset_path":"/workspace/output/sla_out/datasets"}'
 
 parameters:
   - name: sla
