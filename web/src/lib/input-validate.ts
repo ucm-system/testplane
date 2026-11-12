@@ -49,7 +49,7 @@ function describeValue(value: unknown): string {
 /**
  * 「跨行单个 JSON 对象」检测：整段文本是一个合法 JSON 对象/数组，但占了多行——
  * 这是最常见的 JSONL 误写（把美化打印的 JSON 直接贴进来）。JSONL 要求每行一个
- * 完整对象，所以给出**一条可操作的**错误（提示点「压缩」），而不是逐行的 N 条语法错误。
+ * 完整对象，所以给出**一条可操作的**错误（提示点「格式化」），而不是逐行的 N 条语法错误。
  */
 function singleMultiLineJson(text: string): boolean {
   if (!text.includes('\n')) return false
@@ -72,12 +72,12 @@ export function validateJsonlInput(text: string, parameters: RunnerParameter[]):
   const required = parameters.filter((p) => p.required === true)
   const typed = parameters.filter((p) => Boolean(p.type))
 
-  // 常见误写先行：跨行的单个 JSON 对象 → 一条可操作错误（点「压缩」可一键修好）
+  // 常见误写先行：跨行的单个 JSON 对象 → 一条可操作错误（点「格式化」可一键修好）
   if (singleMultiLineJson(text)) {
     issues.push({
       line: 1,
       kind: 'syntax',
-      message: '这是一段跨行的单个 JSON 对象；JSONL 要求每行一个完整对象——点上方「压缩」压成一行',
+      message: '这是一段跨行的单个 JSON 对象；JSONL 要求每行一个完整对象——点上方「格式化」压成一行',
     })
     return issues
   }
@@ -164,7 +164,7 @@ export function validateYamlInput(text: string): InputIssue[] {
   }
 }
 
-/* ---------------------------------------------------------------- 格式化 / 压缩 */
+/* ---------------------------------------------------------------- 格式化 */
 
 /** 单行 JSON 序列化（键与值之间 `: `、元素之间 `, `）：保持"一条记录一行"的 JSONL 形态。 */
 function stringifyOneLine(value: unknown): string {
@@ -197,25 +197,6 @@ export function formatJsonl(text: string): JsonlRewriteResult {
     if (!raw.trim()) return raw
     try {
       return stringifyOneLine(JSON.parse(raw))
-    } catch {
-      keptInvalid += 1
-      return raw
-    }
-  })
-  return { text: out.join('\n'), keptInvalid }
-}
-
-/** JSONL 逐行压缩：去掉记录内的全部多余空白（仍是每行一条记录）。
- *  整段是跨行单个 JSON 时压成一行（配合校验器的「点压缩」提示）。 */
-export function minifyJsonl(text: string): JsonlRewriteResult {
-  if (singleMultiLineJson(text)) {
-    return { text: JSON.stringify(JSON.parse(text.trim())), keptInvalid: 0 }
-  }
-  let keptInvalid = 0
-  const out = text.split('\n').map((raw) => {
-    if (!raw.trim()) return raw
-    try {
-      return JSON.stringify(JSON.parse(raw))
     } catch {
       keptInvalid += 1
       return raw
