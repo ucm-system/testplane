@@ -41,7 +41,7 @@ func (s *Store) SubmitTask(ctx context.Context, p SubmitParams) (*Task, []*Runne
 		return nil, nil, fmt.Errorf("store: submit task: task 不能为空")
 	}
 	if len(p.Runners) == 0 {
-		return nil, nil, fmt.Errorf("store: submit task %s: runners 至少 1 条（D-57）: %w", p.Task.ID, domain.ErrPrecondition)
+		return nil, nil, fmt.Errorf("store: submit task %s: runners 至少 1 条: %w", p.Task.ID, domain.ErrPrecondition)
 	}
 	at := p.At
 	if at.IsZero() {

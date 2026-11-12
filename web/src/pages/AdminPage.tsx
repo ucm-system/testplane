@@ -33,7 +33,7 @@ type TabKey = 'profiles' | 'clusters' | 'mounts' | 'secrets' | 'audit'
 const TAB_ITEMS: Array<{ value: TabKey; label: string }> = [
   { value: 'profiles', label: 'Profiles' },
   { value: 'clusters', label: 'Clusters' },
-  { value: 'mounts', label: '挂载点' },
+  { value: 'mounts', label: 'Mounts' },
   { value: 'secrets', label: 'Secrets' },
   { value: 'audit', label: 'Audit' },
 ]
@@ -100,10 +100,10 @@ function ProfilesTab() {
       <CardHeader
         tone="primary"
         title="Execution Profiles"
-        sub="提交 Task 时 execution.profile 必须命中这里"
         actions={
           <Button
             size="sm"
+            variant="primary"
             icon={<Plus className="size-3" aria-hidden />}
             onClick={() => {
               setEditing(null)

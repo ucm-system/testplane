@@ -33,7 +33,9 @@ test('runs list -> detail task table -> submit dry-run error', async ({ page }) 
   await expect(page.locator('table').first()).toBeVisible()
 
   await page.goto('/submit')
-  await expect(page.getByText('提交前会先 dry-run', { exact: false })).toBeVisible()
+  // 页面就绪的标志：提交/校验按钮可见（页脚说明文案已按「界面去噪音」删掉）
+  await expect(page.getByTestId('submit-task')).toBeVisible()
+  await expect(page.getByTestId('validate-task')).toBeVisible()
 
   // 清空 Task 1 名称，让 dry-run 返回校验错误（页面应显示“校验未通过” Banner）。
   const taskName = page.getByLabel('runner 1 名称')
@@ -118,12 +120,12 @@ test('admin：键盘 ←/→ 切换页签到 Audit', async ({ page }) => {
   await profilesTab.focus()
   await expect(profilesTab).toHaveAttribute('aria-selected', 'true')
 
-  // 方向键切页签（不是 Tab 键）：Profiles → Clusters → 挂载点 → Secrets → Audit。
-  // 这里逐档走，中途断言"挂载点"这一档也在键盘可达序列里（票 #90 新加的页签）。
+  // 方向键切页签（不是 Tab 键）：Profiles → Clusters → Mounts → Secrets → Audit。
+  // 这里逐档走，中途断言 Mounts 这一档也在键盘可达序列里（票 #90 新加的页签）。
   await page.keyboard.press('ArrowRight') // Clusters
   await expect(page.getByRole('tab', { name: 'Clusters' })).toHaveAttribute('aria-selected', 'true')
-  await page.keyboard.press('ArrowRight') // 挂载点
-  await expect(page.getByRole('tab', { name: '挂载点' })).toHaveAttribute('aria-selected', 'true')
+  await page.keyboard.press('ArrowRight') // Mounts
+  await expect(page.getByRole('tab', { name: 'Mounts' })).toHaveAttribute('aria-selected', 'true')
   await page.keyboard.press('ArrowRight') // Secrets
   await page.keyboard.press('ArrowRight') // Audit
   const auditTab = page.getByRole('tab', { name: 'Audit' })

@@ -84,7 +84,7 @@ test('⑥ /runs?q= 只在本页内查找，改关键字会写回 URL', async ({ 
   await page.goto('/?page_size=50&q=qwen3-8b-nightly')
   await expect(page.getByText('全部 Task')).toBeVisible()
 
-  const search = page.getByLabel('在当前页内查找（名称 / ID）')
+  const search = page.getByLabel('搜索名称 / ID')
   await expect(search).toHaveValue('qwen3-8b-nightly')
 
   const rows = page.locator('tbody tr')

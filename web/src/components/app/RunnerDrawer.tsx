@@ -170,7 +170,7 @@ export function RunnerDrawer({
                 {detail.data.role}
               </Badge>
               {detail.data.role === 'deploy' || detail.data.role === 'clean' ? (
-                <span className="ml-2 text-2xs text-fg-3">内置（用户不可引用，D-70）</span>
+                <span className="ml-2 text-2xs text-fg-3">内置（不可手动引用）</span>
               ) : null}
             </dd>
             <dt className="text-fg-3">失败策略</dt>
@@ -182,13 +182,12 @@ export function RunnerDrawer({
               </Badge>
             </dd>
             <dt className="text-fg-3">独占 Endpoint</dt>
-            <dd className="text-fg-2">{detail.data.exclusive ? '是（仅外接模式有效）' : '否'}</dd>
+            <dd className="text-fg-2">{detail.data.exclusive ? '是' : '否'}</dd>
             <dt className="text-fg-3">镜像</dt>
             <dd className="break-all font-mono text-2xs text-fg-2">{detail.data.image}</dd>
             <dt className="text-fg-3">入口</dt>
             <dd className="break-all font-mono text-2xs text-fg-2">
               {detail.data.entry ? JSON.stringify(detail.data.entry) : '—'}
-              <span className="ml-2 text-2xs text-fg-3">（exec form 数组；argv 恒空，D-66）</span>
             </dd>
             <dt className="text-fg-3">exports</dt>
             <dd className="break-all font-mono text-2xs text-fg-2">{detail.data.exports?.join('、') || '—'}</dd>

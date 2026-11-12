@@ -315,7 +315,7 @@ test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 T
   await expect(sourceSelect).toBeVisible()
   await expect(sourceSelect).toContainText('Genet 服务部署（内置）')
   await expect(sourceSelect).toContainText('Mock 服务部署（内置）')
-  await expect(sourceSelect).toContainText('已有服务（不部署 · 直接填三元组）')
+  await expect(sourceSelect).toContainText('已有服务（不部署，直接填地址）')
 
   // 部署形态（默认 Genet）：CodeMirror 编辑器在，且真做了语法高亮 + 行号
   const editor = page.getByLabel('部署描述 YAML')
@@ -358,7 +358,7 @@ test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 T
   await page.screenshot({ path: join(OUT_DIR, '09-submit-yaml-highlight.png'), fullPage: true })
 
   // 切到「已有服务」：同一张卡换成服务三元组字段
-  await sourceSelect.selectOption({ label: '已有服务（不部署 · 直接填三元组）' })
+  await sourceSelect.selectOption({ label: '已有服务（不部署，直接填地址）' })
   await expect(page.getByLabel('服务 base URL')).toBeVisible()
   await expect(page.getByText('模型路径（可选）')).toBeVisible()
   await expect(page.getByLabel('部署描述 YAML')).toHaveCount(0)

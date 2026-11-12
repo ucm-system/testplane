@@ -223,12 +223,12 @@ test('⑦ 只有 pre_check 角色的 Runner：无可用测试 runner 时置灰�
 
   const hint = page.getByTestId('runner-empty-registered')
   await expect(hint).toBeVisible({ timeout: 15_000 })
-  await expect(hint).toHaveText('当前没有可用的 Runner；deploy / clean 角色仅内置（D-70），不能作为测试 runner')
+  await expect(hint).toHaveText('当前没有可用的测试 Runner')
 
   const submit = page.getByTestId('submit-task')
   await expect(submit).toBeDisabled()
   await expect(submit).toHaveAttribute('aria-disabled', 'true')
-  await expect(submit).toHaveAttribute('title', /当前没有可用的 Runner/)
+  await expect(submit).toHaveAttribute('title', /当前没有可用的测试 Runner/)
   await expect(page.getByTestId('validate-task')).toBeDisabled()
 
   // 下拉里只剩占位，没有可选的测试 runner

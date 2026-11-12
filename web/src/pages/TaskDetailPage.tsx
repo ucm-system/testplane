@@ -16,6 +16,7 @@ import { Dialog } from '@/components/ui/dialog'
 import { KV } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Banner, ErrorState } from '@/components/ui/states'
+import { stripErrorCodePrefix } from '@/lib/error-format'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
 import { Tabs, tabPanelProps } from '@/components/ui/tabs'
 import { useToast } from '@/components/ui/toast'
@@ -122,7 +123,7 @@ function deployPhaseText(deploy: Deploy): string {
     case 'ready':
       return '就绪：是否真的可用由 pre_check 判定。'
     case 'blocked':
-      return '被阻塞：会收口为 service_unavailable（D-47）。'
+      return '被阻塞：Task 将以 service_unavailable 结束。'
     case null:
     case undefined:
       return '尚未启动：service-deploy runner 还没跑到。'
@@ -162,7 +163,7 @@ function DeploySection({
           <span className="flex items-center gap-2">
             service-deploy
             <DeployStateBadge state={phase} />
-            {deploy.genet_status ? <Tag mono title="Helm status 原值（两根轴之一，D-45）">{deploy.genet_status}</Tag> : null}
+            {deploy.genet_status ? <Tag mono title="Helm status 原值">{deploy.genet_status}</Tag> : null}
           </span>
         }
         sub={`deploy runner: ${deploy.runner ?? '—'}${deploy.release_name ? ` · release: ${deploy.release_name}` : ''}`}
@@ -367,13 +368,11 @@ function RunnerDetailPanel({
         <KV label="镜像 digest">
           <span className="break-all font-mono text-2xs text-fg-3">{runner.image_digest ?? 'unknown'}</span>
         </KV>
-        <KV label="失败策略">
-          {runner.on_failure === 'abort_task' ? 'abort_task（失败终止本 attempt 内后续 runner）' : 'continue'}
-        </KV>
+        <KV label="失败策略">{runner.on_failure}</KV>
         <KV label="超时">{formatDuration(runner.timeout_seconds)}</KV>
         <KV label="退出码">{runner.exit_code ?? '—'}</KV>
         {runner.exports_ref ? (
-          <KV label="exports 落档">
+          <KV label="exports">
             <code className="break-all font-mono text-2xs text-fg-3">{runner.exports_ref}</code>
           </KV>
         ) : null}
@@ -382,7 +381,7 @@ function RunnerDetailPanel({
             <code className="break-all font-mono text-2xs text-fg-3">{runner.result_ref}</code>
           </KV>
         ) : (
-          <KV label="result.json">—（产物三选一：可能只产出 html / csv，见结果视图，D-74）</KV>
+          <KV label="result.json">—（见结果视图）</KV>
         )}
         {runner.status_reason ? <KV label="跳过原因">{runner.status_reason}</KV> : null}
       </dl>
@@ -392,7 +391,7 @@ function RunnerDetailPanel({
           <Badge tone="err" className="font-mono">
             {runner.error.code}
           </Badge>
-          <span className="text-fg">{runner.error.message}</span>
+          <span className="text-fg">{stripErrorCodePrefix(runner.error.code, runner.error.message)}</span>
           {runner.error.retryable ? <Badge tone="warn">可重试</Badge> : null}
         </div>
       ) : null}
@@ -401,7 +400,7 @@ function RunnerDetailPanel({
         <InputExample
           example={catalogRunner.data.placeholder}
           testIdPrefix="runner-detail"
-          title={`${runner.runner_name} 的输入示例（只读；本次执行的实际输入在落档文件里）`}
+          title={`${runner.runner_name} 的输入示例`}
         />
       ) : null}
 
@@ -561,7 +560,7 @@ export function TaskDetailPage() {
     <>
       <div className="flex flex-wrap items-center gap-2">
         <Link to="/">
-          <Button size="sm" icon={<ArrowLeft className="size-3" aria-hidden />}>
+          <Button size="sm" variant="ghost" icon={<ArrowLeft className="size-3" aria-hidden />}>
             返回概览
           </Button>
         </Link>
@@ -580,9 +579,10 @@ export function TaskDetailPage() {
         {detail && terminal ? (
           <Button
             size="sm"
+            variant="primary"
             data-testid="retry-task"
             disabled={Boolean(retryBlocked)}
-            title={retryBlocked ?? '把这次 Task 的参数带回提交页，可修改后重新提交（生成新 Task）'}
+            title={retryBlocked ?? '把参数带回提交页，修改后生成新 Task'}
             onClick={confirmRetry}
           >
             重试
@@ -601,9 +601,9 @@ export function TaskDetailPage() {
               立即重试
             </Button>
           }
-        >
-          事件时间线暂时停止更新，已经收到的内容仍然可读；恢复后这条提示会自动消失。
-        </Banner>
+          >
+            恢复后这条提示会自动消失。
+          </Banner>
       ) : null}
 
       {actionError ? <ErrorState error={actionError} compact /> : null}
@@ -662,11 +662,11 @@ export function TaskDetailPage() {
                 status === 'open'
                   ? '实时更新中'
                   : status === 'polling'
-                    ? '实时更新已降级为 3s 轮询'
+                    ? '3s 轮询中'
                     : status === 'reconnecting'
-                      ? '连接断开，重连中'
+                      ? '重连中'
                       : status === 'closed'
-                        ? '已结束 · 时间线为历史事件'
+                        ? '已结束'
                         : undefined
               }
             />
@@ -676,7 +676,7 @@ export function TaskDetailPage() {
                   <Badge tone="err" className="font-mono">
                     {detail.error.code}
                   </Badge>
-                  <span className="text-fg">{detail.error.message}</span>
+                  <span className="text-fg">{stripErrorCodePrefix(detail.error.code, detail.error.message)}</span>
                   {detail.error.retryable ? <Badge tone="warn">可重试</Badge> : null}
                 </div>
               ) : null}
@@ -744,7 +744,7 @@ export function TaskDetailPage() {
             <CardHeader
               tone="primary"
               title="runner 管道时间线"
-              sub="严格串行：service-deploy? → pre_check? → tests → service-clean?（v2 无并行分支，D-69/D-70）；点任一节点看详情"
+              sub="deploy → precheck → tests → clean，点任一节点看详情"
               actions={
                 <span className="text-2xs text-fg-3">
                   attempt #{activeAttemptNo || '—'} · {runners.length} 个节点
@@ -791,7 +791,7 @@ export function TaskDetailPage() {
           {/* 选中 runner 的详情（含日志）；deploy / clean 的日志也在各自节点下读 */}
           {selectedRunner ? (
             <Card>
-              <CardHeader tone="muted" title={`runner 详情 · seq #${selectedRunner.seq}`} sub="输入落档、冻结快照与执行日志" />
+              <CardHeader tone="muted" title={`runner 详情 · seq #${selectedRunner.seq}`} />
               <RunnerDetailPanel
                 task={detail}
                 runner={selectedRunner}

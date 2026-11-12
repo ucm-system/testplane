@@ -12,7 +12,7 @@ import { cn } from '@/lib/utils'
 export function InputExample({
   example,
   onFill,
-  title = '输入示例（placeholder 来自 runner.yaml）',
+  title = '输入示例',
   testIdPrefix,
   className,
 }: {
@@ -42,7 +42,6 @@ export function InputExample({
           ▸
         </span>
         示例
-        <span className="text-fg-3">（可复制；点开看全文）</span>
       </summary>
       <div className="border-t border-line-soft px-2.5 py-2">
         <div className="flex flex-wrap items-center gap-2">

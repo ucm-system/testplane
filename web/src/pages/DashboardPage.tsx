@@ -61,61 +61,44 @@ export function DashboardPage() {
           </>
         ) : (
           <>
-            <KpiCard
-              label="进行中 Task"
-              value={formatNumber(stats?.active_tasks ?? 0)}
-              hint="含部署排队（service-deploy 未 ready）"
-              tone="blue"
-            />
-            <KpiCard
-              label="排队 runner"
-              value={formatNumber(stats?.queued_runners ?? 0)}
-              hint="平台槽位 + 队列两个来源"
-              tone="ink"
-            />
+            <KpiCard label="进行中 Task" value={formatNumber(stats?.active_tasks ?? 0)} tone="blue" />
+            <KpiCard label="排队 runner" value={formatNumber(stats?.queued_runners ?? 0)} tone="ink" />
             <KpiCard
               label="成功率（终态 Task）"
               value={stats?.success_rate == null ? '—' : `${Math.round(stats.success_rate * 100)}%`}
-              hint={`近 24h 失败 ${formatNumber(stats?.failed_24h ?? 0)} 个`}
+              hint={`24h 失败 ${formatNumber(stats?.failed_24h ?? 0)}`}
               tone="green"
             />
-            <KpiCard
-              label="已注册 Runner"
-              value={formatNumber(stats?.runner_count ?? 0)}
-              hint="随镜像内置，启动时扫描目录自动发现"
-              tone="amber"
-            />
+            <KpiCard label="已注册 Runner" value={formatNumber(stats?.runner_count ?? 0)} tone="amber" />
           </>
         )}
       </section>
 
-      {/* 原「排队中的 Task」压成一行：谁在排队 + 去看队列 */}
-      <div
-        data-testid="queue-summary"
-        className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface px-4 py-2.5 text-2xs text-fg-3 shadow-xs"
-      >
-        <span className="text-fg-2">排队中的 runner：{waitingRunners.length} 个</span>
-        {waitingRunners.length > 0 ? (
-          <>
-            <span aria-hidden>·</span>
-            <span className="min-w-0 truncate" title={waitingRunners.map((runner) => runner.name).join('、')}>
-              {waitingRunners
-                .slice(0, 3)
-                .map((runner) => runner.name)
-                .join('、')}
-              {waitingRunners.length > 3 ? ` 等 ${waitingRunners.length} 个` : ''}
-            </span>
-          </>
-        ) : null}
-        <Link
-          to="/clusters"
-          className="ml-auto inline-flex h-6 items-center gap-1 text-primary-text hover:underline"
-          data-testid="queue-link"
+      {/* 有 runner 真的在排队才显示这一行（0 个的横条是噪音） */}
+      {waitingRunners.length > 0 ? (
+        <div
+          data-testid="queue-summary"
+          className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface px-4 py-2.5 text-2xs text-fg-3 shadow-xs"
         >
-          看队列
-          <ArrowUpRight className="size-3" aria-hidden />
-        </Link>
-      </div>
+          <span className="text-fg-2">排队中的 runner：{waitingRunners.length} 个</span>
+          <span aria-hidden>·</span>
+          <span className="min-w-0 truncate" title={waitingRunners.map((runner) => runner.name).join('、')}>
+            {waitingRunners
+              .slice(0, 3)
+              .map((runner) => runner.name)
+              .join('、')}
+            {waitingRunners.length > 3 ? ` 等 ${waitingRunners.length} 个` : ''}
+          </span>
+          <Link
+            to="/clusters"
+            className="ml-auto inline-flex h-6 items-center gap-1 text-primary-text hover:underline"
+            data-testid="queue-link"
+          >
+            看队列
+            <ArrowUpRight className="size-3" aria-hidden />
+          </Link>
+        </div>
+      ) : null}
 
       {/* 全量 Task 表（真分页 + 列筛选，条件都在 URL 上） */}
       <TasksTable />

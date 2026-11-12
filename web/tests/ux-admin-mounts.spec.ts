@@ -26,7 +26,7 @@ test.beforeEach(async ({ page }) => {
 /** 打开管理台的「挂载点」页签 */
 async function openMounts(page: import('@playwright/test').Page) {
   await page.goto('/admin')
-  await page.getByRole('tab', { name: '挂载点' }).click()
+  await page.getByRole('tab', { name: 'Mounts' }).click()
   await expect(page.getByTestId('mounts-explainer')).toBeVisible({ timeout: 20_000 })
 }
 
@@ -90,8 +90,8 @@ test('① 页签可切换 + 空态文案 + 页内说明（不能填 NFS 地址 /
 
   // 其它 tab 仍可用（同一套 Tabs）
   await page.getByRole('tab', { name: 'Profiles' }).click()
-  await expect(page.getByRole('tab', { name: '挂载点' })).toHaveAttribute('aria-selected', 'false')
-  await page.getByRole('tab', { name: '挂载点' }).click()
+  await expect(page.getByRole('tab', { name: 'Mounts' })).toHaveAttribute('aria-selected', 'false')
+  await page.getByRole('tab', { name: 'Mounts' }).click()
   await expect(page.getByTestId('mounts-explainer')).toBeVisible()
 
   await page.screenshot({ path: join(OUT_DIR, 'admin-mounts-1440.png'), fullPage: true })

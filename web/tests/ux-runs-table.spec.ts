@@ -174,7 +174,7 @@ test('⑤ q 只在本页内查找：文案写清「在当前页内」，且不�
   await expect(page.getByTestId('pagination-total')).toBeVisible({ timeout: 15_000 })
   const totalBefore = await page.getByTestId('pagination-total').innerText()
 
-  const search = page.getByLabel('在当前页内查找（名称 / ID）')
+  const search = page.getByLabel('搜索名称 / ID')
   await expect(search).toBeVisible()
   await expect(page.getByText('筛选本页已加载的 Run')).toHaveCount(0)
 
