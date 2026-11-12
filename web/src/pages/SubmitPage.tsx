@@ -10,8 +10,9 @@ import { InputExample } from '@/components/app/InputExample'
 import { Badge, Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
-import { Field, Input, Select, Textarea } from '@/components/ui/input'
+import { Field, Input, Select } from '@/components/ui/input'
 import { YamlEditor, type YamlEditorError } from '@/components/ui/yaml-editor'
+import { JsonlEditor } from '@/components/ui/jsonl-editor'
 import { Segmented } from '@/components/ui/segmented'
 import { Banner } from '@/components/ui/states'
 import { FormErrorSummary } from '@/components/app/FormErrorSummary'
@@ -209,9 +210,6 @@ export function SubmitPage() {
   /** Runner 详情抽屉（与 `/runners?open=` 同一个组件） */
   const [detailRunner, setDetailRunner] = useState<string | null>(null)
 
-  /** 每个 runner 的输入框 ref（就地报错点击 → 跳到那一行） */
-  const inputRefs = useRef<Record<string, HTMLTextAreaElement | null>>({})
-
   /**
    * 客户端**即时校验**（dry-run 性质，不替代提交时服务端校验，D-67）：
    *  - jsonl：按 Runner 的 parameters 逐行校验类型 + required（+ parameters 里带的 enum 提示），行号级报错；
@@ -232,21 +230,8 @@ export function SubmitPage() {
     return map
   }, [runnerDrafts, runnerList, defaultRunner])
 
-  /** 就地报错点击：把光标跳到那一行并选中（textarea 的行 → 字符偏移）。 */
-  const jumpToLine = (draftKey: string, line: number) => {
-    const el = inputRefs.current[draftKey]
-    if (!el) return
-    const lines = el.value.split('\n')
-    let offset = 0
-    for (let i = 0; i < Math.min(line - 1, lines.length); i += 1) offset += (lines[i]?.length ?? 0) + 1
-    const target = lines[Math.min(line - 1, lines.length - 1)] ?? ''
-    el.focus()
-    el.setSelectionRange(offset, offset + target.length)
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
-  }
-
-  /** 「校验」按钮：滚动/聚焦第一条问题；无问题给一条成功 toast。 */
-  const validateDraftInput = (draft: RunnerDraft, issues: InputIssue[]) => {
+  /** 「校验」按钮：无问题给一条成功 toast（有问题就地列表 + 编辑器标行）。 */
+  const validateDraftInput = (issues: InputIssue[]) => {
     if (issues.length === 0) {
       toast({
         title: '输入校验通过',
@@ -256,7 +241,6 @@ export function SubmitPage() {
       return
     }
     const first = issues[0]!
-    jumpToLine(draft.key, first.line)
     toast({
       title: `发现 ${issues.length} 条输入问题`,
       description: `第 ${first.line} 行${first.field ? ` · ${first.field}` : ''}：${first.message}`,
@@ -953,15 +937,16 @@ export function SubmitPage() {
                       hint={inputHint(deployRunnerObj?.input_format ?? 'jsonl')}
                       error={issueFor('task.deploy.input')}
                     >
-                      <Textarea
+                      <JsonlEditor
                         value={deployInput}
+                        onChange={setDeployInput}
                         rows={3}
-                        spellCheck={false}
                         aria-label="deploy runner 输入"
-                        aria-invalid={(deployJsonlIssues.length ?? 0) > 0}
+                        mirrorLabel="deploy runner 输入"
+                        testId="deploy-jsonl-editor"
                         placeholder={deployPlaceholderFirstLine}
-                        className="font-mono text-xs"
-                        onChange={(e) => setDeployInput(e.target.value)}
+                        title="deploy.input（该 runner 的输入原文，平台不解析语义）"
+                        error={deployJsonlIssues[0] ? { line: deployJsonlIssues[0].line } : null}
                       />
                     </Field>
                     {deployJsonlIssues.length > 0 ? (
@@ -1177,7 +1162,7 @@ export function SubmitPage() {
                       variant="ghost"
                       data-testid={`input-validate-${index + 1}`}
                       icon={<ListChecks className="size-3" aria-hidden />}
-                      onClick={() => validateDraftInput(draft, draftIssues[draft.key] ?? [])}
+                      onClick={() => validateDraftInput(draftIssues[draft.key] ?? [])}
                     >
                       校验
                     </Button>
@@ -1200,18 +1185,15 @@ export function SubmitPage() {
                     error={issueFor(`task.runners[${index}].input`) ?? issueFor(`task.runners[${index}].runner`)}
                     hint={resolvedRunner ? inputHint(resolvedRunner.input_format) : undefined}
                   >
-                    <Textarea
-                      ref={(el) => {
-                        inputRefs.current[draft.key] = el
-                      }}
+                    <JsonlEditor
                       value={draft.input}
+                      onChange={(next) => setRunnerDraft(draft.key, { input: next })}
                       rows={3}
-                      spellCheck={false}
                       aria-label={`runner ${index + 1} 输入`}
-                      aria-invalid={(draftIssues[draft.key]?.length ?? 0) > 0}
+                      testId={`jsonl-editor-${index + 1}`}
                       placeholder={resolvedRunner?.placeholder?.split('\n')[0] ?? '{"dataset":"/data/gsm8k.jsonl","limit":200}'}
-                      className="font-mono text-xs"
-                      onChange={(e) => setRunnerDraft(draft.key, { input: e.target.value })}
+                      title={`${draft.name.trim() || `runner ${index + 1}`} 的输入（JSONL，平台校验结构）`}
+                      error={draftIssues[draft.key]?.[0] ? { line: draftIssues[draft.key]![0]!.line } : null}
                     />
                   </Field>
                   {/* 行内报错（行号 + 字段名 + 原因）：点一条跳到那一行；规则与服务端 D-67 一致 */}
@@ -1223,14 +1205,10 @@ export function SubmitPage() {
                     >
                       {(draftIssues[draft.key] ?? []).slice(0, 8).map((issue, issueIndex) => (
                         <li key={`${issue.line}-${issue.field ?? issue.kind}-${issueIndex}`}>
-                          <button
-                            type="button"
-                            className="text-left text-2xs leading-[16px] text-danger-text hover:underline"
-                            onClick={() => jumpToLine(draft.key, issue.line)}
-                          >
+                          <span className="text-left text-2xs leading-[16px] text-danger-text">
                             第 {issue.line} 行
                             {issue.field ? <code className="mx-1 font-mono">{issue.field}</code> : null}· {issue.message}
-                          </button>
+                          </span>
                         </li>
                       ))}
                       {(draftIssues[draft.key]?.length ?? 0) > 8 ? (
