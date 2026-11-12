@@ -325,15 +325,15 @@ test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 T
   await editor.click()
   await page.keyboard.type('model: Qwen3-32B\nresources:\n  gpu: 8')
   const highlight = await page.evaluate(() => {
-    const content = document.querySelector('.cm-content')
+    // 只看 YAML 编辑器（runner 行的 jsonl 编辑器也在页面上，别串台）
+    const content = document.querySelector('[aria-label="部署描述 YAML"]')
     if (!content) return null
     const base = getComputedStyle(content).color
-    // 与正文不同的颜色 = 真的上了语法高亮（YAML 的 key 会被 tag 成 propertyName）
     const colors = new Set(Array.from(content.querySelectorAll('span')).map((span) => getComputedStyle(span).color))
     colors.delete(base)
     return {
       tokenColors: colors.size,
-      hasLineNumbers: Boolean(document.querySelector('.cm-lineNumbers')),
+      hasLineNumbers: Boolean(content.closest('.cm-editor')?.querySelector('.cm-lineNumbers')),
       whiteSpace: getComputedStyle(content).whiteSpace,
     }
   })
@@ -350,7 +350,7 @@ test('提交页：服务来源一张卡两形态 + Deploy YAML 语法高亮与 T
   await page.keyboard.type('note: demo')
   await page.keyboard.press('Enter')
   await page.keyboard.type('# 注释演示')
-  const value = await page.locator('.cm-content').innerText()
+  const value = await editor.innerText()
   expect(value, 'Tab 应插入 2 个空格').toContain('\n  note: demo')
   expect(value).toContain('# 注释演示')
 
