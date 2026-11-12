@@ -15,6 +15,7 @@ import { useAsync } from '@/hooks/useAsync'
 import { ARTIFACT_GROUPS, groupArtifacts, relativeArtifactPath } from '@/lib/artifact-groups'
 import { artifactViewKindOf } from '@/components/app/ArtifactViewer'
 import { formatBytes } from '@/lib/download'
+import { stripErrorCodePrefix } from '@/lib/error-format'
 import { formatDateTime, formatDuration, runDuration } from '@/lib/utils'
 import { cn } from '@/lib/utils'
 
@@ -66,7 +67,7 @@ function conclusion(task: TaskDetail): { tone: 'ok' | 'warn' | 'err' | 'muted'; 
       return {
         tone: 'err',
         text: task.error
-          ? `${task.error.code}：${task.error.message}`
+          ? `${task.error.code}：${stripErrorCodePrefix(task.error.code, task.error.message)}`
           : failedNames.length > 0
             ? `${failedNames.length} 个 runner 失败：${failedNames.join('、')}`
             : 'runner 管道有失败。',

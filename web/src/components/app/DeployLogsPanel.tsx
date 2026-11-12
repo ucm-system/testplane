@@ -9,6 +9,7 @@ import { Banner, EmptyState, ErrorState } from '@/components/ui/states'
 import { useFollowScroll } from '@/hooks/useFollowScroll'
 import { LOG_POLL_INTERVAL_MS } from '@/hooks/useLogTail'
 import { formatBytes, saveBlob } from '@/lib/download'
+import { stripErrorCodePrefix } from '@/lib/error-format'
 import { logMarkerTone } from '@/lib/log-markers'
 import { cn, formatClock } from '@/lib/utils'
 
@@ -383,7 +384,7 @@ export function DeployLogsPanel({
     <div className="flex flex-col gap-3 px-5 py-4">
       {error ? (
         <p role="alert" className="rounded-md border border-danger/25 bg-danger-weak px-2.5 py-1.5 text-2xs text-fg">
-          {error.code}：{error.message}（已收到的日志保留，下一轮会自动重试）
+          {error.code}：{stripErrorCodePrefix(error.code, error.message)}（日志已保留，下一轮自动重试）
         </p>
       ) : null}
       {downloadNotice ? (

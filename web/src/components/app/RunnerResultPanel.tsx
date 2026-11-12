@@ -51,7 +51,7 @@ function JsonResultBody({ taskId, runner, attemptNo }: { taskId: string; runner:
   if (result.error) {
     return (
       <p className="py-2 text-2xs text-danger-text">
-        result.json 读取失败（{result.error.code}）：{result.error.message}
+        result.json 读取失败（{result.error.code}）：{stripErrorCodePrefix(result.error.code, result.error.message)}
       </p>
     )
   }
