@@ -268,7 +268,7 @@ const RUNNERS: RunnerWire[] = [
   }),
   runnerWire({
     name: 'mock-deploy',
-    version: '1.1.1',
+    version: '1.1.2',
     display_name: 'Mock 服务部署（内置）',
     description:
       '与 Genet 完全解耦（D-75）：不做部署动作，只接入一个 OpenAI 兼容 mock 服务并等它就绪；缺省接 chart 内置 mock-llm。不声明 clean_runner → 无 clean 阶段。',
@@ -288,7 +288,7 @@ const RUNNERS: RunnerWire[] = [
   }),
   runnerWire({
     name: 'genet-clean',
-    version: '1.0.0',
+    version: '1.0.1',
     display_name: '服务拆除（内置）',
     description: '消费 AG_DEPLOY_REF 调 Genet 卸载 release 并判干净；finally 语义执行。仅由 deploy runner 的 clean_runner 声明注入。',
     role: 'clean',

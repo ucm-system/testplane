@@ -1,10 +1,13 @@
 name: endpoint-probe
-version: 1.0.2
+version: 1.0.3
 display_name: 服务就绪探测
 description: |
   对已部署的 LLM 服务执行生成型探活：POST <url>/chat/completions，max_tokens=1、stream=true，
   首包 token 一到即判定可服务，避免慢模型/长思考模型「等到 EOS 才返回」被误判为未就绪。
   只回答「服务此刻能不能出字」；部署是否 ready/blocked 由内置 service-deploy runner 与 Genet 负责（§9）。
+  输入要点：url / model_name 不在输入文件里——由平台以 AG_SERVED_URL / AG_SERVED_MODEL_NAME
+  注入；探活路径由本 Runner 自行拼 /chat/completions 与 /models，不单独暴露 path 参数。
+  1.0.3 起 placeholder 收敛为单行合法 JSONL（跨行美化 JSON 复制/填示例即报行号错误，D-67）。
 
 role: pre_check
 
@@ -51,10 +54,8 @@ consumes: [AG_SERVED_URL, AG_SERVED_MODEL_NAME]
 #
 # 本 Runner 不声明超时与产物：超时由平台/调用方决定；产物契约三选一（D-74：result.json/html/csv 至少其一，本 Runner 产出 result.json），全局统一见 §5.3、§6.6。
 
-placeholder: |
-  {"wait_timeout_seconds":600,"retry_interval_seconds":15,"max_tokens":1,"stream":true}
-  url / model_name 不在输入文件里：由平台以 AG_SERVED_URL / AG_SERVED_MODEL_NAME 注入。
-  探活路径由 Runner 自行拼 /chat/completions 与 /models，不单独暴露 path 参数。
+# placeholder 必须与 input_format 同格式（D-67）：jsonl = 单行完整 JSON 对象。
+placeholder: '{"wait_timeout_seconds":600,"retry_interval_seconds":15,"max_tokens":1,"stream":true}'
 
 parameters:
   - name: wait_timeout_seconds

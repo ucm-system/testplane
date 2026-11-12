@@ -1,5 +1,5 @@
 name: genet-clean
-version: 1.0.0
+version: 1.0.1
 display_name: 服务拆除（内置）
 description: |
   内置 clean Runner：消费 deploy 导出的 AG_DEPLOY_REF（缺失时用确定性 releaseName 兜底并注明 fallback），
@@ -38,11 +38,10 @@ consumes: [AG_DEPLOY_REF]
 # 业务参数 schema（jsonl）：本 Runner 无业务参数（附录 C：无业务参数时必须显式 []）。
 parameters: []
 
-placeholder: |
-  {}
-  本 Runner 无业务参数（parameters: []）；平台按 jsonl 落盘空参数文件。
-  releaseName 来源优先级：AG_DEPLOY_REF（deploy 导出）> /workspace/input/deploy-state.json 副本
-  > 确定性兜底 "arg-"+sha256("${AG_TASK_ID}:${AG_ATTEMPT}")[:12]（日志注明 fallback）。
+# placeholder 必须与 input_format 同格式（D-67）：无业务参数 → 空对象单行。
+# releaseName 来源优先级：AG_DEPLOY_REF（deploy 导出）> /workspace/input/deploy-state.json 副本
+# > 确定性兜底 "arg-"+sha256("${AG_TASK_ID}:${AG_ATTEMPT}")[:12]（日志注明 fallback）。
+placeholder: '{}' 
 
 # 运行期读取的环境变量（§12.4）。GENET_API_KEY 走 Task 级 secrets（§12.2 / D-72）。
 env:
