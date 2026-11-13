@@ -24,34 +24,32 @@ async function replaceYaml(page: Page, text: string): Promise<void> {
   await page.keyboard.insertText(text)
 }
 
-test('① 0 个测试 Task：提交/校验置灰（disabled + aria-disabled + title）且 Task 区说明可见', async ({ page }) => {
+test('① 0 个测试 runner：允许提交（D-77，只验证服务能否启动），空态给中性说明', async ({ page }) => {
   await openSubmit(page)
 
-  // 默认 1 个 Task → 先确认按钮是能点的（否则下面的置灰断言没有说服力）
   const submit = page.getByTestId('submit-task')
   const validate = page.getByTestId('validate-task')
   await expect(submit).toBeEnabled()
 
+  // 干跑前先给 Task 名称（frontendIssues 的 name 必填与 0-runner 无关）
+  await page.getByLabel('Task 名称').fill('deploy-only-check')
   await page.getByTestId('remove-runner-1').click()
 
-  // 说明就出现在 Task 卡片区
+  // 中性说明（不再是置灰警告）：只跑 服务来源 + precheck/clean
   const hint = page.getByTestId('runner-empty-hint')
   await expect(hint).toBeVisible()
-  await expect(hint).toHaveText('至少需要 1 个 runner（deploy / precheck / clean 由平台注入，不计入）')
+  await expect(hint).toContainText('未添加测试 runner')
+  await expect(hint).toContainText('适合验证服务能否启动')
 
-  // 两个按钮：真 disabled + aria-disabled + title 说清原因
-  for (const button of [submit, validate]) {
-    await expect(button).toBeDisabled()
-    await expect(button).toHaveAttribute('aria-disabled', 'true')
-    await expect(button).toHaveAttribute('title', /至少需要 1 个 runner/)
-  }
-
-  // 点了也不会发请求（按钮 disabled，dry-run 的摘要区不该出现）
-  await page.getByTestId('submit-task').click({ force: true })
+  // 提交/校验保持可用：dry-run 通过（mock 校验同样允许 0 个 runner）
+  await expect(submit).toBeEnabled()
+  await expect(validate).toBeEnabled()
+  await validate.click()
   await expect(page.getByTestId('form-error-summary')).toHaveCount(0)
+  await expect(page.getByText('dry-run 通过')).toBeVisible({ timeout: 15_000 })
 })
 
-test('② 删掉最后一个 Task 后立即置灰；撤销后恢复并重新可用', async ({ page }) => {
+test('② 删掉最后一个 runner：提交始终可用；撤销恢复原行', async ({ page }) => {
   await openSubmit(page)
 
   // 默认值是空的（见 ux-submit-defaults）：先自己写一个名字，撤销才有「原值」可恢复
@@ -60,11 +58,11 @@ test('② 删掉最后一个 Task 后立即置灰；撤销后恢复并重新可�
   const submit = page.getByTestId('submit-task')
   await page.getByTestId('remove-runner-1').click()
 
-  // 「立即」：不等 dry-run、不刷新，点完就应该变灰
-  await expect(submit).toBeDisabled()
+  // D-77：删空不再置灰，只是出现中性说明
+  await expect(submit).toBeEnabled()
   await expect(page.getByTestId('runner-empty-hint')).toBeVisible()
 
-  // C5：删除给 undo toast，撤销把 Task 原位置放回去，A4 的置灰随之解除
+  // C5：删除给 undo toast，撤销把 runner 原位置放回去
   const toast = page.locator('[data-sonner-toaster]')
   await expect(toast).toContainText('已删除 runner accuracy-dataset-a')
   await toast.getByRole('button', { name: '撤销' }).click()
@@ -203,7 +201,7 @@ test('⑧ 跨行美化 JSON 粘贴：一条可操作错误（点格式化压成�
   await expect(page.getByTestId('input-issues-1')).toHaveCount(0)
 })
 
-test('⑦ 只有 pre_check 角色的 Runner：无可用测试 runner 时置灰并在 runner 区说明原因', async ({ page }) => {
+test('⑦ 只有 pre_check 角色的 Runner：目录空仍可提交（服务来源 + precheck）', async ({ page }) => {
   await openSubmit(page)
 
   // 目录里只剩 pre_check 角色：B10 描述的就是这种「下拉只有一句占位」的状态
@@ -223,13 +221,12 @@ test('⑦ 只有 pre_check 角色的 Runner：无可用测试 runner 时置灰�
 
   const hint = page.getByTestId('runner-empty-registered')
   await expect(hint).toBeVisible({ timeout: 15_000 })
-  await expect(hint).toHaveText('当前没有可用的测试 Runner')
+  await expect(hint).toContainText('目录里暂无测试类 Runner')
 
+  // D-77：服务来源（genet-deploy）+ precheck（auto 注入）仍可提交
   const submit = page.getByTestId('submit-task')
-  await expect(submit).toBeDisabled()
-  await expect(submit).toHaveAttribute('aria-disabled', 'true')
-  await expect(submit).toHaveAttribute('title', /当前没有可用的测试 Runner/)
-  await expect(page.getByTestId('validate-task')).toBeDisabled()
+  await expect(submit).toBeEnabled()
+  await expect(page.getByTestId('validate-task')).toBeEnabled()
 
   // 下拉里只剩占位，没有可选的测试 runner
   await expect(page.getByLabel('runner 1 Runner')).toHaveValue('')

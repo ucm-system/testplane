@@ -248,6 +248,30 @@ func TestAssemblePrecheckOffSkipsInjection(t *testing.T) {
 	}
 }
 
+// D-77：runners 可为 0——「只验证服务能否启动」（deploy + precheck + clean）是合法 Task。
+func TestAssembleNoTestRunnersAllowed(t *testing.T) {
+	c := catalogWithBuiltin()
+	m := &Manifest{Task: TaskBody{
+		Name:   "deploy-only",
+		Deploy: &DeployManifest{Runner: builtinDeployName, Version: "1.0.0", Input: "model: Qwen3-32B\n"},
+	}}
+	p, err := testAssembler(c).Assemble(context.Background(), m, "t-20261111-CCCC", "dev", nil)
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	if len(p.Runners) < 2 {
+		t.Fatalf("deploy + precheck(+clean) 至少两行: %+v", p.Runners)
+	}
+	if p.Runners[0].Role != domain.RoleDeploy {
+		t.Fatalf("seq=1 应为 deploy 注入行: %+v", p.Runners[0])
+	}
+	for _, rr := range p.Runners[1:] {
+		if rr.Role != domain.RolePreCheck && rr.Role != domain.RoleClean {
+			t.Fatalf("0 个用户 runner 时只应出现注入行: %+v", rr)
+		}
+	}
+}
+
 func TestAssembleValidationErrors(t *testing.T) {
 	cases := []struct {
 		name string
@@ -261,9 +285,6 @@ func TestAssembleValidationErrors(t *testing.T) {
 		{"deploy_xor_service_neither", func(m *Manifest) {
 			m.Task.Service = nil
 		}, domain.IssueCodeDeployService, "task"},
-		{"no_runners", func(m *Manifest) {
-			m.Task.Runners = nil
-		}, domain.IssueCodeRequired, "task.runners"},
 		{"injected_name_conflict", func(m *Manifest) {
 			m.Task.Runners[0].Name = InjectedPrecheckName
 		}, domain.IssueCodeNameConflict, "runners[0].name"},

@@ -1497,9 +1497,6 @@ function validateManifest(manifest: TaskManifest): ValidationIssue[] {
   if (body.service && !body.service.url?.trim()) {
     issues.push({ path: 'task.service.url', code: 'VALIDATION_ERROR', message: 'service.url 必填' })
   }
-  if (!body.runners || body.runners.length === 0) {
-    issues.push({ path: 'task.runners', code: 'VALIDATION_ERROR', message: '至少需要 1 个 runner' })
-  }
   if ((body.runners?.length ?? 0) > 200) {
     issues.push({ path: 'task.runners', code: 'TASK_TOO_LARGE', message: '单个 Task 最多 200 个 runner（§12.7）' })
   }

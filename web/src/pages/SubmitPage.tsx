@@ -326,7 +326,7 @@ export function SubmitPage() {
 
   /**
    * A4 / B10：两种「点下去也一定失败」的情况，直接在本页拦住（不靠后端 400）：
-   *  - 0 个 runner（D-57：至少 1 条；注入的 deploy / precheck / clean 不计入）；
+   *  - 0 个 runner（D-77：允许，只跑 deploy/precheck/clean；注入行不计入）；
    *  - 目录里没有 role=test 的 Runner（deploy / clean 角色不可在 runners[] 引用，D-70）。
    * 目录还在加载时**不算**「没有」：`loading` 期间不置灰，避免把加载中误判成空目录。
    */
@@ -346,8 +346,6 @@ export function SubmitPage() {
 
   const submitBlockers: string[] = []
   if (blocked) submitBlockers.push(blocked)
-  if (noRunners) submitBlockers.push('至少需要 1 个 runner')
-  if (noRunnersRegistered) submitBlockers.push('当前没有可用的测试 Runner')
   if (nameTooLong) submitBlockers.push(`Task 名称超过 ${NAME_MAX_RUNES} 字符（当前 ${nameRunes}）`)
   const submitDisabled = submitBlockers.length > 0
   const submitTitle = submitDisabled ? submitBlockers.join('；') : undefined
@@ -541,14 +539,6 @@ export function SubmitPage() {
         path: 'task.runners[0].execution.profile',
         code: 'REQUIRED',
         message: 'execution.profile 必填',
-      })
-    }
-    // D-57：与后端同一句口径（path=task.runners 会被映射到 runner 区就地显示）
-    if (runnerDrafts.length === 0) {
-      found.push({
-        path: 'task.runners',
-        code: 'REQUIRED',
-        message: '至少需要 1 个 runner（deploy / precheck / clean 由平台注入，不计入）',
       })
     }
     runnerDrafts.forEach((draft, index) => {
@@ -1011,9 +1001,9 @@ export function SubmitPage() {
           {noRunners ? (
             <p
               data-testid="runner-empty-hint"
-              className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-[16px] text-warn-text"
+              className="rounded-md border border-line-soft bg-surface-2 px-3 py-2 text-2xs leading-[16px] text-fg-3"
             >
-              至少需要 1 个 runner（deploy / precheck / clean 由平台注入，不计入）
+              未添加测试 runner：本次只执行 服务来源 → precheck（auto 时）→ clean，适合验证服务能否启动
             </p>
           ) : null}
 
@@ -1021,9 +1011,9 @@ export function SubmitPage() {
           {noRunnersRegistered ? (
             <p
               data-testid="runner-empty-registered"
-              className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-[16px] text-warn-text"
+              className="rounded-md border border-line-soft bg-surface-2 px-3 py-2 text-2xs leading-[16px] text-fg-3"
             >
-              当前没有可用的测试 Runner
+              目录里暂无测试类 Runner；可只提交服务来源 + precheck（auto 注入）
             </p>
           ) : null}
 
