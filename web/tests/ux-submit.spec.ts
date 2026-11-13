@@ -234,3 +234,19 @@ test('⑦ 只有 pre_check 角色的 Runner：无可用测试 runner 时置灰�
   // 下拉里只剩占位，没有可选的测试 runner
   await expect(page.getByLabel('runner 1 Runner')).toHaveValue('')
 })
+
+test('⑨ 单行 JSON 带尾随换行（重试回填常见）：不算跨行，不报错', async ({ page }) => {
+  await openSubmit(page)
+
+  // 重试回填的原文常带行尾换行符（服务端逐行 trim 跳空行，本就合法）——
+  // 校验器不得把它误判成「跨行的单个 JSON 对象」（用户 2026-11-13：点重试全报错）
+  const args = page.getByLabel('runner 1 输入')
+  await args.fill('{"dataset":"/data/gsm8k.jsonl","limit":200}\n')
+  await expect(page.getByTestId('input-issues-1')).toHaveCount(0)
+
+  // 真跨行（内部有换行）仍然报，且一键格式化可救回
+  await args.fill('{"a":1,\n"b":2}')
+  await expect(page.getByTestId('input-issues-1')).toContainText('跨行的单个 JSON 对象')
+  await page.getByTestId('input-format-1').click()
+  await expect(args).toHaveValue('{"a": 1, "b": 2}')
+})
