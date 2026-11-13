@@ -13,6 +13,12 @@ type Size = 'sm' | 'md'
  *  - 焦点：`ring-[3px] ring-ring/50` + `border-ring`（全站统一）；
  *  - 禁用：`pointer-events-none opacity-50`；
  *  - 图标：尺寸由组件兜底（16px），调用点只写 `data-icon="inline-start|inline-end"`。
+ *
+ * 变体层级（设计约束，用户 2026-11-13：「详情」按钮各处长不一样 —— 同一动作全站同款）：
+ *  - `primary`  页面级主行动，一页最多一显眼处（新建 Task / 提交 / 重试 / 打包下载）；
+ *  - `secondary` 次级但要有可点感的动作 —— **所有「详情」一律 secondary**（RunnersPage / 提交页 runner 行 / 服务来源 / precheck 同款）；
+ *  - `ghost`    行内轻操作（移除 / 校验 / 格式化 / 清除筛选），不与主次级抢视觉；
+ *  - `danger` / `dangerGhost` 破坏性动作（删除 / 取消 Task）。
  */
 const VARIANTS: Record<Variant, string> = {
   // 主按钮用墨黑（= shadcn 的 --primary），蓝色只留给链接与焦点
