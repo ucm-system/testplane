@@ -81,7 +81,7 @@ func (s *Store) SeedDefaultsWith(ctx context.Context, o SeedOptions) error {
 				INSERT INTO clusters (name, api_server, kubeconfig_key, description)
 				VALUES ($1, $2, '', $3)
 				ON CONFLICT (name) DO NOTHING`,
-				o.ClusterName, o.APIServer, "默认集群（启动时 seed，D-42）"); err != nil {
+				o.ClusterName, o.APIServer, "默认集群"); err != nil {
 				return fmt.Errorf("store: seed cluster: %w", err)
 			}
 		}

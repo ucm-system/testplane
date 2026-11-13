@@ -215,7 +215,7 @@ function DeploySection({
         {deploy.input ? (
           <details className="rounded-md border border-line-soft bg-surface-2 px-3 py-2" open>
             <summary className="flex h-6 cursor-pointer items-center text-2xs text-fg-2">
-              部署描述原文（deploy.input，提交冻结；平台不解析语义）
+              部署描述原文
             </summary>
             <pre className="mt-2 overflow-x-auto font-mono text-2xs leading-[16px] text-fg-2">{deploy.input}</pre>
           </details>

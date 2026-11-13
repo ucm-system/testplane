@@ -214,15 +214,17 @@ export function ClustersPage() {
         <CardBody className="flex flex-col gap-3">
           {waiting ? (
             <div className="flex flex-wrap gap-2">
-              {Object.entries(waiting.by_reason).map(([reason, count]) => (
-                <span
-                  key={reason}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 py-1 text-2xs text-fg-2"
-                >
-                  {waitingReasonLabel(reason)}
-                  <span className="font-mono tabular-nums text-fg-3">{count}</span>
-                </span>
-              ))}
+              {Object.entries(waiting.by_reason)
+                .filter(([, count]) => count > 0)
+                .map(([reason, count]) => (
+                  <span
+                    key={reason}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 py-1 text-2xs text-fg-2"
+                  >
+                    {waitingReasonLabel(reason)}
+                    <span className="font-mono tabular-nums text-fg-3">{count}</span>
+                  </span>
+                ))}
             </div>
           ) : null}
 

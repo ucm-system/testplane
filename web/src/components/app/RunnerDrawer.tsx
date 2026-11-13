@@ -145,7 +145,7 @@ export function RunnerDrawer({
       open={name !== null}
       onClose={onClose}
       title={detail.data?.display_name ?? name ?? 'Runner'}
-      description={`${name ?? ''} · 平台只认 runner.yaml（附录 C v2），注册靠目录扫描`}
+      description={name ?? undefined}
     >
       {detail.loading && !detail.data ? (
         <LoadingBlock label="加载 Runner 详情…" />
@@ -154,7 +154,10 @@ export function RunnerDrawer({
       ) : detail.data ? (
         <div className="flex flex-col gap-4" data-testid="runner-drawer">
           {detail.data.description ? (
-            <p className="text-xs leading-[16px] text-fg-2">{detail.data.description}</p>
+            <details className="rounded-md border border-line-soft bg-surface-2 px-3 py-2">
+              <summary className="cursor-pointer text-xs text-fg-2">说明</summary>
+              <p className="mt-2 whitespace-pre-wrap text-2xs leading-[16px] text-fg-2">{detail.data.description}</p>
+            </details>
           ) : null}
 
           <dl className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
