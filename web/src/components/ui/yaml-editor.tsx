@@ -13,6 +13,7 @@ import CodeMirror, {
 import { yaml } from '@codemirror/lang-yaml'
 import { Check, Copy, FileCode } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { editorAutoHeight, editorContentLines, useEditorAutoGrow } from '@/lib/editor-autogrow'
 
 /**
  * YAML 编辑器 —— **CodeMirror 6**（`@uiw/react-codemirror` + `@codemirror/lang-yaml`）。
@@ -201,11 +202,11 @@ export function YamlEditor({
 }: YamlEditorProps) {
   const viewRef = useRef<EditorView | null>(null)
   const [mounted, setMounted] = useState(false)
-  // 可拖拽高度：CodeMirror 没有 native textarea 的 resize handle，所以由外层容器提供 CSS `resize: vertical`。
-  // 高度**不让 React 接管**（不写 style 属性）：只在挂了之后命令式设一次初始高度，之后用户拖成多少就是多少，
-  // 否则每次 onChange 重渲染都会被 `rows` 算出来的高度覆盖回去——这正是"拖一下就弹回去"的原因。
-  const rowsHeight = Math.round(rows * 1.7 * 12.5 + 16)
   const boxRef = useRef<HTMLDivElement | null>(null)
+  // 高度随内容自动长（封顶半屏），用户拖过就以用户为准 —— 机制见 lib/editor-autogrow
+  // （原实现只在挂载时设一次基准高度；用户 2026-11-13：默认框太低，希望随内容长高）
+  const autoHeight = useMemo(() => editorAutoHeight(rows, editorContentLines(value, rows)), [rows, value])
+  useEditorAutoGrow(boxRef, autoHeight)
   // 底部提示条要显示的光标位置（1-based），与 CodeMirror 的 selection 同步
   const [cursor, setCursor] = useState({ line: 1, col: 1 })
   // 复制按钮的「已复制」反馈
@@ -258,14 +259,6 @@ export function YamlEditor({
       effects: [setYamlDiag.of({ lineFrom: line.from, from, to }), EditorView.scrollIntoView(line.from, { y: 'center' })],
     })
   }, [error, value, mounted])
-
-  // 把用户拖出来的高度记进 state（否则每次重渲染被 rows 算出来的高度覆盖回原样）。
-  // 只跟 1px 以上的变化，避免 ResizeObserver 与 setState 之间的抖动循环。
-  useEffect(() => {
-    const el = boxRef.current
-    if (!el || el.style.height) return
-    el.style.height = `${rowsHeight}px`
-  }, [rowsHeight])
 
   const copyValue = async () => {
     try {

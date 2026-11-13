@@ -889,6 +889,15 @@ export function SubmitPage() {
                     ) : (
                       <Tag data-testid="deploy-clean-tag">无 clean 阶段</Tag>
                     )}
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      data-testid="deploy-runner-detail"
+                      aria-label="查看服务来源的 Runner 详情"
+                      onClick={() => setDetailRunner(deployRunnerObj.name)}
+                    >
+                      详情
+                    </Button>
                   </span>
                 ) : null}
               </div>
@@ -930,7 +939,7 @@ export function SubmitPage() {
                       <JsonlEditor
                         value={deployInput}
                         onChange={setDeployInput}
-                        rows={3}
+                        rows={7}
                         aria-label="deploy runner 输入"
                         mirrorLabel="deploy runner 输入"
                         testId="deploy-jsonl-editor"
@@ -1038,9 +1047,21 @@ export function SubmitPage() {
             <div className="rounded-md border border-line-soft bg-surface-2 px-3 py-2 text-2xs leading-[16px] text-fg-2">
               <span className="font-medium text-fg">precheck 自动注入：</span>
               {precheckRunner ? (
-                <Tag mono className="ml-2">
-                  {precheckRunner.name} · {precheckRunner.version}
-                </Tag>
+                <>
+                  <Tag mono className="ml-2">
+                    {precheckRunner.name} · {precheckRunner.version}
+                  </Tag>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    data-testid="precheck-detail"
+                    aria-label="查看 precheck 的 Runner 详情"
+                    className="ml-1"
+                    onClick={() => setDetailRunner(precheckRunner.name)}
+                  >
+                    详情
+                  </Button>
+                </>
               ) : null}
             </div>
           ) : null}
@@ -1168,7 +1189,7 @@ export function SubmitPage() {
                     <JsonlEditor
                       value={draft.input}
                       onChange={(next) => setRunnerDraft(draft.key, { input: next })}
-                      rows={3}
+                      rows={7}
                       aria-label={`runner ${index + 1} 输入`}
                       testId={`jsonl-editor-${index + 1}`}
                       placeholder={resolvedRunner?.placeholder?.split('\n')[0] ?? '{"dataset":"/data/gsm8k.jsonl","limit":200}'}
