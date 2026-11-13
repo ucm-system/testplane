@@ -891,7 +891,7 @@ export function SubmitPage() {
                     )}
                     <Button
                       size="sm"
-                      variant="secondary"
+                      variant="ghost"
                       data-testid="deploy-runner-detail"
                       aria-label="查看服务来源的 Runner 详情"
                       onClick={() => setDetailRunner(deployRunnerObj.name)}
@@ -1053,7 +1053,7 @@ export function SubmitPage() {
                   </Tag>
                   <Button
                     size="sm"
-                    variant="secondary"
+                    variant="ghost"
                     data-testid="precheck-detail"
                     aria-label="查看 precheck 的 Runner 详情"
                     className="ml-1"
@@ -1109,10 +1109,10 @@ export function SubmitPage() {
                       </option>
                     ))}
                   </Select>
-                  {/* 详情：复用 `/runners?open=` 的同一个抽屉组件（不复制第二份）；所有「详情」统一 secondary（button.tsx 层级约束） */}
+                  {/* 详情：复用 `/runners?open=` 的同一个抽屉组件（不复制第二份）；所有「详情」统一 ghost 文字（button.tsx 层级约束） */}
                   <Button
                     size="sm"
-                    variant="secondary"
+                    variant="ghost"
                     data-testid="runner-runner-detail"
                     data-runner-index={index + 1}
                     disabled={!resolvedRunner}

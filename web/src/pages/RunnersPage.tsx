@@ -208,7 +208,7 @@ export function RunnersPage() {
                             另有 {group.older.length} 个历史版本
                           </Button>
                         ) : null}
-                        <Button size="sm" variant="secondary" onClick={() => setOpenName(group.name)}>
+                        <Button size="sm" variant="ghost" onClick={() => setOpenName(group.name)}>
                           详情
                         </Button>
                       </TD>
