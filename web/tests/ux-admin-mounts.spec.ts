@@ -67,7 +67,7 @@ test('① 页签可切换 + 空态文案 + 页内说明（不能填 NFS 地址 /
   const empty = page.getByTestId('mounts-empty')
   await expect(empty).toBeVisible()
   await expect(empty).toContainText('还没有挂载点')
-  await expect(empty).toContainText('未配置时不会阻断 Pod')
+  await expect(empty).toContainText('未配置不会阻断 Pod')
 
   // 页内说明压成一行（用户 2026-11-11）：解释与 YAML 收进弹窗，点按钮才展开
   const explainer = page.getByTestId('mounts-explainer')
@@ -170,7 +170,7 @@ test('④ 删除要二次确认：先弹确认框，确认后才消失', async (
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('只影响之后提交的 Task')
-  await expect(dialog).toContainText('已在跑的 Pod 不受影响')
+  await expect(dialog).toContainText('已提交 Task 的 runner 快照已冻结')
   await page.getByRole('button', { name: '取消' }).click()
   await expect(page.getByTestId('mount-row-to-delete')).toBeVisible()
 

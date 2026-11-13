@@ -239,7 +239,7 @@ function ProfilesTab() {
         open={pendingDelete !== null}
         onClose={() => setPendingDelete(null)}
         title="删除这个 Profile？"
-        description="删除只影响之后的提交：历史 Task 冻结了 profile 名，不会因此失败。"
+        description="删除只影响之后的提交。"
         footer={
           <>
             <Button onClick={() => setPendingDelete(null)}>取消</Button>
@@ -327,7 +327,7 @@ function ClustersTab() {
       <CardHeader
         tone="info"
         title="集群"
-        sub="kubeconfig 放 Secret；这里只维护定位信息"
+        sub="kubeconfig 存于 Secret"
         actions={
           <Button
             size="sm"
@@ -358,7 +358,7 @@ function ClustersTab() {
       ) : clusters.loading && !clusters.data ? (
         <TableSkeleton rows={3} cols={5} />
       ) : (clusters.data ?? []).length === 0 ? (
-        <EmptyState title="没有集群" description="先登记一个可用的 K8s 集群，Profile 才有地方落。" />
+        <EmptyState title="没有集群" description="先登记一个 K8s 集群。" />
       ) : (
         <TableWrap>
           <Table>
@@ -444,7 +444,7 @@ function ClustersTab() {
             <Field label="api_server" required>
               <Input value={draft.api_server} onChange={(e) => setDraft({ ...draft, api_server: e.target.value })} />
             </Field>
-            <Field label="kubeconfig_key" hint="挂载目录里的文件名；这里只存名字，不存凭据">
+            <Field label="kubeconfig_key" hint="Secret 里的文件名">
               <Input
                 value={draft.kubeconfig_key ?? ''}
                 onChange={(e) => setDraft({ ...draft, kubeconfig_key: e.target.value })}
@@ -469,7 +469,7 @@ function ClustersTab() {
           setRefs([])
         }}
         title="删除这个集群？"
-        description="仍有 Profile 引用时后端会 409，不会静默级联删除。"
+        description="被 Profile 引用时无法删除。"
         footer={
           <>
             <Button
@@ -753,7 +753,7 @@ function MountsTab() {
         <CardHeader
           tone="info"
           title="挂载点"
-          sub="运行时资源：增删改下一次渲染立即生效"
+          sub="改动下次渲染生效"
           actions={
             <Button size="sm" icon={<Plus className="size-3" aria-hidden />} data-testid="new-mount" onClick={openCreate}>
               新建挂载点
@@ -777,7 +777,7 @@ function MountsTab() {
           <EmptyState
             data-testid="mounts-empty"
             title="还没有挂载点"
-            description="未配置时不会阻断 Pod —— Runner 自己会报路径不存在。"
+            description="未配置不会阻断 Pod。"
           />
         ) : (
           <TableWrap>
@@ -860,7 +860,7 @@ function MountsTab() {
           setFieldErrors({})
         }}
         title={editing ? `编辑挂载点：${editing}` : '新建挂载点'}
-        description="保存后下一次渲染立即生效，不需要重启。"
+        description="保存后下次渲染生效。"
         footer={
           <>
             <Button
@@ -939,7 +939,6 @@ function MountsTab() {
           setError(null)
         }}
         title="删除这个挂载点？"
-        description="只影响之后提交的 Task，已在跑的 Pod 不受影响。"
         footer={
           <>
             <Button
@@ -1004,7 +1003,7 @@ function SecretsTab() {
       <CardHeader
         tone="warn"
         title="Secrets 引用"
-        sub="只登记引用：不显示、也不回写任何 Secret 值"
+        sub="只登记引用名"
         actions={
           <Button size="sm" icon={<Plus className="size-3" aria-hidden />} onClick={() => setDraft({ ...EMPTY_SECRET })}>
             登记引用
@@ -1018,7 +1017,7 @@ function SecretsTab() {
       ) : secrets.loading && !secrets.data ? (
         <TableSkeleton rows={3} cols={5} />
       ) : (secrets.data ?? []).length === 0 ? (
-        <EmptyState title="没有登记任何 Secret 引用" description="Task 的 secrets 只能引用这里登记的条目（C-10）。" />
+        <EmptyState title="没有登记任何 Secret 引用" description="Task 的凭据只能引用这里登记的条目。" />
       ) : (
         <TableWrap>
           <Table>

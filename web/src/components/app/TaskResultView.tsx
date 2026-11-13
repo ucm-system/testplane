@@ -215,7 +215,7 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
           <LoadingBlock label="加载产物清单…" />
         ) : currentItems.length === 0 ? (
           <CardBody>
-            <EmptyState title="还没有产物" description="产物在 Task 结束后写出；存储未接线时这里会是空的。" />
+            <EmptyState title="还没有产物" description="Task 结束后产物会出现在这里。" />
           </CardBody>
         ) : (
           <div className="flex flex-col gap-2 px-5 py-3" data-testid="artifact-groups">

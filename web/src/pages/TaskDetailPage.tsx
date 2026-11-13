@@ -11,7 +11,7 @@ import { InputExample } from '@/components/app/InputExample'
 import { DeployStateBadge, RunnerStatusBadge, TaskStatusBadge, WaitingReasonTag } from '@/components/app/StatusBadge'
 import { Badge, Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
+import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { Dialog } from '@/components/ui/dialog'
 import { KV } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -115,18 +115,18 @@ function PipelineNode({
 function deployPhaseText(deploy: Deploy): string {
   switch (deploy.phase) {
     case 'queued':
-      return '排队中：等部署方资源，排队计入部署总窗口（默认 72h），期间可以取消。'
+      return '排队中，等部署方资源。'
     case 'accepted':
-      return '已受理：部署方开始调度。'
+      return '已受理。'
     case 'deploying':
-      return '部署中：Pod 正在拉起。'
+      return '部署中。'
     case 'ready':
-      return '就绪：是否真的可用由 pre_check 判定。'
+      return '就绪，可用性由 pre_check 判定。'
     case 'blocked':
-      return '被阻塞：Task 将以 service_unavailable 结束。'
+      return '被阻塞，Task 将以 service_unavailable 结束。'
     case null:
     case undefined:
-      return '尚未启动：service-deploy runner 还没跑到。'
+      return '尚未启动。'
     default:
       return deploy.phase
   }
@@ -233,7 +233,7 @@ function DeploySection({
           <CardHeader
             tone="info"
             title="Pods"
-            sub="多节点 / PD 分离时一个部署对应多个 Pod；点 Pod 名切到它的日志页签"
+            sub="点 Pod 名切换日志"
             className="border-b-0 px-5 py-3"
           />
           <div data-testid="deploy-pods">
@@ -282,7 +282,7 @@ function DeploySection({
           <div id="deploy-logs" className="border-t border-line-soft">
             <div className="flex flex-wrap items-center gap-2 px-5 pb-1 pt-4">
               <span className="text-sm font-semibold text-fg">部署 Pod 日志</span>
-              <span className="text-2xs text-fg-3">按 Pod 分页签，不合并；断过的地方显式标 gap；落盘文件可直接下载 .log</span>
+              <span className="text-2xs text-fg-3">按 Pod 分页签；落盘文件可下载 .log</span>
             </div>
             <DeployLogsPanel
               taskId={task.id}
@@ -298,19 +298,13 @@ function DeploySection({
         /* Pod 拓扑为空（排队中 / 已回收 / 外接模式）：日志端点返回 200 + 空列表 + message，
            面板按 deploy.phase 给"排队中 / 已回收 / 外接模式"的文案。 */
         <div className="border-t border-line-soft">
-          <CardHeader
-            tone="info"
-            title="Pods"
-            sub="Pod 清单来自 deploy-state.json；暂无 Pod 时仍可看排队水位与已等待时长"
-            className="border-b-0 px-5 py-3"
-          />
+          <CardHeader tone="info" title="Pods" className="border-b-0 px-5 py-3" />
           <div data-testid="deploy-pods">
-            <p className="px-5 pb-3 text-xs text-fg-3">暂无 Pod（排队中或已回收）</p>
+            <p className="px-5 pb-3 text-xs text-fg-3">暂无 Pod</p>
           </div>
           <div id="deploy-logs" className="border-t border-line-soft">
             <div className="flex flex-wrap items-center gap-2 px-5 pb-1 pt-4">
               <span className="text-sm font-semibold text-fg">部署 Pod 日志</span>
-              <span className="text-2xs text-fg-3">没有 Pod 时不请求日志端点（排队期 200 + message，不是 404）</span>
             </div>
             <DeployLogsPanel taskId={task.id} deployState={phase ?? null} pods={pods} pod={selectedPod} onPodChange={setSelectedPod} />
           </div>
@@ -533,7 +527,7 @@ export function TaskDetailPage() {
       return (
         <NotFoundPage
           title="Task 不存在或已被清理"
-          description="这个 Task 可能已经被清理（保留期 30 天），或者 ID 打错了。可以回到概览，或从 Task 表里找最近的记录。"
+          description="Task 可能已过保留期被清理，或 ID 不存在。"
         />
       )
     }
@@ -776,12 +770,9 @@ export function TaskDetailPage() {
                   ))}
                 </ol>
               )}
-              <p className="mt-2 text-2xs text-fg-3">
-                管道在 attempt 内按 seq 严格串行执行恰好一次；runner 没有自己的重试（FAILED 是终态，D-69）。
-                {deployStateMeta(detail.deploy?.phase).label !== '未启动'
-                  ? ` 当前部署阶段：${deployStateMeta(detail.deploy?.phase).label}。`
-                  : ''}
-              </p>
+              {deployStateMeta(detail.deploy?.phase).label !== '未启动' ? (
+                <p className="mt-2 text-2xs text-fg-3">当前部署阶段：{deployStateMeta(detail.deploy?.phase).label}</p>
+              ) : null}
             </CardBody>
           </Card>
 
@@ -815,11 +806,6 @@ export function TaskDetailPage() {
             <CardBody>
               <EventTimeline events={events} connection={connection} ended={terminal} />
             </CardBody>
-            <CardFooter>
-              <span>
-                页面上的状态跟着服务端推送走，不会先替你改成「已完成」；日志不在事件流里 —— 点开某个 runner 才读它那一次的日志。
-              </span>
-            </CardFooter>
           </Card>
         </section>
       ) : null}
@@ -828,7 +814,7 @@ export function TaskDetailPage() {
         open={confirmOpen}
         onClose={() => setConfirmOpen(false)}
         title="取消这个 Task？"
-        description="取消后不可逆；状态以服务端推送为准（先 cancelling，clean 收口后才落 canceled）。"
+        description="取消后不可逆，等 clean 结束后 Task 变为已取消。"
         footer={
           <>
             <Button onClick={() => setConfirmOpen(false)}>不取消</Button>

@@ -353,14 +353,11 @@ export function DeployLogsPanel({
     return (
       <div className="px-5 py-4">
         {queued ? (
-          <Banner tone="warn" title="尚未产生 Pod（排队中）">
-            部署还在 {deployState} 阶段，Pod 起来后这里会按 Pod 分页签显示日志。
+          <Banner tone="warn" title="部署排队中">
+            Pod 起来后这里会显示日志。
           </Banner>
         ) : (
-          <EmptyState
-            title="Pod 已回收，没有可读的 Pod"
-            description="Pod 拓扑已回收，面板没有可选的 Pod；已落盘的 deploy/logs/*.log 仍可在产物区逐条下载。"
-          />
+          <EmptyState title="Pod 已回收" description="历史日志可在产物区下载。" />
         )}
       </div>
     )
@@ -472,7 +469,7 @@ export function DeployLogsPanel({
             className="size-3.5 rounded-sm border-line"
           />
           {/* tail 是一次性快照：勾上就暂停自动刷新，取消勾选恢复跟随 */}
-          先看最新（tail 40 行）
+          先看最新 40 行
         </label>
       </div>
 

@@ -102,7 +102,7 @@ test('③ Pod 拓扑：pods[] 非空渲染表格（Pod 名可点、重启标 war
   await asOperator(page, QUEUED_RUN)
   // v2：Pod 拓扑在「执行细节」页签里（默认停在「报告」）
   await page.getByRole('tab', { name: '执行细节' }).click()
-  await expect(page.getByTestId('deploy-pods')).toContainText('暂无 Pod（排队中或已回收）', { timeout: 5_000 })
+  await expect(page.getByTestId('deploy-pods')).toContainText('暂无 Pod', { timeout: 5_000 })
 })
 
 test('④ 产物分组：三个组都在，文件一个不少（数量 = /artifacts 返回条数）', async ({ page }) => {

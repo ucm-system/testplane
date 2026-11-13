@@ -110,9 +110,7 @@ export function RunnersPage() {
           sub={
             roleFilter !== 'all'
               ? `${groups.length} 个 · 已按 ${roleFilter} 过滤`
-              : `${groups.filter((group) => !group.latest.retired).length} 个${
-                  groups.some((group) => group.latest.retired) ? ' · 另有已退役版本，点版本号看历史' : ''
-                }`
+              : `${groups.filter((group) => !group.latest.retired).length} 个`
           }
           actions={
             <Segmented<'all' | RunnerRole>

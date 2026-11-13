@@ -125,7 +125,6 @@ test('⑧ 900px 宽：没有右栏了，事件流在「执行细节」页签里�
   const panel = page.getByTestId('task-events-panel')
   await expect(panel).toBeVisible({ timeout: 20_000 })
   await expect(panel).toContainText(/共 \d+ 条/)
-  await expect(panel).toContainText('日志不在事件流里')
 })
 
 test('C3 runner 时间线节点可聚焦并用键盘打开 runner 日志面板', async ({ page }) => {

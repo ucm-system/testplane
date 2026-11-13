@@ -356,7 +356,6 @@ export function TasksTable() {
           <EmptyState
             data-testid="page-out-of-range"
             title={`第 ${page} 页超出范围（共 ${totalPages} 页）`}
-            description="筛选条件变了，或者链接里的页码太旧；回到第 1 页重新看。"
             action={
               <Button size="sm" data-testid="back-to-first" onClick={() => updateQuery({ page: null })}>
                 回到第 1 页

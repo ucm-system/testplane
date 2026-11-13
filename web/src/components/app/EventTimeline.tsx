@@ -75,7 +75,7 @@ function eventText(event: TaskEvent): string {
     return code ? `${base} · ${code}` : base
   }
   if (event.type === 'runner_started') return `seq ${event.runner_seq ?? '—'} 开始执行`
-  if (event.type === 'exports_harvested') return `seq ${event.runner_seq ?? '—'} 的 exports 已收割落档`
+  if (event.type === 'exports_harvested') return `seq ${event.runner_seq ?? '—'} 的 exports 已收集`
   if (event.type === 'task_finished') return `Task 已结束 · ${tokenLabel(event, event.to)}`
   if (event.type === 'report.written') return '报告已生成'
   if (event.type === 'clean_finished') return 'service-clean 完成（拆除收口）'

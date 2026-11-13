@@ -27,7 +27,7 @@ export function RunnerParamTable({
 }) {
   const [copied, setCopied] = useState<string | null>(null)
   if (parameters.length === 0)
-    return <p className="text-2xs text-fg-3">没有声明参数（input_format 为 yaml / text 时参数完全归 Runner）。</p>
+    return <p className="text-2xs text-fg-3">没有声明参数。</p>
 
   return (
     <TableWrap>
@@ -242,11 +242,6 @@ export function RunnerDrawer({
               </ul>
             )}
           </div>
-
-          <p className="rounded-md border border-line-soft bg-surface-2 p-3 text-2xs leading-[16px] text-fg-3">
-            Runner 随平台发版走目录扫描自动注册 —— 控制台不提供上传或注册入口；版本发布后不可覆盖
-            （同 name+version 不同内容会被拒）。
-          </p>
         </div>
       ) : null}
     </Drawer>
