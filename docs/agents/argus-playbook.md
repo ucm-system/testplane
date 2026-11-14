@@ -50,7 +50,7 @@ MCP：`argus_list_runners`。CLI：`argus runners`。
 ## 2. 组合提交体（Manifest v2）
 
 顶层是嵌套 `task:`（D-40）；`deploy` 与 `service` **二选一**（都填或都不填都拒绝，D-27）；
-`runners[]` 至少 1 条、至多 200 条（D-57/§12.7）。字段只有
+`runners[]` 可为 0（D-77：只跑 deploy/precheck/clean，验证服务能否启动）、至多 200 条（§12.7）。字段只有
 `name / runner / version / execution / input / on_failure / timeout_seconds`——
 **没有** `args`（argv 恒空）、**没有** runner 级 `retry`（D-69）、**没有** `cleanup.policy`（D-70）。
 
