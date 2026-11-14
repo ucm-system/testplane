@@ -7,7 +7,7 @@ import type { ApiErrorBody, Artifact, TaskDetail } from '@/api/types'
 import { RunnerResultPanel } from '@/components/app/RunnerResultPanel'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonClassName } from '@/components/ui/button'
-import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
+import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { EmptyState, ErrorState, LoadingBlock } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
 import { TaskStatusBadge } from '@/components/app/StatusBadge'
@@ -15,6 +15,7 @@ import { useAsync } from '@/hooks/useAsync'
 import { ARTIFACT_GROUPS, groupArtifacts, relativeArtifactPath } from '@/lib/artifact-groups'
 import { artifactViewKindOf } from '@/components/app/ArtifactViewer'
 import { formatBytes } from '@/lib/download'
+import { stripErrorCodePrefix } from '@/lib/error-format'
 import { formatDateTime, formatDuration, runDuration } from '@/lib/utils'
 import { cn } from '@/lib/utils'
 
@@ -66,10 +67,10 @@ function conclusion(task: TaskDetail): { tone: 'ok' | 'warn' | 'err' | 'muted'; 
       return {
         tone: 'err',
         text: task.error
-          ? `${task.error.code}：${task.error.message}`
+          ? `${task.error.code}：${stripErrorCodePrefix(task.error.code, task.error.message)}`
           : failedNames.length > 0
             ? `${failedNames.length} 个 runner 失败：${failedNames.join('、')}`
-            : 'runner 管道有失败（原「部分失败」语义已并入 failed，D-73）。',
+            : 'runner 管道有失败。',
       }
     case 'service_unavailable':
       return { tone: 'err', text: '被测服务不可用（pre_check 未通过或部署被阻塞），测试未执行。' }
@@ -141,32 +142,24 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
           <p className="text-sm leading-[16px] text-fg">{verdict.text}</p>
           <dl className="grid grid-cols-2 gap-3 sm:grid-cols-5">
             {[
-              ['runner 总数', counts?.total ?? 0, 'muted'],
-              ['成功', counts?.succeeded ?? 0, 'ok'],
-              ['失败', counts?.failed ?? 0, 'err'],
-              ['跳过', counts?.skipped ?? 0, 'warn'],
-              ['等待/执行', (counts?.pending ?? 0) + (counts?.running ?? 0), 'muted'],
-            ].map(([label, value, tone]) => (
+              ['runner 总数', counts?.total ?? 0],
+              ['成功', counts?.succeeded ?? 0],
+              ['失败', counts?.failed ?? 0],
+              ['跳过', counts?.skipped ?? 0],
+              ['等待/执行', (counts?.pending ?? 0) + (counts?.running ?? 0)],
+            ].map(([label, value]) => (
               <div key={String(label)} className="rounded-md border border-line-soft bg-surface-2 px-3 py-2">
                 <dt className="text-2xs text-fg-3">{label}</dt>
-                <dd className="mt-1 flex items-baseline gap-2">
-                  <span className="text-xl font-semibold tabular-nums leading-none text-fg">{value}</span>
-                  <Badge tone={tone as 'muted'}>{String(label)}</Badge>
-                </dd>
+                <dd className="mt-1 text-xl font-semibold tabular-nums leading-none text-fg">{value}</dd>
               </div>
             ))}
           </dl>
         </CardBody>
       </Card>
 
-      {/* 2) runner 结果（用户 2026-11-11：deploy/precheck 也要有详情）：全部 runner 一个面板——
-          测试类内联渲染三选一（D-74），deploy/clean 给输入落档 / exports / 部署产物链接 */}
+      {/* 2) runner 结果（用户 2026-11-11：deploy/precheck 也要有详情）：全部 runner 一个面板 */}
       <Card data-testid="task-result-render">
-        <CardHeader
-          tone="info"
-          title="runner 结果"
-          sub="每个 runner 一个详情面板：测试类（test / pre_check）内联渲染 result.html（sandbox）/ result.csv（表格）/ result.json（指标表）三选一（D-74）；deploy/clean 看输入落档、exports 与部署产物"
-        />
+        <CardHeader tone="info" title="runner 结果" />
         {runners.length === 0 ? (
           <CardBody>
             <p className="text-xs text-fg-3">还没有 runner 执行记录。</p>
@@ -184,9 +177,6 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
             ))}
           </div>
         )}
-        <CardFooter>
-          <span>展开看指标/表格/HTML 或 deploy 的落档与产物；失败 runner 默认展开。「查看」进整页查看器，URL 可收藏。</span>
-        </CardFooter>
       </Card>
 
       {/* 3) 产物下载：显式列全（report.json / report.md / metadata.json / events.jsonl / 各 runner 日志与 exports / 部署 Pod 日志） */}
@@ -225,7 +215,7 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
           <LoadingBlock label="加载产物清单…" />
         ) : currentItems.length === 0 ? (
           <CardBody>
-            <EmptyState title="还没有产物" description="产物在 Task 结束后写出；存储未接线时这里会是空的。" />
+            <EmptyState title="还没有产物" description="Task 结束后产物会出现在这里。" />
           </CardBody>
         ) : (
           <div className="flex flex-col gap-2 px-5 py-3" data-testid="artifact-groups">
@@ -242,7 +232,6 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
                     <ChevronRight className="size-3 text-fg-3 transition-transform group-open:rotate-90" aria-hidden />
                     <span className="font-medium text-fg">{group.label}</span>
                     <Badge tone="muted">{rows.length}</Badge>
-                    <span className="text-2xs text-fg-3">{group.description}</span>
                   </summary>
                   {rows.length === 0 ? (
                     <p className="border-t border-line-soft px-3 py-2 text-2xs text-fg-3">这一组没有文件</p>
@@ -298,9 +287,6 @@ export function TaskResultView({ task }: { task: TaskDetail }) {
             })}
           </div>
         )}
-        <CardFooter>
-          <span>这些都是这次 Task 落下的文件；「查看」进整页查看器（URL 可收藏），下载直接开始。</span>
-        </CardFooter>
       </Card>
     </>
   )

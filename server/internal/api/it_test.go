@@ -192,10 +192,10 @@ func TestIT_SubmitValidationsAndAccept(t *testing.T) {
 		t.Fatalf("错误码应为 VALIDATION_ERROR: %v", errBody["code"])
 	}
 
-	// runners 0 条 → 400。
+	// runners 0 条 → 202（D-77：可为 0，只跑 deploy/precheck/clean，验证服务能否启动）。
 	rec = srv.do(t, http.MethodPost, "/api/v1/tasks", `{"task":{"name":"x","service":{"url":"http://a:1"},"runners":[]}}`)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("0 runners 应 400: %d", rec.Code)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("0 runners 应 202（D-77）: %d %s", rec.Code, rec.Body.String())
 	}
 
 	// dry_run：200 + valid。

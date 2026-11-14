@@ -65,7 +65,7 @@ func ReservedMountPaths(shared []SharedMountSpec) map[string]string {
 		if label == "" {
 			label = s.ClaimName
 		}
-		out[p] = fmt.Sprintf("platform shared mount %q (PVC %q, D-63)", label, s.ClaimName)
+		out[p] = fmt.Sprintf("platform shared mount %q (PVC %q)", label, s.ClaimName)
 	}
 	return out
 }
@@ -121,7 +121,7 @@ func NormalizeSharedMounts(in []SharedMountSpec) ([]SharedMountSpec, error) {
 		item.MountPath = cleanMountPath(item.MountPath)
 
 		if item.ClaimName == "" {
-			return nil, fmt.Errorf("sharedMounts[%d]: claimName 必填（平台只认 PVC 名，D-63）", i)
+			return nil, fmt.Errorf("sharedMounts[%d]: claimName 必填（平台只认 PVC 名）", i)
 		}
 		if item.MountPath == "" || !path.IsAbs(item.MountPath) {
 			return nil, fmt.Errorf("sharedMounts[%d]: mountPath 必须是绝对路径，得到 %q", i, s.MountPath)

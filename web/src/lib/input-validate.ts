@@ -50,10 +50,13 @@ function describeValue(value: unknown): string {
  * 「跨行单个 JSON 对象」检测：整段文本是一个合法 JSON 对象/数组，但占了多行——
  * 这是最常见的 JSONL 误写（把美化打印的 JSON 直接贴进来）。JSONL 要求每行一个
  * 完整对象，所以给出**一条可操作的**错误（提示点「格式化」），而不是逐行的 N 条语法错误。
+ *
+ * 判断看 **trim 之后**有没有内部换行：重试回填/粘贴常带尾随换行（`{...}\n`），
+ * 那仍是合法单行 JSONL，不算跨行——与服务端逐行 trim 跳空行的口径一致（domain/input.go）。
  */
 function singleMultiLineJson(text: string): boolean {
-  if (!text.includes('\n')) return false
   const trimmed = text.trim()
+  if (!trimmed.includes('\n')) return false
   if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return false
   try {
     const parsed: unknown = JSON.parse(trimmed)

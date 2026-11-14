@@ -27,7 +27,7 @@ export function RunnerParamTable({
 }) {
   const [copied, setCopied] = useState<string | null>(null)
   if (parameters.length === 0)
-    return <p className="text-2xs text-fg-3">没有声明参数（input_format 为 yaml / text 时参数完全归 Runner）。</p>
+    return <p className="text-2xs text-fg-3">没有声明参数。</p>
 
   return (
     <TableWrap>
@@ -145,7 +145,7 @@ export function RunnerDrawer({
       open={name !== null}
       onClose={onClose}
       title={detail.data?.display_name ?? name ?? 'Runner'}
-      description={`${name ?? ''} · 平台只认 runner.yaml（附录 C v2），注册靠目录扫描`}
+      description={name ?? undefined}
     >
       {detail.loading && !detail.data ? (
         <LoadingBlock label="加载 Runner 详情…" />
@@ -154,7 +154,10 @@ export function RunnerDrawer({
       ) : detail.data ? (
         <div className="flex flex-col gap-4" data-testid="runner-drawer">
           {detail.data.description ? (
-            <p className="text-xs leading-[16px] text-fg-2">{detail.data.description}</p>
+            <details className="rounded-md border border-line-soft bg-surface-2 px-3 py-2">
+              <summary className="cursor-pointer text-xs text-fg-2">说明</summary>
+              <p className="mt-2 whitespace-pre-wrap text-2xs leading-[16px] text-fg-2">{detail.data.description}</p>
+            </details>
           ) : null}
 
           <dl className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
@@ -170,7 +173,7 @@ export function RunnerDrawer({
                 {detail.data.role}
               </Badge>
               {detail.data.role === 'deploy' || detail.data.role === 'clean' ? (
-                <span className="ml-2 text-2xs text-fg-3">内置（用户不可引用，D-70）</span>
+                <span className="ml-2 text-2xs text-fg-3">内置（不可手动引用）</span>
               ) : null}
             </dd>
             <dt className="text-fg-3">失败策略</dt>
@@ -182,13 +185,12 @@ export function RunnerDrawer({
               </Badge>
             </dd>
             <dt className="text-fg-3">独占 Endpoint</dt>
-            <dd className="text-fg-2">{detail.data.exclusive ? '是（仅外接模式有效）' : '否'}</dd>
+            <dd className="text-fg-2">{detail.data.exclusive ? '是' : '否'}</dd>
             <dt className="text-fg-3">镜像</dt>
             <dd className="break-all font-mono text-2xs text-fg-2">{detail.data.image}</dd>
             <dt className="text-fg-3">入口</dt>
             <dd className="break-all font-mono text-2xs text-fg-2">
               {detail.data.entry ? JSON.stringify(detail.data.entry) : '—'}
-              <span className="ml-2 text-2xs text-fg-3">（exec form 数组；argv 恒空，D-66）</span>
             </dd>
             <dt className="text-fg-3">exports</dt>
             <dd className="break-all font-mono text-2xs text-fg-2">{detail.data.exports?.join('、') || '—'}</dd>
@@ -243,11 +245,6 @@ export function RunnerDrawer({
               </ul>
             )}
           </div>
-
-          <p className="rounded-md border border-line-soft bg-surface-2 p-3 text-2xs leading-[16px] text-fg-3">
-            Runner 随平台发版走目录扫描自动注册 —— 控制台不提供上传或注册入口；版本发布后不可覆盖
-            （同 name+version 不同内容会被拒）。
-          </p>
         </div>
       ) : null}
     </Drawer>

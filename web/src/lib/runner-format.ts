@@ -2,11 +2,11 @@
 export function inputFormatLabel(format: 'jsonl' | 'yaml' | 'text'): string {
   switch (format) {
     case 'jsonl':
-      return 'jsonl（逐行 JSON，平台校验结构）'
+      return 'jsonl'
     case 'yaml':
-      return 'yaml（只校语法，语义归 Runner）'
+      return 'yaml'
     case 'text':
-      return 'text（只校语法，语义归 Runner）'
+      return 'text'
   }
 }
 
@@ -14,10 +14,10 @@ export function inputFormatLabel(format: 'jsonl' | 'yaml' | 'text'): string {
 export function inputHint(format: 'jsonl' | 'yaml' | 'text'): string {
   switch (format) {
     case 'jsonl':
-      return 'JSONL：每行一个 JSON 对象（平台校验字段类型与 required，报错带行号）'
+      return '每行一个 JSON 对象'
     case 'yaml':
-      return 'YAML 原文：平台只做语法校验，语义完全归 Runner'
+      return 'YAML 原文，只校语法'
     case 'text':
-      return '文本原文：平台只做语法校验，语义完全归 Runner'
+      return '文本原文，只校语法'
   }
 }

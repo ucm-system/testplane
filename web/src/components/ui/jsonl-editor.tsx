@@ -13,6 +13,7 @@ import CodeMirror, {
 import { json } from '@codemirror/lang-json'
 import { Check, Copy, FileJson } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { editorAutoHeight, editorContentLines, useEditorAutoGrow } from '@/lib/editor-autogrow'
 
 /**
  * JSONL 编辑器 —— 与 YamlEditor 同一套 CodeMirror 6 架构（用户 2026-11-12：
@@ -191,8 +192,10 @@ export function JsonlEditor({
 }: JsonlEditorProps) {
   const viewRef = useRef<EditorView | null>(null)
   const [mounted, setMounted] = useState(false)
-  const rowsHeight = Math.round(rows * 1.7 * 12.5 + 16)
   const boxRef = useRef<HTMLDivElement | null>(null)
+  // 高度随内容自动长（封顶半屏），用户拖过就以用户为准 —— 机制见 lib/editor-autogrow
+  const autoHeight = useMemo(() => editorAutoHeight(rows, editorContentLines(value, rows)), [rows, value])
+  useEditorAutoGrow(boxRef, autoHeight)
   const [cursor, setCursor] = useState({ line: 1, col: 1 })
   const [copied, setCopied] = useState(false)
 
@@ -232,12 +235,6 @@ export function JsonlEditor({
       effects: [setJsonlDiag.of({ lineFrom: line.from, from: line.from, to: line.to }), EditorView.scrollIntoView(line.from, { y: 'center' })],
     })
   }, [error, value, mounted])
-
-  useEffect(() => {
-    const el = boxRef.current
-    if (!el || el.style.height) return
-    el.style.height = `${rowsHeight}px`
-  }, [rowsHeight])
 
   const copyValue = async () => {
     try {

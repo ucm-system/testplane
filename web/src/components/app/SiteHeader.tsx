@@ -75,7 +75,7 @@ export function SiteHeader() {
       <div className="ml-auto flex shrink-0 items-center gap-2">
         {/* 概览页的动作行里已经有「新建 Task」（本轮不改页面结构），这里不重复放一颗；
             其余页面由页头统一提供入口。 */}
-        {pathname !== '/' ? (
+        {pathname !== '/' && pathname !== '/submit' ? (
           <Link to="/submit" aria-label="新建 Task">
             <Button variant="primary" size="sm" icon={<Plus className="size-3.5" aria-hidden />} data-testid="header-new-task">
               新建 Task

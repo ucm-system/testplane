@@ -760,7 +760,7 @@ func ValidateSpec(spec domain.RunnerSpec, raw runnerYAML, builtin bool) []FieldE
 		}
 	}
 	if !domain.ValidInputFormat(spec.InputFormat) {
-		add("input_format", "must be jsonl|yaml|text (D-67)")
+		add("input_format", "must be jsonl|yaml|text")
 	}
 	switch spec.Role {
 	case domain.RoleTest, domain.RolePreCheck, domain.RoleDeploy, domain.RoleClean:

@@ -22,7 +22,7 @@ type SubmitParams struct {
 	Task *Task
 	// AttemptMax 是 attempt 上限校验所需的配置（0 跳过校验）。
 	// Runners 是解析后的 runner 执行记录快照（含注入的 service-deploy / precheck / service-clean；
-	// seq 从 1 递增）。至少 1 条（D-57）；上限由提交校验（TASK_TOO_LARGE）在 orchestrator 做。
+	// seq 从 1 递增）。可为 0（D-77：只跑 deploy/precheck/clean）；上限由提交校验（TASK_TOO_LARGE）在 orchestrator 做。
 	Runners []*RunnerRun
 	// Actor 是提交者（dev 模式下是用户名）。
 	Actor string
@@ -39,9 +39,6 @@ type SubmitParams struct {
 func (s *Store) SubmitTask(ctx context.Context, p SubmitParams) (*Task, []*RunnerRun, error) {
 	if p.Task == nil {
 		return nil, nil, fmt.Errorf("store: submit task: task 不能为空")
-	}
-	if len(p.Runners) == 0 {
-		return nil, nil, fmt.Errorf("store: submit task %s: runners 至少 1 条（D-57）: %w", p.Task.ID, domain.ErrPrecondition)
 	}
 	at := p.At
 	if at.IsZero() {

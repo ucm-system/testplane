@@ -10,6 +10,7 @@ import { Badge, Tag } from '@/components/ui/badge'
 import { buttonClassName } from '@/components/ui/button'
 import { parseCsv } from '@/components/app/ArtifactViewer'
 import { saveBlob } from '@/lib/download'
+import { stripErrorCodePrefix } from '@/lib/error-format'
 import { formatDuration } from '@/lib/utils'
 import { cn } from '@/lib/utils'
 
@@ -50,7 +51,7 @@ function JsonResultBody({ taskId, runner, attemptNo }: { taskId: string; runner:
   if (result.error) {
     return (
       <p className="py-2 text-2xs text-danger-text">
-        result.json 读取失败（{result.error.code}）：{result.error.message}
+        result.json 读取失败（{result.error.code}）：{stripErrorCodePrefix(result.error.code, result.error.message)}
       </p>
     )
   }
@@ -288,7 +289,7 @@ export function RunnerResultPanel({
               <Badge tone="err" className="font-mono">
                 {runner.error.code}
               </Badge>
-              <span className="text-fg">{runner.error.message}</span>
+              <span className="text-fg">{stripErrorCodePrefix(runner.error.code, runner.error.message)}</span>
               {runner.error.retryable ? <Badge tone="warn">可重试</Badge> : null}
             </div>
           ) : null}
@@ -300,13 +301,11 @@ export function RunnerResultPanel({
           ) : runner.result_ref ? (
             <JsonResultBody taskId={taskId} runner={runner} attemptNo={attemptNo} />
           ) : isTestRole ? (
-            <p className="text-2xs leading-[16px] text-fg-3">
-              该 runner 没有产出 result.html / csv / json 三选一中的任何一份（D-74）；以日志与产物清单为准。
-            </p>
+            <p className="text-2xs leading-[16px] text-fg-3">没有产出结果文件，以日志与产物为准。</p>
           ) : (
             <dl className="grid gap-x-8 gap-y-2 rounded-md border border-line-soft bg-surface-2 px-3 py-2 text-2xs sm:grid-cols-2">
               <div className="flex gap-2">
-                <dt className="shrink-0 text-fg-3">输入落档</dt>
+                <dt className="shrink-0 text-fg-3">输入</dt>
                 <dd className="min-w-0 break-all font-mono text-fg-2">
                   {runner.input_ref ? (
                     <Link
@@ -321,7 +320,7 @@ export function RunnerResultPanel({
                 </dd>
               </div>
               <div className="flex gap-2">
-                <dt className="shrink-0 text-fg-3">exports 落档</dt>
+                <dt className="shrink-0 text-fg-3">导出</dt>
                 <dd className="min-w-0 break-all font-mono text-fg-2">
                   {runner.exports_ref ? (
                     <Link

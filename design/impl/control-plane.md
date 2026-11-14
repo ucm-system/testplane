@@ -465,7 +465,7 @@ SELECT count(*) FROM task_runners WHERE status IN ('preparing','running');  -- <
 | pre_check 失败 | `on_failure: abort_task`（注册强制）：后续 runner 置 `skipped(upstream_abort)`，**传播到 clean 为止**；随后执行 service-clean，Task 终态按 C-5.8 判 `service_unavailable` / `failed` |
 | 外接模式独占 runner | 独占该 Endpoint 槽位期间，**其他 Task** 指向同一 `endpoint_key` 的独占 runner 排队（`slot_waiting`） |
 
-> **提交下限（D-57）**：`runners[]` 至少 1 条，与 precheck 取值无关（pre_check 是平台注入的 runner，不是用户测试）。0 条直接 400 VALIDATION_ERROR，不落库、不建 Task。
+> **提交下限（D-77，2026-11-13）**：`runners[]` 可为 0——「只验证服务能否启动」（deploy + precheck 探活 + clean）是常用操作，不要求必须有测试 runner。`deploy` XOR `service` 仍必填其一（管道永远非空）；上限 200 不变。
 
 调度守卫：外接模式下 runner 进入 `queued` 前必须 `endpoint_key IS NOT NULL`（提交时由 `service.url` 计算）；违反即拒绝调度并告警，**不得**用占位键绕过。部署模式不校验（无租约）。
 
@@ -579,7 +579,7 @@ var (
 | 1 | 请求体大小（Manifest ≤ 1 MiB）、YAML 可解析 | `VALIDATION_ERROR` |
 | 2 | `manifest.schema.json` 结构校验（必填、类型、枚举、互斥；顶层 `task:`） | `VALIDATION_ERROR` |
 | 3 | `deploy` XOR `service`；两者都缺/都给 → 拒绝（§10.1） | `VALIDATION_ERROR` |
-| 4 | `runners[]` 数量 ∈ [1, 200] | 0 条 / 超 200 → `VALIDATION_ERROR` / `TASK_TOO_LARGE` |
+| 4 | `runners[]` 数量 ∈ [0, 200]（D-77） | 超 200 → `TASK_TOO_LARGE` |
 | 5 | `runners[].runner + version` 命中白名单（`deploy`/`clean` 角色不可引用——由平台自动注入） | `RUNNER_NOT_FOUND` |
 | 6 | `execution.profile` 已登记 | `EXECUTION_PROFILE_NOT_FOUND` |
 | 7 | `input` 通过该 Runner 的 `input_format` 校验（C-8.4：jsonl 逐行 JSON.parse + 对象 + 按 `parameters` 校验类型与 required，报错带**行号 + 字段名**；yaml/text 仅语法可解析） | `VALIDATION_ERROR` |

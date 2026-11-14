@@ -271,7 +271,7 @@ const RUNNERS: RunnerWire[] = [
     version: '1.1.2',
     display_name: 'Mock 服务部署（内置）',
     description:
-      '与 Genet 完全解耦（D-75）：不做部署动作，只接入一个 OpenAI 兼容 mock 服务并等它就绪；缺省接 chart 内置 mock-llm。不声明 clean_runner → 无 clean 阶段。',
+      '接入一个 OpenAI 兼容的 mock 服务，等它就绪即可；不做任何部署动作，与 Genet 无关。缺省接 chart 内置 mock-llm，不产生 clean 阶段。',
     role: 'deploy',
     on_failure: 'abort_task',
     exclusive: false,
@@ -1464,10 +1464,10 @@ function validateManifest(manifest: TaskManifest): ValidationIssue[] {
   }
   if (!body.name?.trim()) issues.push({ path: 'task.name', code: 'VALIDATION_ERROR', message: 'Task 名称不能为空' })
   if (body.deploy && body.service) {
-    issues.push({ path: 'task', code: 'VALIDATION_ERROR', message: 'deploy 与 service 二选一，不能都给（D-27）' })
+    issues.push({ path: 'task', code: 'VALIDATION_ERROR', message: 'deploy 与 service 二选一，不能都给' })
   }
   if (!body.deploy && !body.service) {
-    issues.push({ path: 'task', code: 'VALIDATION_ERROR', message: 'deploy 与 service 必须给其一（D-27）' })
+    issues.push({ path: 'task', code: 'VALIDATION_ERROR', message: 'deploy 与 service 必须给其一' })
   }
   if (body.deploy) {
     // deploy 块 = runner 引用（与 runners[] 同构；clean 配对由 runner.yaml clean_runner 声明）
@@ -1496,9 +1496,6 @@ function validateManifest(manifest: TaskManifest): ValidationIssue[] {
   }
   if (body.service && !body.service.url?.trim()) {
     issues.push({ path: 'task.service.url', code: 'VALIDATION_ERROR', message: 'service.url 必填' })
-  }
-  if (!body.runners || body.runners.length === 0) {
-    issues.push({ path: 'task.runners', code: 'VALIDATION_ERROR', message: '至少需要 1 个 runner（D-57）' })
   }
   if ((body.runners?.length ?? 0) > 200) {
     issues.push({ path: 'task.runners', code: 'TASK_TOO_LARGE', message: '单个 Task 最多 200 个 runner（§12.7）' })
@@ -1974,7 +1971,7 @@ export const mockApi: Api = {
         '  <head><meta charset="utf-8"><title>mock result.html</title></head>',
         '  <body>',
         '    <h1>Qwen3-32B · accuracy-dataset-a</h1>',
-        '    <p>Runner 产出的 result.html（D-74 三选一）：sandbox 渲染、脚本禁用。</p>',
+        '    <p>Runner 产出的 result.html：沙箱渲染、脚本禁用。</p>',
         '    <table border="1"><tr><th>dataset</th><th>accuracy</th></tr><tr><td>gsm8k</td><td>0.8421</td></tr></table>',
         "    <script>document.body.setAttribute('data-script-ran', 'yes')</script>",
         '  </body>',

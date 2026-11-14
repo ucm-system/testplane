@@ -21,7 +21,7 @@ import (
 //	 1. Manifest 可解析（YAML/JSON 同一结构；请求体 ≤1 MiB 由 API 层限制）
 //	 2. 结构校验（顶层 task:、必填、类型）
 //	 3. deploy XOR service（两者都缺/都给 → 拒绝，§10.1）
-//	 4. runners[] 数量 ∈ [1, 200]（0 条 D-57；超限 TASK_TOO_LARGE）
+//	 4. runners[] 数量 ∈ [0, 200]（D-77：可为 0，只跑 deploy/precheck/clean；超限 TASK_TOO_LARGE）
 //	 5. runner+version 命中注册表；deploy/clean 角色不可手动引用（deploy 由提交体的
 //	    deploy.runner 引用注入、clean 由该 runner 的 clean_runner 声明注入）
 //	 6. execution.profile 已登记
@@ -226,13 +226,10 @@ func (a *Assembler) Assemble(ctx context.Context, m *Manifest, taskID, actor str
 		ve.Add("task.name", domain.IssueCodeRequired, "task.name 必填")
 	}
 	if len(m.Task.Name) > 200 {
-		ve.Add("task.name", domain.IssueCodeTooLong, "task.name 超过 200 字符（D-58）")
+		ve.Add("task.name", domain.IssueCodeTooLong, "task.name 超过 200 字符")
 	}
 	if (m.Task.Deploy == nil) == (m.Task.Service == nil) {
-		ve.Add("task", domain.IssueCodeDeployService, "deploy 与 service 必须二选一（两者都缺或都给都拒绝，§10.1）")
-	}
-	if len(m.Task.Runners) == 0 {
-		ve.Add("task.runners", domain.IssueCodeRequired, "runners 至少 1 条（D-57）")
+		ve.Add("task", domain.IssueCodeDeployService, "deploy 与 service 必须二选一（两者都缺或都给都拒绝）")
 	}
 	if len(m.Task.Runners) > a.MaxRunners {
 		return nil, domain.NewFailureError(domain.CodeTaskTooLarge,
@@ -333,7 +330,7 @@ func (a *Assembler) Assemble(ctx context.Context, m *Manifest, taskID, actor str
 		}
 		if spec.Role == domain.RoleDeploy || spec.Role == domain.RoleClean {
 			return nil, domain.NewFailureError(domain.CodeRunnerNotFound,
-				fmt.Sprintf("runners[%d].runner %q 的角色 %s 由平台自动注入，不可手动引用（D-70）", i, in.Runner, spec.Role),
+				fmt.Sprintf("runners[%d].runner %q 的角色 %s 由平台自动注入，不可手动引用", i, in.Runner, spec.Role),
 				map[string]any{"path": fmt.Sprintf("runners[%d].runner", i)})
 		}
 		// Profile（C-5.1 第 6 条）。

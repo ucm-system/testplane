@@ -235,7 +235,7 @@ export function SubmitPage() {
     if (issues.length === 0) {
       toast({
         title: '输入校验通过',
-        description: '与服务端 D-67 同规则（类型 + required + enum 提示）；最终以提交时服务端校验为准',
+        description: '与服务端同一套规则',
         tone: 'ok',
       })
       return
@@ -253,7 +253,7 @@ export function SubmitPage() {
     const previous = draft.input
     setRunnerDraft(draft.key, { input: placeholder })
     toast({
-      title: '已填入示例（placeholder 来自 runner.yaml）',
+      title: '已填入示例',
       tone: 'ok',
       durationMs: 7000,
       action: previous.trim() ? { label: '撤销', onClick: () => setRunnerDraft(draft.key, { input: previous }) } : undefined,
@@ -326,7 +326,7 @@ export function SubmitPage() {
 
   /**
    * A4 / B10：两种「点下去也一定失败」的情况，直接在本页拦住（不靠后端 400）：
-   *  - 0 个 runner（D-57：至少 1 条；注入的 deploy / precheck / clean 不计入）；
+   *  - 0 个 runner（D-77：允许，只跑 deploy/precheck/clean；注入行不计入）；
    *  - 目录里没有 role=test 的 Runner（deploy / clean 角色不可在 runners[] 引用，D-70）。
    * 目录还在加载时**不算**「没有」：`loading` 期间不置灰，避免把加载中误判成空目录。
    */
@@ -346,8 +346,6 @@ export function SubmitPage() {
 
   const submitBlockers: string[] = []
   if (blocked) submitBlockers.push(blocked)
-  if (noRunners) submitBlockers.push('至少需要 1 个 runner（deploy / precheck / clean 由平台注入，不计入）')
-  if (noRunnersRegistered) submitBlockers.push('当前没有可用的 Runner；deploy / clean 角色不能在 runner 列表里引用')
   if (nameTooLong) submitBlockers.push(`Task 名称超过 ${NAME_MAX_RUNES} 字符（当前 ${nameRunes}）`)
   const submitDisabled = submitBlockers.length > 0
   const submitTitle = submitDisabled ? submitBlockers.join('；') : undefined
@@ -543,14 +541,6 @@ export function SubmitPage() {
         message: 'execution.profile 必填',
       })
     }
-    // D-57：与后端同一句口径（path=task.runners 会被映射到 runner 区就地显示）
-    if (runnerDrafts.length === 0) {
-      found.push({
-        path: 'task.runners',
-        code: 'REQUIRED',
-        message: '至少需要 1 个 runner（deploy / precheck / clean 由平台注入，不计入）',
-      })
-    }
     runnerDrafts.forEach((draft, index) => {
       if (!draft.name.trim())
         found.push({ path: `task.runners[${index}].name`, code: 'REQUIRED', message: 'runner 名称必填' })
@@ -662,8 +652,7 @@ export function SubmitPage() {
               </Link>
             }
           >
-            提交后生成新 Task（新 ID），原 Task 保留不动（不改历史）；同名不合并（D-37），所以名字自动加了
-            <code className="mx-1 font-mono">-retry</code> 后缀。
+            提交后生成新 Task，原 Task 保留不动。
           </Banner>
         </div>
       ) : null}
@@ -695,7 +684,6 @@ export function SubmitPage() {
             label="Task 名称"
             required
             htmlFor="task-name"
-            hint="同名不合并：每次提交都创建新 Task（不做幂等，D-37）。"
             error={nameError}
           >
             <div id="task-name-row" className="flex items-center gap-2">
@@ -729,7 +717,6 @@ export function SubmitPage() {
         <CardHeader
           tone="warn"
           title="环境变量与凭据"
-          sub="Task 粒度，注入该 Task 下全部 runner（§12.4）"
           actions={
             <>
               <Button
@@ -755,7 +742,7 @@ export function SubmitPage() {
           {/* 默认 0 行：不预填示例（那是要提交的内容，不是装饰） */}
           {envRows.length === 0 && secretRows.length === 0 ? (
             <p data-testid="env-empty-hint" className="text-2xs text-fg-3">
-              还没有环境变量或凭据引用。需要时点右上角「+ 环境变量 / + 凭据引用」再加一行。
+              暂无，需要时点右上角添加。
             </p>
           ) : null}
           {envRows.map((row, index) => (
@@ -806,7 +793,6 @@ export function SubmitPage() {
               </Button>
             </div>
           ))}
-          <p className="text-2xs text-fg-3">凭据只填引用，明文不会出现在 Manifest 里（C-10）；env 明文可回显可编辑（不脱敏、不折叠）。</p>
         </CardBody>
       </Card>
 
@@ -818,7 +804,7 @@ export function SubmitPage() {
         <CardHeader
           tone="primary"
           title="runner 管道"
-          sub="严格串行：服务来源(deploy) → pre_check? → runners → clean?；clean 是否注入由所选 deploy runner 的 clean_runner 声明决定"
+          sub="deploy → precheck → runners → clean"
           actions={
             <>
               <span className="text-2xs text-fg-3">执行环境</span>
@@ -858,10 +844,6 @@ export function SubmitPage() {
             <div className="flex flex-wrap items-center gap-2">
               <span className="grid size-5 shrink-0 place-items-center rounded-full bg-surface-3 text-2xs text-fg-2">0</span>
               <span className="text-sm font-semibold text-fg">服务来源</span>
-              <span className="text-2xs text-fg-3">
-                Genet（默认）/ Mock / 已有服务三选一；都填或都不填会被拒（D-27）。「已有服务」不部署、
-                直接填三元组；deploy runner 的 clean 是否注入由它的 clean_runner 声明决定
-              </span>
             </div>
 
             {/* 服务来源下拉（用户 2026-11-11：与 runner 行同一形态）：Genet（默认）/ Mock / 已有服务。
@@ -887,7 +869,7 @@ export function SubmitPage() {
                       {runner.name === defaultDeployRunnerName ? '（默认）' : ''} · {runner.name} v{runner.version}
                     </option>
                   ))}
-                  <option value="">已有服务（不部署 · 直接填三元组）</option>
+                  <option value="">已有服务（不部署，直接填地址）</option>
                 </Select>
                 {deployRunnerObj ? (
                   <span className="flex shrink-0 items-center gap-1">
@@ -897,10 +879,17 @@ export function SubmitPage() {
                     ) : (
                       <Tag data-testid="deploy-clean-tag">无 clean 阶段</Tag>
                     )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      data-testid="deploy-runner-detail"
+                      aria-label="查看服务来源的 Runner 详情"
+                      onClick={() => setDetailRunner(deployRunnerObj.name)}
+                    >
+                      详情
+                    </Button>
                   </span>
-                ) : (
-                  <span className="text-2xs text-fg-3">base URL / 模型名静态注入 AG_SERVED_URL 等</span>
-                )}
+                ) : null}
               </div>
             </Field>
 
@@ -914,8 +903,8 @@ export function SubmitPage() {
                       onChange={setDeployInput}
                       rows={7}
                       aria-label="部署描述 YAML"
-                      title="deploy.input（该 runner 的输入原文，平台不解析语义）"
-                      hint="2 空格缩进 · 平台不解析语义"
+                      title="deploy.input"
+                      hint="2 空格缩进"
                       error={lintPos}
                     />
                     <p
@@ -927,7 +916,7 @@ export function SubmitPage() {
                     >
                       {deployParse.error
                         ? `${deployParse.pos ? `第 ${deployParse.pos.line} 行第 ${deployParse.pos.col} 列：` : ''}${deployParse.error}`
-                        : '✓ YAML 语法有效（语义归 deploy runner，平台不解析）'}
+                        : '✓ 语法有效'}
                     </p>
                   </>
                 ) : (
@@ -940,12 +929,12 @@ export function SubmitPage() {
                       <JsonlEditor
                         value={deployInput}
                         onChange={setDeployInput}
-                        rows={3}
+                        rows={7}
                         aria-label="deploy runner 输入"
                         mirrorLabel="deploy runner 输入"
                         testId="deploy-jsonl-editor"
                         placeholder={deployPlaceholderFirstLine}
-                        title="deploy.input（该 runner 的输入原文，平台不解析语义）"
+                        title="deploy.input"
                         error={deployJsonlIssues[0] ? { line: deployJsonlIssues[0].line } : null}
                       />
                     </Field>
@@ -977,7 +966,7 @@ export function SubmitPage() {
                       const previous = deployInput
                       setDeployInput(deployRunnerObj.placeholder ?? '')
                       toast({
-                        title: '已填入示例（placeholder 来自 runner.yaml）',
+                        title: '已填入示例',
                         tone: 'ok',
                         durationMs: 7000,
                         action: previous.trim() ? { label: '撤销', onClick: () => setDeployInput(previous) } : undefined,
@@ -985,10 +974,6 @@ export function SubmitPage() {
                     }}
                   />
                 ) : null}
-                <p className="text-2xs leading-[16px] text-fg-3">
-                  这段原文会作为 {deployRunnerObj?.name ?? 'deploy runner'} 的输入（AG_PARAMS_FILE）；平台不解析语义（§10.1）。
-                  部署被阻塞会收口为 service_unavailable（D-47）。
-                </p>
               </div>
             ) : (
               <div className="grid gap-3 sm:grid-cols-3">
@@ -1007,10 +992,6 @@ export function SubmitPage() {
                 <Field label="模型路径（可选）" className="sm:col-span-3">
                   <Input value={modelPath} onChange={(e) => setModelPath(e.target.value)} placeholder="/models/Qwen3-32B" />
                 </Field>
-                <p className="text-2xs leading-[16px] text-fg-3 sm:col-span-3">
-                  这三个字段就是平台要注入的公共参数来源（AG_SERVED_URL / AG_SERVED_MODEL_NAME / AG_MODEL_PATH）：
-                  不部署、不拉服务，由你来填。
-                </p>
               </div>
             )}
           </section>
@@ -1020,9 +1001,9 @@ export function SubmitPage() {
           {noRunners ? (
             <p
               data-testid="runner-empty-hint"
-              className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-[16px] text-warn-text"
+              className="rounded-md border border-line-soft bg-surface-2 px-3 py-2 text-2xs leading-[16px] text-fg-3"
             >
-              至少需要 1 个 runner（deploy / precheck / clean 由平台注入，不计入）
+              未添加测试 runner：本次只执行 服务来源 → precheck（auto 时）→ clean，适合验证服务能否启动
             </p>
           ) : null}
 
@@ -1030,9 +1011,9 @@ export function SubmitPage() {
           {noRunnersRegistered ? (
             <p
               data-testid="runner-empty-registered"
-              className="rounded-md border border-warn/40 bg-warn-weak px-3 py-2 text-2xs leading-[16px] text-warn-text"
+              className="rounded-md border border-line-soft bg-surface-2 px-3 py-2 text-2xs leading-[16px] text-fg-3"
             >
-              当前没有可用的 Runner；deploy / clean 角色仅内置（D-70），不能作为测试 runner
+              目录里暂无测试类 Runner；可只提交服务来源 + precheck（auto 注入）
             </p>
           ) : null}
 
@@ -1054,13 +1035,23 @@ export function SubmitPage() {
 
           {precheck === 'auto' ? (
             <div className="rounded-md border border-line-soft bg-surface-2 px-3 py-2 text-2xs leading-[16px] text-fg-2">
-              <span className="font-medium text-fg">precheck（自动注入）：</span>
-              平台取注册表中唯一一个 <code className="font-mono">role=pre_check</code> 的 Runner，注入为第一个测试类
-              runner；0 个或多个都拒绝提交。
+              <span className="font-medium text-fg">precheck 自动注入：</span>
               {precheckRunner ? (
-                <Tag mono className="ml-2">
-                  {precheckRunner.name} · {precheckRunner.version}
-                </Tag>
+                <>
+                  <Tag mono className="ml-2">
+                    {precheckRunner.name} · {precheckRunner.version}
+                  </Tag>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    data-testid="precheck-detail"
+                    aria-label="查看 precheck 的 Runner 详情"
+                    className="ml-1"
+                    onClick={() => setDetailRunner(precheckRunner.name)}
+                  >
+                    详情
+                  </Button>
+                </>
               ) : null}
             </div>
           ) : null}
@@ -1108,7 +1099,7 @@ export function SubmitPage() {
                       </option>
                     ))}
                   </Select>
-                  {/* 详情：复用 `/runners?open=` 的同一个抽屉组件（不复制第二份） */}
+                  {/* 详情：复用 `/runners?open=` 的同一个抽屉组件（不复制第二份）；所有「详情」统一 ghost 文字（button.tsx 层级约束） */}
                   <Button
                     size="sm"
                     variant="ghost"
@@ -1188,11 +1179,11 @@ export function SubmitPage() {
                     <JsonlEditor
                       value={draft.input}
                       onChange={(next) => setRunnerDraft(draft.key, { input: next })}
-                      rows={3}
+                      rows={7}
                       aria-label={`runner ${index + 1} 输入`}
                       testId={`jsonl-editor-${index + 1}`}
                       placeholder={resolvedRunner?.placeholder?.split('\n')[0] ?? '{"dataset":"/data/gsm8k.jsonl","limit":200}'}
-                      title={`${draft.name.trim() || `runner ${index + 1}`} 的输入（JSONL，平台校验结构）`}
+                      title={`${draft.name.trim() || `runner ${index + 1}`} 的输入`}
                       error={draftIssues[draft.key]?.[0] ? { line: draftIssues[draft.key]![0]!.line } : null}
                     />
                   </Field>
@@ -1231,13 +1222,13 @@ export function SubmitPage() {
             )
           })}
         </CardBody>
-        <CardFooter>
+        <CardFooter className="sticky bottom-0 z-10 rounded-b-xl border-t border-line-soft bg-surface shadow-[0_-4px_12px_rgba(0,0,0,0.04)]">
           <span>
             {blocked
-              ? `当前角色 ${auth.role ?? 'viewer'} 只读：${blocked}（服务端也会再判一次）`
+              ? `当前角色 ${auth.role ?? 'viewer'} 只读：${blocked}`
               : submitDisabled
                 ? submitTitle
-                : '提交前会先 dry-run；校验通过才真正 POST /tasks（每次提交都创建新 Task，不做幂等 D-37）。'}
+                : ''}
           </span>
           <div className="ml-auto flex items-center gap-2">
             <Button

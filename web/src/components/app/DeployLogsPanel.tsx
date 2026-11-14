@@ -9,6 +9,7 @@ import { Banner, EmptyState, ErrorState } from '@/components/ui/states'
 import { useFollowScroll } from '@/hooks/useFollowScroll'
 import { LOG_POLL_INTERVAL_MS } from '@/hooks/useLogTail'
 import { formatBytes, saveBlob } from '@/lib/download'
+import { stripErrorCodePrefix } from '@/lib/error-format'
 import { logMarkerTone } from '@/lib/log-markers'
 import { cn, formatClock } from '@/lib/utils'
 
@@ -352,14 +353,11 @@ export function DeployLogsPanel({
     return (
       <div className="px-5 py-4">
         {queued ? (
-          <Banner tone="warn" title="尚未产生 Pod（排队中）">
-            部署还在 {deployState} 阶段，Pod 起来后这里会按 Pod 分页签显示日志。
+          <Banner tone="warn" title="部署排队中">
+            Pod 起来后这里会显示日志。
           </Banner>
         ) : (
-          <EmptyState
-            title="Pod 已回收，没有可读的 Pod"
-            description="Pod 拓扑已回收，面板没有可选的 Pod；已落盘的 deploy/logs/*.log 仍可在产物区逐条下载。"
-          />
+          <EmptyState title="Pod 已回收" description="历史日志可在产物区下载。" />
         )}
       </div>
     )
@@ -383,7 +381,7 @@ export function DeployLogsPanel({
     <div className="flex flex-col gap-3 px-5 py-4">
       {error ? (
         <p role="alert" className="rounded-md border border-danger/25 bg-danger-weak px-2.5 py-1.5 text-2xs text-fg">
-          {error.code}：{error.message}（已收到的日志保留，下一轮会自动重试）
+          {error.code}：{stripErrorCodePrefix(error.code, error.message)}（日志已保留，下一轮自动重试）
         </p>
       ) : null}
       {downloadNotice ? (
@@ -471,7 +469,7 @@ export function DeployLogsPanel({
             className="size-3.5 rounded-sm border-line"
           />
           {/* tail 是一次性快照：勾上就暂停自动刷新，取消勾选恢复跟随 */}
-          先看最新（tail 40 行）
+          先看最新 40 行
         </label>
       </div>
 

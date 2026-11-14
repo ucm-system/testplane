@@ -238,7 +238,7 @@ paths:
       summary: 提交 Task（YAML 或 JSON Manifest；不做幂等）
       description: |
         07 §4：异步编排，202 表示已受理并落库，后续状态由 SSE 或轮询获取。
-        提交体是嵌套 `task:`（D-40）：`deploy` 与 `service` 互斥（都填或都不填拒绝）；`runners[]` 至少 1 条、
+        提交体是嵌套 `task:`（D-40）：`deploy` 与 `service` 互斥（都填或都不填拒绝）；`runners[]` 可为 0（D-77：只验证服务能否启动时只跑 deploy/precheck/clean）、
         至多 200 条（D-57、§12.7）；service-deploy / precheck / service-clean 由平台按提交配置自动注入，
         用户不可手动添加（D-70）。
 
@@ -4004,7 +4004,7 @@ components:
           description: |
             runner 列表（仅 test / 可选显式 pre_check）；**严格串行执行**（§7.1）。
             注入的 service-deploy / precheck / service-clean 不计入用户列表。
-          minItems: 1     # D-57：至少 1 条
+          # D-77：可为 0（只跑 deploy/precheck/clean 验证服务能否启动）
           maxItems: 200   # §12.7：超限 TASK_TOO_LARGE
           items:
             $ref: '#/components/schemas/RunnerSpec'

@@ -103,18 +103,15 @@ export function RunnersPage() {
 
   return (
     <>
-      <p className="text-2xs leading-[16px] text-fg-3">
-        Runner 随平台发版走目录扫描自动注册（附录 C v2）；参数 schema 是平台提交期校验的依据（类型 + required，
-        D-67），范围与枚举仍归 Runner。<strong>deploy / clean 也是 Runner</strong>（D-70）：deploy 角色是提交页
-        「服务来源」的可选项（genet-deploy / mock-deploy / existing-deploy…），clean 角色由 deploy runner 的
-        clean_runner 声明自动注入 —— 两类都仅内置，用户目录声明会被拒绝。
-      </p>
-
       <Card>
         <CardHeader
           tone="primary"
           title="已注册 Runner"
-          sub={`${groups.length} 个名字${roleFilter === 'all' ? '' : ` · 已按 ${roleFilter} 过滤`} · 注册表只读，没有运行时管理端点`}
+          sub={
+            roleFilter !== 'all'
+              ? `${groups.length} 个 · 已按 ${roleFilter} 过滤`
+              : `${groups.filter((group) => !group.latest.retired).length} 个`
+          }
           actions={
             <Segmented<'all' | RunnerRole>
               ariaLabel="按角色筛选"
@@ -190,7 +187,7 @@ export function RunnersPage() {
                         <Badge tone={runner.input_format === 'jsonl' ? 'info' : 'muted'}>{runner.input_format}</Badge>
                       </TD>
                       <TD className={cn('text-2xs', runner.exclusive ? 'text-fg' : 'text-fg-3')}>
-                        {runner.exclusive ? '是（仅外接模式）' : '否'}
+                        {runner.exclusive ? '是' : '否'}
                       </TD>
                       <TD className="tabular-nums">{runner.parameters.length}</TD>
                       <TD className="flex flex-wrap items-center justify-end gap-1.5 text-right">

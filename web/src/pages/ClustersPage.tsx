@@ -3,7 +3,7 @@ import { api } from '@/api'
 import type { Cluster, QueueStatus } from '@/api/types'
 import { WaitingReasonTag } from '@/components/app/StatusBadge'
 import { Badge } from '@/components/ui/badge'
-import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card'
+import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/states'
 import { Table, TBody, TD, TH, THead, TR, TableWrap } from '@/components/ui/table'
@@ -51,16 +51,12 @@ export function ClustersPage() {
 
       {data.error ? <ErrorState error={data.error} onRetry={data.reload} /> : null}
 
-      <p className="text-2xs leading-[16px] text-fg-3">
-        平台不参与调度：这一页只回答「卡在平台名额，还是卡在 K8s / Volcano」；只显示集群地址与最近一次连通性结论，不显示凭据。
-      </p>
-
       <Card>
         <CardHeader tone="primary" title="集群" sub={`${clusters.length} 个 · 只读`} />
         {data.loading && clusters.length === 0 ? (
           <TableSkeleton rows={2} cols={5} />
         ) : clusters.length === 0 ? (
-          <EmptyState title="还没有登记集群" description="集群由 admin 在后端登记（kubeconfig 放 Secret），控制台只读。" />
+          <EmptyState title="还没有登记集群" description="由 admin 登记后显示。" />
         ) : (
           <TableWrap>
             <Table>
@@ -102,7 +98,6 @@ export function ClustersPage() {
         <CardHeader
           tone="info"
           title="平台槽位"
-          sub="平台自己的并发名额：满了就排队，不会被拒绝"
           actions={
             <span className="text-2xs text-fg-3">
               {queue?.generated_at ? `${formatRelative(queue.generated_at)}生成` : '只读'}
@@ -158,7 +153,7 @@ export function ClustersPage() {
         <CardHeader
           tone="warn"
           title="Volcano 队列"
-          sub={volcano?.available ? '只读快照（后端缓存 15s）' : '调度器不可达时只降级本块'}
+          sub={volcano?.available ? '只读快照' : '调度器不可达'}
           actions={volcano?.stale ? <Badge tone="warn">曾采到过快照</Badge> : null}
         />
         {!volcano ? null : !volcano.available ? (
@@ -168,14 +163,6 @@ export function ClustersPage() {
             <p className="text-xs text-fg-2">
               Volcano 快照不可用{volcano.detail ? <span className="ml-1 font-mono text-2xs text-fg-3">{volcano.detail}</span> : null}
             </p>
-            <p className="text-2xs leading-[16px] text-fg-3">
-              这一块降级不影响平台槽位与排队原因（上面两块照常）。平台不展示历史数字，等下一次采样成功再看队列水位。
-            </p>
-            {volcano.stale ? (
-              <p className="text-2xs text-warn-text">
-                上一次刷新成功、本次失败；即使如此也不回放旧数值，只标这个徽标。
-              </p>
-            ) : null}
           </CardBody>
         ) : (volcano.queues ?? []).length === 0 ? (
           <EmptyState title="采样成功，但没有登记任何队列" description="集群里还没有登记 Volcano Queue。" />
@@ -216,34 +203,33 @@ export function ClustersPage() {
             </Table>
           </TableWrap>
         )}
-        <CardFooter>
-          <span>平台只读调度器状态，不插队、不改配额。</span>
-        </CardFooter>
       </Card>
 
       <Card>
         <CardHeader
           tone="muted"
           title="排队中的 runner"
-          sub={waiting ? `共 ${waiting.total} 个 · 按调度 FIFO 顺序（C-4.6）` : undefined}
+          sub={waiting ? `共 ${waiting.total} 个` : undefined}
         />
         <CardBody className="flex flex-col gap-3">
           {waiting ? (
             <div className="flex flex-wrap gap-2">
-              {Object.entries(waiting.by_reason).map(([reason, count]) => (
-                <span
-                  key={reason}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 py-1 text-2xs text-fg-2"
-                >
-                  {waitingReasonLabel(reason)}
-                  <span className="font-mono tabular-nums text-fg-3">{count}</span>
-                </span>
-              ))}
+              {Object.entries(waiting.by_reason)
+                .filter(([, count]) => count > 0)
+                .map(([reason, count]) => (
+                  <span
+                    key={reason}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 py-1 text-2xs text-fg-2"
+                  >
+                    {waitingReasonLabel(reason)}
+                    <span className="font-mono tabular-nums text-fg-3">{count}</span>
+                  </span>
+                ))}
             </div>
           ) : null}
 
           {(waiting?.runners ?? []).length === 0 ? (
-            <p className="text-2xs text-fg-3">当前没有排队中的 runner。</p>
+            <p className="text-2xs text-fg-3">暂无排队。</p>
           ) : (
             <TableWrap>
               <Table>

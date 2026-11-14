@@ -98,7 +98,7 @@ export function isRetryableTask(status: string): boolean {
 /** 终态语义说明（列表页右栏图例）。 */
 export const TERMINAL_LEGEND: Array<{ status: TaskStatus; desc: string }> = [
   { status: 'succeeded', desc: 'runner 管道全部走完且无失败' },
-  { status: 'failed', desc: '有 runner 失败（含原「部分失败」语义，D-73）' },
+  { status: 'failed', desc: '有 runner 失败' },
   { status: 'service_unavailable', desc: '服务没起来，找部署方' },
   { status: 'canceled', desc: '人主动停的，不算失败' },
 ]
@@ -109,7 +109,7 @@ export const EVENT_TYPE_CN: Record<string, string> = {
   state_changed: 'Task 状态变化',
   runner_started: 'runner 开始执行',
   runner_finished: 'runner 执行结束',
-  exports_harvested: 'exports 已收割',
+  exports_harvested: 'exports 已收集',
   clean_finished: '清理完成',
   cleanup_failed: '清理失败',
   task_finished: 'Task 结束',

@@ -279,9 +279,9 @@ export function TasksTable() {
                 <Input
                   value={search}
                   onChange={(event) => updateQuery({ q: event.target.value }, { resetPage: true })}
-                  placeholder="在当前页内查找（名称 / ID）"
-                  aria-label="在当前页内查找（名称 / ID）"
-                  title="服务端没有全文搜索：只在当前这一页的条目里查找，不会跨页"
+                  placeholder="搜索名称 / ID"
+                  aria-label="搜索名称 / ID"
+                  title="只在当前页内查找"
                   className="h-9 w-60 pl-8"
                 />
               </div>
@@ -289,23 +289,17 @@ export function TasksTable() {
           }
         />
 
-        {/*
-          按 Runner 筛选：`Task` 投影里没有 runner 字段（03 §3.1 只到 submitted_by），
-          整列渲染 "—" 比不放更糟，所以这一维用**工具条上的漏斗**，候选值与计数仍来自 /tasks/facets。
-        */}
+        {/* 按 Runner 筛选：候选值与计数来自 /tasks/facets */}
         <div className="flex flex-wrap items-center gap-2 border-b border-line-soft px-5 py-2 text-2xs text-fg-3">
-          <span className="flex items-center gap-1">
-            <span>按 Runner 筛选</span>
-            <FacetFilter
-              label={FACET_LABEL.runner}
-              selected={filters.runner}
-              buckets={facets?.runner ?? []}
-              onApply={(values) => applyFacet('runner', values)}
-            />
-            {filters.runner.length > 0 ? (
-              <span className="font-mono text-fg-2">{filters.runner.join('、')}</span>
-            ) : null}
-          </span>
+          <FacetFilter
+            label={FACET_LABEL.runner}
+            selected={filters.runner}
+            buckets={facets?.runner ?? []}
+            onApply={(values) => applyFacet('runner', values)}
+          />
+          {filters.runner.length > 0 ? (
+            <span className="font-mono text-fg-2">{filters.runner.join('、')}</span>
+          ) : null}
         </div>
 
         {anyFilter ? (
@@ -362,7 +356,6 @@ export function TasksTable() {
           <EmptyState
             data-testid="page-out-of-range"
             title={`第 ${page} 页超出范围（共 ${totalPages} 页）`}
-            description="筛选条件变了，或者链接里的页码太旧；回到第 1 页重新看。"
             action={
               <Button size="sm" data-testid="back-to-first" onClick={() => updateQuery({ page: null })}>
                 回到第 1 页
