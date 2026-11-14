@@ -8,13 +8,13 @@
 
 | 镜像 | index digest |
 |---|---|
-| `ghcr.io/ucm-system/argus-server:0.2.0` | 待发布工作流产出后回填 |
-| `ghcr.io/ucm-system/argus-web:0.2.0` | 待发布工作流产出后回填 |
-| `ghcr.io/ucm-system/argus-runner-aisbench-sla:0.2.0` | 待发布工作流产出后回填 |
-| `ghcr.io/ucm-system/argus-runner-endpoint-probe:0.2.0` | 待发布工作流产出后回填 |
-| `ghcr.io/ucm-system/argus-runner-genet-deploy:0.2.0` | 待发布工作流产出后回填 |
-| `ghcr.io/ucm-system/argus-runner-genet-clean:0.2.0` | 待发布工作流产出后回填 |
-| `ghcr.io/ucm-system/argus-runner-mock-deploy:0.2.0` | 待发布工作流产出后回填 |
+| `ghcr.io/ucm-system/argus-server:0.2.0` | `sha256:ff7c6e2df6c7e283b27eb8c1b0d77e872b7d86814755cf0a757662cb0f5dbaf5` |
+| `ghcr.io/ucm-system/argus-web:0.2.0` | `sha256:d982103d14c6d0e6856ac5b9f07803bb18797c17ba69557cb934494d04c309bb` |
+| `ghcr.io/ucm-system/argus-runner-aisbench-sla:0.2.0` | `sha256:08784db4f30b0c1f960b34d83b8fae1935c6313e187fe85ee4eafa0a9af0529c` |
+| `ghcr.io/ucm-system/argus-runner-endpoint-probe:0.2.0` | `sha256:5944c345bcbe205c5cda93aa0e7558768735d18b9a6782d1664888169d54ba98` |
+| `ghcr.io/ucm-system/argus-runner-genet-deploy:0.2.0` | `sha256:925579e74f4bcef4aea0d7a72c8e061d1bc26cd4790badd41b0993cb4556bb2d` |
+| `ghcr.io/ucm-system/argus-runner-genet-clean:0.2.0` | `sha256:61aea97cf8a84d6c14e1dff9fa85baba19e86458d164b324048619f6671b4847` |
+| `ghcr.io/ucm-system/argus-runner-mock-deploy:0.2.0` | `sha256:9750775387730fe6f64f17b6eca34c55c729d2765842618dd8b55ed24c5e53e7` |
 
 ## 1. 更名 Argus + Runner 化改造（#94/#95）
 
@@ -60,4 +60,4 @@
 - **镜像名换了**：`testplane-*` → `argus-*`，旧路径停在 0.1.2 不再更新；
 - **chart 版本 0.1.2 → 0.2.0**（0.1.3 只在 main 上短暂存在、未发版）；
 - **D-77 契约**：`runners` 允许为空数组（0 个测试 runner 合法）；deploy XOR service 的互斥校验不变——管道永远非空（deploy/precheck/clean 注入）；
-- 生产请钉 **digest**：本 PR 先只改 tag，digest 由打 tag 的发布工作流产出后单独回填（同 v0.1.2 → #89 流程）；回填前 digest 仍指 v0.1.2，勿用 release values 部署。
+- 生产请钉 **digest**：`values.yaml` 已钉 v0.2.0 的 argus-server 多架构 index digest（打 tag 的发布工作流产出，`docker buildx imagetools inspect` 复核过）；换版本时同时改 tag 与 digest。
