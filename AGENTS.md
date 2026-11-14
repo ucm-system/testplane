@@ -10,7 +10,7 @@ TestPlane：面向 LLM 服务的云原生测试编排平台。**设计先行**�
 
 ### Issue tracker
 
-GitHub Issues（`ucm-system/testplane`），用 `gh` CLI 读写；wayfinder 地图与工单见 `docs/agents/issue-tracker.md`。
+GitHub Issues（`ucm-system/Argus`），用 `gh` CLI 读写；wayfinder 地图与工单见 `docs/agents/issue-tracker.md`。
 
 ### Triage labels
 
@@ -19,3 +19,8 @@ GitHub Issues（`ucm-system/testplane`），用 `gh` CLI 读写；wayfinder 地�
 ### Domain docs
 
 single-context：一个仓库共用根目录一份 `GLOSSARY.md`，架构决定放 `docs/adr/`。See `docs/agents/domain.md`.
+
+### Repo skills
+
+动手型技能在 [`skills/`](skills/README.md)（提交 Task / 开发 Runner / 本地 kind 环境 / 发版），
+做对应操作前先读对应 SKILL.md；与权威源冲突以 `design/` 与 `openapi.yaml` 为准。
