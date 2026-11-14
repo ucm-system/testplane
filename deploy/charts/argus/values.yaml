@@ -19,9 +19,11 @@ image:
   # "回滚到底跑了哪份代码"无从回答）。digest 由 `deploy/docker/build-push.ps1` 打印。
   # tag 与 digest 二选一；生产请用 digest。
   # digest 来自 `release.yml`（打 v* tag）或 `deploy/docker/build-push.ps1 -Push` 的输出。
-  # 下面的值对应 **v0.1.2 正式发布**（多架构 index digest，linux/amd64 + linux/arm64），
+  # 下面的值对应 **v0.2.0 正式发布**（多架构 index digest，linux/amd64 + linux/arm64），
   # 由 `.github/workflows/release.yml` 打 tag 时产出；换版本时同时改 tag 与 digest。
-  tag: "0.1.2"
+  # v0.2.0 发布流程：本 PR 先只改 tag；digest 在 tag 工作流产出后单独钉（同 v0.1.2 → #89 流程），
+  # 在那之前 digest 仍指 v0.1.2（digest 优先，勿在此期间以 release values 部署）。
+  tag: "0.2.0"
   digest: "sha256:f91cef0daaa7d0d60d2b26a3da6546dd824e3a7261b34ac001d2a815c9165dee"
   pullPolicy: IfNotPresent
   pullSecrets: []
